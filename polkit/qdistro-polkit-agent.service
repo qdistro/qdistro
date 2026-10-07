@@ -36,7 +36,14 @@ Environment=QDISTRO_POLKIT_PROMPT_BIN=/usr/local/bin/qdistro-polkit-prompt
 # The user manager environment is writable by any same-UID process
 # (`systemctl --user set-environment` + restart), so never inherit it
 # into the production unit (iso2 `17` E9).
-UnsetEnvironment=QDISTRO_POLKIT_NONINTERACTIVE
+#
+# UnsetEnvironment= applies AFTER all Environment=/EnvironmentFile=
+# assignments — including same-uid drop-ins — per systemd.exec(5), so
+# this list is also the env-injection denylist: loader preloads
+# (LD_*/GLIBC_TUNABLES) would run attacker code in the agent process
+# before -I takes effect, and their entries could be scrubbed from
+# /proc/<pid>/environ before the broker ever reads it (sol r168).
+UnsetEnvironment=QDISTRO_POLKIT_NONINTERACTIVE LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH LD_ORIGIN_PATH LD_PROFILE LD_USE_LOAD_BIAS LD_DYNAMIC_WEAK LD_DEBUG_OUTPUT LD_HWCAP_MASK GLIBC_TUNABLES PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT PYTHONBREAKPOINT PYTHONEXECUTABLE PYTHONUSERBASE PYTHONWARNINGS BASH_ENV ENV CDPATH IFS
 
 # TCB no-network discipline. The agent talks to polkitd, qdistro-broker,
 # fprintd/PAM, and its local prompt over AF_UNIX/system facilities only;

@@ -293,28 +293,39 @@ announced or filed the cookie, a cancel recorded for one sender cannot
 pre-deny another's filing, and the first declaration wins — a foreign
 sender cannot rebind a cookie by filing or announcing it later.
 
-Two further hardenings keep attacker code off the trusted connection.
-The unit launches `python3 -I`, which ignores `PYTHONPATH`/
-`PYTHONHOME`/`sitecustomize`/`usercustomize` — the user manager's
-environment is writable by any same-uid process
-(`systemctl --user set-environment` + restart), and injected startup
-code would share the agent's connection, the very thing the sender
-binding trusts. The broker *requires* `-I` in the peer's argv —
-without it, even `python3 <script>` loads attacker-writable user-site
-`sitecustomize`/`.pth` code with no env var at all — and rejects agent
-peers whose `/proc/<pid>/environ` (read untruncated, fail-closed)
-names an injection-capable variable (`PYTHON*`, `LD_PRELOAD`,
-`LD_AUDIT`, …, and `QDISTRO_POLKIT_NONINTERACTIVE`, which a same-uid
-drop-in could otherwise re-arm past the unit's `UnsetEnvironment=`).
-The peer's `/proc/<pid>/exe` must also resolve to a python under a
-root-owned system directory — an attacker binary merely *named*
-`python3` would satisfy a basename check while ignoring argv.
+The remaining hardenings keep attacker code off the trusted
+connection, and — because `/proc` attributes are read only after any
+injected code has already run — the load-bearing controls are
+structural:
+
+- The unit launches `python3 -I`, ignoring `PYTHONPATH`/
+  `PYTHONHOME`/`sitecustomize`/`usercustomize`, and the broker
+  *requires* `-I` in the peer argv — without it, even
+  `python3 <script>` loads attacker-writable user-site
+  `sitecustomize`/`.pth` code with no env var at all.
+- The unit's `UnsetEnvironment=` denylist (`LD_*`, `GLIBC_TUNABLES`,
+  `PYTHON*`, `BASH_ENV`, `QDISTRO_POLKIT_NONINTERACTIVE`, …) applies
+  **last**, over same-uid drop-ins and the user manager's writable
+  environment — a loader preload could otherwise execute before `-I`
+  and scrub its own environ entries, making post-exec
+  `/proc/<pid>/environ` reads worthless as attestation.
+- The peer's parent must be the admin's **user manager** (`ppid` ∈
+  `user@UID.service` `cgroup.procs`). Foreign processes can migrate
+  into the uid-writable unit cgroup, but they keep their own parent —
+  only a process systemd actually spawned into the unit satisfies the
+  pin.
+- Defence-in-depth (checked anyway): exe resolves to a python under a
+  root-owned system dir (an attacker binary merely *named* `python3`
+  ignores argv), only no-argument isolation flags precede the script,
+  environ is read untruncated and fail-closed, the SELinux type is not
+  hostile, and the cgroup path matches the unit exactly.
+
 Residual: a same-uid drop-in can still rewrite the unit entirely —
-but every ExecStart that is not a system `python3 -I <installed
-script>` with a clean environ fails the peer check, so the fake agent
-cannot reach the relay; the worst outcome is a denial of service, not
-a forged approval. ptrace injection into the live agent is outside
-this boundary's reach.
+but every surviving ExecStart shape is a system `python3 -I
+<installed script>` with a scrubbed environ, i.e. genuine agent code;
+the worst outcome is a denial of service, not a forged approval.
+ptrace injection into the live agent is outside this boundary's
+reach.
 
 History: before this responder existed the agent was verified end-to-end
 on a real seat session (registration, dispatch, broker delegation, fail-

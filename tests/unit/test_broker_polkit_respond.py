@@ -78,7 +78,12 @@ class _StubBroker(Broker):
         self._peer_label = ("system_u:system_r:unconfined_t:s0",
                             "unconfined_t")
         self._peer_cgroup_val = AGENT_CGROUP
-        self._peer_env_names: set = set()
+        self._peer_env_names: set | None = set()
+        # The peer must be spawned by the admin's user manager — a
+        # foreign process migrated into the unit cgroup keeps its own
+        # parent (sol r168).
+        self._manager_pids = {4242}
+        self._peer_ppid_val: int | None = 4242
         self.pending_signals: list[int] = []
         self.decided_signals: list[tuple[int, str]] = []
         # Captured (uid, cookie, identity) tuples from _respond_polkit.
@@ -112,6 +117,12 @@ class _StubBroker(Broker):
         if self._peer_env_names is None:
             return None
         return set(self._peer_env_names)
+
+    def _peer_ppid(self, pid):
+        return self._peer_ppid_val
+
+    def _admin_user_manager_pids(self):
+        return set(self._manager_pids)
 
     def _peer_matches_admin_control(self, *, uid: int, pid: int,
                                     exe: str, method: str = ""
@@ -678,6 +689,32 @@ class TestPolkitAgentPeerBinding:
         with pytest.raises(dbus.DBusException):
             _file_polkit(broker)
         assert broker._pending == {}
+
+    def test_a_process_not_spawned_by_the_user_manager_is_rejected(
+            self, broker):
+        """The unit's cgroup.procs is uid-writable — a foreign process
+        can migrate into the agent's real cgroup (sol r164), present
+        perfect exe/argv/env, and would pass every attribute check.
+        Its PPID stays its own launcher, never the user manager —
+        only systemd-spawned unit children are the agent (sol r168)."""
+        # Foreign parent (a shell, systemd-run --scope, …)
+        broker._peer_ppid_val = 9999
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        # Unreadable ppid fails closed.
+        broker._peer_ppid_val = None
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        broker._peer_ppid_val = 4242
+        # No user manager (not running / lingering off) fails closed.
+        broker._manager_pids = set()
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        broker._manager_pids = {4242}
+        assert broker._pending == {}
+        # And the manager-spawned shape still admits the real agent.
+        rid = _file_polkit(broker, "cookie-ok", [IDENT_ROOT])
+        assert rid in broker._pending
 
     def test_a_hostile_selinux_type_rejects_even_root(self, broker):
         """uid 0 in a container/tier domain must not reach the relay."""

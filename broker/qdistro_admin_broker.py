@@ -297,15 +297,21 @@ _POLKIT_AGENT_EXE_DIRS = frozenset((
 # carrying them is not the agent even when exe/argv/cgroup match
 # (sol r165). -I already neutralises the PYTHON* entries; the check is
 # belt-and-suspenders and additionally covers LD_* which -I does not.
+# Keep aligned with the unit's UnsetEnvironment= denylist (it applies
+# last, over drop-ins too — systemd.exec(5)). This read is
+# defence-in-depth only: injected loader code could scrub its own
+# environ entries before the broker reads them (sol r168), so the
+# unit-level unset is the structural control and the PPID pin proves
+# the peer was unit-spawned at all.
 _POLKIT_AGENT_DANGEROUS_ENV = frozenset((
     "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH", "LD_ORIGIN_PATH",
-    "LD_PROFILE", "LD_USE_LOAD_BIAS",
+    "LD_PROFILE", "LD_USE_LOAD_BIAS", "LD_DYNAMIC_WEAK",
+    "LD_DEBUG_OUTPUT", "LD_HWCAP_MASK", "GLIBC_TUNABLES",
     "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT",
     "PYTHONBREAKPOINT", "PYTHONEXECUTABLE", "PYTHONUSERBASE",
-    "BASH_ENV", "ENV",
-    # The agent's unit UnsetEnvironment= does not beat a same-uid
-    # drop-in's Environment= — a peer presenting the test seam is not
-    # the production agent.
+    "PYTHONWARNINGS",
+    "BASH_ENV", "ENV", "CDPATH", "IFS",
+    # A peer presenting the test seam is not the production agent.
     "QDISTRO_POLKIT_NONINTERACTIVE",
 ))
 
@@ -778,6 +784,44 @@ def _read_proc_environ_names(pid: int) -> set[str] | None:
         part.split(b"=", 1)[0].decode("utf-8", "replace")
         for part in raw.split(b"\x00") if part
     }
+
+
+def _read_proc_ppid(pid: int) -> int | None:
+    """Return the PPID of pid from /proc/<pid>/stat field 4, or None.
+
+    The comm field (field 2) is wrapped in parens and may itself
+    contain spaces or parens — split from the right of the last ')'.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            raw = f.read(4096)
+    except OSError:
+        return None
+    rparen = raw.rfind(b")")
+    if rparen < 0:
+        return None
+    fields = raw[rparen + 2:].split()
+    try:
+        return int(fields[1])  # field 4 = ppid (fields[0] is state)
+    except (IndexError, ValueError):
+        return None
+
+
+# The admin's systemd user manager owns this cgroup; its cgroup.procs
+# lists exactly the manager pid(s). A polkit-agent peer must have been
+# forked by that manager — a foreign process migrated into the unit's
+# cgroup keeps its own (attacker) parent (sol r168).
+_USER_MANAGER_CGROUP_PROCS = (
+    f"/sys/fs/cgroup/user.slice/user-{ADMIN_UID}.slice/"
+    f"user@{ADMIN_UID}.service/cgroup.procs")
+
+
+def _user_manager_pids() -> set[int]:
+    try:
+        with open(_USER_MANAGER_CGROUP_PROCS, encoding="ascii") as f:
+            return {int(x) for x in f.read().split()}
+    except (OSError, ValueError):
+        return set()
 
 
 def _selinux_type(label: str) -> str:
@@ -1670,8 +1714,14 @@ class Broker(dbus.service.Object):
     def _peer_cmdline(self, pid: int) -> list[str]:
         return _read_proc_cmdline(pid)
 
-    def _peer_environ_names(self, pid: int) -> set[str]:
+    def _peer_environ_names(self, pid: int) -> set[str] | None:
         return _read_proc_environ_names(pid)
+
+    def _peer_ppid(self, pid: int) -> int | None:
+        return _read_proc_ppid(pid)
+
+    def _admin_user_manager_pids(self) -> set[int]:
+        return _user_manager_pids()
 
     def _peer_label_type(self, pid: int) -> tuple[str, str]:
         label = _read_proc_selinux_label(pid)
@@ -1782,12 +1832,19 @@ class Broker(dbus.service.Object):
         set-environment + restart — PYTHONPATH/LD_PRELOAD would run
         attacker code inside the genuine agent argv — sol r165; the
         read must not truncate before a hidden variable, and an
-        unreadable environ fails closed — sol r166); and an exact match
-        on the agent unit's systemd cgroup path — forged same-named
-        child cgroups under delegated scopes differ (sol r163). These
-        are defence-in-depth: the capability boundary is the D-Bus
-        unique sender the cookie is bound to (sol r164). uid 0 needs
-        no relay: it may answer polkitd itself.
+        unreadable environ fails closed — sol r166); an exact match on
+        the agent unit's systemd cgroup path — forged same-named child
+        cgroups under delegated scopes differ (sol r163); and a parent
+        pid equal to the admin's user-manager pid — foreign processes
+        can migrate into the uid-writable unit cgroup (sol r164) but
+        keep their own parent, so only unit-spawned processes pass
+        (sol r168). The unit also UnsetEnvironment=s the whole injection
+        denylist — applied last, over drop-ins — because a loader
+        preload could scrub its own environ entries before the peer
+        check reads them (sol r168). These are defence-in-depth: the
+        capability boundary is the D-Bus unique sender the cookie is
+        bound to (sol r164). uid 0 needs no relay: it may answer
+        polkitd itself.
         """
         if int(uid) not in (0, ADMIN_UID):
             return False, (f"uid {uid} is neither root nor admin uid "
@@ -1826,6 +1883,20 @@ class Broker(dbus.service.Object):
         if cgroup not in _POLKIT_AGENT_CGROUPS:
             return False, (f"peer cgroup {cgroup!r} is not the "
                            f"{_POLKIT_AGENT_UNIT} unit")
+        # The cgroup path alone is forgeable — the unit's cgroup.procs
+        # is uid-writable, so a foreign process can migrate INTO it
+        # (sol r164). Pinning the peer's parent to the user manager
+        # proves the process was spawned by systemd into the unit:
+        # PPID is kernel-assigned at fork and cannot be adopted away.
+        # Loader environ attestation can't fill this gap — injected
+        # code could scrub its own entries before we read them
+        # (sol r168).
+        ppid = self._peer_ppid(pid)
+        managers = self._admin_user_manager_pids()
+        if ppid is None or not managers or ppid not in managers:
+            return False, (f"peer ppid {ppid} is not the admin's user "
+                           "manager — the agent must be spawned by "
+                           "systemd into its unit")
         return True, "session polkit agent unit"
 
     def _require_polkit_agent_peer(self, sender, conn, method: str
