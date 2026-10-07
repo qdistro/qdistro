@@ -13,13 +13,17 @@
 #     untouched — real state is never deleted
 #   - fragment with a LIVE process on the uid        -> still refused, account
 #     untouched; once the process dies the next launch repairs
+#   - one-sided subid rows / dangling home symlink / a MISSING subid db
+#     (grep rc=2, not rc=1)                                -> all refused,
+#     account untouched — a lookup error is not "row absent"
 # Runs after tier3s-guest-setup.sh. Each check prints one PASS/FAIL line;
 # `[s132] N passes, M failures`; exit 1 on any failure.
 set -u
 T3S_TAG=s132
 . "$(dirname "$0")/tier3s-guest-lib.sh"
-SF=s132frag; SP=s132part; SL=s132live
+SF=s132frag; SP=s132part; SL=s132live; SO=s132one; SY=s132sym; SE=s132err
 AF=$(silo_acct "$SF"); AP=$(silo_acct "$SP"); AL=$(silo_acct "$SL")
+AO=$(silo_acct "$SO"); AY=$(silo_acct "$SY"); AE=$(silo_acct "$SE")
 
 # forge_fragment <account> <silo> — the exact state a mid-useradd kill leaves:
 # passwd row with the tier3s GECOS, locked password, NO home, NO subid rows.
@@ -59,7 +63,7 @@ is "image staged in admin's store (archive source)" "$(yes_no pm image exists "$
 is "broker allows the smoke spawn" "$(broker_check "$ACTION")" allow
 is "tier3s group present" "$(yes_no tier3s_group_ok)" yes
 assert_all_clear pre
-for s in $SF $SP $SL; do
+for s in $SF $SP $SL $SO $SY $SE; do
     sm CreateTier3sSilo ssss "$s" headless-smoke "$s" none > /dev/null
     is "CreateTier3sSilo $s" "$(silo_state "$s")" Created
 done
@@ -132,7 +136,7 @@ forge_fragment "$AL" "$SL" \
     || { fail "could not forge the $SL fragment"; finish; }
 runuser -u "$AL" -- sleep 120 &
 live_pid=$!
-sleep 0.5
+wait_for 10 uid_live "$AL" || fail "$SL: the decoy process never came up"
 is "$SL: a process runs as the fragment uid" "$(yes_no uid_live "$AL")" yes
 sm StartSilo s "$SL" > "$WORK/start.sl" 2>&1; rc=$?
 if [ "$rc" -ne 0 ]; then pass "$SL launch refused (rc=$rc)"; else fail "$SL launch unexpectedly succeeded"; fi
@@ -149,5 +153,71 @@ is "$SL: once the process is gone the fragment is repaired" \
     "$(unit_log "$unit" "$cur" | grep -cF "removed a killed-mid-useradd fragment of $AL")" 1
 is "$SL: account healthy after repair" "$(yes_no acct_healthy "$AL")" yes
 systemctl reset-failed "$unit" 2>/dev/null
+
+# ---------------------------------------------------------------------------
+step "5. one-sided subid rows and a dangling-symlink home are NOT repaired"
+# 5a: subuid row present, subgid missing — a fragment must have NEITHER row;
+# partial rows could be hand-planted, so the account stays refused+untouched.
+unit=$(unit_of "$SO"); cur=$(journal_cursor)
+forge_fragment "$AO" "$SO" \
+    && pass "fragment forged for $SO" \
+    || { fail "could not forge the $SO fragment"; finish; }
+echo "$AO:196608:65536" >> /etc/subuid
+sm StartSilo s "$SO" > "$WORK/start.so" 2>&1; rc=$?
+if [ "$rc" -ne 0 ]; then pass "$SO launch refused (rc=$rc)"; else fail "$SO launch unexpectedly succeeded"; fi
+unit_log "$unit" "$cur" | grep -v pam_unix | sed 's/^/    unit: /'
+is "$SO: refused on the one-sided subid rows" \
+    "$(unit_log "$unit" "$cur" | grep -cF "REFUSE: silo account $AO has no subuid/subgid rows")" 1
+is "$SO: repair did NOT fire (a subid row exists)" \
+    "$(unit_log "$unit" "$cur" | grep -cF "removed a killed-mid-useradd fragment")" 0
+is "$SO: account and its planted row are still there" \
+    "$(yes_no acct_exists "$AO"):$(grep -c "^$AO:" /etc/subuid)" "yes:1"
+systemctl reset-failed "$unit" 2>/dev/null
+userdel -f "$AO" >/dev/null 2>&1 || :
+sed -i "/^$AO:/d" /etc/subuid /etc/subgid
+
+# 5b: home path is a dangling symlink — "no home" must mean truly absent, so
+# -e AND -L are both checked; a planted link keeps the account refused+alive.
+unit=$(unit_of "$SY"); cur=$(journal_cursor)
+forge_fragment "$AY" "$SY" \
+    && pass "fragment forged for $SY" \
+    || { fail "could not forge the $SY fragment"; finish; }
+hy=$(getent passwd "$AY" | cut -d: -f6)
+ln -s /nonexistent-t3s-target "$hy"
+is "$SY: home path is a dangling symlink" \
+    "$(yes_no test -L "$hy"):$(yes_no test -e "$hy")" "yes:no"
+sm StartSilo s "$SY" > "$WORK/start.sy" 2>&1; rc=$?
+if [ "$rc" -ne 0 ]; then pass "$SY launch refused (rc=$rc)"; else fail "$SY launch unexpectedly succeeded"; fi
+unit_log "$unit" "$cur" | grep -v pam_unix | sed 's/^/    unit: /'
+# (sub_ok is checked before home_ok, so the refusal names the subid rows;
+# what step 5b proves is that the symlink did NOT count as an absent home)
+is "$SY: refused (the symlink is not an absent home)" \
+    "$(unit_log "$unit" "$cur" | grep -c "spawn-tier3s: REFUSE:")" 1
+is "$SY: repair did NOT fire (the path is not absent)" \
+    "$(unit_log "$unit" "$cur" | grep -cF "removed a killed-mid-useradd fragment")" 0
+is "$SY: account and planted symlink are still there" \
+    "$(yes_no acct_exists "$AY"):$(yes_no test -L "$hy")" "yes:yes"
+systemctl reset-failed "$unit" 2>/dev/null
+rm -f "$hy"; userdel -f "$AY" >/dev/null 2>&1 || :
+
+# 5c: a FAILED subid lookup must refuse, never delete — rc>=2 is not "row
+# absent". The spawn runs as root so a mode-000 db is still readable; the
+# failure case a root caller sees is the file gone entirely (grep rc=2).
+unit=$(unit_of "$SE"); cur=$(journal_cursor)
+forge_fragment "$AE" "$SE" \
+    && pass "fragment forged for $SE" \
+    || { fail "could not forge the $SE fragment"; finish; }
+mv /etc/subuid /etc/subuid.s132-moved
+sm StartSilo s "$SE" > "$WORK/start.se" 2>&1; rc=$?
+mv /etc/subuid.s132-moved /etc/subuid
+if [ "$rc" -ne 0 ]; then pass "$SE launch refused (rc=$rc)"; else fail "$SE launch unexpectedly succeeded"; fi
+unit_log "$unit" "$cur" | grep -v pam_unix | sed 's/^/    unit: /'
+is "$SE: refusal cites the unreadable subid db" \
+    "$(unit_log "$unit" "$cur" | grep -cF "cannot prove $AE has no subid rows")" 1
+is "$SE: repair did NOT fire on a lookup error" \
+    "$(unit_log "$unit" "$cur" | grep -cF "removed a killed-mid-useradd fragment")" 0
+is "$SE: fragment account is still there" "$(yes_no acct_exists "$AE")" yes
+systemctl reset-failed "$unit" 2>/dev/null
+userdel -f "$AE" >/dev/null 2>&1 || :
 assert_all_clear post
 finish

@@ -185,16 +185,22 @@ else
             && grep -q "^$SILO_ACCT:[0-9]*:[1-9][0-9]*$" /etc/subgid \
             || sub_ok=0
         [ "$home_ok" -eq 1 ] && [ "$sub_ok" -eq 1 ] && break
-        if [ "$prov_try" -eq 1 ] && [ ! -e "$SILO_HOME" ] && [ ! -L "$SILO_HOME" ] \
-            && ! grep -q "^$SILO_ACCT:" /etc/subuid \
-            && ! grep -q "^$SILO_ACCT:" /etc/subgid; then
-            pgrep -u "$SILO_UID" >/dev/null 2>&1; pg_rc=$?
-            [ "$pg_rc" -eq 1 ] \
-                || refuse "$SILO_ACCT is a provision fragment but uid $SILO_UID has live processes (or pgrep failed, rc=$pg_rc); refusing to delete it"
-            userdel -f "$SILO_ACCT" \
-                || refuse "cannot delete the provision-fragment account $SILO_ACCT"
-            say "removed a killed-mid-useradd fragment of $SILO_ACCT; re-provisioning"
-            continue
+        if [ "$prov_try" -eq 1 ] && [ ! -e "$SILO_HOME" ] && [ ! -L "$SILO_HOME" ]; then
+            grep -q "^$SILO_ACCT:" /etc/subuid 2>/dev/null; su_rc=$?
+            grep -q "^$SILO_ACCT:" /etc/subgid 2>/dev/null; sg_rc=$?
+            # a failed lookup is NOT an absent row: rc >= 2 means the
+            # database could not be read, so nothing is proven
+            [ "$su_rc" -le 1 ] && [ "$sg_rc" -le 1 ] \
+                || refuse "cannot prove $SILO_ACCT has no subid rows (subuid lookup rc=$su_rc, subgid rc=$sg_rc); refusing to touch it"
+            if [ "$su_rc" -eq 1 ] && [ "$sg_rc" -eq 1 ]; then
+                pgrep -u "$SILO_UID" >/dev/null 2>&1; pg_rc=$?
+                [ "$pg_rc" -eq 1 ] \
+                    || refuse "$SILO_ACCT is a provision fragment but uid $SILO_UID has live processes (or pgrep failed, rc=$pg_rc); refusing to delete it"
+                userdel -f "$SILO_ACCT" \
+                    || refuse "cannot delete the provision-fragment account $SILO_ACCT"
+                say "removed a killed-mid-useradd fragment of $SILO_ACCT; re-provisioning"
+                continue
+            fi
         fi
         [ "$sub_ok" -eq 1 ] \
             || refuse "silo account $SILO_ACCT has no subuid/subgid rows"
