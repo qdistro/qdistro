@@ -737,7 +737,7 @@ def _register(bus, agent_path: str) -> tuple[str | None, str | None]:
         _session_subject(sid), "en_US.UTF-8", agent_path)
     syslog.syslog(syslog.LOG_NOTICE,
                   f"registered as session polkit agent (path={agent_path}, "
-                  f"session={sid}, polkitd={owner})")
+                  f"session={sid})")
     return sid, owner
 
 
