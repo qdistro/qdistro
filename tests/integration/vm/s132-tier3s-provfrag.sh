@@ -35,6 +35,12 @@ forge_fragment() {
     [ "$u" -ge 1000 ]
 }
 
+# quiet probes for yes_no — it echoes the command's stdout, so anything
+# that prints (id, getent, pgrep) must be silenced inside a function.
+acct_exists() { id "$1" >/dev/null 2>&1; }
+tier3s_group_ok() { getent group qdistro-tier3s >/dev/null 2>&1; }
+uid_live() { pgrep -u "$(id -u "$1")" >/dev/null 2>&1; }
+
 # acct_healthy <account> — post-repair shape: home present and owned, both
 # subid rows present.
 acct_healthy() {
@@ -51,7 +57,7 @@ out=$(/usr/lib/qdistro/tier3s/probe.sh --user admin 2>&1); rc=$?
 is "probe PASS before the launches" "$rc:$(printf '%s\n' "$out" | grep -c '^RESULT PASS')" "0:1"
 is "image staged in admin's store (archive source)" "$(yes_no pm image exists "$IMAGE")" yes
 is "broker allows the smoke spawn" "$(broker_check "$ACTION")" allow
-is "tier3s group present" "$(yes_no timeout 5 getent group qdistro-tier3s)" yes
+is "tier3s group present" "$(yes_no tier3s_group_ok)" yes
 assert_all_clear pre
 for s in $SF $SP $SL; do
     sm CreateTier3sSilo ssss "$s" headless-smoke "$s" none > /dev/null
@@ -66,7 +72,7 @@ unit=$(unit_of "$SF"); cur=$(journal_cursor)
 forge_fragment "$AF" "$SF" \
     && pass "fragment forged for $SF (no home, no subid rows)" \
     || { fail "could not forge the $SF fragment"; finish; }
-is "fragment: account resolves" "$(yes_no timeout 5 id "$AF")" yes
+is "fragment: account resolves" "$(yes_no acct_exists "$AF")" yes
 is "fragment: no home dir" "$(yes_no test -e "$(getent passwd "$AF" | cut -d: -f6)")" no
 is "fragment: no subid rows" \
     "$(grep -c "^$AF:" /etc/subuid):$(grep -c "^$AF:" /etc/subgid)" "0:0"
@@ -114,7 +120,7 @@ is "$SP: refused on the missing subid rows" \
 is "$SP: repair did NOT fire (home exists — not a fragment signature)" \
     "$(unit_log "$unit" "$cur" | grep -cF "removed a killed-mid-useradd fragment")" 0
 is "$SP: account and home are still there" \
-    "$(yes_no timeout 5 id "$AP"):$(yes_no test -d "$(getent passwd "$AP" | cut -d: -f6)")" "yes:yes"
+    "$(yes_no acct_exists "$AP"):$(yes_no test -d "$(getent passwd "$AP" | cut -d: -f6)")" "yes:yes"
 systemctl reset-failed "$unit" 2>/dev/null
 userdel -r "$AP" >/dev/null 2>&1 || userdel -f "$AP" >/dev/null 2>&1 || :
 
@@ -127,13 +133,13 @@ forge_fragment "$AL" "$SL" \
 runuser -u "$AL" -- sleep 120 &
 live_pid=$!
 sleep 0.5
-is "$SL: a process runs as the fragment uid" "$(yes_no pgrep -u "$(id -u "$AL")")" yes
+is "$SL: a process runs as the fragment uid" "$(yes_no uid_live "$AL")" yes
 sm StartSilo s "$SL" > "$WORK/start.sl" 2>&1; rc=$?
 if [ "$rc" -ne 0 ]; then pass "$SL launch refused (rc=$rc)"; else fail "$SL launch unexpectedly succeeded"; fi
 unit_log "$unit" "$cur" | grep -v pam_unix | sed 's/^/    unit: /'
 is "$SL: refused on the live uid" \
     "$(unit_log "$unit" "$cur" | grep -cF "REFUSE: $AL is a provision fragment but uid")" 1
-is "$SL: account not deleted while its uid is live" "$(yes_no timeout 5 id "$AL")" yes
+is "$SL: account not deleted while its uid is live" "$(yes_no acct_exists "$AL")" yes
 kill "$live_pid" 2>/dev/null; wait "$live_pid" 2>/dev/null || :
 cur=$(journal_cursor)
 sm StartSilo s "$SL" > "$WORK/start.sl2" 2>&1; rc=$?
