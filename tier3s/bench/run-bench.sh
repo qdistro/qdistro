@@ -174,6 +174,10 @@ if [ "$SAMPLES" -gt 0 ]; then
         if [ -z "$winrect" ]; then
             echo "   latency: window rect detection failed — cannot scope the oracle" >&2
             echo "window-rect MISS(setup)" >> "$L/latency.log"; FAIL=1
+            # record compositor paint health — a boot with failing atomic
+            # commits (virtio-gpu EINVAL) leaves the desk frame unchanged
+            ssh_vm 'journalctl --user -M admin@ -u qdwin-compositor --no-pager 2>/dev/null | grep -c "repaint-flush failed"' \
+                | sed 's/^/weston-repaint-flush-failures: /' >> "$L/latency.log" || true
         fi
         for i in $(seq 1 "$SAMPLES"); do
             [ -n "$winrect" ] || break
