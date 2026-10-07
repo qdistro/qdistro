@@ -4492,14 +4492,19 @@ class Broker(dbus.service.Object):
             req.decision = result == "allow"
             waiters = list(req.waiters)
             req.waiters.clear()
+        # Deliver the polkit response before releasing waiters: the
+        # agent's BeginAuthentication completes as soon as its
+        # WaitForDecision returns, and polkitd tears the cookie's
+        # session down then — a late response lands on "No session for
+        # cookie".
+        if req.decision and req.polkit_cookie:
+            self._respond_polkit(req)
         self.RequestDecided(rid, result)
         for reply, _error in waiters:
             try:
                 reply(req.decision)
             except Exception as exc:
                 print(f"[broker] hook reply failed: {exc!r}", flush=True)
-        if req.decision and req.polkit_cookie:
-            self._respond_polkit(req)
         return False
 
     def _apply_layered_identity(self, rid: int, future) -> bool:
@@ -4764,15 +4769,19 @@ class Broker(dbus.service.Object):
                 print(f"[broker] cache.store failed: {e}", flush=True)
                 cached_ok = False
 
+        # polkitd tears down the auth session the moment the agent's
+        # BeginAuthentication returns — and it returns the instant its
+        # WaitForDecision waiter releases. The response must reach
+        # polkitd BEFORE any waiter is answered, or it lands on a dead
+        # cookie ("No session for cookie").
+        if allowed and req.polkit_cookie:
+            self._respond_polkit(req)
         for reply_cb, _err in waiters:
             try:
                 reply_cb(bool(allowed))
             except Exception as e:  # noqa: BLE001
                 print(f"[broker] reply_cb failed: {e}", flush=True)
         self.RequestDecided(int(request_id), "allow" if allowed else "deny")
-        # polkitd is still parked on the cookie — deliver the approval.
-        if allowed and req.polkit_cookie:
-            self._respond_polkit(req)
         # Caching is best-effort: the request's decision stands either way;
         # "applied-uncached" lets a caller warn that a non-once scope will
         # not be remembered.

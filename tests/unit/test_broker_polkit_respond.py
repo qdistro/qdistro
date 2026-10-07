@@ -187,6 +187,21 @@ class TestRequestPolkitAuth:
         assert broker.polkit_responded == []
         assert "no usable identity" in capsys.readouterr().out
 
+    def test_the_response_precedes_the_waiter_release(self, broker):
+        """Ordering matters: the agent completes BeginAuthentication the
+        instant its WaitForDecision returns, and polkitd tears the
+        cookie's session down then. A response sent after the waiter
+        release lands on "No session for cookie" — observed live."""
+        rid = _file_polkit(broker, "cookie-x", [IDENT_ROOT])
+        seen = []
+        def reply(v):
+            seen.append(bool(v) and bool(broker.polkit_responded))
+        broker._pending[rid].waiters.append((reply, lambda e: None))
+        broker.DecideRequest(rid, "allow", "once")
+        assert seen == [True], (
+            "the waiter fired before AuthenticationAgentResponse2 was "
+            "sent — polkitd will have already torn the session down")
+
     def test_a_respond_failure_is_logged_not_fatal(self, broker, capsys):
         """A stale cookie or dead polkitd must not corrupt the decision —
         it was already made and audited."""
