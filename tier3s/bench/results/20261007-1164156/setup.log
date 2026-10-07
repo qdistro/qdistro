@@ -1,0 +1,202 @@
+
+## 0. guest
+INFO: profile: QDISTRO_PROFILE=dev 
+INFO: kernel 7.2.8-1-default; podman version 6.0.2; systemd 261 (261.3); selinux Enforcing
+PASS: o10: worker image (built without QDISTRO_TIER3S=1) carries no tier 3s file
+
+## 1. stage the tested commit, root-owned
+PASS: staged src.tar
+INFO: tested commit 1164156350474f9e96f35c68a6cf45be0394f9c5
+PASS: staged tree has the tier 3s sources (yes)
+
+## 2. installer WITHOUT QDISTRO_TIER3S (owner O10: installs nothing tier 3s)
+    install-session-manager: tier 3s not installed (QDISTRO_TIER3S is not 1; paravirt O10)
+PASS: o10: installer without the flag rc (0)
+PASS: o10: installer without the flag says so (1)
+PASS: o10: no tier 3s file after the installer ran without the flag
+
+## 3. installer WITH QDISTRO_TIER3S=1 from the tested commit
+    session manager ready on org.qdistro.SessionManager1
+PASS: installer with QDISTRO_TIER3S=1 rc (0)
+PASS: installed /usr/lib/qdistro/tier3s/spawn-tier3s.sh = tested commit (e20e75e63a23794d7a7aacfee5f24fd04d1a9e811a40dacd91ddc66c60dc9f5c)
+PASS: installed /usr/lib/qdistro/tier3s/spawn-tier3s.sh owner/mode (root:root 755)
+PASS: installed /usr/lib/qdistro/tier3s/probe.sh = tested commit (0cdcf13ec4393ef6cff999a9574f585a900f9f0984d0fc13420e5869ed933a76)
+PASS: installed /usr/lib/qdistro/tier3s/probe.sh owner/mode (root:root 755)
+PASS: installed /usr/lib/qdistro/tier3s/tier3s-runsc = tested commit (3d55537c56376d12767d8de902ec76f968915f71d2a5433b5d93ab1296c33a85)
+PASS: installed /usr/lib/qdistro/tier3s/tier3s-runsc owner/mode (root:root 755)
+PASS: installed /usr/lib/qdistro/tier3s/RUNSC_RELEASE = tested commit (b0b60c5230d11c46eb52588e308ef93eba3cbff4ce5871d929059c8fa969b3a3)
+PASS: installed /usr/lib/qdistro/tier3s/RUNSC_RELEASE owner/mode (root:root 644)
+PASS: installed /usr/lib/qdistro/tier3s/seccomp/foot.json = tested commit (f7b8c94fcc26455cb986e3eb1bbd37785cb1bfd3d54f233a17e6f0ba3c7459f6)
+PASS: installed /usr/lib/qdistro/tier3s/seccomp/foot.json owner/mode (root:root 644)
+PASS: installed /usr/lib/qdistro/tier3s/seccomp/headless-smoke.json = tested commit (13c0e63dd2684e4f9a5c30b38d2e71b363ab33fc1bb7f68b4f53b8a8aa29b41d)
+PASS: installed /usr/lib/qdistro/tier3s/seccomp/headless-smoke.json owner/mode (root:root 644)
+PASS: installed /usr/lib/qdistro/tier3s/seccomp/weston-terminal.json = tested commit (0384b8f78a14e515046bc484c87755e5568e2db5a6e7494e44a68180814e981d)
+PASS: installed /usr/lib/qdistro/tier3s/seccomp/weston-terminal.json owner/mode (root:root 644)
+PASS: installed /usr/libexec/qdistro/qdistro-tier3s-scope = tested commit (f2e72493a7af1d1b3cba0f0539a2db993d0f38ef1b8b93d284e1f0f7b0d7c3a5)
+PASS: installed /usr/libexec/qdistro/qdistro-tier3s-scope owner/mode (root:root 755)
+PASS: installed /usr/libexec/qdistro/qdistro-tier3s-cleanup = tested commit (fbe276f34af0215ac54eec4d1faccc95b52812260dfb34fcd6cf65507b43ca4c)
+PASS: installed /usr/libexec/qdistro/qdistro-tier3s-cleanup owner/mode (root:root 755)
+PASS: installed /usr/lib/tmpfiles.d/qdistro-tier3s.conf = tested commit (0bee7ef7eda634a286a22a0ab6b57d3c71a88fb61c4bbfdd51a9313cf6f5b500)
+PASS: installed /usr/lib/tmpfiles.d/qdistro-tier3s.conf owner/mode (root:root 644)
+PASS: installed /etc/systemd/system/qdistro-tier3s-silo@.service = tested commit (fb081df29bd074601e35eddd142beb9cdb49c13d85640c8252ee39c19de4d1ff)
+PASS: installed /etc/systemd/system/qdistro-tier3s-silo@.service owner/mode (root:root 644)
+PASS: installed /usr/libexec/qdistro/qdistro-tier3s-silo-launch = tested commit (3f2e195aef4b84a784958a7a3c180f978a180ac7516dbea5b6f32616aaeee8c0)
+PASS: installed /usr/libexec/qdistro/qdistro-tier3s-silo-launch owner/mode (root:root 755)
+PASS: installed /usr/libexec/qdistro/qdistro_session_manager.py = tested commit (8da25e52b691cd364fee13c290581d29416458908119ebfa251fc50cad556810)
+PASS: installed /usr/libexec/qdistro/qdistro_session_manager.py owner/mode (root:root 755)
+PASS: installed broker = tested commit (dcfdc673a771d8d083aa4f422360152d3316cb624b635e7ab806b93c4c9c6a50)
+PASS: tmpfiles: runsc state-root base (root:root 755)
+PASS: tmpfiles: per-silo runtime base (root:root 755)
+PASS: tmpfiles: control dir (root:root 700)
+PASS: tmpfiles: per-launch parent (root:root 755)
+PASS: tmpfiles: tier3s stanza dir (root:root 700)
+PASS: runsc not installed by the installer (no)
+PASS: unit loaded from /etc (/etc/systemd/system/qdistro-tier3s-silo@.service)
+PASS: unit StopPropagatedFrom (O11) (qdistro-session-manager.service)
+PASS: session manager runs the installed code (pid 2432, serves CreateTier3sSilo)
+PASS: broker has the rules-only tier3s prefix (1)
+
+## 3c. SELinux: install the tier3s module from the tested commit
+    [tier3s-install] OK — qdistro_tier3s active
+PASS: install-policy.sh rc (0)
+PASS: module loaded (1)
+    [broker-rules-install] OK — qdistro_broker_rules active
+PASS: broker-rules install-policy.sh rc (0)
+PASS: broker-rules module loaded (1)
+
+## 4. runsc: offline provision from the staged, pin-checked tarball
+PASS: runsc tarball sha512 = pin (20260928.0) (4ce35ca83aef7f96b06cde668e0b23aa98b05aa1829508e974196c2a1e02786c95f5bf79315fd7ddcfd88fe7a00f083ed8053e25eff7673d28d5256440caae8b)
+    provision-runsc: all 6 pinned files verified
+    provision-runsc: runsc --version: runsc version release-20260928.0
+    provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+PASS: provision-runsc.sh --offline rc (0)
+PASS: runsc ELF carries qdistro_tier3s_exec_t (1)
+PASS: all gvisor-bin sidecars carry qdistro_tier3s_exec_t (5)
+    PASS profile: dev (/etc/qdistro/profile)
+    PASS kernel: >= 5.6 (7.2.8-1-default)
+    PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
+    PASS userns: max_user_namespaces=15373 (minimum, not capacity)
+    PASS ptrace_scope: 1 (<= 2)
+    PASS subuid: admin:100000:65536
+    PASS subgid: admin:100000:65536
+    PASS newuidmap: /usr/bin/newuidmap
+    PASS newgidmap: /usr/bin/newgidmap
+    PASS pin: /usr/lib/qdistro/tier3s/RUNSC_RELEASE release=20260928.0
+    PASS runsc: release stamp matches pin; /usr/libexec/qdistro/runsc/runsc present (not yet executed)
+    PASS install_path: /usr/libexec/qdistro/runsc and ancestors up to /: real dirs, uid 0, not group/other-writable
+    PASS bundle: /usr/libexec/qdistro/runsc: 6 files, exact set, sha512 match pin
+    PASS runsc_version: runsc version release-20260928.0 (matches pin, rc=0; executed the verified inode 65027:5243504)
+    PASS wrapper: /usr/libexec/qdistro/tier3s-runsc (identical to /usr/lib/qdistro/tier3s/tier3s-runsc)
+    PASS workloads: /usr/lib/qdistro/tier3s/workloads (3 declaration(s))
+    PASS state_root: /run/qdistro-tier3s-runsc (per-uid dir is a qt3s-* caller prerequisite; admin never invokes runsc)
+    PASS podman: 6.0.2 (>= 6)
+    PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded
+    PASS label_disable: accepted (|[label=disable])
+    INFO kvm: /dev/kvm present (not used: --platform=systrap)
+    INFO selinux: Enforcing
+    RESULT PASS: tier 3s prerequisites present
+PASS: installed probe rc (0)
+PASS: installed probe RESULT (1)
+PASS: probe state_root (1)
+
+## 5. workload image from the OCI archive (built once with registry access)
+PASS: image archive and manifest staged
+    IMAGE_FOOT=qdistro/tier3s-foot:latest
+    IMAGE_ID_FOOT=25bf2270a51f3122f2a14d7cb7ad48830cfb81830b40599fa5f4181b027ce200
+    IMAGE_DIGEST_FOOT=sha256:1527134c58867059130b612d83b4bb35c8940b1c627f8be7b3ae86df9a6265fa
+    IMAGE_HEADLESS_SMOKE=qdistro/tier3s-headless-smoke:latest
+    IMAGE_ID_HEADLESS_SMOKE=48335dc4b871fb48fade86abfe67d98b6a4c027b183f799a639e4d4dc290bb58
+    IMAGE_DIGEST_HEADLESS_SMOKE=sha256:1a0580d8cbdf1f0127bbb129f5da77441b9e436d15d70edcd35d7825208a7295
+    IMAGE_WESTON_TERMINAL=qdistro/tier3s-weston-terminal:latest
+    IMAGE_ID_WESTON_TERMINAL=8140708c054e17b3edbe30515cdbcaa2ec44ea8e7d1f572d58b828cdc721dd3a
+    IMAGE_DIGEST_WESTON_TERMINAL=sha256:a5b73d8b881965cb8b4cfd2a35879e4f7a437fd46b5f0b63ccd4a8245ebe59d8
+    IMAGE_SNAPSHOT=20261003
+    IMAGE_ARCHIVE_SHA256_FOOT=e5c36e3fe80cb66df2d7d12036c3416fd2f02d51ce25fce1dc9f2e2ca3311a22
+    IMAGE_ARCHIVE_SHA256_HEADLESS_SMOKE=931c6a1a5f08352b3ffe20333065f025a6820c01296cb771f821fc0a9c2db9d5
+    IMAGE_ARCHIVE_SHA256_WESTON_TERMINAL=1190e02b24cb0dc1f3192f3fb8b5e4f3429e1361e344c9a2f005257ff54f5b6f
+    INPUT_KEY=d39629a268ef78c6119d8ed9cb88486d
+    BUILT_FROM_COMMIT=30638407c7e0d59b1bbe3085fa1b7fa10833ec56
+    BUILD_VM=t3s-c2-261005-101056-3578230-20792
+    BUILT_AT=2026-10-05T17:03:24Z
+    IMAGE=qdistro/tier3s-headless-smoke:latest
+    IMAGE_ID=48335dc4b871fb48fade86abfe67d98b6a4c027b183f799a639e4d4dc290bb58
+    IMAGE_DIGEST=sha256:1a0580d8cbdf1f0127bbb129f5da77441b9e436d15d70edcd35d7825208a7295
+    IMAGE_ARCHIVE_SHA256=931c6a1a5f08352b3ffe20333065f025a6820c01296cb771f821fc0a9c2db9d5
+PASS: archive sha256 = manifest (931c6a1a5f08352b3ffe20333065f025a6820c01296cb771f821fc0a9c2db9d5)
+PASS: manifest snapshot = snapshot.conf pin (20261003)
+PASS: manifest input key = the tested commit's image inputs (d39629a268ef78c6119d8ed9cb88486d)
+    Writing manifest to image destination
+    Loaded image: localhost/qdistro/tier3s-headless-smoke:latest
+PASS: podman load (admin) rc (0)
+PASS: loaded image ID = manifest IMAGE_ID (48335dc4b871fb48fade86abfe67d98b6a4c027b183f799a639e4d4dc290bb58)
+PASS: image snapshot label = pin (20261003)
+IMAGE_ID=48335dc4b871fb48fade86abfe67d98b6a4c027b183f799a639e4d4dc290bb58
+IMAGE_DIGEST=sha256:f22e6aeea7598ea2ecb0eb9df0fb5720b2f40b7a8f79ff48e0fa357a453d6987
+INFO: the manifest digest changes across the oci-archive round trip (manifest re-serialized; build VM: sha256:1a0580d8cbdf1f0127bbb129f5da77441b9e436d15d70edcd35d7825208a7295); the asserted identity is the image ID (config digest)
+
+## 5b. Phase B: per-workload GUI image archives (weston-terminal,foot)
+PASS: weston-terminal archive sha256 = manifest (1190e02b24cb0dc1f3192f3fb8b5e4f3429e1361e344c9a2f005257ff54f5b6f)
+    Writing manifest to image destination
+    Loaded image: localhost/qdistro/tier3s-weston-terminal:latest
+PASS: podman load weston-terminal (admin) rc (0)
+PASS: loaded weston-terminal image ID = manifest (8140708c054e17b3edbe30515cdbcaa2ec44ea8e7d1f572d58b828cdc721dd3a)
+PASS: weston-terminal image snapshot label = pin (20261003)
+PASS: weston-terminal image workload label (weston-terminal)
+PASS: weston-terminal workload declaration installed (GUI=1) (1)
+PASS: foot archive sha256 = manifest (e5c36e3fe80cb66df2d7d12036c3416fd2f02d51ce25fce1dc9f2e2ca3311a22)
+    Writing manifest to image destination
+    Loaded image: localhost/qdistro/tier3s-foot:latest
+PASS: podman load foot (admin) rc (0)
+PASS: loaded foot image ID = manifest (25bf2270a51f3122f2a14d7cb7ad48830cfb81830b40599fa5f4181b027ce200)
+PASS: foot image snapshot label = pin (20261003)
+PASS: foot image workload label (foot)
+PASS: foot workload declaration installed (GUI=1) (1)
+PASS: admin compositor socket present (yes)
+PASS: qdshell is up (active)
+PASS: tool runuser installed (yes)
+PASS: tool waypipe installed (yes)
+PASS: tool qdistro-secctx-exec installed (yes)
+PASS: tool dbus-send installed (yes)
+PASS: tool sqlite3 installed (yes)
+PASS: tool python3 installed (yes)
+PASS: admin tool qs installed (yes)
+PASS: admin tool ydotool installed (yes)
+PASS: clipboard-source helper installed (/usr/bin/qdistro-test-clipboard-source)
+PASS: pywayland importable as admin (yes)
+
+## 6. broker allow rule for the smoke spawn
+PASS: broker without a rule (unknown)
+PASS: broker with the allow rule (allow)
+
+## 6b. Model A canary: silo account + store + probe + one live launch
+PASS: canary: silo created (Created)
+PASS: canary: qt3s-t3setup provisioned; localhost/qdistro/tier3s-headless-smoke:latest in its own store
+PASS: canary: silo uid:gid resolved and not admin's (yes)
+PASS: canary: per-uid runsc root + runtime dir (silo-owned 0700) (1003 700 1003 700)
+    INFO kvm: /dev/kvm present (not used: --platform=systrap)
+    INFO selinux: Enforcing
+    RESULT PASS: tier 3s prerequisites present
+PASS: canary: probe as the silo account rc (0)
+PASS: canary: admin still holds the staged archive copy (yes)
+PASS: canary: silo store holds the workload image (yes)
+    silos.yaml: t3setup argv -> ["qdistro-tier3s-smoke", "--hold", "120"]
+PASS: canary: launch e4ec322c44071e96db77582d73a4f8ef recorded running
+PASS: canary: sandbox processes confined to qdistro_tier3s_t (yes)
+PASS: canary: container runs in the silo store, not admin's (0:1)
+PASS: canary: StopSilo (Stopped)
+PASS: canary: all 17 launch processes gone (pid+starttime)
+PASS: canary: scope qdistro-tier3s-e4ec322c44071e96db77582d73a4f8ef.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-e4ec322c44071e96db77582d73a4f8ef.scope absent)
+PASS: canary: per-launch dir /run/qdistro-tier3s/e4ec322c44071e96db77582d73a4f8ef gone
+PASS: canary: control record /run/qdistro-tier3s-ctl/e4ec322c44071e96db77582d73a4f8ef gone
+PASS: canary: container qdistro-tier3s-t3setup gone (podman exists rc=1 in t3setup's store)
+PASS: canary: container qdistro-tier3s-t3setup absent from admin's store
+PASS: canary: no runsc state for 3fbd0cd54b64 in /run/qdistro-tier3s-runsc/1003
+PASS: canary: DeleteSilo (absent)
+PASS: setup: control records (0)
+PASS: setup: scopes (0)
+PASS: setup: labelled containers (0)
+PASS: setup: runsc-bundle processes (0)
+PASS: setup: state roots hold no container state (0)
+PASS: setup: no cleanup call scope left (0)
+PASS: setup: no cleanup work dir left (0)
+[t3s-setup] 114 passes, 0 failures
