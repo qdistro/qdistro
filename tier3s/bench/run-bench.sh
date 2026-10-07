@@ -183,10 +183,13 @@ if [ "$SAMPLES" -gt 0 ]; then
             [ -n "$winrect" ] || break
             # ambient-noise control: three baselines spanning ~1.2s. Only a
             # change inside the TARGET WINDOW mask can impersonate a key
-            # echo — panel/clock repaints outside it are ignored
-            shot "$STAGE/f0.ppm"; sleep 0.6
-            shot "$STAGE/f0b.ppm"; sleep 0.6
-            shot "$STAGE/f0c.ppm"
+            # echo — panel/clock repaints outside it are ignored. Remove
+            # the previous sample's frames first so a failed capture can
+            # never reuse a stale baseline.
+            rm -f "$STAGE/f0.ppm" "$STAGE/f0b.ppm" "$STAGE/f0c.ppm"
+            shot "$STAGE/f0.ppm" && sleep 0.6 && shot "$STAGE/f0b.ppm" \
+                && sleep 0.6 && shot "$STAGE/f0c.ppm" \
+                || { echo "sample_$i MISS(capture)" >> "$L/latency.log"; sleep 0.5; continue; }
             d01=$(python3 "$here/ppmdiff.py" "$STAGE/f0.ppm" "$STAGE/f0b.ppm" inwin $winrect)
             d12=$(python3 "$here/ppmdiff.py" "$STAGE/f0b.ppm" "$STAGE/f0c.ppm" inwin $winrect)
             case "$d01 $d12" in

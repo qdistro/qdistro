@@ -306,9 +306,10 @@ sec_mem() {
     t2pid=$(pm inspect --format '{{.State.Pid}}' t2mem 2>/dev/null)
     t2cg=$(proc_cg "$t2pid")
     [ -n "$t2cg" ] && delegate_to "$t2cg" && sleep 1
-    local a0 a1 b0 b1 h0 h1
-    if [ -n "$t2cg" ] && [ -n "$(cg_mem "$t2cg")" ]; then
-        emit t2_idle_memory_current_mb "$(mb_b "$(cg_mem "$t2cg")")" MB
+    local a0 a1 b0 b1 h0 h1 t2cur=""
+    [ -n "$t2cg" ] && t2cur=$(cg_mem "$t2cg")
+    if [ -n "$t2cur" ]; then
+        emit t2_idle_memory_current_mb "$(mb_b "$t2cur")" MB
         local t2pss; t2pss=$(sum_pss_kb $(tree_procs "/sys/fs/cgroup$t2cg"))
         [ -n "$t2pss" ] && emit t2_idle_pss_mb "$(mb_kb "$t2pss")" MB \
             || fail "mem: t2 PSS sum failed"
@@ -325,21 +326,25 @@ sec_mem() {
     # idle CPU over 60s with the window open (plan: repeat under
     # --systrap-disable-fast-path is not wired through the launch path; the
     # syscall section shows the per-syscall cost it would amortise)
-    a0=$(cg_usage_us "$scope_cg"); b0=$(cg_usage_us "$t2cg"); h0=$(cg_usage_us "$hcg")
-    sleep 60
-    a1=$(cg_usage_us "$scope_cg"); b1=$(cg_usage_us "$t2cg"); h1=$(cg_usage_us "$hcg")
-    cpu_pct() { # cpu_pct <meas> <us_before> <us_after> — fail, don't emit, on missing data
-        if [ -n "$2" ] && [ -n "$3" ]; then
-            local v; v=$(python3 -c "print(f'{($3-$2)/60e6*100:.2f}')" 2>/dev/null)
-            [ -n "$v" ] || { fail "cpu $1: calc failed"; return; }
-            emit "$1" "$v" pct_core
-        else
-            fail "cpu $1: usage_usec missing (${2:-unset} -> ${3:-unset})"
-        fi
-    }
-    cpu_pct t3s_gui_idle_cpu_pct "$a0" "$a1"
-    cpu_pct t3s_headless_idle_cpu_pct "$h0" "$h1"
-    cpu_pct t2_idle_cpu_pct "$b0" "$b1"
+    if [ -n "$scope_cg" ] && [ -n "$hcg" ] && [ -n "$t2cg" ]; then
+        a0=$(cg_usage_us "$scope_cg"); b0=$(cg_usage_us "$t2cg"); h0=$(cg_usage_us "$hcg")
+        sleep 60
+        a1=$(cg_usage_us "$scope_cg"); b1=$(cg_usage_us "$t2cg"); h1=$(cg_usage_us "$hcg")
+        cpu_pct() { # cpu_pct <meas> <us_before> <us_after> — fail, don't emit, on missing data
+            if [ -n "$2" ] && [ -n "$3" ]; then
+                local v; v=$(python3 -c "print(f'{($3-$2)/60e6*100:.2f}')" 2>/dev/null)
+                [ -n "$v" ] || { fail "cpu $1: calc failed"; return; }
+                emit "$1" "$v" pct_core
+            else
+                fail "cpu $1: usage_usec missing (${2:-unset} -> ${3:-unset})"
+            fi
+        }
+        cpu_pct t3s_gui_idle_cpu_pct "$a0" "$a1"
+        cpu_pct t3s_headless_idle_cpu_pct "$h0" "$h1"
+        cpu_pct t2_idle_cpu_pct "$b0" "$b1"
+    else
+        fail "cpu: cgroup path missing (gui=${scope_cg:-none} head=${hcg:-none} t2=${t2cg:-none})"
+    fi
     pm rm -f t2mem > /dev/null 2>&1
     sm StopSilo si "$HS" 10 > /dev/null 2>&1
     teardown_one "$GS"
@@ -395,7 +400,10 @@ sec_io() {
     step "file I/O: tar xf ~200MB into a 1GiB tmpfs"
     local tree=/var/tmp/t3s-bench-tree tar=/var/tmp/t3s-bench-tree.tar
     rm -rf "$tree"; mkdir -p "$tree"
-    for i in $(seq 1 200); do dd if=/dev/zero bs=1M count=1 of="$tree/f$i" 2>/dev/null; done
+    for i in $(seq 1 200); do
+        dd if=/dev/zero bs=1M count=1 of="$tree/f$i" 2>/dev/null \
+            || { fail "io: dd $tree/f$i failed"; rm -rf "$tree" "$tar"; return; }
+    done
     (cd "$tree" && tar cf "$tar" ./*) || { fail "io: tar cf failed"; return; }
     chmod 0644 "$tar"   # rootless podman binds it read-only into the container
     local sz; sz=$(stat -c %s "$tar")
@@ -409,7 +417,8 @@ sec_io() {
         echo "$1" | sed -n 's/.*TAR_MS=\([0-9]*\).*/\1/p'
     }
     local out ms i
-    mkdir -p /mnt/t3s-io && mount -t tmpfs -o size=1g none /mnt/t3s-io
+    mkdir -p /mnt/t3s-io && mount -t tmpfs -o size=1g none /mnt/t3s-io \
+        || { fail "io: tmpfs mount failed"; return; }
     local TARX="tar --no-same-permissions --touch -xf"
     local t0 t1
     t0=$(ts_us)
@@ -422,7 +431,8 @@ sec_io() {
     # tier 2: admin-owned bind-mount so :z can relabel; the shell inside the
     # container prints TAR_MS for just the extraction
     local at=/home/admin/t3s-bench.tar t2probe
-    install -m 0644 -o admin -g admin "$tar" "$at"
+    install -m 0644 -o admin -g admin "$tar" "$at" \
+        || { fail "io: install $at failed"; return; }
     t2probe='S=$(date +%s%3N); tar --no-same-permissions --touch -xf /bench.tar -C /bench && echo TAR_MS=$(( $(date +%s%3N) - S ))'
     for i in 1 2; do
         if ! out=$(pm run --rm --name t2io$i --network none --entrypoint /bin/sh \
@@ -439,7 +449,8 @@ sec_io() {
     # tier 3s: the tar is a bind-mounted host file → reads go through the
     # gofer (gofs); extraction writes the sandbox's tmpfs. Second variant
     # turns directfs off where the pin supports it.
-    cp "$tar" "$RSHARE/bench.tar" && chmod 644 "$RSHARE/bench.tar"
+    cp "$tar" "$RSHARE/bench.tar" && chmod 644 "$RSHARE/bench.tar" \
+        || { fail "io: stage $RSHARE/bench.tar failed"; return; }
     local t3probe='S=$(date +%s%3N); tar --no-same-permissions --touch -xf /bench/bench.tar -C /w && echo TAR_MS=$(( $(date +%s%3N) - S ))'
     for i in 1 2; do
         if ! out=$(t3s_run t3io$i "[\"/bin/sh\",\"-c\",\"$t3probe\"]" 2>&1); then
@@ -502,12 +513,12 @@ sec_overhead() {
     local uid
     uid=$(silo_uid "$GS")
     [ -n "$uid" ] || { fail "overhead: no uid for $GS"; return; }
-    local home store state rt
+    local home store state rt ok=1
     home=$(getent passwd "$(silo_acct "$GS")" | cut -d: -f6)
-    store=$(du -sm "$home/.local/share/containers" 2>/dev/null | cut -f1)
-    state=$(du -sm "$RUNSC_BASE/$uid" 2>/dev/null | cut -f1)
-    rt=$(du -sm "$RT_BASE/$uid" 2>/dev/null | cut -f1)
-    [ -n "$store" ] && [ -n "$state" ] && [ -n "$rt" ] \
+    store=$(du -sm "$home/.local/share/containers" 2>/dev/null | cut -f1) || ok=0
+    state=$(du -sm "$RUNSC_BASE/$uid" 2>/dev/null | cut -f1) || ok=0
+    rt=$(du -sm "$RT_BASE/$uid" 2>/dev/null | cut -f1) || ok=0
+    [ "$ok" = 1 ] && [ -n "$store" ] && [ -n "$state" ] && [ -n "$rt" ] \
         || { fail "overhead: du failed (home=${home:-none} store=${store:-none} state=${state:-none} rt=${rt:-none})"; return; }
     emit silo_store_mb "$store" MB
     emit silo_runsc_state_mb "$state" MB
@@ -539,18 +550,25 @@ teardown_one() {
         return
     fi
     scg=$(rec "$tok" scope_cgroup)
-    [ -n "$scg" ] || fail "teardown $s: scope_cgroup never recorded"
-    t0=$(ts_us)
-    sm StopSilo si "$s" 10 > /dev/null 2>&1
-    if wait_for 60 unit_down "qdistro-tier3s-$tok.scope"; then
-        emit "teardown_${s}_ms" $(( ($(ts_us) - t0) / 1000 )) ms
-    else
-        fail "teardown $s: scope qdistro-tier3s-$tok.scope still up after StopSilo"
+    if [ -z "$scg" ]; then
+        fail "teardown $s: scope_cgroup never recorded"
+        sm StopSilo si "$s" 10 > /dev/null 2>&1
+        return
     fi
-    [ -d "/sys/fs/cgroup$scg" ] && fail "teardown $s: scope cgroup $scg still present" || :
+    t0=$(ts_us)
+    if ! sm StopSilo si "$s" 10 > /dev/null 2>&1; then
+        fail "teardown $s: StopSilo call failed"; return
+    fi
+    if ! wait_for 60 unit_down "qdistro-tier3s-$tok.scope"; then
+        fail "teardown $s: scope qdistro-tier3s-$tok.scope still up after StopSilo"
+        return
+    fi
+    local dt=$(( ($(ts_us) - t0) / 1000 ))
+    [ -d "/sys/fs/cgroup$scg" ] && { fail "teardown $s: scope cgroup $scg still present"; return; }
     st=$(silo_state "$s")
-    [ "$st" = QUERY-FAILED ] && fail "teardown $s: ListSilos query failed"
-    [ "$st" = Active ] && fail "teardown $s: still Active"
+    [ "$st" = QUERY-FAILED ] && { fail "teardown $s: ListSilos query failed"; return; }
+    [ "$st" = Active ] && { fail "teardown $s: still Active"; return; }
+    emit "teardown_${s}_ms" "$dt" ms
     rm -f "$WORK/$tok".{procs,cg,id}
 }
 
