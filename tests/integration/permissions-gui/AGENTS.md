@@ -184,6 +184,19 @@ frame of that state.
  The vm-exec payload is now quote-free (`echo <b64> | base64 -d |
  sqlite3 <path>`) and JSON-encodes cleanly. Scenarios 04 / 06 / 07 /
  10 use this pattern — copy it verbatim when you need SQL in Setup.
+
+ c) **Audit / approvals SQL with `LIKE '...%'`: use `qci_sqlite`.**
+ Inside the guest (after `source /tmp/qci-gui-waiters.sh`):
+ ```bash
+ qci_sqlite audit "SELECT decision, scope FROM audit WHERE action LIKE 'app.send-to:%' ORDER BY id DESC LIMIT 1;"
+ qci_sqlite approvals "DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';"
+ ```
+ The SQL goes to sqlite3 as one argv word. When you fold a scenario
+ into one guest driver, copy its `qci_sqlite` lines VERBATIM. NEVER
+ put SQL (or any data) in a printf FORMAT: `printf "...LIKE 'x:%'..."`
+ reads `%'` as a directive, the query never runs, and a correct run
+ goes ERROR (permissions-gui/14, full-20261006T224555Z-2478214). If
+ you must print data, `printf '%s\n' "$data"`.
 2. **Backgrounded GUI processes from `vm-exec` die when the agent call
  returns** unless you detach them. Use `setsid ... </dev/null
  >/tmp/foo.log 2>&1 &` inside a script.
