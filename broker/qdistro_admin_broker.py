@@ -748,8 +748,9 @@ def _read_proc_cmdline(pid: int) -> list[str]:
     return out
 
 
-def _read_proc_environ_names(pid: int) -> set[str]:
-    """Return the environment variable NAMES in /proc/<pid>/environ.
+def _read_proc_environ_names(pid: int) -> set[str] | None:
+    """Return the environment variable NAMES in /proc/<pid>/environ,
+    or None when unreadable — callers must fail closed.
 
     Names only — values may carry secrets and are never read into the
     comparison. The polkit-agent peer check uses this to spot loader/
@@ -757,11 +758,15 @@ def _read_proc_environ_names(pid: int) -> set[str]:
     caller can push through the user manager before restarting the
     agent's unit (sol r165).
     """
+    # Read the whole environ (bounded by the kernel's ARG_MAX): a
+    # truncated read could push an injection variable past the cutoff
+    # while the loader still honours it, and an unreadable environ is
+    # unverifiable — both fail closed (sol r166).
     try:
         with open(f"/proc/{pid}/environ", "rb") as f:
-            raw = f.read(131072)
+            raw = f.read()
     except OSError:
-        return set()
+        return None
     return {
         part.split(b"=", 1)[0].decode("utf-8", "replace")
         for part in raw.split(b"\x00") if part
@@ -1757,19 +1762,23 @@ class Broker(dbus.service.Object):
         The relay methods answer or cancel real polkitd
         authentications. The agent is `python3 -I <installed script>`
         inside its user unit, so the peer must satisfy all of: python
-        exe basename; the script as argv[-1] with only no-argument
-        isolation flags before it (`python3 -c '…' <script>` puts the
-        path at argv[-1] too, but -c takes argv[2] as CODE — the flag
-        whitelist rejects it; sol r161); no injection-capable
-        environment variables (the user manager's environment is
-        same-uid writable via set-environment + restart — PYTHONPATH/
-        LD_PRELOAD would run attacker code inside the genuine agent
-        argv; sol r165); and an exact match on the agent unit's systemd
-        cgroup path — forged same-named child cgroups under delegated
-        scopes differ (sol r163). These are defence-in-depth: the
-        capability boundary is the D-Bus unique sender the cookie is
-        bound to (sol r164). uid 0 needs no relay: it may answer
-        polkitd itself.
+        exe basename; the script as argv[-1]; -I REQUIRED among the
+        preceding flags, all of which must be no-argument isolation
+        flags (the bare `python3 <script>` form loads attacker-writable
+        user-site sitecustomize/usercustomize/.pth — sol r166 — and
+        `python3 -c '…' <script>` puts the path at argv[-1] too but -c
+        is an argument-taking flag outside the whitelist — sol r161);
+        a readable environ naming no injection-capable variable (the
+        user manager's environment is same-uid writable via
+        set-environment + restart — PYTHONPATH/LD_PRELOAD would run
+        attacker code inside the genuine agent argv — sol r165; the
+        read must not truncate before a hidden variable, and an
+        unreadable environ fails closed — sol r166); and an exact match
+        on the agent unit's systemd cgroup path — forged same-named
+        child cgroups under delegated scopes differ (sol r163). These
+        are defence-in-depth: the capability boundary is the D-Bus
+        unique sender the cookie is bound to (sol r164). uid 0 needs
+        no relay: it may answer polkitd itself.
         """
         if int(uid) not in (0, ADMIN_UID):
             return False, (f"uid {uid} is neither root nor admin uid "
@@ -1781,15 +1790,19 @@ class Broker(dbus.service.Object):
             return True, "root peer needs no relay"
         exe_s = str(exe or "")
         argv = self._peer_cmdline(pid)
+        flags = argv[1:-1]
         if not (os.path.basename(exe_s) in _PYTHON_EXE_BASENAMES
-                and len(argv) > 1
+                and len(argv) > 2
                 and argv[-1] in _POLKIT_AGENT_SCRIPT_PATHS
-                and all(a in _POLKIT_AGENT_SAFE_FLAGS
-                        for a in argv[1:-1])):
+                and "-I" in flags
+                and all(a in _POLKIT_AGENT_SAFE_FLAGS for a in flags)):
             return False, (f"admin peer exe={exe_s!r} is not the "
-                           f"installed polkit agent")
-        bad_env = sorted(self._peer_environ_names(pid)
-                         & _POLKIT_AGENT_DANGEROUS_ENV)
+                           f"isolated installed polkit agent")
+        env_names = self._peer_environ_names(pid)
+        if env_names is None:
+            return False, ("peer environ is unreadable; cannot verify "
+                           "no injection variables are set")
+        bad_env = sorted(env_names & _POLKIT_AGENT_DANGEROUS_ENV)
         if bad_env:
             return False, ("peer environment carries injection-capable "
                            f"variables: {', '.join(bad_env)}")

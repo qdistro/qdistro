@@ -109,6 +109,8 @@ class _StubBroker(Broker):
         return self._peer_cgroup_val
 
     def _peer_environ_names(self, pid):
+        if self._peer_env_names is None:
+            return None
         return set(self._peer_env_names)
 
     def _peer_matches_admin_control(self, *, uid: int, pid: int,
@@ -588,6 +590,25 @@ class TestPolkitAgentPeerBinding:
             broker.set_peer(ADMIN_UID, exe=AGENT_EXE, argv=argv)
             with pytest.raises(dbus.DBusException):
                 _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_the_unisolated_interpreter_form_is_rejected(self, broker):
+        """A drop-in ExecStart of `python3 <script>` (no -I) still
+        loads attacker-writable user-site sitecustomize/.pth — without
+        any env var. Isolated mode is part of the accepted argv shape
+        (sol r166)."""
+        broker.set_peer(ADMIN_UID, exe=AGENT_EXE,
+                        argv=["python3", AGENT_ARGV[-1]])
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_an_unreadable_environ_fails_closed(self, broker):
+        """A peer whose environ cannot be read cannot be shown to be
+        injection-free — deny rather than skip the check (sol r166)."""
+        broker._peer_env_names = None
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
         assert broker._pending == {}
 
     def test_injection_capable_environment_is_rejected(self, broker):
