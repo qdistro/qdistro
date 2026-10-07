@@ -388,7 +388,9 @@ def _imported_members(inst):
 
 def test_scratch_image_import_needs_no_temporary_path(tmp_path):
     """Absent scratch image, TMPDIR unusable: the probe still imports a valid
-    one-entry archive, because it never creates a temporary directory."""
+    one-entry archive. The import itself creates no temporary directory, and
+    nss_q's per-attempt scratch file falls back to /tmp or /dev/shm when
+    TMPDIR is not writable."""
     inst = Install(tmp_path)
     ro = tmp_path / "ro-tmp"
     ro.mkdir()
@@ -594,3 +596,173 @@ def test_a_uid_printed_before_a_stall_is_not_a_lookup(tmp_path):
     # and as_user's site never adopts the printed prefix either
     assert "FAIL nss:" in r.stdout, r.stdout
     assert "(id -u rc=124; " in r.stdout, r.stdout
+
+
+# --- NSS retry semantics (nss_q) --------------------------------------------
+# A lookup killed at the bound (rc 124) is retried — on a saturated VM disk a
+# cold page-in of the lookup's binary/modules/passwd file plausibly outlasted
+# one 5 s bound (full-20261006T175536Z-3524705) — while ONE waiting budget is
+# shared across every nss_q call site in a probe (sol r152 P2). A missing
+# entry is final at once; a wedged provider is paid for once per probe; and a
+# TERM-resistant or uninterruptible child cannot stretch the budget past the
+# SIGKILL escalation / outer cap (sol r152 P1).
+
+def counting_getent(b, other, stall_first, rc_after=0):
+    """getent that wedges on its first `stall_first` passwd calls for
+    `other`, then answers with rc_after (0: the real entry). Each call is
+    counted in b/getent.calls."""
+    calls = b / "getent.calls"
+    line = (f"{other.pw_name}:x:{other.pw_uid}:{other.pw_gid}"
+            f"::{other.pw_dir or '/nonexistent'}:{other.pw_shell or '/sbin/nologin'}")
+    (b / "getent").write_text(
+        "#!/bin/sh\n"
+        f"echo x >> '{calls}'\n"
+        f"n=$(wc -l < '{calls}')\n"
+        f"if [ \"$n\" -le {stall_first} ]; then sleep 60; fi\n"
+        + (f"printf '%s\\n' '{line}'\n" if rc_after == 0 else "")
+        + f"exit {rc_after}\n")
+    (b / "getent").chmod(0o755)
+    return calls
+
+
+def test_a_lookup_killed_once_at_the_bound_is_retried(tmp_path):
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "nssbin"; b.mkdir()
+    calls = counting_getent(b, other, stall_first=1)
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=60)
+    assert "FAIL nss:" not in r.stdout, r.stdout
+    assert len(calls.read_text().splitlines()) == 2, "one kill, one retry"
+
+
+def test_a_missing_entry_is_final_without_retry(tmp_path):
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "nssbin"; b.mkdir()
+    calls = counting_getent(b, other, stall_first=0, rc_after=2)
+    t0 = time.time()
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=60)
+    assert time.time() - t0 < 30, "a missing entry was waited on"
+    assert "FAIL nss:" in r.stdout and "(getent passwd rc=2; 1 tries; " in r.stdout, r.stdout
+    assert len(calls.read_text().splitlines()) == 1, "a missing entry was retried"
+
+
+def test_a_wedged_provider_costs_one_retry_budget_per_probe(tmp_path):
+    """Every attempt wedges: the lookup fails once the shared budget
+    (NSS_TRIES x (NSS_BOUND + NSS_KILL_GRACE) = 21 s of NSS wait) is spent —
+    three full 5 s bounds plus whatever shortened bound the remainder buys —
+    and every later NSS lookup in the same probe fails at once instead of
+    paying the budget again (the spawn waits on the probe under its token
+    lock)."""
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "idbin"; b.mkdir()
+    calls = b / "id.calls"
+    (b / "id").write_text(
+        "#!/bin/sh\nfor a; do last=\"$a\"; done\n"
+        "case \"${last:-}\" in -*|\"\") exec /usr/bin/id \"$@\" ;; esac\n"
+        f"echo x >> '{calls}'\nsleep 600\n")
+    (b / "id").chmod(0o755)
+    t0 = time.time()
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=60)
+    took = time.time() - t0
+    n = len(calls.read_text().splitlines())
+    assert 3 <= n <= 6, calls.read_text()
+    assert took < 30, f"a wedged provider was waited on per lookup site ({took:.0f} s)"
+    assert "FAIL user: the NSS lookup for" in r.stdout and "timed out" in r.stdout, r.stdout
+    assert "shared NSS wait budget" in r.stdout, r.stdout
+    assert "FAIL nss:" in r.stdout and "(id -u rc=124; 0 tries; " in r.stdout, r.stdout
+
+
+def test_a_term_resistant_lookup_is_killed_at_the_escalation(tmp_path):
+    """sol r152 P1: `timeout <bound>` alone sends TERM and then waits on the
+    child forever — a lookup that ignores TERM would hang the probe and
+    never reach a retry or the wedge. The attempt now runs under
+    `timeout -k` (SIGKILL after the grace) inside an outer cap, so a
+    TERM-resistant child costs bound+grace per attempt and even an
+    uninterruptible child cannot stretch the shared budget."""
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "idbin"; b.mkdir()
+    calls = b / "id.calls"
+    (b / "id").write_text(
+        "#!/bin/sh\nfor a; do last=\"$a\"; done\n"
+        "case \"${last:-}\" in -*|\"\") exec /usr/bin/id \"$@\" ;; esac\n"
+        f"echo x >> '{calls}'\n"
+        "trap '' TERM\nsleep 600\n")
+    (b / "id").chmod(0o755)
+    t0 = time.time()
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=90)
+    took = time.time() - t0
+    assert took < 40, f"a TERM-resistant NSS lookup hung the probe ({took:.0f} s)"
+    n = len(calls.read_text().splitlines())
+    assert 2 <= n <= 4, calls.read_text()
+    assert "FAIL user: the NSS lookup for" in r.stdout and "timed out" in r.stdout, r.stdout
+
+
+def test_an_early_sigkill_is_a_real_failure_not_a_timeout(tmp_path):
+    """sol r154 P2: a 137 that arrives BEFORE the attempt's bound is an
+    external SIGKILL (OOM, a kill, a self-kill), not our TERM->KILL
+    escalation — it must stay a final non-timeout failure instead of
+    being relabelled "timed out", retried, or latching the NSS wedge.
+    The whole-second `date +%s` read this replaced could round a 4.2 s
+    kill across a second boundary up to a 5 s bound; the centisecond
+    monotonic clock cannot."""
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "idbin"; b.mkdir()
+    calls = b / "id.calls"
+    (b / "id").write_text(
+        "#!/bin/sh\nfor a; do last=\"$a\"; done\n"
+        "case \"${last:-}\" in -*|\"\") exec /usr/bin/id \"$@\" ;; esac\n"
+        f"echo x >> '{calls}'\n"
+        "kill -9 $$\n")
+    (b / "id").chmod(0o755)
+    t0 = time.time()
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=60)
+    took = time.time() - t0
+    assert took < 20, f"an early SIGKILL was waited on like a timeout ({took:.0f} s)"
+    n = len(calls.read_text().splitlines())
+    assert 1 <= n <= 4, calls.read_text()   # one per lookup site; no retries
+    assert "(id rc=137; 1 tries)" in r.stdout, r.stdout
+    # the wedge latch is NOT set: the nss section's own lookup was still
+    # attempted (rc=137 again) rather than failing fast with "0 tries"
+    assert "(id -u rc=137; 1 tries; " in r.stdout, r.stdout
+    assert "0 tries" not in r.stdout, r.stdout
+
+
+def test_the_nss_budget_is_shared_across_lookup_sites(tmp_path):
+    """sol r152 P2: the retry budget is ONE per-probe wait allowance, not a
+    fresh NSS_TRIES x NSS_BOUND at every nss_q site. Earlier lookups that
+    recover after stalls still charge their wait to the budget, so a
+    provider that wedges later cannot be waited on for the full budget
+    again."""
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "nssbin"; b.mkdir()
+    idc = b / "id.calls"
+    (b / "id").write_text(
+        "#!/bin/sh\nfor a; do last=\"$a\"; done\n"
+        "case \"${last:-}\" in -*|\"\") exec /usr/bin/id \"$@\" ;; esac\n"
+        f"echo x >> '{idc}'\n"
+        f"n=$(wc -l < '{idc}')\n"
+        "if [ \"$n\" -le 2 ]; then sleep 60; fi\n"
+        "exec /usr/bin/id \"$@\"\n")
+    # getent wedges on every call: by the time the nss section asks for it,
+    # the earlier id stalls have already eaten ~10 s of the 21 s budget, so
+    # it gets the remainder only — never another 3 x 5 s.
+    calls = counting_getent(b, other, stall_first=99)
+    (b / "id").chmod(0o755)
+    t0 = time.time()
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=90)
+    took = time.time() - t0
+    n = len(calls.read_text().splitlines())
+    assert 1 <= n <= 2, calls.read_text()
+    assert took < 40, f"NSS lookups were paid a fresh budget per site ({took:.0f} s)"
+    assert "FAIL nss:" in r.stdout and "(getent passwd rc=124; " in r.stdout, r.stdout
