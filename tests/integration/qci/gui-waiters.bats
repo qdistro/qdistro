@@ -311,6 +311,42 @@ EOF
     [[ "$stderr" == *"GetPending failed"* ]]
 }
 
+@test "qci_sqlite: passes SQL containing % to sqlite3 as one verbatim argv word" {
+    sqlite3() { printf '<%s>\n' "$@"; }
+    export -f sqlite3
+    local sql="SELECT decision, scope FROM audit WHERE action LIKE 'app.send-to:%' ORDER BY id DESC LIMIT 1;"
+    run qci_sqlite audit "$sql"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf '<%s>\n' -batch /var/lib/qdistro/audit/audit.sqlite "$sql")" ]
+    run qci_sqlite approvals "DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"<-batch>"*"</var/lib/qdistro/approvals/approvals.sqlite>"*"<DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';>" ]]
+}
+
+@test "qci_sqlite: runs a real LIKE '%' query when sqlite3 is present" {
+    command -v sqlite3 >/dev/null || skip "sqlite3 not installed"
+    local db="$BATS_TEST_TMPDIR/audit.sqlite"
+    sqlite3 "$db" "CREATE TABLE audit(id INTEGER PRIMARY KEY, action TEXT, decision INT, scope TEXT);
+INSERT INTO audit(action,decision,scope) VALUES ('app.send-to:3000:x',0,'1h'),('other',1,'forever'),('app.send-to:3000:x',1,'once');"
+    run qci_sqlite "$db" "SELECT decision, scope FROM audit WHERE action LIKE 'app.send-to:%' ORDER BY id DESC LIMIT 1;"
+    [ "$status" -eq 0 ]
+    [ "$output" = "1|once" ]
+}
+
+@test "qci_sqlite: rejects an unknown database alias and a missing SQL argument" {
+    sqlite3() { echo called; }
+    export -f sqlite3
+    run --separate-stderr qci_sqlite audits "SELECT 1;"
+    [ "$status" -eq 2 ]
+    [ -z "$output" ]
+    run --separate-stderr qci_sqlite audit
+    [ "$status" -eq 2 ]
+    [ -z "$output" ]
+    run --separate-stderr qci_sqlite audit "SELECT 1;" extra
+    [ "$status" -eq 2 ]
+    [ -z "$output" ]
+}
+
 @test "qci_claim_driver: a lock under the scratch root must be an existing <slug>/driver.lock" {
     local root="$BATS_TEST_TMPDIR/scratch"
     mkdir -p "$root/the_slug.md"
