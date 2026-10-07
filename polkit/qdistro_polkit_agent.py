@@ -940,6 +940,19 @@ class SessionRegistrar:
         for delay in _SIGNAL_FOLLOWUP_MS:
             GLib.timeout_add(delay, self._once)
 
+    def _on_logind_props(self, iface, changed, _invalidated) -> None:
+        # SessionNew can arrive well before logind elects the session as
+        # the user's Display session, and the election itself emits only
+        # PropertiesChanged on the User object -- observed live: a ~25 s
+        # gap between session creation and Display, during which every
+        # reconcile() saw "no login session" and the registration waited
+        # for the poll tick. Re-run reconcile on the election itself.
+        if str(iface) != LOGIND_IFACE_USER or "Display" not in changed:
+            return
+        self.reconcile()
+        for delay in _SIGNAL_FOLLOWUP_MS:
+            GLib.timeout_add(delay, self._once)
+
     def _on_polkit_owner(self, name, old_owner, new_owner) -> None:
         if str(name) != POLKIT_BUS or not str(new_owner):
             return
@@ -964,6 +977,18 @@ class SessionRegistrar:
                 syslog.syslog(syslog.LOG_WARNING,
                               f"cannot watch logind {signal}: {e}; "
                               f"polling every {RECONCILE_POLL_S}s only")
+        try:
+            # Display-session election is announced on the admin's User
+            # object, separately from session create/remove -- pin the
+            # watch to that object (logind names it after the uid).
+            self.bus.add_signal_receiver(
+                self._on_logind_props, signal_name="PropertiesChanged",
+                dbus_interface="org.freedesktop.DBus.Properties",
+                bus_name=LOGIND_BUS,
+                path=f"{LOGIND_OBJ}/user/_{os.getuid()}")
+        except Exception as e:  # noqa: BLE001
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"cannot watch the user's Display election: {e}")
         try:
             # bus_name + path pin the watch to signals the bus daemon itself
             # sends about POLKIT_BUS -- any other sender's identically

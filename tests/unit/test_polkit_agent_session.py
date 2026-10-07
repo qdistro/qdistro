@@ -326,8 +326,8 @@ class TestRegistrar:
         assert agent_mod.main() == 0
         loop.run.assert_called_once()
         assert fake.registered == []
-        assert {"SessionNew", "SessionRemoved", "NameOwnerChanged"} \
-            <= set(fake.signals)
+        assert {"SessionNew", "SessionRemoved", "NameOwnerChanged",
+                "PropertiesChanged"} <= set(fake.signals)
 
     def test_login_later_registers_for_that_session(self, fake, monkeypatch):
         monkeypatch.setattr(agent_mod.GLib, "timeout_add", lambda *a: 1)
@@ -340,6 +340,26 @@ class TestRegistrar:
         assert reg.session_id == "6"
         reg.reconcile()  # idempotent
         assert fake.registered == ["6"]
+
+    def test_display_election_retriggers_reconcile(self, fake, monkeypatch):
+        """logind can elect a session as the user's Display well after
+        SessionNew -- the VM run saw a ~25 s gap that only the 30 s poll
+        caught. The PropertiesChanged carrying Display must re-run
+        reconcile; unrelated PropertiesChanged must not."""
+        monkeypatch.setattr(agent_mod.GLib, "timeout_add", lambda *a: 1)
+        reg = _registrar(fake)
+        reg.reconcile()
+        _login(fake, "6")
+        # noise: another interface, and a User change without Display
+        reg._on_logind_props("org.freedesktop.login1.Session",
+                           {"State": "active"}, [])
+        reg._on_logind_props(agent_mod.LOGIND_IFACE_USER,
+                             {"IdleHint": True}, [])
+        assert fake.registered == []
+        reg._on_logind_props(agent_mod.LOGIND_IFACE_USER,
+                             {"Display": ("6", "/s/_36")}, [])
+        assert fake.registered == ["6"]
+        assert reg.session_id == "6"
 
     def test_relogin_moves_the_registration(self, fake):
         _login(fake, "6")
