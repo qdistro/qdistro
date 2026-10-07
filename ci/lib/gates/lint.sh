@@ -27,7 +27,7 @@ lint_shell_files() {
     # gitignored on purpose) must not inflate the migration metric
     # (iso2 `07` M4). Falls back to find outside a git checkout.
     if git -C "$QDISTRO_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        git -C "$QDISTRO_REPO" ls-files -z -- scripts ci/bin ci/lib image tests/integration 2>/dev/null \
+        git -C "$QDISTRO_REPO" ls-files -z -- scripts ci/bin ci/lib image packaging tests/integration 2>/dev/null \
             | tr '\0' '\n' \
             | awk -v root="$QDISTRO_REPO" '
                 /^tests\/integration\// { n = gsub("/", "/"); if (n > 3 || $0 !~ /\.sh$/) next; print root "/" $0; next }
@@ -45,7 +45,7 @@ lint_shell_files() {
         return 0
     fi
     find "$QDISTRO_REPO/scripts" "$QDISTRO_REPO/ci/bin" "$QDISTRO_REPO/ci/lib" "$QDISTRO_REPO/image" \
-        -type f -name '*.sh' 2>/dev/null
+        "$QDISTRO_REPO/packaging" -type f -name '*.sh' 2>/dev/null
     find "$QDISTRO_REPO/ci/bin" -type f ! -name '*.*' 2>/dev/null | while IFS= read -r f; do
         IFS= read -r shebang < "$f" || true
         if [[ $shebang =~ ^#!.*(/|[[:space:]])(ba)?sh([[:space:]]|$) ]]; then

@@ -1,0 +1,44 @@
+<domain type='kvm'>
+  <name>@QDISTRO_VM_NAME@</name>
+  <memory unit='KiB'>4194304</memory>
+  <vcpu>4</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-q35-9.2'>hvm</type>
+    <loader readonly='yes' type='pflash'>/usr/share/qemu/ovmf-x86_64-4m-code.bin</loader>
+    <nvram>@QDISTRO_WORK@/nvram/vars-@QDISTRO_VM_NAME@.bin</nvram>
+    <boot dev='cdrom'/>
+  </os>
+  <features><acpi/><apic/></features>
+  <cpu mode='host-passthrough'/>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' cache='writeback'/>
+      <source file='@QDISTRO_WORK@/target.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source file='@QDISTRO_WORK@/oemdrv.img'/>
+      <target dev='vdb' bus='virtio'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='@QDISTRO_WORK@/qdistro-installer.x86_64.iso'/>
+      <target dev='sda' bus='sata'/>
+      <readonly/>
+    </disk>
+    <controller type='sata' index='0'/>
+    <interface type='user'>
+      <mac address='52:54:00:3a:aa:02'/>
+      <model type='virtio'/>
+    </interface>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
+    <graphics type='spice' autoport='yes'/>
+    <video><model type='virtio' heads='1'/></video>
+    <serial type='pty'/><console type='pty'/>
+    <rng model='virtio'><backend model='random'/></rng>
+  </devices>
+</domain>

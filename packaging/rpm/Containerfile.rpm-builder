@@ -1,0 +1,35 @@
+ARG BASE_IMAGE=registry.opensuse.org/opensuse/tumbleweed:latest
+FROM ${BASE_IMAGE}
+
+# Tumbleweed repository endpoints for the builder image. Defaults float on
+# Tumbleweed proper; pin to a snapshot or a local mirror by overriding, e.g.:
+#   --build-arg TW_OSS_URL=https://download.opensuse.org/history/20261003/tumbleweed/repo/oss/
+ARG TW_OSS_URL=https://download.opensuse.org/tumbleweed/repo/oss/
+ARG TW_NONOSS_URL=https://download.opensuse.org/tumbleweed/repo/non-oss/
+
+RUN rm -f /etc/zypp/repos.d/*.repo /etc/zypp/services.d/*.service \
+ && printf '[oss]\nname=TW OSS\nenabled=1\nautorefresh=0\nbaseurl=%s\ngpgcheck=1\n' "$TW_OSS_URL" > /etc/zypp/repos.d/oss.repo \
+ && printf '[nonoss]\nname=TW NonOSS\nenabled=1\nautorefresh=0\nbaseurl=%s\ngpgcheck=1\n' "$TW_NONOSS_URL" > /etc/zypp/repos.d/nonoss.repo \
+ && zypper -n --gpg-auto-import-keys refresh \
+ && zypper -n dup -y --no-recommends \
+ && zypper -n install -y --no-recommends \
+      rpm-build rpm-devel createrepo_c git file make tar gzip xz \
+      meson ninja gcc gcc-c++ pkgconf-pkg-config \
+      python314 python314-pip python314-setuptools python314-wheel \
+      python-rpm-macros \
+      selinux-policy-devel selinux-policy-targeted checkpolicy policycoreutils findutils \
+      weston-devel libweston-16 libweston-16-0 \
+      wayland-devel wayland-protocols-devel libinput-devel libXcursor-devel \
+      freerdp-devel winpr-devel pipewire-devel libselinux-devel \
+      qt6-base-devel qt6-core-devel qt6-qml-devel qt6-quick-devel \
+      qt6-declarative-devel qt6-svg-devel qt6-shadertools \
+      libpixman-1-0-devel libxkbcommon-devel libevdev-devel \
+      libgbm-devel libdrm-devel seatd-devel \
+      Mesa-libEGL-devel Mesa-libGLESv2-devel Mesa-libGLESv3-devel \
+      liblcms2-devel libdisplay-info-devel libX11-devel libxcb-devel \
+      cairo-devel libpng16-devel libpng16-compat-devel pango-devel \
+      fontconfig-devel glib2-devel libva-devel \
+ && zypper clean -a
+
+# Build once:
+#   podman build -f packaging/rpm/Containerfile.rpm-builder -t localhost/qdistro-rpm-builder:latest packaging/rpm
