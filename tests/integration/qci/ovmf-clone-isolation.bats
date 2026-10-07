@@ -7,6 +7,11 @@ setup() {
     BIN="$BATS_TEST_TMPDIR/bin"
     IMG="$BATS_TEST_TMPDIR/images"
     XML_DIR="$BATS_TEST_TMPDIR/xml"
+    # clone-baseweed.sh builds a real qcow2 overlay over a real backing image.
+    # qemu-img is a host prerequisite of the VM gates; the offline dev container
+    # (ci/bin/qci-host-run) does not ship it.
+    command -v qemu-img >/dev/null 2>&1 \
+        || skip "qemu-img not installed: clone-baseweed.sh builds real qcow2 overlays (run on the host, e.g. via qci selftest)"
     mkdir -p "$FIXTURE/lib" "$BIN" "$IMG" "$XML_DIR"
     cp "$REPO_ROOT/scripts/vm/clone-baseweed.sh" "$FIXTURE/clone-baseweed.sh"
     cp "$REPO_ROOT/scripts/vm/vm-start-and-wait" "$FIXTURE/vm-start-and-wait"

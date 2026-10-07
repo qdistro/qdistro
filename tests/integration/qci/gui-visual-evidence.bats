@@ -176,8 +176,18 @@ apply_contract() {
         "${CAPROOT-$ADIR}"
 }
 
+# The gate's decodability probe (gui_frame_is_decodable) needs ImageMagick:
+# without it every attested frame is decodable=unknown and the contract records
+# a missing harness capability (ERROR), so cases that grade a verdict cannot run.
+# qci selftest on the host has it; the offline dev container (qci-host-run) does
+# not ship it.
+require_magick() {
+    command -v magick >/dev/null 2>&1 \
+        || skip "ImageMagick magick not installed: the gate's frame decodability probe requires it (run on the host, e.g. via qci selftest)"
+}
+
 teardown() {
-    [ -n "${TDIR:-}" ] && rm -rf -- "$TDIR"
+    if [ -n "${TDIR:-}" ]; then rm -rf -- "$TDIR"; fi
 }
 
 # Write an image into the artifact dir WITHOUT any harness capture behind it --
@@ -457,6 +467,7 @@ EOF
 # --- the harness's own OCR pass ---------------------------------------------
 
 @test "harness ocr: the gate produces a manifest with a sha256 per frame" {
+    require_magick
     write_frame s1.png Approve Deny
     write_frame s2.png
     run gui_harness_ocr_frames "$ADIR" "$ADIR/visual-evidence"
@@ -556,6 +567,7 @@ EOF
 # --- the contract itself -----------------------------------------------------
 
 @test "contract: visual scenario + a readable frame -> the verdict is accepted" {
+    require_magick
     write_status PASS
     write_frame step2.png Approve Deny Later
     run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
@@ -570,6 +582,7 @@ EOF
 }
 
 @test "contract: ORDERING is irrelevant - a frame newer than status.txt still counts" {
+    require_magick
     # Round 2 rejected evidence whose mtime was after status.txt, while the same
     # prompt told every agent to write status.txt first. That contradiction
     # turned fully observed runs into ERROR. The harness reads the frames after
@@ -600,6 +613,7 @@ EOF
 # happened". A legitimately blank pane is an observation; round 2 rejected it
 # (header-only TSV) and manufactured a false ERROR.
 @test "contract: a genuinely textless frame is an OBSERVATION, not a missing one" {
+    require_magick
     write_status PASS
     write_frame blank.png
     run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
@@ -610,6 +624,7 @@ EOF
 }
 
 @test "contract: a backend that fails on every frame does not void an attested verdict" {
+    require_magick
     # OCR reads TEXT only. A frame set this gate captured, sealed and harvested
     # is evidence whether or not tesseract could read words in it, so a broken
     # backend degrades the text column and nothing else. Making it ERROR would
@@ -622,6 +637,7 @@ EOF
 }
 
 @test "contract: no OCR backend still grades, and says the text column is skipped" {
+    require_magick
     write_status PASS
     write_frame s1.png Approve
     QCI_OCR_BIN=definitely-not-installed-qci run apply_contract \
@@ -744,6 +760,7 @@ EOF
 }
 
 @test "(B) an ATTESTED blank frame IS evidence — the empty-pane case is not a false ERROR" {
+    require_magick
     write_status PASS
     write_frame blank.png
     run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
@@ -752,6 +769,7 @@ EOF
 }
 
 @test "(B) planting extra unattested images alongside one real capture cannot inflate the evidence" {
+    require_magick
     write_status PASS
     write_frame real.png Approve
     plant_image fake1.png Deny
@@ -872,6 +890,7 @@ EOF
 # indistinguishable from never capturing, and only the scenario's own declared
 # capture count can close it.
 @test "(C) RESIDUAL: a row dropped BEFORE the gate seals is indistinguishable from never capturing" {
+    require_magick
     write_status PASS
     write_frame good.png Approve
     write_frame damning.png Error Denied
@@ -913,6 +932,7 @@ EOF
 }
 
 @test "(C) a capture written OUTSIDE the artifact tree is reported, not punished" {
+    require_magick
     write_status PASS
     write_frame s1.png Approve
     # vm-gui's default destination is /tmp/vm-screenshot.png: a real capture that
@@ -926,6 +946,7 @@ EOF
 }
 
 @test "(C) capture-then-copy still counts: attestation matches by DIGEST, not path" {
+    require_magick
     write_status PASS
     plant_image_at "$TDIR/scratch.png" Approve
     attest_row "$TDIR/scratch.png" ""
@@ -1046,6 +1067,7 @@ EOF
 # re-implement the published chain format itself. It is GATED on the bound VM,
 # and the contract claims exactly that and no more.
 @test "RESIDUAL: the gated hand-over helper still accepts bytes it did not capture" {
+    require_magick
     write_status PASS
     plant_image forged.png Approve
     attest_frame "$ADIR/forged.png"
@@ -1155,6 +1177,7 @@ EOF
 }
 
 @test "capture log: the gate copies the ledger into its own evidence dir for audit" {
+    require_magick
     write_status PASS
     write_frame s1.png Approve
     run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
@@ -1167,6 +1190,7 @@ EOF
 # --- the structural facts the harness computes for NON-TEXT assertions ------
 
 @test "structural: identical captures are REPORTED as 1 distinct, not failed" {
+    require_magick
     # qdwin-noctalia/05 "bar stays after idle" asserts the frame does NOT change.
     # A diff oracle that FAILED on identical frames would invent a wrong verdict.
     write_status PASS
@@ -1179,6 +1203,7 @@ EOF
 }
 
 @test "structural: frames that really changed are reported as distinct" {
+    require_magick
     write_status PASS
     write_frame before.png Approve
     write_frame after.png Approved Revoke
@@ -1386,6 +1411,7 @@ VIRSH
 }
 
 @test "vm-gui: a frame byte-identical to an earlier capture is NAMED as such (06/25 misread)" {
+    require_magick
     install_constant_virsh
     run vmgui_screenshot "$ADIR/s2-after.png"
     [ "$status" -eq 0 ]
@@ -1430,6 +1456,7 @@ VIRSH
 }
 
 @test "vm-gui: an UNTOUCHED delivered set grades normally" {
+    require_magick
     install_fake_virsh
     vmgui_screenshot "$ADIR/keep.png"
     write_status PASS
@@ -1438,6 +1465,7 @@ VIRSH
 }
 
 @test "vm-gui: a published frame counts ONCE, not as capture + delivery" {
+    require_magick
     # The delivered frame has two rows with one digest (the scratch capture and
     # the in-tree delivery). Counting both reported a single screenshot as
     # "2 frame(s), 1 distinct" and inflated the declared-capture floor.
@@ -1451,6 +1479,7 @@ VIRSH
 }
 
 @test "vm-gui: two genuinely identical in-tree frames are still two captures" {
+    require_magick
     # Only the out-of-tree half of a PUBLISHED PAIR collapses. A stability
     # scenario that captures a before and an after must keep reporting two.
     write_status PASS
@@ -1481,6 +1510,7 @@ EOF
 }
 
 @test "floor: two real published frames DO satisfy a declared count of two" {
+    require_magick
     install_fake_virsh
     cat > "$TDIR/two.md" <<'EOF'
 # 10 - declares two captures
@@ -1509,6 +1539,7 @@ EOF
 }
 
 @test "omission: both identical twins present is still a clean pass" {
+    require_magick
     write_status PASS
     write_frame a.png Approve
     cp "$ADIR/a.png" "$ADIR/b.png"
@@ -1613,6 +1644,7 @@ EOF
 }
 
 @test "one row: two identical captures in DIFFERENT scopes are two frames" {
+    require_magick
     # The old digest-wide collapse turned these into one and failed a floor of
     # two on two real captures.
     write_status PASS
@@ -1627,6 +1659,7 @@ EOF
 }
 
 @test "supersede: re-capturing to the SAME path is one frame, not an omission" {
+    require_magick
     # One reference-run log re-captures to the same path 34 times. Demanding a
     # separate file per row reported the surviving frame as deleted.
     install_fake_virsh
@@ -1662,6 +1695,7 @@ EOF
 }
 
 @test "moved: a frame relocated within the artifact tree still counts" {
+    require_magick
     install_fake_virsh
     vmgui_screenshot "$ADIR/s1.png"
     mkdir -p "$ADIR/sub"
@@ -1754,6 +1788,7 @@ EOF
 }
 
 @test "reservation: an out-of-tree row FIRST does not steal the in-tree file" {
+    require_magick
     # The same shape in the other ledger order -- a peek to /tmp before the
     # evidence capture -- which fable found reported a delivered frame as
     # deleted (a false ERROR with a false message).
@@ -1784,6 +1819,7 @@ EOF
 }
 
 @test "path key: the relative path survives the artifact dir being renamed" {
+    require_magick
     # Harvest renames the artifact directory, so the ABSOLUTE path each row
     # recorded is stale by grading time.
     write_status PASS
@@ -1877,6 +1913,7 @@ EOF
 # --- B round 6: shapes both round-5 reviewers built -------------------------
 
 @test "S1c: two captures to one scratch name, each copy preserved, are TWO" {
+    require_magick
     # Round 5 discarded every earlier row for a reused path BEFORE matching, so
     # a before/after pair taken through one /tmp name counted as one capture and
     # failed a floor of two (sol and fable, B round 5).
@@ -1899,6 +1936,7 @@ EOF
 }
 
 @test "W3: a peek to /tmp does not make a RENAMED in-tree frame look deleted" {
+    require_magick
     # Identical bytes out-of-tree and in-tree, with the in-tree file renamed.
     # A ledger-ordered digest pass reported the delivered frame as missing.
     write_status PASS
@@ -1930,6 +1968,7 @@ EOF
 }
 
 @test "W2: a NESTED row's key is its whole path, so a top-level move is REPORTED" {
+    require_magick
     # Round 5 keyed in-tree rows on a path SUFFIX, so `sub/frame.png`'s row
     # claimed a top-level `frame.png` as if it were its own file.
     #
@@ -1951,6 +1990,7 @@ EOF
 }
 
 @test "K8: the exact-path key keeps a peek from taking an in-tree row's OWN file" {
+    require_magick
     # A never-copied /tmp peek carrying the same bytes as an UNTOUCHED in-tree
     # frame. With the capture root the in-tree row claims its own path and the
     # peek is merely un-harvested; without a root the basename pass takes that
@@ -2030,6 +2070,7 @@ publish_frame() {
 }
 
 @test "supersession: an IDENTICAL re-capture loop to one in-tree path is ONE frame" {
+    require_magick
     # Reserving in ledger order gave the sole surviving file to the OLDEST row.
     # The newest row was then unmatched, and supersession only ever drops a row
     # a LATER row superseded -- so the newest row counted as a real omission and
@@ -2070,6 +2111,7 @@ EOF
 }
 
 @test "supersession: PRESERVED copies of a reused path are still counted apart" {
+    require_magick
     # The guard on the fix: newest-first reservation must not undo round 6's
     # own correction. Two captures to one scratch name, each copy preserved
     # under a different artifact name, are still TWO.
@@ -2091,6 +2133,7 @@ EOF
 }
 
 @test "K7c: a 34-iteration STATIC in-tree loop is one frame, not an omission" {
+    require_magick
     # The shape the supersession comment itself cites. A wait-loop that
     # re-captures to one name produces identical bytes by construction once the
     # screen settles, which is precisely when ledger-order reservation misfired

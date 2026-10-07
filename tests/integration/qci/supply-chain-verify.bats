@@ -96,11 +96,19 @@ make_local_signed_fixture() {
 
 @test "cloud cache accepts signed bytes only when they match the test substrate pin" {
     make_local_signed_fixture
+    # The helper requires wget before it looks at the cache, but a cache hit
+    # must never download. Shadow wget with a stub that fails loudly, so the
+    # case neither depends on wget being installed (the offline dev container
+    # has none) nor could reach the network if the cache path regressed.
+    mkdir -p "$WORK/bin"
+    printf '#!/bin/sh\necho "unexpected wget $*" >&2\nexit 99\n' > "$WORK/bin/wget"
+    chmod +x "$WORK/bin/wget"
     digest="$(sha256sum "$WORK/image.qcow2" | awk '{print $1}')"
-    run env OPENSUSE_TW_KEY="$WORK/local-key.asc" OPENSUSE_TW_FPR="$LOCAL_FPR" \
+    run env PATH="$WORK/bin:$PATH" OPENSUSE_TW_KEY="$WORK/local-key.asc" OPENSUSE_TW_FPR="$LOCAL_FPR" \
         bash -c ". '$LIB'; download_verified_cloud_image 'https://invalid.example/image.qcow2' '$WORK/image.qcow2' '$digest'"
     [ "$status" -eq 0 ]
-    run env OPENSUSE_TW_KEY="$WORK/local-key.asc" OPENSUSE_TW_FPR="$LOCAL_FPR" \
+    [[ "$output" != *"unexpected wget"* ]]
+    run env PATH="$WORK/bin:$PATH" OPENSUSE_TW_KEY="$WORK/local-key.asc" OPENSUSE_TW_FPR="$LOCAL_FPR" \
         bash -c ". '$LIB'; download_verified_cloud_image 'https://invalid.example/image.qcow2' '$WORK/image.qcow2' '0000000000000000000000000000000000000000000000000000000000000000'"
     [ "$status" -ne 0 ]
     [[ "$output" == *"differs from test substrate pin"* ]]

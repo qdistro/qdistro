@@ -98,7 +98,34 @@ teardown() {
     done
 }
 
+# The two cwd cases below exercise run_agent_command's per-attempt working
+# directory, not its desktop sandbox (the isolation case covers that and needs
+# the real bubblewrap). run_agent_command refuses to start without bwrap, and the
+# offline dev container (ci/bin/qci-host-run) does not ship it, so when it is
+# absent stand in a pass-through that consumes the sandbox options
+# gui_host_sandbox_args emits and execs the agent command unchanged.
+use_bwrap_or_passthrough() {
+    command -v bwrap >/dev/null 2>&1 && return 0
+    mkdir -p "$BATS_TEST_TMPDIR/bwrap-bin"
+    cat > "$BATS_TEST_TMPDIR/bwrap-bin/bwrap" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --die-with-parent) shift ;;
+        --tmpfs) shift 2 ;;
+        --dev-bind|--ro-bind) shift 3 ;;
+        --*) echo "bwrap pass-through: unexpected option $1" >&2; exit 125 ;;
+        *) break ;;
+    esac
+done
+exec "$@"
+SH
+    chmod +x "$BATS_TEST_TMPDIR/bwrap-bin/bwrap"
+    PATH="$BATS_TEST_TMPDIR/bwrap-bin:$PATH"
+}
+
 @test "run_agent_command: relative tool outputs stay in a cleaned temporary cwd" {
+    use_bwrap_or_passthrough
     local prompt="$BATS_TEST_TMPDIR/prompt.md"
     local log="$BATS_TEST_TMPDIR/agent.log"
     local cwd_record="$BATS_TEST_TMPDIR/agent-cwd.txt"
@@ -118,6 +145,7 @@ teardown() {
 }
 
 @test "run_agent_command: failed agent preserves temporary cwd and logs its path" {
+    use_bwrap_or_passthrough
     local prompt="$BATS_TEST_TMPDIR/prompt.md"
     local log="$BATS_TEST_TMPDIR/agent.log"
     local cwd_record="$BATS_TEST_TMPDIR/agent-cwd.txt"
