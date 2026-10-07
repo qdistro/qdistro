@@ -157,6 +157,17 @@ ensure_silo_image() {
     local s="$1" w="${2:-$(silo_workload "$1")}" acct uid gid img arch
     [ -n "$w" ] || { echo "ensure_silo_image: $s: no workload (no silo row?)" >&2; return 1; }
     acct=$(silo_acct "$s")
+    if timeout 5 id "$acct" >/dev/null 2>&1; then
+        # a provisioning launch swept mid-useradd leaves a bare account — no
+        # home, no /etc/sub{u,g}id rows — that podman cannot use and that
+        # spawn refuses to co-opt; drop the fragment and re-provision below
+        local hd
+        hd=$(getent passwd "$acct" | cut -d: -f6)
+        if [ ! -d "$hd" ] || ! grep -q "^$acct:" /etc/subuid \
+                || ! grep -q "^$acct:" /etc/subgid; then
+            userdel -f "$acct" >/dev/null 2>&1 || :
+        fi
+    fi
     if ! timeout 5 id "$acct" >/dev/null 2>&1; then
         # the launch wrapper refuses an empty argv before spawn runs; a real
         # argv reaches 3b (account creation) and is still refused later —
@@ -185,13 +196,19 @@ ensure_silo_image() {
     for d in "$RT_BASE/$uid" "$RUNSC_BASE/$uid"; do
         [ -d "$d" ] || install -d -m 0700 -o "$uid" -g "$gid" "$d" || return 1
     done
+
     img="localhost/qdistro/tier3s-$w:latest"
     pm_s "$s" image exists "$img" 2>/dev/null && return 0
     arch="$IMG_DIR/tier3s-$w.oci.tar"; [ "$w" = headless-smoke ] && arch="$IMG_DIR/image.oci.tar"
     if [ -f "$arch" ]; then
-        pm_s "$s" load -q -i "$arch" > /dev/null 2>&1
+        pm_s "$s" load -q -i "$arch" > /dev/null 2>&1 || {
+            # a pause process minted before the account's subuid rows exist
+            # keeps the broken userns alive; migrate drops it, retry once
+            pm_s "$s" system migrate > /dev/null 2>&1 || :
+            pm_s "$s" load -q -i "$arch" > /dev/null 2>&1 || return 1
+        }
     elif pm image exists "$img" 2>/dev/null; then   # no archive: copy out of admin's store (e.g. wlprobe)
-        pm save "$img" 2>/dev/null | pm_s "$s" load -q > /dev/null 2>&1
+        pm save "$img" 2>/dev/null | pm_s "$s" load -q > /dev/null 2>&1 || return 1
     else
         echo "ensure_silo_image: no archive $arch and admin's store lacks $img" >&2; return 1
     fi
