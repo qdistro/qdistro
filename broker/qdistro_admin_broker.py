@@ -14,6 +14,7 @@ within the scope's lifetime). See .
 from __future__ import annotations
 
 import concurrent.futures
+import ctypes
 import json
 import math
 import os
@@ -825,6 +826,32 @@ def _read_proc_ppid(pid: int) -> int | None:
 # own (attacker) parent (sol r168); an orphan reparented to PID 1 still
 # fails the exact system.slice cgroup match above.
 _POLKIT_AGENT_PPID = 1
+
+_libc = ctypes.CDLL(None, use_errno=True)
+
+
+def _pidfd_live_pid(fd: int) -> int | None:
+    """Numeric pid of a pidfd's referent if that task is still alive.
+
+    A pidfd pins the TASK, not the number: when the referent dies the
+    fd's fdinfo still prints the old pid, but pidfd_send_signal(fd, 0)
+    fails with ESRCH — the two together separate a live process from a
+    recycled pid (astra r173). Returns None for a dead referent or an
+    fd that is not a pidfd."""
+    try:
+        pid = None
+        with open(f"/proc/self/fdinfo/{fd}", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("Pid:"):
+                    pid = int(line.split()[1])
+                    break
+        if pid is None or pid <= 0:
+            return None
+        if _libc.pidfd_send_signal(fd, 0, None, 0) != 0:
+            return None
+        return pid
+    except (OSError, ValueError):
+        return None
 
 
 def _selinux_type(label: str) -> str:
@@ -1750,6 +1777,44 @@ class Broker(dbus.service.Object):
             return None
         return main_pid if main_pid > 0 else None
 
+    def _peer_connection_live_pid(self, sender) -> int | None:
+        """Live pid of the task that OPENED `sender`'s bus connection.
+
+        The numeric pid the daemon reports for a connection is fixed at
+        connect time: a caller can pass its socket to another process and
+        exit, and a later pid reuse (e.g. an agent restart) makes /proc
+        and MainPID describe a different task than the connection's real
+        owner (astra r173). dbus-broker's GetConnectionCredentials
+        ProcessFD is a pidfd for the ORIGIN task — a bus-authenticated
+        process-lifetime reference. dbus-python cannot negotiate fd
+        passing, so the query goes through Gio. Returns the referent's
+        pid only while that task is alive; None (fail closed) for a dead
+        origin, a missing ProcessFD, or any lookup error."""
+        try:
+            gbus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            res, fd_list = gbus.call_with_unix_fd_list_sync(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                "org.freedesktop.DBus", "GetConnectionCredentials",
+                GLib.Variant("(s)", (str(sender),)),
+                GLib.VariantType("(a{sv})"),
+                Gio.DBusCallFlags.NONE, 5000, None, None)
+            idx = res.unpack()[0].get("ProcessFD")
+            if hasattr(idx, "unpack"):
+                idx = idx.unpack()
+            if idx is None:
+                return None
+            # g_unix_fd_list_get already returns a caller-owned dup of
+            # the received fd; dup'ing again would leak the first.
+            fd = fd_list.get(int(idx))
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] polkit peer check: no ProcessFD for "
+                  f"{sender}: {e}", flush=True)
+            return None
+        try:
+            return _pidfd_live_pid(fd)
+        finally:
+            os.close(fd)
+
     def _peer_label_type(self, pid: int) -> tuple[str, str]:
         label = _read_proc_selinux_label(pid)
         return label, _selinux_type(label)
@@ -1840,7 +1905,8 @@ class Broker(dbus.service.Object):
         return uid, pid, exe, st
 
     def _peer_matches_polkit_agent(self, *, uid: int, pid: int,
-                                   exe: str) -> tuple[bool, str]:
+                                   exe: str, sender: str = ""
+                                   ) -> tuple[bool, str]:
         """Trusted session-polkit-agent peer predicate (astra r159 P1).
 
         The relay methods answer or cancel real polkitd
@@ -1867,7 +1933,10 @@ class Broker(dbus.service.Object):
         EQUAL the unit's MainPID as reported by systemd itself — a
         compromised descendant can double-fork into the same cgroup
         with PPID 1 and a rewritten argv, but can never be the process
-        pid 1 forked for ExecStart (astra r172 P1). The environment
+        pid 1 forked for ExecStart (astra r172 P1); and the connection's
+        ORIGIN task must be that live pid — the daemon's ProcessFD
+        pidfd pins the task, so a connection that outlived its process
+        into a pid reuse is rejected (astra r173). The environment
         check is
         defence-in-depth only: injected loader code could scrub its own
         entries before the broker reads them (sol r168), and no user-unit
@@ -1943,13 +2012,26 @@ class Broker(dbus.service.Object):
         if int(pid) != main_pid:
             return False, (f"peer pid {pid} is not the "
                            f"{_POLKIT_AGENT_UNIT} main pid {main_pid}")
+        # The daemon-reported pid is fixed at connect time; a caller can
+        # keep its socket alive in another process and let the pid be
+        # recycled by a restarted agent — then /proc and MainPID describe
+        # the genuine agent while the connection is still the attacker's
+        # (astra r173). Require the connection's ORIGIN task (the
+        # daemon's ProcessFD pidfd) to be a live process with this pid.
+        # Dead origin → pid reuse → ESRCH → reject; live foreign origin
+        # → different pid → reject.
+        live_pid = self._peer_connection_live_pid(sender)
+        if live_pid != int(pid):
+            return False, ("the connection's origin process is dead or "
+                           "is not the agent's main process — a recycled "
+                           "pid must not inherit a stale connection")
         return True, "system polkit agent unit"
 
     def _require_polkit_agent_peer(self, sender, conn, method: str
                                    ) -> tuple[int, int, str, int]:
         uid, pid, exe, st = self._peer_info(sender, conn)
         ok, reason = self._peer_matches_polkit_agent(
-            uid=uid, pid=pid, exe=exe)
+            uid=uid, pid=pid, exe=exe, sender=str(sender or ""))
         if not ok:
             raise dbus.DBusException(
                 f"{method} restricted to the session polkit agent; "

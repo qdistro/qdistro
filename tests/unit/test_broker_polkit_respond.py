@@ -19,6 +19,9 @@ _peer_info, and intercept the actual polkitd call
 from __future__ import annotations
 
 import concurrent.futures
+import fcntl
+import os
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -87,6 +90,12 @@ class _StubBroker(Broker):
         # (the default peer IS the agent); any other value overrides.
         self._agent_main_pid: int | None = None
         self._agent_main_pid_unreadable = False
+        # The daemon's ProcessFD for the caller's connection — a pidfd
+        # for the ORIGIN task. None = "report the peer pid as the live
+        # origin" (default peer IS the agent); a different value models
+        # a connection outliving its process into pid reuse; False
+        # models a dead origin / missing credential (astra r173).
+        self._peer_origin_live_pid: int | None | bool = None
         self.pending_signals: list[int] = []
         self.decided_signals: list[tuple[int, str]] = []
         # Captured (uid, cookie, identity) tuples from _respond_polkit.
@@ -129,6 +138,13 @@ class _StubBroker(Broker):
             return None
         if self._agent_main_pid is not None:
             return self._agent_main_pid
+        return self._peer_pid
+
+    def _peer_connection_live_pid(self, sender):
+        if self._peer_origin_live_pid is False:
+            return None
+        if self._peer_origin_live_pid is not None:
+            return self._peer_origin_live_pid
         return self._peer_pid
 
     def _peer_matches_admin_control(self, *, uid: int, pid: int,
@@ -769,6 +785,30 @@ class TestPolkitAgentPeerBinding:
             _file_polkit(broker)
         assert broker._pending == {}
 
+    def test_a_connection_outliving_its_process_is_rejected(
+            self, broker):
+        """astra r173: a same-uid caller can connect to the bus, pass
+        the socket to a child, and exit; after its pid is recycled by
+        an agent restart the daemon still reports the stale numeric
+        pid, and /proc + MainPID describe the GENUINE agent. Only the
+        connection's origin-task pidfd distinguishes them — a dead
+        origin fails ESRCH; a live foreign origin carries a different
+        pid."""
+        # Dead origin: the ProcessFD pidfd no longer resolves to a live
+        # task even though the numeric pid now names the real agent.
+        broker._peer_origin_live_pid = False
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        with pytest.raises(dbus.DBusException):
+            broker.AnnouncePolkitAuth("cookie-9")
+        assert broker._pending == {}
+        # Live foreign origin: the connector still runs, just not as
+        # the agent's main pid.
+        broker._peer_origin_live_pid = broker._peer_pid + 1
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+
     def test_a_hostile_selinux_type_rejects_even_root(self, broker):
         """uid 0 in a container/tier domain must not reach the relay."""
         broker.set_peer(0, exe=PEER_EXE, argv=[PEER_EXE])
@@ -808,6 +848,77 @@ class TestPolkitAgentPeerBinding:
         broker.set_peer(0, exe=PEER_EXE, argv=[PEER_EXE])
         rid = _file_polkit(broker, "cookie-root", [IDENT_ROOT])
         assert rid in broker._pending
+
+
+class TestConnectionOriginHelpers:
+    """Real-helper coverage for the connection-origin check (astra
+    r174): the seam-based tests above fake `_peer_connection_live_pid`,
+    so these exercise the production fd handling itself."""
+
+    class _Creds:
+        def unpack(self):
+            return [{"ProcessFD": 0}]
+
+    class _FDList:
+        """The shape of GUnixFDList for the call site: get() hands the
+        caller an owned descriptor (g_unix_fd_list_get dups internally)."""
+        def __init__(self, fd):
+            self._fd = fd
+
+        def get(self, idx):
+            assert idx == 0
+            return self._fd
+
+    def _fake_bus(self, monkeypatch, fd):
+        fd_list = self._FDList(fd)
+
+        class _Bus:
+            def call_with_unix_fd_list_sync(self, *a, **kw):
+                return TestConnectionOriginHelpers._Creds(), fd_list
+
+        monkeypatch.setattr(B.Gio, "bus_get_sync",
+                            lambda *a, **kw: _Bus())
+
+    def test_the_received_fd_is_the_one_closed(
+            self, broker, monkeypatch):
+        """astra r174 P2: g_unix_fd_list_get already returns a
+        caller-owned dup; dup'ing it again leaked one descriptor per
+        credential check. The helper must use and close exactly the fd
+        the daemon handed it."""
+        proc = subprocess.Popen(["sleep", "30"])
+        pidfd = os.pidfd_open(proc.pid)
+        try:
+            self._fake_bus(monkeypatch, pidfd)
+            live = Broker._peer_connection_live_pid(broker, ":1.999")
+            assert live == proc.pid
+            with pytest.raises(OSError):
+                fcntl.fcntl(pidfd, fcntl.F_GETFD)
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_pidfd_live_pid_real_kernel_semantics(self):
+        """A pidfd pins the TASK: live referent returns its pid; once
+        the task is reaped, signal-0 fails and fdinfo reports -1 —
+        either way the helper returns None (fails closed). A plain
+        non-pidfd never parses."""
+        proc = subprocess.Popen(["sleep", "30"])
+        pidfd = os.pidfd_open(proc.pid)
+        try:
+            assert B._pidfd_live_pid(pidfd) == proc.pid
+        finally:
+            proc.kill()
+            proc.wait()
+        assert B._pidfd_live_pid(pidfd) is None
+        os.close(pidfd)
+        rfd, wfd = os.pipe()
+        try:
+            assert B._pidfd_live_pid(rfd) is None
+            # not a pidfd: the helper must not consume caller fds
+            fcntl.fcntl(rfd, fcntl.F_GETFD)
+        finally:
+            os.close(rfd)
+            os.close(wfd)
 
 
 class TestStalePolkitReap:

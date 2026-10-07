@@ -324,6 +324,16 @@ connection:
   never satisfy is being the process systemd spawned. When systemd
   cannot answer, the check fails closed. `ppid == 1` is kept as a
   cheap pre-filter.
+- The **connection itself** is bound to that live process: the pid the
+  daemon reports for a connection is fixed at connect time, so a caller
+  could keep its socket alive in another process and let the pid be
+  recycled by an agent restart — /proc and MainPID would then describe
+  the genuine agent while the connection is the attacker's. The broker
+  therefore also fetches the daemon's `ProcessFD` credential (a pidfd
+  for the connection's origin task, via `GetConnectionCredentials`) and
+  requires it to resolve to a *live* task whose pid is the MainPID. A
+  dead origin — the pid-reuse case — fails closed; a live foreign
+  origin carries a different pid.
 - Defence-in-depth (checked anyway): exe resolves to a python under a
   root-owned system dir (an attacker binary merely *named* `python3`
   ignores argv), only no-argument isolation flags precede the script,
