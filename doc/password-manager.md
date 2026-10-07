@@ -234,50 +234,57 @@ dispatches `BeginAuthentication` to one of three methods:
 - **PAM** — admin types their password, verified via `python-pam`.
 - **fprintd** — verify via `net.reactivated.Fprint.Device`.
 - **broker** — delegate the yes/no decision to the qdistro admin broker's
- `RequestPermission` flow, surfaced via the admin-approval-app.
+ `RequestPolkitAuth` flow, surfaced via the admin-approval-app.
 
 The method is picked per polkit action via fnmatch globs in
 `/etc/qdistro/polkit-agent.conf`. The default is `broker`. The shipped
 config maps `org.qdistro.pwd.*` to `pam` so vault unlocks require a fresh
 admin password unless admin changes that policy.
 
-### Status (2026-07-26) — the agent cannot yet authorize anything
+### Status (2026-10-07) — the broker is the privileged responder
 
-Do not claim polkit integration as a working v1 feature. Driving a real
-greetd login on a VM — the first time this path had ever been exercised;
-every previous probe was headless, where polkitd refuses registration
-outright with "Cannot determine session the caller is in" — established
-the following.
+polkitd accepts `AuthenticationAgentResponse2` **only from uid 0**, and
+the session agent runs as the admin uid, so the agent never answers
+polkitd directly. The privileged broker (uid 0) delivers the response:
 
-**Works.** The agent registers with polkitd on a real seat session, is
-consulted for authorizations, dispatches to the configured method, reaches
-the broker, and **denies** correctly. Everything fails closed.
+- **broker method** — the agent files the authorization as
+  `RequestPolkitAuth(action, details, cookie, identities)`, which queues
+  like `RequestPermission` but carries polkit's correlation cookie and
+  the identity list polkitd offered. On an allow — admin click, rule,
+  cache, or hook — the broker calls `AuthenticationAgentResponse2`
+  itself. The agent still waits on `WaitForDecision` for the outcome,
+  so denial logging and audit correlation stay unchanged.
+- **pam / fprint methods** — the verdict is verified locally by the
+  agent, then relayed: `RespondPolkitAuth(cookie, identities)` asks the
+  broker to make the uid-0 call.
+- **cancellation** — polkitd's `CancelAuthentication` forwards to
+  `CancelPolkitAuth(cookie)`, which decides the matching queued request
+  deny so a dead prompt does not linger in the admin queue and the
+  parked `WaitForDecision` waiter releases.
 
-**Does not work.** No method can deliver a positive decision, so an admin
-who approves still gets "Not authorized":
+Two invariants make this safe:
 
-- `_respond()` calls `AuthenticationAgentResponse2` directly from the
-  uid-1000 agent. polkit accepts that call **only from uid 0**, and answers
-  `Only uid 0 may invoke this method. This incident has been logged.` Stock
-  agents never call it themselves: they hand cookie and password to the
-  setuid helper `/usr/libexec/polkit-1/polkit-agent-helper-1`, which runs
-  the PAM conversation as root and responds on their behalf. That maps onto
-  the `pam` method only — the helper *is* the PAM conversation, so `broker`
-  and `fprint` have no route to a polkit YES without qdistro shipping its
-  own privileged responder.
-- `_respond()` also hardcodes the identity `unix-user uid=ADMIN_UID`,
-  ignoring the `identities` list polkitd passes in. On the current image
+- **The cookie is the correlation secret.** Only polkitd's registered
+  agent ever sees it; a response naming a cookie polkitd is not waiting
+  on is a silent no-op, so a stale, cancelled, or attacker-guessed
+  cookie grants nothing.
+- **The response identity comes from polkit's own list.** On this image
   `/usr/share/polkit-1/rules.d/50-default.rules` sets
-  `polkit._suse_admin_groups = []`, so that list is `[unix-user uid=0]` —
-  `admin` is uid 1000 and is in no `wheel` group (there is no `wheel`
-  group). Responding with an identity that is not in the list is rejected
-  even from uid 0. Either the image must add `admin` to polkit's admin
-  identities, or the agent must choose from the list it was given rather
-  than assert one.
+  `polkit._suse_admin_groups = []`, so `identities` is
+  `[unix-user uid=0]` — `admin` is uid 1000 and in no `wheel` group.
+  Responding with an identity polkitd did not offer is rejected even
+  from uid 0, so the broker picks from the supplied list (preferring a
+  `unix-user` entry for the requesting uid, else the first `unix-user`,
+  else the first entry) rather than asserting one.
 
-Closing this needs a design decision about the privileged responder, not a
-patch. Until then the honest claim is: **qdistro's polkit agent is wired in
-and enforces denials; it cannot grant.**
+All three broker methods are restricted to the admin uid server-side
+and denied to non-admin callers in the `org.qdistro.AdminBroker1`
+system-bus policy.
+
+History: before this responder existed the agent was verified end-to-end
+on a real seat session (registration, dispatch, broker delegation, fail-
+closed denies) but could not grant — direct `AuthenticationAgentResponse2`
+returned `Only uid 0 may invoke this method`.
 
 ## Portal Secret integration
 
