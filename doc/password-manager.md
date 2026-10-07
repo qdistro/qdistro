@@ -289,8 +289,22 @@ Because exe, argv, and cgroup membership are all forgeable by a
 sufficiently motivated same-uid process, the relay additionally binds
 each cookie to its declaring connection's **unique D-Bus name**:
 `RespondPolkitAuth` and `CancelPolkitAuth` act only for the sender that
-announced or filed the cookie, and a cancel recorded for one sender
-cannot pre-deny another's filing.
+announced or filed the cookie, a cancel recorded for one sender cannot
+pre-deny another's filing, and the first declaration wins — a foreign
+sender cannot rebind a cookie by filing or announcing it later.
+
+Two further hardenings keep attacker code off the trusted connection.
+The unit launches `python3 -I`, which ignores `PYTHONPATH`/
+`PYTHONHOME`/`sitecustomize`/`usercustomize` — the user manager's
+environment is writable by any same-uid process
+(`systemctl --user set-environment` + restart), and injected startup
+code would share the agent's connection, the very thing the sender
+binding trusts. The broker also rejects agent peers whose
+`/proc/<pid>/environ` carries injection-capable variables
+(`PYTHON*`, `LD_PRELOAD`, `LD_AUDIT`, …). Residual: a same-uid
+drop-in can still replace the unit's `ExecStart` entirely — that
+yields only a denial of service, since the forged argv fails the
+script check and the fake agent cannot reach the relay.
 
 History: before this responder existed the agent was verified end-to-end
 on a real seat session (registration, dispatch, broker delegation, fail-

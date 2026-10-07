@@ -273,6 +273,35 @@ _POLKIT_AGENT_CGROUPS = frozenset(
     f"{slice_}/{_POLKIT_AGENT_UNIT}"
     for slice_ in ("app.slice", "session.slice"))
 
+# Interpreter flags the agent's unit may legitimately pass — argument-
+# taking forms (-c, -m, -W, -X, --check-hash-based-pycs) are excluded:
+# `python3 -c 'evil()' <script path>` must never match the script
+# binding (sol r161). The unit launches `python3 -I <script>`: -I
+# isolates startup (no PYTHONPATH/sitecustomize/usercustomize, no
+# script-dir sys.path) so a same-uid caller cannot ride the real
+# agent's connection via user-manager environment injection (sol r165).
+_POLKIT_AGENT_SAFE_FLAGS = frozenset((
+    "-I", "-E", "-s", "-S", "-P", "-u", "-B", "-O", "-OO", "-q",
+))
+
+# Environment variables that inject attacker code into a python peer or
+# its loader. A same-uid process can push these into the user manager
+# (`systemctl --user set-environment` + restart the unit), so a peer
+# carrying them is not the agent even when exe/argv/cgroup match
+# (sol r165). -I already neutralises the PYTHON* entries; the check is
+# belt-and-suspenders and additionally covers LD_* which -I does not.
+_POLKIT_AGENT_DANGEROUS_ENV = frozenset((
+    "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH", "LD_ORIGIN_PATH",
+    "LD_PROFILE", "LD_USE_LOAD_BIAS",
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT",
+    "PYTHONBREAKPOINT", "PYTHONEXECUTABLE", "PYTHONUSERBASE",
+    "BASH_ENV", "ENV",
+    # The agent's unit UnsetEnvironment= does not beat a same-uid
+    # drop-in's Environment= — a peer presenting the test seam is not
+    # the production agent.
+    "QDISTRO_POLKIT_NONINTERACTIVE",
+))
+
 _ADMIN_HOSTILE_SELINUX_TYPES = frozenset((
     "container_t",
     "svirt_lxc_net_t",
@@ -717,6 +746,26 @@ def _read_proc_cmdline(pid: int) -> list[str]:
         if part:
             out.append(part.decode("utf-8", "replace"))
     return out
+
+
+def _read_proc_environ_names(pid: int) -> set[str]:
+    """Return the environment variable NAMES in /proc/<pid>/environ.
+
+    Names only — values may carry secrets and are never read into the
+    comparison. The polkit-agent peer check uses this to spot loader/
+    interpreter injection (LD_PRELOAD, PYTHONPATH, …) that a same-uid
+    caller can push through the user manager before restarting the
+    agent's unit (sol r165).
+    """
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            raw = f.read(131072)
+    except OSError:
+        return set()
+    return {
+        part.split(b"=", 1)[0].decode("utf-8", "replace")
+        for part in raw.split(b"\x00") if part
+    }
 
 
 def _selinux_type(label: str) -> str:
@@ -1609,6 +1658,9 @@ class Broker(dbus.service.Object):
     def _peer_cmdline(self, pid: int) -> list[str]:
         return _read_proc_cmdline(pid)
 
+    def _peer_environ_names(self, pid: int) -> set[str]:
+        return _read_proc_environ_names(pid)
+
     def _peer_label_type(self, pid: int) -> tuple[str, str]:
         label = _read_proc_selinux_label(pid)
         return label, _selinux_type(label)
@@ -1703,15 +1755,21 @@ class Broker(dbus.service.Object):
         """Trusted session-polkit-agent peer predicate (astra r159 P1).
 
         The relay methods answer or cancel real polkitd
-        authentications. The agent is python3 running its installed
-        script inside its user unit, so the peer must satisfy all of:
-        python exe basename, the script at argv[1] (the position the
-        interpreter executes — `python3 -c '…' <script>` passes the path
-        as a mere argument; sol r161), and an exact match on the agent
-        unit's systemd cgroup path — the part that survives PYTHONPATH/
-        usercustomize injection (sol r162) and forged same-named child
-        cgroups under delegated scopes (sol r163). uid 0 needs no
-        relay: it may answer polkitd itself.
+        authentications. The agent is `python3 -I <installed script>`
+        inside its user unit, so the peer must satisfy all of: python
+        exe basename; the script as argv[-1] with only no-argument
+        isolation flags before it (`python3 -c '…' <script>` puts the
+        path at argv[-1] too, but -c takes argv[2] as CODE — the flag
+        whitelist rejects it; sol r161); no injection-capable
+        environment variables (the user manager's environment is
+        same-uid writable via set-environment + restart — PYTHONPATH/
+        LD_PRELOAD would run attacker code inside the genuine agent
+        argv; sol r165); and an exact match on the agent unit's systemd
+        cgroup path — forged same-named child cgroups under delegated
+        scopes differ (sol r163). These are defence-in-depth: the
+        capability boundary is the D-Bus unique sender the cookie is
+        bound to (sol r164). uid 0 needs no relay: it may answer
+        polkitd itself.
         """
         if int(uid) not in (0, ADMIN_UID):
             return False, (f"uid {uid} is neither root nor admin uid "
@@ -1725,9 +1783,16 @@ class Broker(dbus.service.Object):
         argv = self._peer_cmdline(pid)
         if not (os.path.basename(exe_s) in _PYTHON_EXE_BASENAMES
                 and len(argv) > 1
-                and argv[1] in _POLKIT_AGENT_SCRIPT_PATHS):
+                and argv[-1] in _POLKIT_AGENT_SCRIPT_PATHS
+                and all(a in _POLKIT_AGENT_SAFE_FLAGS
+                        for a in argv[1:-1])):
             return False, (f"admin peer exe={exe_s!r} is not the "
                            f"installed polkit agent")
+        bad_env = sorted(self._peer_environ_names(pid)
+                         & _POLKIT_AGENT_DANGEROUS_ENV)
+        if bad_env:
+            return False, ("peer environment carries injection-capable "
+                           f"variables: {', '.join(bad_env)}")
         cgroup = self._peer_cgroup(pid)
         if cgroup not in _POLKIT_AGENT_CGROUPS:
             return False, (f"peer cgroup {cgroup!r} is not the "
@@ -2772,14 +2837,25 @@ class Broker(dbus.service.Object):
     # the admin uid, which is the uid the agent runs as.
 
     def _prune_polkit_marks(self, now: float) -> None:
-        """Expire/bound the cancelled and announced cookie maps. Caller
-        holds _lock."""
+        """Expire TTL'd cancelled/announced cookie marks. Caller holds
+        _lock. Fresh entries are NEVER evicted to make room — a caller
+        flooding the map with dummy cookies could otherwise push out a
+        live announcement and rebind the cookie (sol r165)."""
         for m in (self._cancelled_polkit_cookies, self._announced_polkit):
             for c, (_s, t) in list(m.items()):
                 if now - t > POLKIT_UNDECIDED_TTL_S:
                     del m[c]
-            while len(m) >= POLKIT_CANCELLED_MAX:
-                m.pop(next(iter(m)))
+
+    @staticmethod
+    def _polkit_mark_room(m: dict, what: str) -> None:
+        """Fail closed when a cookie-mark map is full of live entries.
+
+        Caller holds _lock after _prune_polkit_marks."""
+        if len(m) >= POLKIT_CANCELLED_MAX:
+            raise dbus.DBusException(
+                f"too many outstanding polkit {what} marks; "
+                "refusing new ones",
+                name=BUS_NAME + ".RateLimited")
 
     def _note_polkit_cancelled(self, cookie: str, sender: str) -> None:
         """Record a cancelled polkit cookie, expiring stale entries.
@@ -2791,6 +2867,9 @@ class Broker(dbus.service.Object):
         now = time.time()
         with self._lock:
             self._prune_polkit_marks(now)
+            if cookie not in self._cancelled_polkit_cookies:
+                self._polkit_mark_room(
+                    self._cancelled_polkit_cookies, "cancel")
             self._cancelled_polkit_cookies[cookie] = (sender, now)
 
     def _polkit_cookie_cancelled(self, cookie: str,
@@ -2854,12 +2933,25 @@ class Broker(dbus.service.Object):
                 raise dbus.DBusException(
                     "cookie is already bound to another peer",
                     name=BUS_NAME + ".AccessDenied")
+            filed = next((r for r in self._pending.values()
+                          if r.polkit_cookie
+                          and r.polkit_cookie == cookie_s), None)
+            if filed is not None and filed.filed_by != sender_s:
+                raise dbus.DBusException(
+                    "cookie was already filed by another peer",
+                    name=BUS_NAME + ".AccessDenied")
             mark = self._cancelled_polkit_cookies.pop(cookie_s, None)
-            if mark is not None and mark[0] == sender_s:
-                # This sender already cancelled the cookie — keep it
-                # dead so a later respond is still refused.
+            if mark is not None:
+                # Cancel marks stay: same-sender keeps the cookie dead
+                # so its later respond is refused; a foreign mark
+                # belongs to that sender's view and does not suppress
+                # this announce.
                 self._cancelled_polkit_cookies[cookie_s] = mark
-                return
+                if mark[0] == sender_s:
+                    return
+            if cookie_s not in self._announced_polkit:
+                self._polkit_mark_room(
+                    self._announced_polkit, "announce")
             self._announced_polkit[cookie_s] = (sender_s, now)
 
     @dbus.service.method(BUS_NAME, in_signature="sa(sa{sv})",
@@ -4634,6 +4726,20 @@ class Broker(dbus.service.Object):
         # skip the deferred IO — the layered fields are advisory only
         # and not needed for the decision or its cache key.
         with self._lock:
+            if polkit:
+                cookie_s = str(polkit[0])
+                bound = self._announced_polkit.get(cookie_s)
+                if bound is not None and bound[0] != filed_by:
+                    raise dbus.DBusException(
+                        "polkit cookie is bound to another peer",
+                        name=BUS_NAME + ".AccessDenied")
+                dup = next((r for r in self._pending.values()
+                            if r.polkit_cookie
+                            and r.polkit_cookie == cookie_s), None)
+                if dup is not None and dup.filed_by != filed_by:
+                    raise dbus.DBusException(
+                        "polkit cookie is already filed by another peer",
+                        name=BUS_NAME + ".AccessDenied")
             rid = self._next_id
             self._next_id += 1
             req = _Request(rid, uid, pid, exe, start_time, action_s,

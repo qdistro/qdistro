@@ -40,7 +40,7 @@ ADMIN_UID = B.ADMIN_UID
 NON_ADMIN_UID = 2000
 PEER_EXE = "/usr/bin/test-app"
 AGENT_EXE = "/usr/bin/python3"
-AGENT_ARGV = ["/usr/bin/python3",
+AGENT_ARGV = ["/usr/bin/python3", "-I",
               "/usr/libexec/qdistro/qdistro_polkit_agent.py"]
 AGENT_CGROUP = (f"user.slice/user-{ADMIN_UID}.slice/"
                 f"user@{ADMIN_UID}.service/"
@@ -78,6 +78,7 @@ class _StubBroker(Broker):
         self._peer_label = ("system_u:system_r:unconfined_t:s0",
                             "unconfined_t")
         self._peer_cgroup_val = AGENT_CGROUP
+        self._peer_env_names: set = set()
         self.pending_signals: list[int] = []
         self.decided_signals: list[tuple[int, str]] = []
         # Captured (uid, cookie, identity) tuples from _respond_polkit.
@@ -106,6 +107,9 @@ class _StubBroker(Broker):
 
     def _peer_cgroup(self, pid):
         return self._peer_cgroup_val
+
+    def _peer_environ_names(self, pid):
+        return set(self._peer_env_names)
 
     def _peer_matches_admin_control(self, *, uid: int, pid: int,
                                     exe: str, method: str = ""
@@ -341,6 +345,100 @@ class TestAnnouncePolkitAuth:
         broker.AnnouncePolkitAuth("")
         assert broker._announced_polkit == {}
 
+    def test_announcing_a_cookie_filed_by_another_sender_is_refused(
+            self, broker):
+        """The first declaration wins: a filed request's cookie cannot
+        be rebound by a different connection (sol r165)."""
+        rid = broker.RequestPolkitAuth(
+            "qdistro.test.action", {}, "cookie-9", [IDENT_ROOT],
+            sender=":1.9")
+        with pytest.raises(dbus.DBusException):
+            broker.AnnouncePolkitAuth("cookie-9", sender=":1.10")
+        assert broker._announced_polkit == {}
+        # The filing itself is undisturbed.
+        assert broker._pending[rid].decision is None
+        # ...while the filer's own announce is a harmless no-op.
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+        assert broker._announced_polkit["cookie-9"][0] == ":1.9"
+
+    def test_the_announce_map_never_evicts_a_live_binding(self, broker):
+        """Flood resistance: fresh entries are not evicted to make
+        room, so a dummy-cookie flood cannot push out a live binding
+        and rebind the cookie to another sender (sol r165)."""
+        broker.AnnouncePolkitAuth("real", sender=":1.9")
+        with broker._lock:
+            now = time.time()
+            for i in range(B.POLKIT_CANCELLED_MAX - 1):
+                broker._announced_polkit[f"pad-{i}"] = (":1.10", now)
+        with pytest.raises(dbus.DBusException):
+            broker.AnnouncePolkitAuth("one-more", sender=":1.10")
+        # The live binding survived the flood.
+        assert broker._announced_polkit["real"][0] == ":1.9"
+        broker.RespondPolkitAuth("real", [IDENT_ROOT], sender=":1.9")
+        assert len(broker.polkit_responded) == 1
+
+    def test_the_cancel_map_never_evicts_a_live_mark(self, broker):
+        broker.CancelPolkitAuth("mine", sender=":1.9")
+        with broker._lock:
+            now = time.time()
+            for i in range(B.POLKIT_CANCELLED_MAX - 1):
+                broker._cancelled_polkit_cookies[f"pad-{i}"] = (
+                    ":1.10", now)
+        with pytest.raises(dbus.DBusException):
+            broker.CancelPolkitAuth("one-more", sender=":1.10")
+        # Same-sender cancel still holds.
+        broker.AnnouncePolkitAuth("mine", sender=":1.9")
+        broker.RespondPolkitAuth("mine", [IDENT_ROOT], sender=":1.9")
+        assert broker.polkit_responded == []
+
+
+class TestPolkitCookieOwnershipConflicts:
+    """First declaration wins: whichever unique sender announced or
+    filed a cookie owns it, and a later conflicting declaration from a
+    different sender is refused (sol r165)."""
+
+    def test_filing_a_cookie_announced_by_another_sender_is_refused(
+            self, broker):
+        """A peer that learned a live cookie cannot file it under its
+        own sender to become its owner."""
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+        with pytest.raises(dbus.DBusException):
+            broker.RequestPolkitAuth(
+                "qdistro.test.action", {}, "cookie-9", [IDENT_ROOT],
+                sender=":1.10")
+        assert broker._pending == {}
+        # The owner's own filing of an announced cookie still works.
+        rid = broker.RequestPolkitAuth(
+            "qdistro.test.action", {}, "cookie-9", [IDENT_ROOT],
+            sender=":1.9")
+        assert rid in broker._pending
+        assert broker._pending[rid].filed_by == ":1.9"
+
+    def test_filing_a_cookie_pending_under_another_sender_is_refused(
+            self, broker):
+        rid = broker.RequestPolkitAuth(
+            "qdistro.test.action", {}, "cookie-9", [IDENT_ROOT],
+            sender=":1.9")
+        with pytest.raises(dbus.DBusException):
+            broker.RequestPolkitAuth(
+                "qdistro.test.action", {}, "cookie-9", [IDENT_ROOT],
+                sender=":1.10")
+        assert list(broker._pending) == [rid]
+
+    def test_a_foreign_respond_after_a_conflict_attempt_stays_denied(
+            self, broker):
+        """The conflict refusal is not itself a binding: the would-be
+        thief still cannot respond to the cookie."""
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+        with pytest.raises(dbus.DBusException):
+            broker.RequestPolkitAuth(
+                "qdistro.test.action", {}, "cookie-9", [IDENT_ROOT],
+                sender=":1.10")
+        with pytest.raises(dbus.DBusException):
+            broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT],
+                                     sender=":1.10")
+        assert broker.polkit_responded == []
+
 
 class TestCancelPolkitAuth:
 
@@ -464,22 +562,47 @@ class TestPolkitAgentPeerBinding:
     def test_the_script_path_as_an_argument_is_not_the_agent(
             self, broker):
         """`python3 -c 'evil()' /usr/libexec/.../agent.py` puts the
-        script at argv[2] as a mere argument — argv[1:] intersection
-        would admit it, argv[1] binding does not (sol r161)."""
+        script at argv[-1] — position alone would admit it, but -c is
+        an argument-taking flag outside the safe-flag whitelist
+        (sol r161/r165)."""
         broker.set_peer(ADMIN_UID, exe=AGENT_EXE,
-                        argv=["python3", "-c", "evil()", AGENT_ARGV[1]])
+                        argv=["python3", "-c", "evil()", AGENT_ARGV[-1]])
         with pytest.raises(dbus.DBusException):
             _file_polkit(broker)
         assert broker._pending == {}
 
-    def test_a_flag_before_the_script_is_not_the_unit_form(
+    def test_an_argument_taking_flag_before_the_script_is_rejected(
             self, broker):
-        """The unit ExecStart is `python3 <script>` with no flags; a
-        caller-added flag shifts the script off argv[1]."""
-        broker.set_peer(ADMIN_UID, exe=AGENT_EXE,
-                        argv=["python3", "-u", AGENT_ARGV[1]])
-        with pytest.raises(dbus.DBusException):
-            _file_polkit(broker)
+        """`-W`/`-X`/`-m` consume the next argv element as their
+        argument — allowing arbitrary flags before the script would let
+        `python3 -W ignore <script>`-style shapes smuggle a non-script
+        position or mask `-c`. Only the no-argument isolation flags
+        (-I/-E/-s/-P/-u/…) the unit may legitimately use are admitted
+        (sol r165)."""
+        for argv in (
+                ["python3", "-W", "ignore", AGENT_ARGV[-1]],
+                ["python3", "-X", "utf8", AGENT_ARGV[-1]],
+                ["python3", "-m", "site", AGENT_ARGV[-1]],
+                ["python3", "--check-hash-based-pycs", "always",
+                 AGENT_ARGV[-1]]):
+            broker.set_peer(ADMIN_UID, exe=AGENT_EXE, argv=argv)
+            with pytest.raises(dbus.DBusException):
+                _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_injection_capable_environment_is_rejected(self, broker):
+        """A same-uid caller can push PYTHONPATH/LD_PRELOAD into the
+        user manager's environment and restart the unit — startup code
+        would then share the agent's trusted connection (sol r165).
+        The peer's environ names must carry none of them."""
+        for env in ({"PYTHONPATH"}, {"LD_PRELOAD"}, {"PYTHONHOME"},
+                    {"PYTHONSTARTUP"}, {"BASH_ENV"}, {"LD_AUDIT"},
+                    {"PYTHONBREAKPOINT"},
+                    {"QDISTRO_POLKIT_NONINTERACTIVE"}):
+            broker._peer_env_names = set(env)
+            with pytest.raises(dbus.DBusException):
+                _file_polkit(broker)
+            broker._peer_env_names = set()
         assert broker._pending == {}
 
     def test_matching_argv_outside_the_agent_unit_is_rejected(

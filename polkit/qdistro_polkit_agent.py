@@ -719,6 +719,18 @@ class QdistroPolkitAgent(dbus.service.Object):
         on this image [unix-user uid=0], not the session uid — because
         polkitd rejects a response naming an identity it did not offer.
         """
+        # Re-announce first: a broker restart forgets every binding, and
+        # without this a live pam/fprint verdict would fail closed for
+        # the rest of the auth session. Idempotent — same sender, same
+        # cookie — and the broker rejects a rebind attempt.
+        try:
+            self._broker_iface().AnnouncePolkitAuth(
+                str(cookie), timeout=_REQUEST_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001
+            syslog.syslog(
+                syslog.LOG_WARNING,
+                f"could not re-announce polkit cookie to the broker: "
+                f"{e}; the respond relay may be refused")
         self._broker_iface().RespondPolkitAuth(
             str(cookie), identities, timeout=_REQUEST_TIMEOUT_S)
 

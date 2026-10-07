@@ -465,7 +465,10 @@ class TestPolkitRespondRelay:
             make_agent, monkeypatch, broker, "pam",
             env={"QDISTRO_POLKIT_NONINTERACTIVE": "allow"})
         assert ok == [1] and err == []
-        assert broker.announced == [("cookie9", mock.ANY)]
+        # BeginAuth announces; _respond re-announces before relaying so
+        # a broker restart cannot strand a live pam/fprint verdict.
+        assert broker.announced == [("cookie9", mock.ANY),
+                                    ("cookie9", mock.ANY)]
 
     def test_a_cancelled_cookie_is_not_announced(
             self, make_agent, monkeypatch):
