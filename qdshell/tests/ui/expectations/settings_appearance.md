@@ -34,9 +34,9 @@ bottom, single scrollable column):
   - A "Show icons in menus" toggle (`icons-in-menus-label`).
   - A "Show icons in buttons" toggle (`icons-in-buttons-label`).
 
-- A sound-theme block (no extra header) with a sound-theme combo
-  (`sound-theme-label`), discovered from `/usr/share/sounds` and
-  `~/.local/share/sounds` (dirs containing an `index.theme`).
+- A sound-theme row with a sound-theme combo (`sound-theme-label`; the
+  combo's own row label reads "Sound theme" — that label IS the required
+  text, no additional section header is expected or prohibited).
 
 - The standard left-side Settings tab strip is visible.
 

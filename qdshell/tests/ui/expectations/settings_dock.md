@@ -6,5 +6,6 @@ What must be visible when this tab is open:
 - Subtab bar with at least: "Appearance" and "Monitors".
 - A position selector.
 - A size slider.
-- An "Auto-hide" toggle.
+- An auto-hide control — the "Display" dropdown, which offers "Auto hide"
+  among its modes.
 - The standard left-side Settings tab strip is visible.

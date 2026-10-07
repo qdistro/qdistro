@@ -26,13 +26,24 @@ const read = (rel) => fs.readFileSync(path.join(ROOT, rel), "utf8");
 const settings = read("Commons/Settings.qml");
 assert.match(settings, /signal settingChanged\(var owner, string key, var value\)/,
     "Settings must declare settingChanged(owner, key, value)");
-const setter = settings.slice(settings.indexOf("function defineObservableSettingProperty"));
-assert.match(setter, /set: function \(newValue\) \{[\s\S]*?root\.settingChanged\(target, key, stored\)/,
-    "the observable setter must emit settingChanged(target, key, stored)");
-assert.match(setter, /var changed = newValue !== stored/,
+// The observable machinery is a Proxy wrapper, not per-key
+// Object.defineProperty accessors: QV4 SIGSEGVs in
+// internalDefineOwnProperty when defineProperty runs while a component is
+// being finalized (the settings Loader incubation path) — the proxy set
+// trap never mutates the target's shape, so the write path cannot hit it.
+const observable = settings.slice(settings.indexOf("function makeObservableSettings"));
+assert.ok(observable.length > 0 && observable.includes("new Proxy"),
+    "settings must be observable through a Proxy wrapper");
+assert.match(observable, /set: function \(target, key, newValue\) \{[\s\S]*?root\.settingChanged\(proxy, key, stored\)/,
+    "the observable set trap must emit settingChanged(proxy, key, stored)");
+assert.match(observable, /var changed = newValue !== old/,
     "an unchanged scalar must not emit");
-assert.match(setter, /!root\.loadingSettingsData/,
+assert.match(observable, /!root\.loadingSettingsData/,
     "loading must not emit");
+// ensures: Object.defineProperty never returns to the settings write
+// path — it is what SEGV'd the shell under QV4 finalize/incubation
+assert.ok(!/Object\.defineProperty/.test(observable),
+    "observable settings must not use Object.defineProperty (QV4 SEGV)");
 
 const consumers = {
     "Services/Theming/AppThemeService.qml": ["darkMode", "monitorForColors", "generationMethod"],

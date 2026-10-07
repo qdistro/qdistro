@@ -17,7 +17,8 @@ of the contract for this surface (describe what is actually present, in order):
     (`panels.power.inactivity-battery-label`, `inactivity-ac-label`).
   - An inactivity action chooser (`panels.power.inactivity-action-label`).
   - When the compositor cannot apply idle/DPMS policy, a persist-only info banner
-    (`panels.power.idle-persist-only`).
+    (`panels.power.idle-persist-only`). NOT required when the compositor
+    advertises idle/DPMS support (qdwin >= shell protocol v35 does).
 - A "Presentation & Inhibition" section (`panels.power.section-presentation`):
   - A presentation-mode toggle (`panels.power.presentation-mode-label`).
   - A presentation auto-disable timeout spin box in minutes

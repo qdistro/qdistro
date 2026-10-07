@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from . import runner
+from . import fixtures, runner
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,11 @@ class DegradedCase:
     close_cmd: list
     expectation: str
     service: str
+    # Guest bash snippets (runner.guest_sh_vm): setup runs before the panel
+    # opens, teardown runs in finally after it closes. Used to INDUCE the
+    # degraded condition on VMs that aren't naturally degraded.
+    setup_guest: tuple = ()
+    teardown_guest: tuple = ()
 
 
 DEGRADED_CASES = [
@@ -37,8 +42,12 @@ DEGRADED_CASES = [
                  "panel_bluetooth_degraded.md", "no Bluetooth adapter / BT off"),
     DegradedCase("network", ["network", "togglePanel"], ["network", "togglePanel"],
                  "panel_network_degraded.md", "offline network"),
+    # qdwin VMs ship an hda codec + PipeWire, so audio is NOT naturally
+    # degraded here — the absence is induced (and restored) per case.
     DegradedCase("audio", ["audio", "togglePanel"], ["audio", "togglePanel"],
-                 "panel_audio_degraded.md", "no PipeWire / no audio devices"),
+                 "panel_audio_degraded.md", "no PipeWire / no audio devices",
+                 setup_guest=(fixtures.AUDIO_DEGRADE,),
+                 teardown_guest=(fixtures.AUDIO_RESTORE,)),
     DegradedCase("battery", ["battery", "togglePanel"], ["battery", "togglePanel"],
                  "panel_battery_degraded.md", "no battery"),
     DegradedCase("media", ["media", "toggle"], ["media", "toggle"],
@@ -69,8 +78,16 @@ DEGRADED_CASES = [
 def test_panel_degraded(vm_session, case):
     import time
     s = vm_session
+    for cmd in case.setup_guest:
+        res = runner.guest_sh_vm(s, cmd)
+        assert res.returncode == 0, (
+            f"degraded-state inducement for '{case.id}' failed "
+            f"(rc={res.returncode}): {res.stderr.strip()[:300]}"
+        )
     runner.ipc_vm(s, *case.open_cmd)
-    time.sleep(1.2)
+    # Panels that auto-close on empty (TrayDrawerPanel) animate shut; the
+    # capture must outlast the transition or it judges a half-rendered frame.
+    time.sleep(2.5)
     png = runner.ARTIFACTS_DIR / f"panel_{case.id}_degraded.png"
     try:
         runner.screenshot_vm(s, png)
@@ -83,6 +100,11 @@ def test_panel_degraded(vm_session, case):
             time.sleep(0.5)
         except Exception:
             pass
+        for cmd in case.teardown_guest:
+            res = runner.guest_sh_vm(s, cmd)
+            if res.returncode != 0:
+                print(f"warning: degraded teardown for '{case.id}' rc="
+                      f"{res.returncode}: {res.stderr.strip()[:200]}")
 
     assert png.exists()
     if not actual.strip():

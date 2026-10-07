@@ -290,6 +290,16 @@ Singleton {
 
   IpcHandler {
     target: "launcher"
+    // Diagnostic read-only query: "true"/"false" when the launcher overlay is
+    // open on any screen. Toggle is the only open/close verb, so tests need
+    // this to reach a known state deterministically.
+    function isOpen(): bool {
+      for (var i = 0; i < Quickshell.screens.length; ++i) {
+        if (PanelService.isLauncherOpen(Quickshell.screens[i]))
+          return true;
+      }
+      return false;
+    }
     function toggle() {
       root.screenDetector.withCurrentScreen(screen => {
                                               var searchText = PanelService.getLauncherSearchText(screen);
