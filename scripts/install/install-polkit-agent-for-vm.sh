@@ -52,6 +52,17 @@ fi
 
 install -m 0755 "$SRC/qdistro_polkit_agent.py" "$DEST_LIB/qdistro_polkit_agent.py"
 install -m 0755 "$SRC/qdistro-polkit-prompt.py" "$DEST_BIN/qdistro-polkit-prompt"
+
+# Migrate the pre-systemd-service user unit (sol r170): the old
+# /etc/systemd/user/ unit plus its `systemctl --global enable` wants link
+# must go, or an upgraded system would run BOTH agents — the old one could
+# claim the session-bus singleton first and would fail the broker's new
+# system-cgroup check anyway. `--global disable` must run while the unit
+# file still exists, so it knows which wants links to remove.
+systemctl --global disable qdistro-polkit-agent.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/user/qdistro-polkit-agent.service
+rm -rf /etc/systemd/user/qdistro-polkit-agent.service.d
+
 install -m 0644 "$SRC/qdistro-polkit-agent.service" \
     "$DEST_SYSTEM_SYSD/qdistro-polkit-agent.service"
 
@@ -83,10 +94,23 @@ fi
 # Opportunistic start on a running system (a re-install); on an offline
 # chroot or a build-time image the first boot's multi-user.target brings
 # it up via the wants link above. Failure here is genuinely fine — the
-# enable is what the install depends on.
+# enable is what the install depends on. On a live reinstall the old
+# user-unit agent may still be running under admin's user manager:
+# stop it and reload that manager's unit definitions so the removed
+# user unit never comes back.
+ADMIN_UID=1000
+ADMIN_USER="admin"
 if is_offline; then
     echo "[offline] skipped (needs a running system manager): start qdistro-polkit-agent.service"
 else
+    if id "$ADMIN_USER" >/dev/null 2>&1 && [ -d "/run/user/$ADMIN_UID" ]; then
+        runuser -u "$ADMIN_USER" -- env \
+            XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
+            systemctl --user stop qdistro-polkit-agent.service >/dev/null 2>&1 || true
+        runuser -u "$ADMIN_USER" -- env \
+            XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
+            systemctl --user daemon-reload >/dev/null 2>&1 || true
+    fi
     systemctl start qdistro-polkit-agent.service >/dev/null 2>&1 \
         || echo "[install-polkit-agent] note: live start failed;" \
                 "the agent starts on the next boot" >&2

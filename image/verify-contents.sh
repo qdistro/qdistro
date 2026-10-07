@@ -704,6 +704,10 @@ check_link "[session-manager] work silo link" /etc/systemd/system/qdshell-sessio
 check_link "[session-manager] enabled" /etc/systemd/system/multi-user.target.wants/qdistro-session-manager.service
 check_req "[polkit-agent] system unit" /etc/systemd/system/qdistro-polkit-agent.service
 check_link "[polkit-agent] multi-user wants link" /etc/systemd/system/multi-user.target.wants/qdistro-polkit-agent.service
+# sol r169/170: the agent moved from a user unit (same-uid-writable
+# environment/drop-ins) to a system service. Both must never coexist.
+check_absent "[polkit-agent] old user unit gone" /etc/systemd/user/qdistro-polkit-agent.service
+check_absent "[polkit-agent] old user wants link gone" /etc/systemd/user/qdwin-session.target.wants/qdistro-polkit-agent.service
 check_req "[polkit-agent] module"      /usr/libexec/qdistro/qdistro_polkit_agent.py
 check_req "[polkit-agent] prompt helper" /usr/local/bin/qdistro-polkit-prompt
 check_req "[pwd] unit"                 /etc/systemd/system/qdistro-pwd.service

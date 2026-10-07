@@ -228,8 +228,8 @@ below).
 
 ## Polkit agent
 
-A per-user session daemon `qdistro-polkit-agent` registers with polkitd and
-dispatches `BeginAuthentication` to one of three methods:
+A system service `qdistro-polkit-agent` (running as `User=admin`) registers
+with polkitd and dispatches `BeginAuthentication` to one of three methods:
 
 - **PAM** — admin types their password, verified via `python-pam`.
 - **fprintd** — verify via `net.reactivated.Fprint.Device`.

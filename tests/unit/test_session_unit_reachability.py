@@ -451,3 +451,37 @@ def test_polkit_agent_enable_cannot_fail_silently():
     assert enable_line, "nothing enables qdistro-polkit-agent.service"
     assert "|| true" not in enable_line, (
         "the polkit agent enable swallows its own failure again")
+
+
+def test_polkit_agent_installer_removes_the_old_user_unit():
+    """Upgrades must not leave the pre-systemd-service user unit behind.
+
+    The agent used to be installed at ``/etc/systemd/user/`` and enabled
+    with ``systemctl --global enable``. Leaving either the unit file or the
+    global wants link in place would let the OLD user unit start next to the
+    new system service (sol r170): the old agent could claim the session-bus
+    singleton first and then fail the broker's system-cgroup check.
+    """
+    text = (_INSTALL_DIR / "install-polkit-agent-for-vm.sh").read_text()
+    assert re.search(r"systemctl\s+--global\s+disable[^\n]*"
+                     r"qdistro-polkit-agent", text), (
+        "the installer no longer globally disables the old user unit — "
+        "its wants link would survive upgrades")
+    assert re.search(r"rm[^\n]*-f[^\n]*/etc/systemd/user/"
+                     r"qdistro-polkit-agent\.service", text), (
+        "the installer no longer removes the old user unit file")
+
+
+def test_polkit_agent_unit_is_a_system_service():
+    """The unit must stay a system service — a user unit's environment is
+    same-uid writable and cannot be sealed (sol r169/170)."""
+    unit = _REPO / "polkit" / "qdistro-polkit-agent.service"
+    svc = _section(unit, "Service")
+    assert svc.get("User") == "admin", (
+        "the polkit agent must run as User=admin under the SYSTEM manager")
+    assert _section(unit, "Install").get("WantedBy") == "multi-user.target"
+    # A PartOf=/WantedBy= on the USER session target would signal a
+    # regression to the user-unit form.
+    assert not any(_SESSION_TARGET in v
+                   for v in _values(unit, "Install", "WantedBy")
+                   + _values(unit, "Unit", "PartOf"))

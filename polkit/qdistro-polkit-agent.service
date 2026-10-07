@@ -34,7 +34,8 @@ RestartSec=3
 # /run/user/1000) up from early boot.
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 Environment=XDG_RUNTIME_DIR=/run/user/1000
-Environment=WAYLAND_DISPLAY=wayland-0
+# The qdwin compositor pins --socket=wayland-1 (deploy/qdwin-compositor.service).
+Environment=WAYLAND_DISPLAY=wayland-1
 # Subprocess prompt path — agent spawns this on PAM auth.
 Environment=QDISTRO_POLKIT_PROMPT_BIN=/usr/local/bin/qdistro-polkit-prompt
 # Denylist kept as defence-in-depth: on a system unit no same-uid
