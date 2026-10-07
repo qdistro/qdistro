@@ -518,6 +518,10 @@ class QdistroPolkitAgent(dbus.service.Object):
                 return
             except Exception as e:  # noqa: BLE001
                 last = e
+                # A failed fallback lookup leaves the just-tried proxy
+                # cached in _broker — drop it so the retry re-resolves
+                # the owner instead of hitting the same dead endpoint.
+                self._broker = None
         syslog.syslog(
             syslog.LOG_WARNING,
             f"could not retire broker request for cookie "
