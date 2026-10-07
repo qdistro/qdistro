@@ -154,6 +154,9 @@ host qdfirefox-extension-coverage-floor coverage'
 }
 
 @test "private row entrypoint refuses to execute on host" {
+    # The refusal keys on /run/.containerenv, so inside the dev container
+    # (ci/bin/qci-host-run) the entrypoint is legitimately allowed to run.
+    [ ! -e /run/.containerenv ] || skip "running inside a Podman container: the host refusal cannot be observed here"
     run bash "$SOURCE_ROOT/ci/containers/run-host.sh"
     echo "$output"; [ "$status" = 2 ]; [[ "$output" = *'require Podman'* ]]
 }
@@ -206,7 +209,7 @@ SH
     for agent in codex claude; do
         printf '#!/bin/sh\nexit 127\n' > "$BATS_TEST_TMPDIR/bin/$agent"
         chmod +x "$BATS_TEST_TMPDIR/bin/$agent"
-        run env TEST_AGENT="$agent" bash -eo pipefail -c '
+        run env -u QCI_AGENT_MODEL TEST_AGENT="$agent" bash -eo pipefail -c '
             . "$SOURCE_ROOT/ci/lib/gates/gui.sh"
             kv() { printf "%s=%s\n" "$1" "$2"; }
             QCI_AGENT_CMD="$TEST_AGENT --model fixture-model" record_agent_identity

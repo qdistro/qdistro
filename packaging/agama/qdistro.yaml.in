@@ -1,0 +1,78 @@
+id: qdistro
+name: qdistro
+description: 'qdistro is a single-tenant Linux distribution with Qubes-inspired
+  app isolation, built on libweston + Wayland + Python/Qt/QML, installed from a
+  signed RPM repository on openSUSE Tumbleweed.'
+icon: qdistro.svg
+desktop_selection: optional
+software:
+  installation_repositories:
+    # Install repositories — rendered from packaging/env.sh (floating TW by default)
+    - url: @QDISTRO_TW_OSS_URL@
+      archs: x86_64
+    - url: @QDISTRO_TW_NONOSS_URL@
+      archs: x86_64
+    # NOTE: the qdistro RPM repository is supplied by the profile's
+    # extraRepositories (product RepositorySpec has no gpgFingerprints field,
+    # so fingerprint pinning has to live there). Listing it here too would
+    # register the same URL a second time without a trusted key.
+  mandatory_patterns:
+    - enhanced_base
+  optional_patterns: []
+  user_patterns:
+    - name: selinux
+      selected: true
+  mandatory_packages:
+    - qdistro-desktop
+    - NetworkManager
+    - sudo-policy-wheel-auth-self
+  optional_packages: [ os-prober ]
+  base_product: openSUSE
+
+boot:
+  # qdistro's kiwi image uses grub2; keep the installed system identical.
+  default_efi_bootloader: "grub2"
+
+storage:
+  space_policy: delete
+  volumes:
+    - "/"
+    - "swap"
+  volume_templates:
+    - mount_path: "/"
+      filesystem: btrfs
+      btrfs:
+        snapshots: true
+        read_only: false
+        default_subvolume: "@"
+        subvolumes:
+          # matches image/config.xml's subvolume set (home is a subvolume,
+          # never a separate XFS partition)
+          - path: home
+          - path: opt
+          - path: root
+          - path: srv
+          - path: tmp
+          - path: usr/local
+          - path: var
+            copy_on_write: false
+      size:
+        auto: true
+      outline:
+        required: true
+        filesystems:
+          - btrfs
+        auto_size:
+          base_min: 5 GiB
+          base_max: 15 GiB
+          snapshots_increment: 250%
+        snapshots_configurable: true
+    - mount_path: "swap"
+      filesystem: swap
+      size:
+        min: 1 GiB
+        max: 2 GiB
+      outline:
+        required: false
+        filesystems:
+          - swap

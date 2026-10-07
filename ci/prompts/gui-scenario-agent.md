@@ -258,6 +258,15 @@ Procedure:
    continue; send it only after those assertions are recorded, not just after
    the final screenshot.
 
+14. Never use data as a printf FORMAT. SQL, paths, titles and command output
+   go through `printf '%s\n' "$data"` or a quoted here-doc, never
+   `printf "...$data..."`: a `%` in the data (`LIKE 'app.send-to:%'`) is read
+   as a directive and the command silently does something else. When you fold
+   scenario commands into one guest driver, copy them verbatim; run broker
+   database SQL with the guest helper `qci_sqlite <audit|approvals> "<sql>"`
+   (full-20261006T224555Z-2478214: a hand-rolled printf dropped
+   permissions-gui/14's final audit query, ERROR on a correct product).
+
 Report format:
 
 ```markdown

@@ -232,12 +232,12 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 47-qsu; echo "rc=$(bg_rc 4
   exited with rc=0 (`/bin/true` succeeded after admin approval).
 - Cache table:
   ```bash
-  SQL_B64=$(base64 -w0 <<'SQL_EOF'
-  SELECT caller_uid, action, match_kind, match_value, argv, scope
-    FROM approvals WHERE action LIKE 'qsu.exec:%';
-  SQL_EOF
+  SQL_B64=$(base64 -w0 <<'EOF'
+  source /tmp/qci-gui-waiters.sh || exit 2
+  qci_sqlite approvals "SELECT caller_uid, action, match_kind, match_value, argv, scope FROM approvals WHERE action LIKE 'qsu.exec:%';"
+  EOF
   )
-  $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
+  $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | bash"
   ```
   Output: one row
   `2000|qsu.exec:root|argv_exact|...|["/bin/true"]|forever_argv`.
@@ -251,13 +251,12 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 47-qsu; echo "rc=$(bg_rc 4
 ### S5 — broker-side audit shows the rejected scope was not committed
 
 ```bash
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
-SELECT decision, scope, substr(source, 1, 20) FROM audit
-  WHERE action='qsu.exec:root'
-  ORDER BY id DESC LIMIT 3;
-SQL_EOF
+SQL_B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh || exit 2
+qci_sqlite audit "SELECT decision, scope, substr(source, 1, 20) FROM audit WHERE action='qsu.exec:root' ORDER BY id DESC LIMIT 3;"
+EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | bash"
 ```
 
 **Assert**: the newest audit row records `decision=1`,

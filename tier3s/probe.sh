@@ -107,6 +107,113 @@ pass() { printf 'PASS %s: %s\n' "$1" "$2"; }
 info() { printf 'INFO %s: %s\n' "$1" "$2"; }
 fail() { printf 'FAIL %s: %s\n' "$1" "$2"; [ -n "$FIRST_FAIL" ] || FIRST_FAIL="$1 ($2)"; }
 
+# --- bounded NSS lookups for the probed user ---------------------------------
+# nss_q <cmd...>: run one NSS lookup; NSS_OUT is its stdout (only at rc 0 —
+# what a killed lookup printed is never a result), NSS_RC its status, NSS_N
+# the attempts this call made.
+#
+# Budget: ONE waiting budget for the whole probe, shared across every nss_q
+# call site (sol r152 P2): NSS_TRIES * (NSS_BOUND + NSS_KILL_GRACE) seconds of
+# NSS wait time in total — the time other probe sections take is not charged.
+# A lookup killed at its bound (rc 124) is retried while the budget lasts.
+# The bound counts wall time, and the plausible mechanism for exceeding it on
+# a saturated dev VM is cold page-in of the lookup's binary, libc's NSS
+# modules and /etc/passwd — in full-20261006T175536Z-3524705
+# (phase7-tier3s-hostile-stream) a foreign-user lookup timed out at 5 s while
+# the same lookup had answered in ms seconds before, under concurrent OCI
+# archive and runsc-bundle writes; a retry on the now-warm path then answers.
+# Treat that as a supported hypothesis for WHY the bound was hit, not proof
+# that NSS providers are never at fault: a wedged provider still fails the
+# probe once the shared budget is spent, and NSS_WEDGED then fails every
+# later lookup at once (rc 124, NSS_N=0) instead of paying the budget again.
+#
+# Attempt mechanics (sol r152 P1): the inner `timeout -k NSS_KILL_GRACE
+# <bound>` TERM-kills a lookup at <bound> and escalates to SIGKILL for a
+# signal-resistant child; an outer `timeout` at bound+grace+1 caps that wait
+# so completion never depends on reaping a child uninterruptible even by
+# SIGKILL (D state) — killing the inner timeout orphans the lookup, which
+# finishes or dies on its own. The lookup's stdout goes to a scratch FILE,
+# not a pipe, so nothing about our wait depends on a grandchild closing its
+# captured output either. Worst case per probe ≈ the shared budget plus one
+# attempt's kill tail (< ~30 s for the defaults).
+NSS_BOUND=5; NSS_TRIES=3; NSS_KILL_GRACE=2
+NSS_WEDGED=0; NSS_SPENT_CS=0
+NSS_OUT=""; NSS_RC=0; NSS_N=0
+
+# _nss_now_cs: elapsed monotonic time in centiseconds, from /proc/uptime.
+# `date +%s` is adjustable REALTIME — a backwards NTP step or clock set
+# could make NSS_SPENT_CS go negative and hand back more than the
+# budget — and its whole-second truncation lets an attempt of 4.2 s that
+# crosses a second boundary read as >= a 5 s bound, misclassifying an
+# early external SIGKILL as our own escalation (sol r154). /proc/uptime
+# ticks in centiseconds and only ever moves forward.
+_nss_now_cs() {
+    local up idle
+    read -r up idle < /proc/uptime || return 1
+    case "$up" in *.*) ;; *) up="$up.00";; esac
+    # "1234.56" -> "123456" (the kernel always prints two decimals)
+    printf '%s\n' "${up%.*}${up##*.}"
+}
+
+_nss_attempt() {   # $1 = TERM bound (seconds); rest = the lookup command
+    local bound=$1; shift
+    local f=""
+    # The scratch file needs ANY writable dir; an unusable TMPDIR (or its
+    # absence) must not break the probe, so walk a fallback chain. If
+    # nowhere is writable the lookup fails loudly instead of hanging.
+    local d
+    for d in "${TMPDIR:-/tmp}" /tmp /dev/shm; do
+        f="$(mktemp "$d/qdistro-nss.XXXXXX" 2>/dev/null)" && break
+        f=""
+    done
+    if [ -z "$f" ]; then NSS_RC=1; return 1; fi
+    timeout $(( bound + NSS_KILL_GRACE + 1 )) \
+        timeout -k "$NSS_KILL_GRACE" "$bound" "$@" >"$f" 2>/dev/null
+    NSS_RC=$?
+    [ "$NSS_RC" -eq 0 ] && NSS_OUT="$(cat "$f")"
+    rm -f "$f"
+}
+
+nss_q() {
+    NSS_OUT=""; NSS_N=0; NSS_RC=0
+    if [ "$NSS_WEDGED" = 1 ]; then NSS_RC=124; return 124; fi
+    local budget_cs=$(( NSS_TRIES * (NSS_BOUND + NSS_KILL_GRACE) * 100 ))
+    while :; do
+        local bound t0 t1 elapsed_cs
+        # Whole-second bound for `timeout`, leaving the kill tail inside
+        # the remaining budget; fractional remainders charge correctly
+        # through NSS_SPENT_CS even when they buy no further attempt.
+        bound=$(( (budget_cs - NSS_SPENT_CS) / 100 - NSS_KILL_GRACE - 1 ))
+        [ "$bound" -gt "$NSS_BOUND" ] && bound=$NSS_BOUND
+        [ "$bound" -lt 1 ] && { NSS_RC=124; break; }
+        NSS_N=$((NSS_N + 1))
+        t0="$(_nss_now_cs)" || { NSS_RC=1; NSS_OUT=""; return 1; }
+        _nss_attempt "$bound" "$@"
+        t1="$(_nss_now_cs)" || t1=$(( t0 + bound * 100 ))
+        elapsed_cs=$(( t1 - t0 ))
+        [ "$elapsed_cs" -lt 0 ] && elapsed_cs=0
+        NSS_SPENT_CS=$(( NSS_SPENT_CS + elapsed_cs ))
+        # 124 is the TERM bound. 137 means the child died of SIGKILL: if
+        # the attempt ran for at least its bound that is OUR escalation
+        # landing — the lookup ignored TERM and overran its bound, the
+        # same verdict (normalise to 124 so callers see one "timed out"
+        # status). A 137 arriving before the bound is a real SIGKILL
+        # (OOM, external kill): final, and not an NSS wedge. The
+        # centisecond monotonic clock keeps the comparison honest — a
+        # whole-second realtime read could round an early kill UP to the
+        # bound and relabel an external kill as our escalation.
+        case "$NSS_RC" in
+            124) ;;
+            137) [ "$elapsed_cs" -ge $(( bound * 100 )) ] \
+                     && NSS_RC=124 || break ;;
+            *) break ;;
+        esac
+    done
+    if [ "$NSS_RC" -eq 124 ]; then NSS_WEDGED=1; NSS_OUT=""; fi
+    [ "$NSS_RC" -eq 0 ] || NSS_OUT=""
+    return "$NSS_RC"
+}
+
 # --- profile gate (refuse, do not screen) ---------------------------------
 profile=""
 [ -r "$PROFILE_FILE" ] && profile="$(sed -n 's/^QDISTRO_PROFILE=//p' "$PROFILE_FILE" | tail -1)"
@@ -135,9 +242,12 @@ if [ "$ps_scope" = absent ] || [ "$ps_scope" -le 2 ]; then pass ptrace_scope "$p
 else fail ptrace_scope "$ps_scope > 2 (systrap needs ptrace)"; fi
 
 # --- launching user's id mapping ------------------------------------------
-# bounded like every foreign-user NSS lookup below (fable A r3 P3-2)
-if ! timeout 5 id "$USER_NAME" >/dev/null 2>&1; then
-    fail user "$USER_NAME does not exist"
+# bounded like every foreign-user NSS lookup below (fable A r3 P3-2; nss_q)
+if ! nss_q id "$USER_NAME"; then
+    if [ "$NSS_RC" -eq 124 ]; then
+        fail user "the NSS lookup for $USER_NAME timed out (shared NSS wait budget of $(( NSS_TRIES * (NSS_BOUND + NSS_KILL_GRACE) )) s spent)"
+    elif [ "$NSS_RC" -eq 1 ]; then fail user "$USER_NAME does not exist"
+    else fail user "the NSS lookup for $USER_NAME failed (id rc=$NSS_RC; $NSS_N tries)"; fi
     for c in subuid subgid; do fail "$c" "not checked: user $USER_NAME missing"; done
     for t in newuidmap newgidmap; do
         p="$(command -v "$t" 2>/dev/null)"
@@ -297,10 +407,11 @@ fi
 SR_BASE="$ROOT/run/qdistro-tier3s-runsc"
 # Every NSS lookup for the foreign user is bounded (fable A r3 P3-2): a wedged
 # provider hangs the spawn's probe otherwise, and timeout's nonzero status —
-# never whatever prefix a dying call printed — is the verdict.
-if ! timeout 5 id "$USER_NAME" >/dev/null 2>&1; then
-    fail state_root "not checked: user $USER_NAME missing"
-elif ! sr_uid="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)" \
+# never whatever prefix a dying call printed — is the verdict (nss_q).
+sr_uid=""
+if ! nss_q id "$USER_NAME"; then
+    fail state_root "not checked: user $USER_NAME missing or its lookup timed out"
+elif ! nss_q id -u "$USER_NAME" || ! sr_uid="$NSS_OUT" \
         || ! [[ "$sr_uid" =~ ^[0-9]+$ ]]; then
     # status-gated and shape-checked like the getent calls (sol r5 P3-4,
     # sol B-i r1): a lookup that prints a uid line and then stalls is killed
@@ -331,15 +442,26 @@ if [ "$(id -un)" != "$USER_NAME" ]; then
     # The uid lookup is status-gated and shape-checked like the getent
     # below: rc 0 AND exactly one numeric uid line, or no result at all —
     # a line printed before the timeout kill is never a uid (sol B-i r1).
-    AS_UID="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)" \
-        && [[ "$AS_UID" =~ ^[0-9]+$ ]] || AS_UID=""
+    # nss_why/nss_t0 only DESCRIBE a failure (which lookup, its status, the
+    # elapsed time): a timeout kill (rc 124) and a missing entry (getent
+    # rc 2) are otherwise indistinguishable in the verdict line. They never
+    # change it.
+    nss_why=""; nss_t0="$(date +%s%N)"
+    nss_q id -u "$USER_NAME"; AS_UID="$NSS_OUT"
+    [ "$NSS_RC" -eq 0 ] && [[ "$AS_UID" =~ ^[0-9]+$ ]] \
+        || { nss_why="id -u rc=$NSS_RC; $NSS_N tries"; AS_UID=""; }
     puid=""; pw=""
-    [ -n "$AS_UID" ] && pw="$(timeout 5 getent passwd "$USER_NAME")" \
-        && puid="$(printf '%s\n' "$pw" | cut -d: -f3)" \
-        && AS_HOME="$(printf '%s\n' "$pw" | cut -d: -f6)"
+    if [ -n "$AS_UID" ]; then
+        if nss_q getent passwd "$USER_NAME"; then
+            pw="$NSS_OUT"
+            puid="$(printf '%s\n' "$pw" | cut -d: -f3)" \
+                && AS_HOME="$(printf '%s\n' "$pw" | cut -d: -f6)"
+        else nss_why="getent passwd rc=$NSS_RC; $NSS_N tries"; fi
+    fi
     [ -n "$AS_UID" ] && [ "$puid" = "$AS_UID" ] && [ "${AS_HOME#/}" != "$AS_HOME" ] \
         && [[ "$pw" != *$'\n'* ]] \
-        || { fail nss "no passwd entry for $USER_NAME within the 5 s bound"; AS_UID=""; AS_HOME=""; }
+        || { fail nss "no passwd entry for $USER_NAME within the shared NSS wait budget ($(( NSS_TRIES * (NSS_BOUND + NSS_KILL_GRACE) )) s) (${nss_why:-entry shape: uid/home/line count}; $(( ($(date +%s%N) - nss_t0) / 1000000 )) ms)"
+             AS_UID=""; AS_HOME=""; }
 fi
 # podman's runtime dir for the probed user: a logind session dir when it
 # exists (admin), else the per-silo dir the spawn creates (a silo account has

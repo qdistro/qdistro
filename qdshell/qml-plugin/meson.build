@@ -136,7 +136,7 @@ ext_idle_notify_protocol_code = custom_target(
 dep_qt6_network = dependency('Qt6Network')
 
 moc_files = qt6.preprocess(
-  moc_headers: ['qdwin-binding.h', 'ctrl-server.h'],
+  moc_headers: ['qdwin-binding.h', 'ctrl-server.h', 'broker-call.h'],
   moc_sources: ['qdistro-qdwin-plugin.cpp'],
   dependencies: [dep_qt6_core, dep_qt6_qml, dep_qt6_network],
 )
@@ -147,6 +147,7 @@ shared_library(
   'qdistro-qdwin',
   sources: [
     'qdwin-binding.cpp',
+    'broker-call.cpp',
     'ctrl-server.cpp',
     'qdistro-qdwin-plugin.cpp',
     moc_files,
@@ -174,3 +175,27 @@ shared_library(
 )
 
 install_data('qmldir', install_dir: qml_plugin_install_dir)
+
+# Native unit tests (suite 'native'; scripts/ci-local.sh runs them from the
+# build dir qci configures). BrokerCallRunner needs no compositor, so its
+# QProcess edges are tested against real child processes.
+dep_qt6_test = dependency('Qt6Test', required: false)
+if dep_qt6_test.found()
+  broker_call_test_moc = qt6.preprocess(
+    moc_headers: ['broker-call.h'],
+    moc_sources: ['tests/tst_broker_call.cpp'],
+    dependencies: [dep_qt6_core],
+  )
+  test('broker-call',
+    executable('tst_broker_call',
+      sources: ['tests/tst_broker_call.cpp', 'broker-call.cpp',
+                broker_call_test_moc],
+      include_directories: include_directories('.'),
+      dependencies: [dep_qt6_core, dep_qt6_test],
+      cpp_args: ['-fPIC'],
+    ),
+    env: ['QT_QPA_PLATFORM=offscreen'],
+    suite: 'native',
+    timeout: 60,
+  )
+endif

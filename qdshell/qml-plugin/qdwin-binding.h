@@ -32,6 +32,8 @@
 #include <utility>
 #include <vector>
 
+#include "broker-call.h"
+
 class CtrlServer;
 
 struct wl_display;
@@ -289,6 +291,39 @@ public:
         uint sourcePid = 0,
         qulonglong sourceStarttime = 0);
 
+    // Asynchronous twins of checkClipboardTransfer / checkClipboardReceive
+    // (same arguments, same broker methods). They never block the GUI
+    // thread: each returns a request id (> 0) at once and later emits
+    // exactly one clipboardCheckFinished(requestId, ...) from the event
+    // loop (never before the call has returned the id), also for rejected
+    // input, a busctl that fails to start, a timeout and the 16-child cap.
+    // Every such edge reports exitCode -1, which
+    // ClipboardBroker.parseCheckClipboardTransferResult denies. See
+    // broker-call.h.
+    // Transfer waits up to 2 s (no compositor deadline at set time);
+    // receive waits up to 1.5 s so the shell answers before qdwin's 2 s
+    // receive timer.
+    Q_INVOKABLE int startCheckClipboardTransfer(
+        const QString &sourceSilo,
+        const QString &destSilo,
+        const QStringList &mimeTypes,
+        const QString &sourceAppId,
+        const QString &destAppId,
+        const QString &sourceSandboxEngine,
+        bool identityVerified,
+        uint sourcePid = 0,
+        qulonglong sourceStarttime = 0);
+    Q_INVOKABLE int startCheckClipboardReceive(
+        const QString &sourceSilo,
+        const QString &destSilo,
+        const QString &mimeType,
+        const QString &sourceAppId,
+        const QString &destAppId,
+        const QString &sourceSandboxEngine,
+        bool identityVerified,
+        uint sourcePid = 0,
+        qulonglong sourceStarttime = 0);
+
     // v32 dev/test screenshot path. Invoked only by CtrlServer after it has
     // authenticated a root peer. Returns {ok,width,height,output,path} on
     // success or {ok:false,error} on failure. The compositor independently
@@ -301,6 +336,9 @@ public:
                               int timeoutMs = 0);
 
 signals:
+    // One per startCheckClipboard* request id; see above.
+    void clipboardCheckFinished(int requestId, int exitCode,
+                                const QString &stdoutText, bool timedOut);
     void boundChanged();
     void lastErrorChanged();
     void focusedHandleChanged();
@@ -462,6 +500,10 @@ private slots:
     void onWaylandReadable();
 
 private:
+    // Runs the async clipboard broker calls (broker-call.h); an empty
+    // args list means the input was rejected and reports as a failure.
+    BrokerCallRunner *brokerCalls_ = nullptr;
+
     void connectAndBind();
     void teardown(const QString &reason);
     // Flush after an imperative request; tear down + reconnect on a fatal

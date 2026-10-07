@@ -25,9 +25,9 @@ gate_full() {
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     # Tester image (todo/iso/14 Phase F): prove the published .raw.xz. This
     # gate uses its own disk (the kiwi artifact), not the per-run golden, so
-    # it is NOT in the golden-sharing cascade below. A missing artifact
-    # records blocked rows and returns 0 in normal mode; QCI_RELEASE=1
-    # escalates those blocked rows.
+    # it is NOT in the golden-sharing cascade below. A missing (or
+    # other-tree) artifact records blocked rows and returns EXIT_BUILD, so
+    # it is never green; QCI_SKIP_IMAGE=1 records the developer omission.
     if [ "${QCI_SKIP_IMAGE:-0}" != 1 ]; then
         gate_image; step_rc=$?
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc

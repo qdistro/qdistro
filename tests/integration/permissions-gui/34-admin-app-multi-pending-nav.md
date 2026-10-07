@@ -37,16 +37,18 @@ $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
 
-APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
-DELETE FROM approvals WHERE action LIKE 'multi.%';
-SQL_EOF
+APPROVALS_SQL_B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh || exit 2
+qci_sqlite approvals "DELETE FROM approvals WHERE action LIKE 'multi.%';"
+EOF
 )
-AUDIT_SQL_B64=$(base64 -w0 <<'SQL_EOF'
-DELETE FROM audit WHERE action LIKE 'multi.%';
-SQL_EOF
+AUDIT_SQL_B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh || exit 2
+qci_sqlite audit "DELETE FROM audit WHERE action LIKE 'multi.%';"
+EOF
 )
-$VMEXEC "$VM" "echo $APPROVALS_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
-$VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $APPROVALS_SQL_B64 | base64 -d | bash"
+$VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | bash"
 ```
 
 ## Steps
@@ -231,11 +233,12 @@ FAIL, not a reason to recapture.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 $VMEXEC "$VM" 'rm -f /tmp/34-w*.pid'
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
-DELETE FROM audit WHERE action LIKE 'multi.%';
-SQL_EOF
+SQL_B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh || exit 2
+qci_sqlite audit "DELETE FROM audit WHERE action LIKE 'multi.%';"
+EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | bash"
 ```
 
 ## Notes for the runner

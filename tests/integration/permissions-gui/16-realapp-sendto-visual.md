@@ -49,11 +49,12 @@ $VMEXEC "$VM" 'systemctl --machine=work2@.host --user restart qdistro-user-relay
 $VMEXEC "$VM" 'systemctl --machine=work@.host --user stop qstub-notepad.service 2>/dev/null || true'
 $VMEXEC "$VM" 'systemctl --machine=work2@.host --user stop qstub-notepad.service 2>/dev/null || true'
 
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
-DELETE FROM approvals WHERE action LIKE 'app.send-to:%';
-SQL_EOF
+SQL_B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh || exit 2
+qci_sqlite approvals "DELETE FROM approvals WHERE action LIKE 'app.send-to:%';" 2>/dev/null || true
+EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
+$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | bash"
 
 # Launch both qnotebook instances on admin's compositor via the helper.
 $VMEXEC "$VM" '
@@ -195,17 +196,18 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
 ### S6 — audit + no-cache
 
 ```bash
-SQL_AUDIT_B64=$(base64 -w0 <<'SQL_EOF'
-SELECT caller_uid, action, decision, scope, source, approver_uid
- FROM audit ORDER BY id DESC LIMIT 1;
-SQL_EOF
+SQL_AUDIT_B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh || exit 2
+qci_sqlite audit "SELECT caller_uid, action, decision, scope, source, approver_uid FROM audit ORDER BY id DESC LIMIT 1;"
+EOF
 )
-SQL_COUNT_B64=$(base64 -w0 <<'SQL_EOF'
-SELECT count(*) FROM approvals WHERE action LIKE 'app.send-to:%';
-SQL_EOF
+SQL_COUNT_B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh || exit 2
+qci_sqlite approvals "SELECT count(*) FROM approvals WHERE action LIKE 'app.send-to:%';"
+EOF
 )
-$VMEXEC "$VM" "echo $SQL_AUDIT_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
-$VMEXEC "$VM" "echo $SQL_COUNT_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
+$VMEXEC "$VM" "echo $SQL_AUDIT_B64 | base64 -d | bash"
+$VMEXEC "$VM" "echo $SQL_COUNT_B64 | base64 -d | bash"
 ```
 
 **Assert**:

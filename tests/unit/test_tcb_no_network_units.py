@@ -25,7 +25,12 @@ def test_polkit_agent_unit_has_no_network_runtime_hardening() -> None:
     directives = _service_directives(POLKIT_SERVICE)
 
     assert directives.get("PrivateNetwork") == "yes"
-    assert directives.get("IPAddressDeny") == "any"
+    # This is a user unit (installed to /etc/systemd/user). IP firewalling
+    # needs the system manager: a user manager applies nothing and only logs
+    # "unit configures an IP firewall, but not running as root". The
+    # enforcement is PrivateNetwork= plus the address-family allowlist, so an
+    # IPAddressDeny= here would be a no-op that reads as a control.
+    assert "IPAddressDeny" not in directives
     families = directives.get("RestrictAddressFamilies", "")
     assert "AF_UNIX" in families
     assert "AF_INET" not in families

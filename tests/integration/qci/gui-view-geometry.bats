@@ -49,7 +49,8 @@ EOF
 }
 
 teardown() {
-    [ -n "${TDIR:-}" ] && rm -rf -- "$TDIR"
+    # setup may skip before TDIR exists; teardown must not fail the case then.
+    if [ -n "${TDIR:-}" ]; then rm -rf -- "$TDIR"; fi
 }
 
 # A real 1280x800 screen with some structure (usable), deterministic bytes.

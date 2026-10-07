@@ -12,7 +12,7 @@ methods depending on configuration:
                 Same prompt subprocess but it kicks the verify and
                 waits for the VerifyStatus signal.
 - ``broker``  — delegate to the qdistro admin broker's
-                RequestPermission / WaitForDecision flow. Approval
+                RequestPolkitAuth / WaitForDecision flow. Approval
                 is a yes/no admin decision rendered by the
                 admin-approval-app (spec/25).
 
@@ -24,9 +24,14 @@ Method selection (highest priority first):
   3. /etc/qdistro/polkit-agent.conf  — fnmatch glob → method.
   4. default ``broker``.
 
-On success the agent calls
+polkitd accepts
 ``org.freedesktop.PolicyKit1.Authority.AuthenticationAgentResponse2``
-with the unix-user identity for ADMIN_UID. On failure the agent
+from uid 0 only, and this agent runs as ADMIN_UID — so it never calls
+polkitd back directly. The privileged broker delivers the response:
+for ``broker``-method requests it does so when the filed request is
+allowed, and for ``pam``/``fprint`` verdicts the agent relays through
+``RespondPolkitAuth``. The response identity is picked from the list
+polkitd itself offered in BeginAuthentication. On failure the agent
 just completes the BeginAuthentication call (polkit treats no
 response as deny).
 
@@ -410,30 +415,70 @@ class QdistroPolkitAgent(dbus.service.Object):
         self._broker = None
         self._config = list(config) if config is not None \
             else load_method_config_layered()
+        # Cookies polkitd cancelled (CancelAuthentication), remembered
+        # locally as well as relayed: cancel lands on the mainloop while
+        # the auth worker may still be filing or waiting, so a worker
+        # that wakes with a dead cookie must neither file a prompt nor
+        # relay a response. Bounded — cookies are single-use nonces.
+        self._cancel_lock = threading.Lock()
+        self._cancelled_cookies: dict[str, None] = {}
+
+    def _note_cancelled(self, cookie: str) -> None:
+        with self._cancel_lock:
+            self._cancelled_cookies.pop(cookie, None)
+            while len(self._cancelled_cookies) >= 256:
+                self._cancelled_cookies.pop(
+                    next(iter(self._cancelled_cookies)))
+            self._cancelled_cookies[cookie] = None
+
+    def _is_cancelled(self, cookie: str) -> bool:
+        with self._cancel_lock:
+            return cookie in self._cancelled_cookies
 
     # -- broker delegation (the v1 path) ----------------------------------
 
     def _broker_iface(self):
         if self._broker is None:
-            obj = self._sysbus.get_object(QDISTRO_BROKER_BUS, QDISTRO_BROKER_OBJ)
+            # Bind the proxy to the broker's UNIQUE name, not the
+            # well-known one. A proxy on the well-known name re-resolves
+            # its destination per call, so a worker that filed request id
+            # 1 on broker instance D1 could, after a restart, call
+            # WaitForDecision(1) on D2 -- whose id counter restarted at 1
+            # -- and consume an unrelated request's decision (astra
+            # r153). A unique-name proxy dies with its owner: the wait
+            # fails with a D-Bus error and the auth denies, fail-closed.
+            # activate_name_owner also starts an activatable broker, as
+            # the previous get_object-on-well-known-name did.
+            owner = str(self._sysbus.activate_name_owner(QDISTRO_BROKER_BUS))
+            obj = self._sysbus.get_object(owner, QDISTRO_BROKER_OBJ)
             self._broker = dbus.Interface(obj, QDISTRO_BROKER_BUS)
         return self._broker
 
-    def _file_request(self, qdistro_action: str, details: dict) -> int:
-        """File one permission request, retrying ONLY when we know the first
-        attempt never reached the broker.
+    def _file_request(self, qdistro_action: str, details: dict,
+                      cookie: str, identities):
+        """File one polkit auth request; return (broker proxy, request id).
 
-        The retry used to catch every DBusException and re-file. Two of the
+        The caller must wait on the SAME proxy the request was filed
+        through: request ids mean something only to the broker instance
+        that issued them, and the proxy is what pins the instance. The
+        retry used to catch every DBusException and re-file. Two of the
         errors it caught — NoReply and a mid-call disconnect — mean "we do
         not know whether the broker got it", so re-filing produced a second
         pending request for the same polkit cookie: the admin saw the same
         prompt twice and answering one left the other stranded. ServiceUnknown
         and NameHasNoOwner are the only ones that positively mean nothing was
         filed, because the name had no owner to receive the call.
+
+        The request is filed as RequestPolkitAuth carrying polkit's cookie
+        and offered identity list: on an allow the broker answers polkitd
+        with AuthenticationAgentResponse2 itself — that call is uid-0-only
+        and this process is not uid 0.
         """
+        iface = self._broker_iface()
         try:
-            return int(self._broker_iface().RequestPermission(
-                qdistro_action, details, timeout=_REQUEST_TIMEOUT_S))
+            return iface, int(iface.RequestPolkitAuth(
+                qdistro_action, details, str(cookie), identities,
+                timeout=_REQUEST_TIMEOUT_S))
         except dbus.DBusException as e:
             if e.get_dbus_name() not in (
                     "org.freedesktop.DBus.Error.ServiceUnknown",
@@ -443,17 +488,63 @@ class QdistroPolkitAgent(dbus.service.Object):
             # be bound to a dead unique name) and try once more, in case it
             # is being restarted underneath us.
             self._broker = None
-            return int(self._broker_iface().RequestPermission(
-                qdistro_action, details, timeout=_REQUEST_TIMEOUT_S))
+            iface = self._broker_iface()
+            return iface, int(iface.RequestPolkitAuth(
+                qdistro_action, details, str(cookie), identities,
+                timeout=_REQUEST_TIMEOUT_S))
 
-    def _ask_broker(self, qdistro_action: str, details: dict) -> bool:
+    def _retire_request(self, iface, cookie: str) -> None:
+        """Best-effort deny of the cookie's queued broker request.
+
+        When this agent gives up on an auth (file/wait failure, or a
+        crash between filing and waiting) the request could otherwise
+        stay pending: a late admin click would make the broker respond
+        into a session polkitd already tore down, and for a cached
+        scope would even store a grant nobody asked for. Cancelling by
+        cookie retires it wherever it lives. `iface` is the proxy that
+        filed (pinned to the broker instance holding the rid); a fresh
+        lookup is the fallback for a dead proxy, and also covers the
+        uncertain-filed case where no rid came back. The cached proxy
+        is dropped first — it IS the suspect proxy on the file path and
+        the failed one on the wait path.
+        """
+        self._broker = None
+        last: Exception | None = None
+        for candidate in (iface, None):
+            try:
+                target = candidate or self._broker_iface()
+                target.CancelPolkitAuth(str(cookie),
+                                        timeout=_REQUEST_TIMEOUT_S)
+                return
+            except Exception as e:  # noqa: BLE001
+                last = e
+                # A failed fallback lookup leaves the just-tried proxy
+                # cached in _broker — drop it so the retry re-resolves
+                # the owner instead of hitting the same dead endpoint.
+                self._broker = None
+        syslog.syslog(
+            syslog.LOG_WARNING,
+            f"could not retire broker request for cookie "
+            f"{_scrub_value(str(cookie))}: {last}")
+
+    def _ask_broker(self, qdistro_action: str, details: dict,
+                    cookie: str, identities) -> bool:
+        if self._is_cancelled(str(cookie)):
+            # polkitd cancelled the session while the worker was queued
+            # — filing now would create a prompt for a dead auth.
+            return False
         try:
-            rid = self._file_request(qdistro_action, details)
+            iface, rid = self._file_request(qdistro_action, details,
+                                            cookie, identities)
         except dbus.DBusException as e:
             self._broker = None
             syslog.syslog(syslog.LOG_ERR,
                           f"could not file a broker request: {e}; "
                           f"denying polkit request")
+            # The file may still have landed (a lost reply is
+            # unknowable); retire by cookie so it cannot be decided
+            # against a session this agent already abandoned.
+            self._retire_request(None, cookie)
             return False
         try:
             # An admin has to read the prompt and decide, so this blocks on
@@ -461,16 +552,18 @@ class QdistroPolkitAgent(dbus.service.Object):
             # which expired long before any real decision and was then read
             # as "broker unreachable" — the broker was up and healthy the
             # whole time. Same generous cutoff as the media exec client.
-            return bool(self._broker_iface().WaitForDecision(
-                rid, timeout=_WAIT_TIMEOUT_S))
+            # `iface` is the same unique-name-bound proxy that filed the
+            # request: rid only exists on that broker instance.
+            return bool(iface.WaitForDecision(rid, timeout=_WAIT_TIMEOUT_S))
         except dbus.DBusException as e:
             self._broker = None
             syslog.syslog(
                 syslog.LOG_ERR,
                 f"no decision for broker request {rid}: {e}; denying polkit "
-                f"request. The request may still be pending in the broker — "
-                f"it is NOT re-filed here, because a second copy of the same "
-                f"prompt is worse than one that goes unanswered.")
+                f"request and retiring the queued request — it is NOT "
+                f"re-filed, because a second copy of the same prompt is "
+                f"worse than one that goes unanswered.")
+            self._retire_request(iface, cookie)
             return False
 
     # -- BeginAuthentication ---------------------------------------------
@@ -495,7 +588,8 @@ class QdistroPolkitAgent(dbus.service.Object):
 
         def _drive() -> bool:
             try:
-                allowed, reason = self._authenticate(action, msg, det, method)
+                allowed, reason = self._authenticate(
+                    action, msg, det, method, str(cookie), identities)
             except Exception as e:  # noqa: BLE001
                 syslog.syslog(syslog.LOG_ERR,
                               f"polkit-agent auth crashed: {e}")
@@ -503,9 +597,18 @@ class QdistroPolkitAgent(dbus.service.Object):
                     f"qdistro polkit-agent crashed: {e}",
                     name="org.freedesktop.PolicyKit1.Error.Failed"))
                 return False
-            if allowed:
+            # A cancel that raced the verdict (e.g. the PAM prompt was
+            # still open when polkitd gave up) deadens the cookie: no
+            # response may be relayed for it.
+            if allowed and self._is_cancelled(str(cookie)):
+                allowed, reason = False, f"{reason}+cancelled"
+            # The broker method answers polkitd itself on an allow — the
+            # response call is uid-0-only, so the uid-1000 agent cannot
+            # (and must not try to) deliver it. pam/fprint verdicts are
+            # local, so those go through the broker's relay.
+            if allowed and method != "broker":
                 try:
-                    self._respond(cookie)
+                    self._respond(str(cookie), identities)
                 except Exception as e:  # noqa: BLE001
                     syslog.syslog(syslog.LOG_ERR,
                                   f"AuthenticationAgentResponse2 failed: {e}")
@@ -519,19 +622,27 @@ class QdistroPolkitAgent(dbus.service.Object):
                           f"{'allow' if allowed else 'deny'} ({reason})")
             ok_cb()
             return False
-        GLib.idle_add(_drive)
+        # Not GLib.idle_add: _drive blocks for the duration of the auth
+        # (broker WaitForDecision waits on a human, up to _WAIT_TIMEOUT_S;
+        # the PAM prompt and fprint verify block too), and an idle callback
+        # runs ON the main loop — one stray BeginAuth (an unrelated package
+        # asking for auth_admin) parked the loop for its whole timeout and
+        # froze session registration in the VM run. A worker thread leaves
+        # the loop free to service registration and signal watches.
+        threading.Thread(target=_drive, daemon=True).start()
 
     # -- method dispatch ---------------------------------------------------
 
     def _authenticate(self, action_id: str, message: str,
-                      details: dict, method: str) -> tuple[bool, str]:
+                      details: dict, method: str, cookie: str,
+                      identities) -> tuple[bool, str]:
         if method == "pam":
             return self._auth_pam(action_id, message)
         if method == "fprint":
             return self._auth_fprint()
         # broker (default fallback)
         qd_action = action_to_qdistro(action_id)
-        ok = self._ask_broker(qd_action, details)
+        ok = self._ask_broker(qd_action, details, cookie, identities)
         return ok, ("broker-allow" if ok else "broker-deny")
 
     def _auth_pam(self, action_id: str,
@@ -559,29 +670,452 @@ class QdistroPolkitAgent(dbus.service.Object):
     @dbus.service.method(POLKIT_IFACE_AGENT,
                          in_signature="s", out_signature="")
     def CancelAuthentication(self, cookie):
-        # v1: no-op. If admin takes forever we just keep the broker
-        # request open; polkit will eventually time out upstream.
+        # Remember locally first: a worker still in RequestPolkitAuth
+        # must not file a prompt (or relay a response) for a session
+        # polkitd already abandoned — and the local mark survives even
+        # if the broker relay below fails.
+        self._note_cancelled(str(cookie))
+        # Forward the cancel to the broker: it decides the matching
+        # queued request deny so the admin prompt does not linger and
+        # this auth's WaitForDecision waiter releases.
         syslog.syslog(syslog.LOG_INFO, f"polkit cancel: {cookie}")
+        try:
+            self._broker_iface().CancelPolkitAuth(
+                str(cookie), timeout=_REQUEST_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001
+            syslog.syslog(
+                syslog.LOG_WARNING,
+                f"could not forward polkit cancel to the broker: {e}; "
+                f"the queued request stays until decided or reaped")
 
     # -- polkit reply --
-    def _respond(self, cookie: str) -> None:
-        polkitd = self._sysbus.get_object(POLKIT_BUS, POLKIT_OBJ)
-        authority = dbus.Interface(polkitd, POLKIT_IFACE_AUTHORITY)
-        identity = ("unix-user", {"uid": dbus.UInt32(ADMIN_UID)})
-        authority.AuthenticationAgentResponse2(
-            dbus.UInt32(os.getuid()), str(cookie), identity,
-        )
+    def _respond(self, cookie: str, identities) -> None:
+        """Relay a positive pam/fprint verdict through the broker.
+
+        polkitd accepts AuthenticationAgentResponse2 from uid 0 only and
+        the agent runs as the admin uid, so the privileged broker makes
+        the call. The identity is picked FROM polkit's offered list —
+        on this image [unix-user uid=0], not the session uid — because
+        polkitd rejects a response naming an identity it did not offer.
+        """
+        self._broker_iface().RespondPolkitAuth(
+            str(cookie), identities, timeout=_REQUEST_TIMEOUT_S)
 
 
 # -- Registration with polkitd -------------------------------------------
+#
+# polkitd only accepts RegisterAuthenticationAgent for a unix-session subject
+# that EQUALS the session it computes for the caller
+# (polkitbackendinteractiveauthority.c: "Cannot determine session the caller
+# is in" / "Passed session and the session the caller is in differs").
+# polkitd computes that session as sd_pid_get_session(caller pid) and, when
+# the caller is not inside a session scope -- always true here, the agent
+# runs in user@UID.service -- falls back to sd_uid_get_display(uid): the
+# user's display session.
+#
+# The user manager starts this unit from qdwin-session.target, which the
+# lingering admin's default.target also wants, so the agent routinely runs
+# while the admin has no display session at all: only logind's class=manager
+# session for user@.service exists until greetd logs the admin in (and in
+# headless/linger-only guests it never exists). Exiting non-zero there made
+# Restart=on-failure respawn the agent every RestartSec forever. Instead the
+# agent stays up, registers when a display session appears, and re-registers
+# when the display session changes.
 
-def _register(bus, agent_path: str) -> None:
-    polkitd = bus.get_object(POLKIT_BUS, POLKIT_OBJ)
-    authority = dbus.Interface(polkitd, POLKIT_IFACE_AUTHORITY)
-    subject = ("unix-session", {"session-id": dbus.String(_session_id())})
-    authority.RegisterAuthenticationAgent(subject, "en_US.UTF-8", agent_path)
+LOGIND_BUS = "org.freedesktop.login1"
+LOGIND_OBJ = "/org/freedesktop/login1"
+LOGIND_IFACE_MANAGER = "org.freedesktop.login1.Manager"
+LOGIND_IFACE_SESSION = "org.freedesktop.login1.Session"
+LOGIND_IFACE_USER = "org.freedesktop.login1.User"
+DBUS_IFACE_PROPS = "org.freedesktop.DBus.Properties"
+
+# logind session classes that never count as "the session the caller is in"
+# for polkitd: sd_pid_get_session() only resolves session-*.scope cgroups,
+# and logind never elects a manager/background session as a user's display.
+_NON_LOGIN_CLASSES = frozenset({"manager", "manager-early", "background",
+                                "background-light", "none"})
+
+# Safety-net poll for display-session changes logind does not signal as
+# SessionNew/SessionRemoved (e.g. display re-election). Cheap: two D-Bus
+# property reads, silent unless the outcome changes.
+RECONCILE_POLL_S = 30
+# Short follow-up checks after a logind session signal: a new session is
+# announced before logind elects it as the user's display session.
+_SIGNAL_FOLLOWUP_MS = (300, 1500, 5000)
+
+
+def _logind_session_props(bus, session_path) -> tuple[str, str]:
+    obj = bus.get_object(LOGIND_BUS, session_path)
+    props = dbus.Interface(obj, DBUS_IFACE_PROPS)
+    sid = str(props.Get(LOGIND_IFACE_SESSION, "Id"))
+    cls = str(props.Get(LOGIND_IFACE_SESSION, "Class"))
+    return sid, cls
+
+
+def _session_id(bus) -> str | None:
+    """The logind session polkitd will attribute this process to, or None.
+
+    Mirrors polkitd's own lookup so the subject we pass equals the session it
+    computes for the caller: the process's own login session if it has one
+    (agent started by hand from a terminal), else the user's display session
+    (agent started by the user manager -- the normal case). Returns None when
+    neither exists; the caller then waits instead of failing.
+    ``QDISTRO_POLKIT_SESSION_ID`` overrides for tests.
+
+    ``XDG_SESSION_ID`` is deliberately not consulted: the user manager's
+    environment is shared by every login and keeps a value imported by an
+    earlier one, so it can name a session that is gone or is not the one
+    polkitd sees.
+    """
+    test = os.environ.get("QDISTRO_POLKIT_SESSION_ID")
+    if test:
+        return test
+    manager = dbus.Interface(bus.get_object(LOGIND_BUS, LOGIND_OBJ),
+                             LOGIND_IFACE_MANAGER)
+    try:
+        path = manager.GetSessionByPID(dbus.UInt32(os.getpid()))
+        sid, cls = _logind_session_props(bus, path)
+        if sid and cls not in _NON_LOGIN_CLASSES:
+            return sid
+    except dbus.DBusException:
+        pass  # NoSessionForPID: not in a session scope (user@.service)
+    try:
+        user_path = manager.GetUser(dbus.UInt32(os.getuid()))
+    except dbus.DBusException:
+        return None  # NoUserForUID
+    props = dbus.Interface(bus.get_object(LOGIND_BUS, user_path),
+                           DBUS_IFACE_PROPS)
+    display = props.Get(LOGIND_IFACE_USER, "Display")
+    sid, path = str(display[0]), str(display[1])
+    if not sid or path in ("", "/"):
+        return None
+    try:
+        _sid, cls = _logind_session_props(bus, path)
+    except dbus.DBusException:
+        return None  # session vanished between the two calls
+    if cls in _NON_LOGIN_CLASSES:
+        return None
+    return sid
+
+
+def _authority(bus):
+    return dbus.Interface(bus.get_object(POLKIT_BUS, POLKIT_OBJ),
+                          POLKIT_IFACE_AUTHORITY)
+
+
+def _session_subject(session_id: str):
+    return ("unix-session", {"session-id": dbus.String(session_id)})
+
+
+def _private_system_bus():
+    """A dedicated system-bus connection for the agent + its registration.
+
+    Not the shared ``dbus.SystemBus()``: the registration polkitd records
+    belongs to the unique name of the calling connection, and closing that
+    connection is the only reliable way to retract it -- polkitd refuses
+    UnregisterAuthenticationAgent once the caller's session has moved on.
+    """
+    conn = dbus.SystemBus(private=True)
+    conn.set_exit_on_disconnect(False)
+    return conn
+
+
+def _register(bus, agent_path: str) -> tuple[str | None, str | None]:
+    """Register for the current session.
+
+    Returns ``(session_id, owner)``; both None when no login session
+    exists. ``owner`` is polkitd's UNIQUE bus name, resolved BEFORE the
+    call and used as its destination: resolving it afterwards would let
+    a polkitd restart in between pair a live registration that died with
+    daemon D1 to D2's freshly-read owner, leaving the cache confident of
+    a registration nobody holds (astra r153). A restart inside the
+    resolve/call window fails the call -- the proxy is bound to the dead
+    unique name -- instead of landing on an instance we did not name.
+
+    Raises dbus.DBusException when the registration cannot be issued or
+    polkitd refuses it.
+    """
+    sid = _session_id(bus)
+    if sid is None:
+        return None, None
+    # activate_name_owner, not get_name_owner: polkitd is dbus-activated,
+    # and a bare owner lookup on an absent daemon would leave
+    # registration waiting for some other client to start it (astra
+    # r156). The call both activates and returns the unique owner to
+    # pin the registration to.
+    owner = str(bus.activate_name_owner(POLKIT_BUS))
+    authority = dbus.Interface(
+        bus.get_object(owner, POLKIT_OBJ), POLKIT_IFACE_AUTHORITY)
+    authority.RegisterAuthenticationAgent(
+        _session_subject(sid), "en_US.UTF-8", agent_path)
     syslog.syslog(syslog.LOG_NOTICE,
-                  f"registered as session polkit agent (path={agent_path})")
+                  f"registered as session polkit agent (path={agent_path}, "
+                  f"session={sid})")
+    return sid, owner
+
+
+def _polkit_owner(bus) -> str | None:
+    """Unique name currently owning polkitd's well-known name.
+
+    None means the name is unowned (polkitd absent); a DBusException means
+    the lookup itself failed and callers should not draw conclusions.
+    """
+    try:
+        return str(bus.get_name_owner(POLKIT_BUS))
+    except dbus.DBusException as e:
+        if e.get_dbus_name() == "org.freedesktop.DBus.Error.NameHasNoOwner":
+            return None
+        raise
+
+
+class SessionRegistrar:
+    """Keep the agent registered for the user's current login session.
+
+    The agent object and its polkitd registration live on a private
+    system-bus connection this class owns and recreates per session. On a
+    session change polkitd refuses UnregisterAuthenticationAgent for the old
+    session -- the subject must equal the session it computes for the
+    caller, which by then is the new session or none -- so the old entry
+    could only be dropped by asking at exactly the right moment. Instead the
+    connection itself is closed: polkitd removes an agent's registration
+    when the unique name that registered it vanishes, so no stale
+    registration survives a session change (or accumulates across ordinary
+    sequential logins).
+
+    A registration is cached together with the unique-name owner of
+    POLKIT_BUS it was made against. Owner changes mean the daemon (and its
+    registration table) restarted, so the cache is dropped; a queued
+    owner-acquired signal for the same owner is ignored. This ordering is
+    what makes a Register call that itself bus-activated polkitd safe.
+
+    ``reconcile()`` is idempotent: it looks up the session polkitd would
+    attribute us to and (re-)registers only when that differs from the one
+    we registered for. Logging happens on state changes only, so an agent
+    waiting for a login does not spam the journal.
+    """
+
+    def __init__(self, bus, agent_path: str,
+                 make_connection=None, make_agent=None):
+        # `bus` is the shared system bus, used only for logind queries and
+        # signal watches so it never has to be torn down. The exported agent
+        # object goes on the private connection together with its
+        # registration -- polkitd calls BeginAuthentication back on the
+        # registering unique name, so both must be the same connection.
+        self.bus = bus
+        self.agent_path = agent_path
+        self._make_connection = make_connection or _private_system_bus
+        self._make_agent = make_agent or (
+            lambda conn: QdistroPolkitAgent(conn, agent_path))
+        self._conn = None
+        self._agent = None
+        self.session_id: str | None = None
+        # Unique-name owner of POLKIT_BUS the current registration was made
+        # against. Registrations die with their polkitd instance; a queued
+        # NameOwnerChanged for an activation that already happened must not
+        # invalidate this cache, so reconcile() compares owners rather than
+        # trusting signal order.
+        self._polkit_owner: str | None = None
+        self._last_state: object = object()
+
+    def _note(self, state, priority, message: str) -> None:
+        if state != self._last_state:
+            self._last_state = state
+            syslog.syslog(priority, message)
+
+    def _drop_connection(self) -> None:
+        conn = self._conn
+        self._conn = None
+        self._agent = None
+        self._polkit_owner = None
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except Exception as e:  # noqa: BLE001
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"closing the retired agent connection failed: {e}")
+
+    def _forget_registration(self, reason: str) -> None:
+        """The polkitd instance we registered with is gone or restarted.
+
+        Registrations do not survive their daemon, so only the cache needs
+        clearing; the private connection is still usable and registering on
+        it lands in the new instance's empty table.
+        """
+        old = self.session_id
+        self.session_id = None
+        self._polkit_owner = None
+        syslog.syslog(syslog.LOG_NOTICE,
+                      f"{reason}; the registration for session {old} died "
+                      "with the old polkitd instance")
+
+    def reconcile(self) -> bool:
+        try:
+            want = _session_id(self.bus)
+        except dbus.DBusException as e:
+            self._note(("lookup-error", str(e)), syslog.LOG_WARNING,
+                       f"cannot query logind for the login session: {e}")
+            return True
+        if self._conn is not None and not self._conn.get_is_connected():
+            # The transport is gone; polkitd's name-owner cleanup already
+            # removed whatever registration this connection held.
+            self._conn = None
+            self._agent = None
+            self.session_id = None
+            self._polkit_owner = None
+        if self.session_id is not None:
+            # The registration is only valid while the polkitd instance we
+            # registered with owns the name. Checking here (not just in the
+            # signal handler) covers the race where our Register call
+            # bus-activated polkitd and its owner-acquired signal is still
+            # queued behind the main loop.
+            try:
+                owner = _polkit_owner(self.bus)
+            except dbus.DBusException as e:
+                self._note(("owner-error", str(e)), syslog.LOG_WARNING,
+                           f"cannot resolve polkitd's bus name owner: {e}")
+                return True
+            if owner != self._polkit_owner:
+                self._forget_registration("polkitd restarted or vanished")
+        if want is not None and want == self.session_id:
+            return True
+        if self.session_id is not None or (
+                want is None and self._conn is not None):
+            old = self.session_id
+            self.session_id = None
+            self._drop_connection()
+            if old is not None:
+                syslog.syslog(syslog.LOG_NOTICE,
+                              f"login session {old} ended or is no longer "
+                              "the display session; unregistered")
+        if want is None:
+            self._note("no-session", syslog.LOG_NOTICE,
+                       f"no login session for uid {os.getuid()} yet; "
+                       "waiting for one before registering with polkitd")
+            return True
+        if self._conn is None:
+            try:
+                conn = self._make_connection()
+                try:
+                    # libdbus marks bus connections exit-on-disconnect:
+                    # without this, closing the retired connection on a
+                    # session change (or its transport dying) exits the
+                    # process with status 1 -- silently, because it is a
+                    # C-level exit() reached through mainloop dispatch,
+                    # not a Python exception.
+                    conn.set_exit_on_disconnect(False)
+                except AttributeError:
+                    pass  # unit-test fakes are not libdbus connections
+                try:
+                    agent = self._make_agent(conn)
+                except Exception:
+                    # Do not leak the fresh connection when the agent
+                    # object cannot be exported on it.
+                    conn.close()
+                    raise
+            except Exception as e:  # noqa: BLE001
+                self._note(("connect-error", str(e)), syslog.LOG_ERR,
+                           "cannot open a private system-bus connection: "
+                           f"{e}; will retry when logind sessions change")
+                return True
+            self._conn, self._agent = conn, agent
+        try:
+            self.session_id, self._polkit_owner = \
+                _register(self._conn, self.agent_path)
+        except dbus.DBusException as e:
+            name = e.get_dbus_name() or ""
+            certain_miss = name in (
+                # the name had no owner to send to, or the unique-name
+                # destination died before the call -- provably nothing
+                # was registered
+                "org.freedesktop.DBus.Error.ServiceUnknown",
+                "org.freedesktop.DBus.Error.NameHasNoOwner",
+            ) or name.startswith("org.freedesktop.PolicyKit1.")
+            if not certain_miss:
+                # NoReply, a mid-call disconnect, anything else: the
+                # Register may still have landed, so this connection's
+                # registration state is unknown and a retry on it could
+                # hit the duplicate-agent refusal. Retire the connection
+                # -- dropping it retracts whatever polkitd recorded.
+                self.session_id = None
+                self._polkit_owner = None
+                self._drop_connection()
+            self._note(("register-error", want, str(e)), syslog.LOG_ERR,
+                       f"registration for session {want} failed: {e}; "
+                       "will retry when logind sessions change")
+            return True
+        if self.session_id is not None:
+            self._last_state = ("registered", self.session_id)
+        return True
+
+    def _on_logind_signal(self, *args) -> None:
+        self.reconcile()
+        for delay in _SIGNAL_FOLLOWUP_MS:
+            GLib.timeout_add(delay, self._once)
+
+    def _on_logind_props(self, iface, changed, _invalidated) -> None:
+        # SessionNew can arrive well before logind elects the session as
+        # the user's Display session, and the election itself emits only
+        # PropertiesChanged on the User object -- observed live: a ~25 s
+        # gap between session creation and Display, during which every
+        # reconcile() saw "no login session" and the registration waited
+        # for the poll tick. Re-run reconcile on the election itself.
+        if str(iface) != LOGIND_IFACE_USER or "Display" not in changed:
+            return
+        self.reconcile()
+        for delay in _SIGNAL_FOLLOWUP_MS:
+            GLib.timeout_add(delay, self._once)
+
+    def _on_polkit_owner(self, name, old_owner, new_owner) -> None:
+        if str(name) != POLKIT_BUS or not str(new_owner):
+            return
+        # A polkitd owner appeared. The signal may describe an activation
+        # that predates a registration we already made on this same daemon
+        # (queued behind a synchronous reconcile()), so it must not clear
+        # state on its own -- reconcile() decides by comparing owners.
+        self.reconcile()
+
+    def _once(self) -> bool:
+        self.reconcile()
+        return False  # one-shot GLib source
+
+    def start(self) -> None:
+        for signal in ("SessionNew", "SessionRemoved"):
+            try:
+                self.bus.add_signal_receiver(
+                    self._on_logind_signal, signal_name=signal,
+                    dbus_interface=LOGIND_IFACE_MANAGER,
+                    bus_name=LOGIND_BUS, path=LOGIND_OBJ)
+            except Exception as e:  # noqa: BLE001
+                syslog.syslog(syslog.LOG_WARNING,
+                              f"cannot watch logind {signal}: {e}; "
+                              f"polling every {RECONCILE_POLL_S}s only")
+        try:
+            # Display-session election is announced on the admin's User
+            # object, separately from session create/remove -- pin the
+            # watch to that object (logind names it after the uid).
+            self.bus.add_signal_receiver(
+                self._on_logind_props, signal_name="PropertiesChanged",
+                dbus_interface="org.freedesktop.DBus.Properties",
+                bus_name=LOGIND_BUS,
+                path=f"{LOGIND_OBJ}/user/_{os.getuid()}")
+        except Exception as e:  # noqa: BLE001
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"cannot watch the user's Display election: {e}")
+        try:
+            # bus_name + path pin the watch to signals the bus daemon itself
+            # sends about POLKIT_BUS -- any other sender's identically
+            # shaped payload is not a polkitd lifecycle event.
+            self.bus.add_signal_receiver(
+                self._on_polkit_owner, signal_name="NameOwnerChanged",
+                dbus_interface="org.freedesktop.DBus",
+                bus_name="org.freedesktop.DBus",
+                path="/org/freedesktop/DBus")
+        except Exception as e:  # noqa: BLE001
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"cannot watch for a polkitd restart: {e}")
+        GLib.timeout_add_seconds(RECONCILE_POLL_S, self.reconcile)
+        self.reconcile()
 
 
 def _admin_user() -> str:
@@ -591,38 +1125,6 @@ def _admin_user() -> str:
         or "admin"
 
 
-def _session_id() -> str:
-    """Find the logind session id for this process.
-
-    Prefer ``XDG_SESSION_ID`` (set by pam_systemd in any logind-managed
-    session). Fall back to ``/proc/self/sessionid`` (audit-kernel only),
-    then ``loginctl show-session self -p Id``. Test overrides via
-    ``QDISTRO_POLKIT_SESSION_ID``.
-    """
-    test = os.environ.get("QDISTRO_POLKIT_SESSION_ID")
-    if test:
-        return test
-    env = os.environ.get("XDG_SESSION_ID")
-    if env:
-        return env
-    try:
-        with open("/proc/self/sessionid") as f:
-            sid = f.read().strip()
-            if sid and sid != "4294967295":
-                return sid
-    except OSError:
-        pass
-    try:
-        out = subprocess.check_output(
-            ["loginctl", "show-session", "self", "-p", "Id", "--value"],
-            text=True, timeout=5).strip()
-        if out:
-            return out
-    except Exception:  # noqa: BLE001
-        pass
-    raise RuntimeError("cannot determine logind session id for polkit registration")
-
-
 # -- main -----------------------------------------------------------------
 
 def main() -> int:
@@ -630,6 +1132,10 @@ def main() -> int:
     # Fail closed before serving if the host lacks the admin/uid-1000 account.
     _require_admin_account()
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    # Auth drivers run on worker threads (BeginAuthentication); libdbus
+    # needs its thread support initialised before connections are shared
+    # across threads.
+    dbus.mainloop.glib.threads_init()
     bus = dbus.SessionBus()
     try:
         bus.request_name(AGENT_BUS, dbus.bus.NAME_FLAG_DO_NOT_QUEUE)
@@ -651,15 +1157,16 @@ def main() -> int:
     # Registration succeeded, the unit looked healthy, and no authorization
     # ever reached the agent — observed live: polkitd logged "FAILED to
     # authenticate", the agent's journal showed nothing at all.
+    #
+    # The registrar keeps object and registration on one PRIVATE system-bus
+    # connection it owns and replaces on session change — closing the
+    # connection is also the unregistration mechanism (see SessionRegistrar).
     sysbus = dbus.SystemBus()
-    agent = QdistroPolkitAgent(sysbus, AGENT_OBJ)  # noqa: F841
-    try:
-        _register(sysbus, AGENT_OBJ)
-    except Exception as e:  # noqa: BLE001
-        syslog.syslog(syslog.LOG_ERR, f"registration failed: {e}")
-        print(f"qdistro-polkit-agent: registration failed: {e}",
-              file=sys.stderr)
-        return 1
+    # Register now if the admin is logged in, otherwise wait for a login
+    # without exiting (see SessionRegistrar): exiting made the user manager
+    # respawn the agent every RestartSec for as long as no session existed.
+    registrar = SessionRegistrar(sysbus, AGENT_OBJ)
+    registrar.start()
     GLib.MainLoop().run()
     return 0
 

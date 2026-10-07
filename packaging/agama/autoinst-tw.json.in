@@ -1,0 +1,44 @@
+{
+  "product": {
+    "id": "Tumbleweed"
+  },
+  "software": {
+    "packages": [
+      "qdistro-desktop"
+    ],
+    "extraRepositories": [
+      {
+        "alias": "qdistro",
+        "name": "qdistro RPM repository",
+        "url": "@QDISTRO_RPM_REPO_URL@",
+        "priority": 70,
+        "enabled": true,
+        "allowUnsigned": false,
+        "gpgFingerprints": [
+          "@QDISTRO_RPM_KEY_FP@"
+        ]
+      }
+    ]
+  },
+  "bootloader": {
+    "timeout": 10,
+    "extraKernelParams": "security=selinux selinux=1"
+  },
+  "user": {
+    "userName": "admin",
+    "fullName": "qdistro admin",
+    "password": "@QDISTRO_ADMIN_PASSWORD@"
+  },
+  "root": {
+    "password": "@QDISTRO_ROOT_PASSWORD@"
+  },
+  "scripts": {
+    "post": [
+      {
+        "name": "qdistro-provision.sh",
+        "chroot": true,
+        "content": "@POST_INSTALL_SH@"
+      }
+    ]
+  }
+}

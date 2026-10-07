@@ -257,3 +257,77 @@ noct_poll_dpms_on_atomic_einval() {
         sleep "$interval"
     done
 }
+
+# ---- Scenario 05 step 2: a guest-timed, detached idle wait ----------------
+#
+# The idle wait used to be a host `sleep 75` followed by a sysfs read, all in
+# one driver tool call. In full-20261006T175536Z-3524705 the driver's tool
+# returned before that call finished (step2-idle.log never got its dpms line),
+# and the driver then read /sys/.../dpms itself ~50 s after its last pointer
+# input -- before the 60 s display-off timeout -- and recorded FAIL "dpms
+# stayed On". The product had blanked on time in every replay.
+#
+# Now the GUEST times the wait: noct_idle_wait_start launches a transient
+# systemd unit that sleeps NOCT_IDLE_WAIT_S, reads the DRM connector, and
+# atomically writes `dpms=<state> waited_s=<n>` to a fresh result path. The
+# wait therefore cannot be cut short by the host side, and the record says how
+# long it actually waited. The host polls the file with short vm-exec calls
+# (no input: QGA only), and a poll that is itself interrupted can simply be
+# re-run against the same result path.
+: "${NOCT_IDLE_WAIT_S:=75}"
+: "${NOCT_IDLE_POLL_S:=3}"
+: "${NOCT_IDLE_POLL_MAX_S:=180}"
+: "${NOCT_DPMS_SYSFS:=/sys/class/drm/card0-Virtual-1/dpms}"
+
+# noct_idle_wait_script <result-path>: the guest script (pure; host-testable).
+noct_idle_wait_script() {
+    local res=$1
+    printf '%s\n' \
+        'start=$(date +%s)' \
+        "sleep $NOCT_IDLE_WAIT_S" \
+        "d=\$(cat $NOCT_DPMS_SYSFS 2>/dev/null || echo unreadable)" \
+        'end=$(date +%s)' \
+        "printf 'dpms=%s waited_s=%s\\n' \"\$d\" \"\$((end-start))\" > $res.tmp && mv -f $res.tmp $res"
+}
+
+# noct_idle_wait_start <result-path>: start the detached guest wait. The path
+# must be fresh (per-attempt token) so a stale record can never be read.
+noct_idle_wait_start() {
+    local res=$1 b64
+    case "$res" in
+        /tmp/qci/*/*) ;;
+        *) echo "FAIL: idle-wait result path must be under the per-scenario /tmp/qci dir, got '$res'"; return 2 ;;
+    esac
+    case "$NOCT_IDLE_WAIT_S" in ''|*[!0-9]*) echo "FAIL: bad NOCT_IDLE_WAIT_S '$NOCT_IDLE_WAIT_S'"; return 2 ;; esac
+    b64=$(noct_idle_wait_script "$res" | base64 -w0) || return 2
+    # Single quotes only: vm-exec's qga JSON breaks on an embedded double quote.
+    "$QDWIN_VM_EXEC" "$VMNAME" \
+        "test ! -e $res && systemd-run --quiet --collect --unit=qci-noct-idle-wait-\$(date +%s%N) /bin/sh -c 'echo $b64 | base64 -d | sh'"
+}
+
+# noct_idle_wait_poll <result-path>: print the record once the guest wrote it.
+# Returns 0 with the record on stdout, 1 if none appeared within
+# NOCT_IDLE_POLL_MAX_S. Each probe is one short vm-exec call.
+noct_idle_wait_poll() {
+    local res=$1 out start now
+    start=$(date +%s)
+    while :; do
+        out=$("$QDWIN_VM_EXEC" "$VMNAME" "cat $res 2>/dev/null" 2>/dev/null | grep -E '^dpms=' | tail -1) || true
+        if [ -n "$out" ]; then printf '%s\n' "$out"; return 0; fi
+        now=$(date +%s)
+        [ $((now - start)) -lt "$NOCT_IDLE_POLL_MAX_S" ] || return 1
+        sleep "$NOCT_IDLE_POLL_S"
+    done
+}
+
+# noct_idle_wait_verdict <record>: 0 iff the guest waited at least
+# NOCT_IDLE_WAIT_S and then read exactly `Off`. Prints the reason otherwise.
+noct_idle_wait_verdict() {
+    local rec=$1 d w
+    d=$(printf '%s\n' "$rec" | sed -n 's/^dpms=\([^ ]*\) waited_s=\([0-9][0-9]*\)$/\1/p')
+    w=$(printf '%s\n' "$rec" | sed -n 's/^dpms=\([^ ]*\) waited_s=\([0-9][0-9]*\)$/\2/p')
+    [ -n "$d" ] && [ -n "$w" ] || { echo "malformed idle-wait record '$rec'"; return 1; }
+    [ "$w" -ge "$NOCT_IDLE_WAIT_S" ] || { echo "guest waited only ${w}s (< ${NOCT_IDLE_WAIT_S}s)"; return 1; }
+    [ "$d" = Off ] || { echo "DPMS read '$d' after ${w}s idle, expected Off"; return 1; }
+    return 0
+}
