@@ -310,8 +310,8 @@ sec_mem() {
     if [ -n "$t2cg" ] && [ -n "$(cg_mem "$t2cg")" ]; then
         emit t2_idle_memory_current_mb "$(mb_b "$(cg_mem "$t2cg")")" MB
         local t2pss; t2pss=$(sum_pss_kb $(tree_procs "/sys/fs/cgroup$t2cg"))
-        [ -n "$t2pss" ] || fail "mem: t2 PSS sum failed"
-        emit t2_idle_pss_mb "$(mb_kb "$t2pss")" MB
+        [ -n "$t2pss" ] && emit t2_idle_pss_mb "$(mb_kb "$t2pss")" MB \
+            || fail "mem: t2 PSS sum failed"
     else
         # report the delegation chain so a miss is diagnosable from the log
         local cgpath="/sys/fs/cgroup$t2cg" anc ctl=""
@@ -363,8 +363,8 @@ sec_sys() {
     local out rc=0
     emit t2_runtime "$(pm info --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null)" -
     out=$("$BW/syscost" 2>&1 | tr '\n' ' ') || rc=$?
-    valid_sysrow "$out" && [ "$rc" -eq 0 ] || fail "sys host probe (rc=$rc): $out"
-    emit sys_host "$out" -
+    if valid_sysrow "$out" && [ "$rc" -eq 0 ]; then emit sys_host "$out" -
+    else fail "sys host probe (rc=$rc): $out"; fi
     # tier 2: the binary must be owned by admin so rootless podman's :z
     # relabel can lsetxattr it (root-owned files fail under enforcing)
     local ap=/home/admin/t3s-syscost
@@ -375,17 +375,17 @@ sec_sys() {
         -v "$ap:/bench/syscost:ro,z" --entrypoint /bench/syscost "$IMGW" 2>&1 \
         | tr '\n' ' ') || rc=$?
     rm -f "$ap"
-    valid_sysrow "$out" && [ "$rc" -eq 0 ] || fail "sys t2 probe (rc=$rc): $out"
-    emit sys_t2_runc "$out" -
+    if valid_sysrow "$out" && [ "$rc" -eq 0 ]; then emit sys_t2_runc "$out" -
+    else fail "sys t2 probe (rc=$rc): $out"; fi
     rc=0
     out=$(t3s_run t3sys '["/bench/syscost"]' 2>&1 | tr '\n' ' ') || rc=$?
-    valid_sysrow "$out" && [ "$rc" -eq 0 ] || fail "sys t3s probe (rc=$rc): $out"
-    emit sys_t3s_systrap "$out" -
+    if valid_sysrow "$out" && [ "$rc" -eq 0 ]; then emit sys_t3s_systrap "$out" -
+    else fail "sys t3s probe (rc=$rc): $out"; fi
     # fast-path off shows the un-amortised trap cost (plan hypothesis)
     rc=0
     out=$(t3s_run t3sysnf '["/bench/syscost"]' --systrap-disable-fast-path 2>&1 | tr '\n' ' ') || rc=$?
-    valid_sysrow "$out" && [ "$rc" -eq 0 ] || fail "sys t3s-nofastpath probe (rc=$rc): $out"
-    emit sys_t3s_systrap_nofastpath "$out" -
+    if valid_sysrow "$out" && [ "$rc" -eq 0 ]; then emit sys_t3s_systrap_nofastpath "$out" -
+    else fail "sys t3s-nofastpath probe (rc=$rc): $out"; fi
     t3s_run t3sys '["/bin/true"]' > /dev/null 2>&1 \
         || fail "direct runsc probe unhealthy — t3s columns above may be errors"
 }
@@ -396,9 +396,11 @@ sec_io() {
     local tree=/var/tmp/t3s-bench-tree tar=/var/tmp/t3s-bench-tree.tar
     rm -rf "$tree"; mkdir -p "$tree"
     for i in $(seq 1 200); do dd if=/dev/zero bs=1M count=1 of="$tree/f$i" 2>/dev/null; done
-    (cd "$tree" && tar cf "$tar" ./*)
+    (cd "$tree" && tar cf "$tar" ./*) || { fail "io: tar cf failed"; return; }
     chmod 0644 "$tar"   # rootless podman binds it read-only into the container
-    emit io_tree_mb $(( $(stat -c %s "$tar") / 1048576 )) MB
+    local sz; sz=$(stat -c %s "$tar")
+    [ -n "$sz" ] || { fail "io: tar stat failed"; return; }
+    emit io_tree_mb $(( sz / 1048576 )) MB
     # Same measurement boundary on all three paths: the workload itself
     # reports TAR_MS (extraction only, in-container clock) — container start /
     # spec-gen / teardown overhead is excluded everywhere. The host column is
@@ -410,8 +412,12 @@ sec_io() {
     mkdir -p /mnt/t3s-io && mount -t tmpfs -o size=1g none /mnt/t3s-io
     local TARX="tar --no-same-permissions --touch -xf"
     local t0 t1
-    t0=$(ts_us); $TARX "$tar" -C /mnt/t3s-io || fail "host io: tar failed"; t1=$(ts_us)
-    emit io_tar_host_ms $(( (t1 - t0) / 1000 )) ms
+    t0=$(ts_us)
+    if $TARX "$tar" -C /mnt/t3s-io; then
+        t1=$(ts_us); emit io_tar_host_ms $(( (t1 - t0) / 1000 )) ms
+    else
+        fail "host io: tar failed"
+    fi
     umount /mnt/t3s-io
     # tier 2: admin-owned bind-mount so :z can relabel; the shell inside the
     # container prints TAR_MS for just the extraction
@@ -419,10 +425,12 @@ sec_io() {
     install -m 0644 -o admin -g admin "$tar" "$at"
     t2probe='S=$(date +%s%3N); tar --no-same-permissions --touch -xf /bench.tar -C /bench && echo TAR_MS=$(( $(date +%s%3N) - S ))'
     for i in 1 2; do
-        out=$(pm run --rm --name t2io$i --network none --entrypoint /bin/sh \
+        if ! out=$(pm run --rm --name t2io$i --network none --entrypoint /bin/sh \
             --security-opt label=disable \
             --tmpfs /bench:size=1g -v "$at:/bench.tar:ro,z" \
-            "$IMGW" -c "$t2probe" 2>&1)
+            "$IMGW" -c "$t2probe" 2>&1); then
+            fail "t2 io run $i: pm run failed: $(echo "$out" | tail -2)"; continue
+        fi
         ms=$(tar_ms "$out")
         [ -n "$ms" ] || { fail "t2 io run $i: $(echo "$out" | tail -2)"; continue; }
         emit io_tar_t2_ms_$i "$ms" ms
@@ -468,21 +476,23 @@ sec_bridge() {
     # server pumps. Pixel bulk travels via the client's mmap'd shm rebuild,
     # not socket writes, so wchar stays small by design. PSS should stay
     # flat — waypipe streams damage, it does not buffer the file.
-    local r0 r1
+    local r0 r1 n_ok=0
     r0=$(sed -n 's/^rchar: //p' "/proc/$bp/io" 2>/dev/null)
     for i in $(seq 1 30); do
-        v=$(pss_kb "$bp" 2>/dev/null) || break
-        [ -n "$v" ] && [ "$v" -gt "$peak" ] && peak=$v
+        v=$(pss_kb "$bp" 2>/dev/null) && [ -n "$v" ] || break
+        [ "$v" -gt "$peak" ] && peak=$v
+        n_ok=$((n_ok + 1))
         sleep 0.4
     done
     r1=$(sed -n 's/^rchar: //p' "/proc/$bp/io" 2>/dev/null)
-    [ "$peak" -gt 0 ] || fail "bridge: client proc died or smaps unreadable mid-flood"
-    [ -n "$r0" ] && [ -n "$r1" ] || fail "bridge: rchar unreadable (${r0:-none} -> ${r1:-none})"
-    [ -n "$r0" ] && [ -n "$r1" ] && [ $((r1 - r0)) -gt 0 ] \
-        || fail "bridge: zero socket traffic — flood did not cross the bridge"
-    emit bridge_client_pss_start_mb "$(mb_kb "$base")" MB
-    emit bridge_client_pss_peak_mb "$(mb_kb "$peak")" MB
-    emit bridge_rchar_delta_kb $(( (r1 - r0) / 1024 )) KB
+    if [ "$n_ok" -eq 30 ] && [ -n "$r0" ] && [ -n "$r1" ] \
+            && [ $((r1 - r0)) -gt 0 ]; then
+        emit bridge_client_pss_start_mb "$(mb_kb "$base")" MB
+        emit bridge_client_pss_peak_mb "$(mb_kb "$peak")" MB
+        emit bridge_rchar_delta_kb $(( (r1 - r0) / 1024 )) KB
+    else
+        fail "bridge: incomplete sample (pss_reads=$n_ok/30 rchar=${r0:-none}->${r1:-none})"
+    fi
     teardown_one "$FS"
 }
 
@@ -492,9 +502,16 @@ sec_overhead() {
     local uid
     uid=$(silo_uid "$GS")
     [ -n "$uid" ] || { fail "overhead: no uid for $GS"; return; }
-    emit silo_store_mb "$(du -sm "$(getent passwd "$(silo_acct "$GS")" | cut -d: -f6)/.local/share/containers" 2>/dev/null | cut -f1)" MB
-    emit silo_runsc_state_mb "$(du -sm "$RUNSC_BASE/$uid" 2>/dev/null | cut -f1)" MB
-    emit silo_runtime_mb "$(du -sm "$RT_BASE/$uid" 2>/dev/null | cut -f1)" MB
+    local home store state rt
+    home=$(getent passwd "$(silo_acct "$GS")" | cut -d: -f6)
+    store=$(du -sm "$home/.local/share/containers" 2>/dev/null | cut -f1)
+    state=$(du -sm "$RUNSC_BASE/$uid" 2>/dev/null | cut -f1)
+    rt=$(du -sm "$RT_BASE/$uid" 2>/dev/null | cut -f1)
+    [ -n "$store" ] && [ -n "$state" ] && [ -n "$rt" ] \
+        || { fail "overhead: du failed (home=${home:-none} store=${store:-none} state=${state:-none} rt=${rt:-none})"; return; }
+    emit silo_store_mb "$store" MB
+    emit silo_runsc_state_mb "$state" MB
+    emit silo_runtime_mb "$rt" MB
 }
 
 # --- latency window modes (host run-bench.sh drives virsh send-key/screenshot)
@@ -525,9 +542,11 @@ teardown_one() {
     [ -n "$scg" ] || fail "teardown $s: scope_cgroup never recorded"
     t0=$(ts_us)
     sm StopSilo si "$s" 10 > /dev/null 2>&1
-    wait_for 60 unit_down "qdistro-tier3s-$tok.scope" \
-        || fail "teardown $s: scope qdistro-tier3s-$tok.scope still up after StopSilo"
-    emit "teardown_${s}_ms" $(( ($(ts_us) - t0) / 1000 )) ms
+    if wait_for 60 unit_down "qdistro-tier3s-$tok.scope"; then
+        emit "teardown_${s}_ms" $(( ($(ts_us) - t0) / 1000 )) ms
+    else
+        fail "teardown $s: scope qdistro-tier3s-$tok.scope still up after StopSilo"
+    fi
     [ -d "/sys/fs/cgroup$scg" ] && fail "teardown $s: scope cgroup $scg still present" || :
     st=$(silo_state "$s")
     [ "$st" = QUERY-FAILED ] && fail "teardown $s: ListSilos query failed"
