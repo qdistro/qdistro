@@ -216,6 +216,25 @@ def make_agent(monkeypatch):
 
 class TestBrokerDelegation:
 
+    def test_begin_auth_runs_off_the_main_loop(self, make_agent, monkeypatch):
+        """A blocked auth driver must not park the GLib main loop: the loop
+        carries the session-registration watches, so an auth waiting on a
+        human (WaitForDecision, up to 900s) would freeze registration for
+        its whole timeout. Observed live: one stray NetworkManager
+        auth_admin BeginAuth stalled the A->B->A session migration."""
+        a = make_agent(_RecordingBroker())
+        started = []
+        def no_idle(*args, **kw):
+            raise AssertionError(
+                "BeginAuth work scheduled on the main loop via idle_add")
+        monkeypatch.setattr(agent_mod.GLib, "idle_add", no_idle)
+        monkeypatch.setattr(
+            agent_mod.threading, "Thread",
+            lambda target, daemon: started.append(target) or mock.MagicMock())
+        a.BeginAuthentication("org.qdistro.test", "m", "", {}, "cookie", [],
+                              ok_cb=lambda: None, err_cb=lambda e: None)
+        assert len(started) == 1, "auth work must start on a worker thread"
+
     def test_wait_carries_a_timeout_long_enough_for_a_human(self, make_agent):
         """The defect: no timeout= meant dbus-python's 25s default applied to
         a call whose whole job is to wait for an admin to read a prompt."""

@@ -519,7 +519,14 @@ class QdistroPolkitAgent(dbus.service.Object):
                           f"{'allow' if allowed else 'deny'} ({reason})")
             ok_cb()
             return False
-        GLib.idle_add(_drive)
+        # Not GLib.idle_add: _drive blocks for the duration of the auth
+        # (broker WaitForDecision waits on a human, up to _WAIT_TIMEOUT_S;
+        # the PAM prompt and fprint verify block too), and an idle callback
+        # runs ON the main loop — one stray BeginAuth (an unrelated package
+        # asking for auth_admin) parked the loop for its whole timeout and
+        # froze session registration in the VM run. A worker thread leaves
+        # the loop free to service registration and signal watches.
+        threading.Thread(target=_drive, daemon=True).start()
 
     # -- method dispatch ---------------------------------------------------
 
@@ -951,6 +958,10 @@ def main() -> int:
     # Fail closed before serving if the host lacks the admin/uid-1000 account.
     _require_admin_account()
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    # Auth drivers run on worker threads (BeginAuthentication); libdbus
+    # needs its thread support initialised before connections are shared
+    # across threads.
+    dbus.mainloop.glib.threads_init()
     bus = dbus.SessionBus()
     try:
         bus.request_name(AGENT_BUS, dbus.bus.NAME_FLAG_DO_NOT_QUEUE)
