@@ -415,15 +415,26 @@ class QdistroPolkitAgent(dbus.service.Object):
 
     def _broker_iface(self):
         if self._broker is None:
-            obj = self._sysbus.get_object(QDISTRO_BROKER_BUS, QDISTRO_BROKER_OBJ)
+            # Bind the proxy to the broker's UNIQUE name, not the
+            # well-known one. A proxy on the well-known name re-resolves
+            # its destination per call, so a worker that filed request id
+            # 1 on broker instance D1 could, after a restart, call
+            # WaitForDecision(1) on D2 -- whose id counter restarted at 1
+            # -- and consume an unrelated request's decision (astra
+            # r153). A unique-name proxy dies with its owner: the wait
+            # fails with a D-Bus error and the auth denies, fail-closed.
+            owner = str(self._sysbus.get_name_owner(QDISTRO_BROKER_BUS))
+            obj = self._sysbus.get_object(owner, QDISTRO_BROKER_OBJ)
             self._broker = dbus.Interface(obj, QDISTRO_BROKER_BUS)
         return self._broker
 
-    def _file_request(self, qdistro_action: str, details: dict) -> int:
-        """File one permission request, retrying ONLY when we know the first
-        attempt never reached the broker.
+    def _file_request(self, qdistro_action: str, details: dict):
+        """File one permission request; return (broker proxy, request id).
 
-        The retry used to catch every DBusException and re-file. Two of the
+        The caller must wait on the SAME proxy the request was filed
+        through: request ids mean something only to the broker instance
+        that issued them, and the proxy is what pins the instance. The
+        retry used to catch every DBusException and re-file. Two of the
         errors it caught — NoReply and a mid-call disconnect — mean "we do
         not know whether the broker got it", so re-filing produced a second
         pending request for the same polkit cookie: the admin saw the same
@@ -431,8 +442,9 @@ class QdistroPolkitAgent(dbus.service.Object):
         and NameHasNoOwner are the only ones that positively mean nothing was
         filed, because the name had no owner to receive the call.
         """
+        iface = self._broker_iface()
         try:
-            return int(self._broker_iface().RequestPermission(
+            return iface, int(iface.RequestPermission(
                 qdistro_action, details, timeout=_REQUEST_TIMEOUT_S))
         except dbus.DBusException as e:
             if e.get_dbus_name() not in (
@@ -443,12 +455,13 @@ class QdistroPolkitAgent(dbus.service.Object):
             # be bound to a dead unique name) and try once more, in case it
             # is being restarted underneath us.
             self._broker = None
-            return int(self._broker_iface().RequestPermission(
+            iface = self._broker_iface()
+            return iface, int(iface.RequestPermission(
                 qdistro_action, details, timeout=_REQUEST_TIMEOUT_S))
 
     def _ask_broker(self, qdistro_action: str, details: dict) -> bool:
         try:
-            rid = self._file_request(qdistro_action, details)
+            iface, rid = self._file_request(qdistro_action, details)
         except dbus.DBusException as e:
             self._broker = None
             syslog.syslog(syslog.LOG_ERR,
@@ -461,8 +474,9 @@ class QdistroPolkitAgent(dbus.service.Object):
             # which expired long before any real decision and was then read
             # as "broker unreachable" — the broker was up and healthy the
             # whole time. Same generous cutoff as the media exec client.
-            return bool(self._broker_iface().WaitForDecision(
-                rid, timeout=_WAIT_TIMEOUT_S))
+            # `iface` is the same unique-name-bound proxy that filed the
+            # request: rid only exists on that broker instance.
+            return bool(iface.WaitForDecision(rid, timeout=_WAIT_TIMEOUT_S))
         except dbus.DBusException as e:
             self._broker = None
             syslog.syslog(
@@ -698,20 +712,33 @@ def _private_system_bus():
     return conn
 
 
-def _register(bus, agent_path: str) -> str | None:
-    """Register for the current session; return its id, or None if none.
+def _register(bus, agent_path: str) -> tuple[str | None, str | None]:
+    """Register for the current session.
 
-    Raises dbus.DBusException when polkitd refuses the registration.
+    Returns ``(session_id, owner)``; both None when no login session
+    exists. ``owner`` is polkitd's UNIQUE bus name, resolved BEFORE the
+    call and used as its destination: resolving it afterwards would let
+    a polkitd restart in between pair a live registration that died with
+    daemon D1 to D2's freshly-read owner, leaving the cache confident of
+    a registration nobody holds (astra r153). A restart inside the
+    resolve/call window fails the call -- the proxy is bound to the dead
+    unique name -- instead of landing on an instance we did not name.
+
+    Raises dbus.DBusException when the registration cannot be issued or
+    polkitd refuses it.
     """
     sid = _session_id(bus)
     if sid is None:
-        return None
-    _authority(bus).RegisterAuthenticationAgent(
+        return None, None
+    owner = str(bus.get_name_owner(POLKIT_BUS))
+    authority = dbus.Interface(
+        bus.get_object(owner, POLKIT_OBJ), POLKIT_IFACE_AUTHORITY)
+    authority.RegisterAuthenticationAgent(
         _session_subject(sid), "en_US.UTF-8", agent_path)
     syslog.syslog(syslog.LOG_NOTICE,
                   f"registered as session polkit agent (path={agent_path}, "
-                  f"session={sid})")
-    return sid
+                  f"session={sid}, polkitd={owner})")
+    return sid, owner
 
 
 def _polkit_owner(bus) -> str | None:
@@ -880,16 +907,25 @@ class SessionRegistrar:
                 return True
             self._conn, self._agent = conn, agent
         try:
-            self.session_id = _register(self._conn, self.agent_path)
-            self._polkit_owner = _polkit_owner(self._conn)
+            self.session_id, self._polkit_owner = \
+                _register(self._conn, self.agent_path)
         except dbus.DBusException as e:
-            if self.session_id is not None:
-                # Register landed but the owner lookup failed: the cached
-                # registration cannot be tied to a daemon instance, so a
-                # retry on this connection could hit a duplicate refusal.
-                # Retire the connection instead — its disappearance
-                # retracts whatever polkitd holds.
+            name = e.get_dbus_name() or ""
+            certain_miss = name in (
+                # the name had no owner to send to, or the unique-name
+                # destination died before the call -- provably nothing
+                # was registered
+                "org.freedesktop.DBus.Error.ServiceUnknown",
+                "org.freedesktop.DBus.Error.NameHasNoOwner",
+            ) or name.startswith("org.freedesktop.PolicyKit1.")
+            if not certain_miss:
+                # NoReply, a mid-call disconnect, anything else: the
+                # Register may still have landed, so this connection's
+                # registration state is unknown and a retry on it could
+                # hit the duplicate-agent refusal. Retire the connection
+                # -- dropping it retracts whatever polkitd recorded.
                 self.session_id = None
+                self._polkit_owner = None
                 self._drop_connection()
             self._note(("register-error", want, str(e)), syslog.LOG_ERR,
                        f"registration for session {want} failed: {e}; "

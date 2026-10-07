@@ -58,6 +58,7 @@ class _Logind:
         self.registrations: dict = {}         # session id -> _Conn holding it
         self.conns: list = []
         self.register_error: Exception | None = None
+        self.register_hook = None             # runs inside Register, pre-checks
         self.owner_error: Exception | None = None
         self.signals: list[str] = []
         # Unique-name owner of polkitd's well-known name. A restart mints a
@@ -147,6 +148,14 @@ class _Obj:
         self.fake, self.conn, self.bus_name, self.path = \
             fake, conn, bus_name, path
 
+    def _dead(self) -> bool:
+        """A proxy addressed to a UNIQUE name dies with that owner: once
+        the daemon it named is gone the destination no longer exists and
+        the bus daemon answers ServiceUnknown. A proxy on the well-known
+        name instead re-resolves to whoever owns it now."""
+        dest = str(self.bus_name)
+        return dest.startswith(":") and dest != self.fake.polkit_owner
+
     # org.freedesktop.login1.Manager
     def GetSessionByPID(self, pid):
         if self.fake.pid_session is None:
@@ -173,6 +182,12 @@ class _Obj:
     # connection, and one session cannot hold two live registrations.
     def RegisterAuthenticationAgent(self, subject, locale, path):
         fake = self.fake
+        if fake.register_hook is not None:
+            fake.register_hook()
+        if self._dead():
+            raise dbus.DBusException(
+                "the destination no longer exists",
+                name="org.freedesktop.DBus.Error.ServiceUnknown")
         if fake.register_error is not None:
             raise fake.register_error
         sid = str(subject[1]["session-id"])
@@ -197,6 +212,10 @@ class _Obj:
 
     def UnregisterAuthenticationAgent(self, subject, path):
         fake = self.fake
+        if self._dead():
+            raise dbus.DBusException(
+                "the destination no longer exists",
+                name="org.freedesktop.DBus.Error.ServiceUnknown")
         sid = str(subject[1]["session-id"])
         caller = fake.caller_session()
         if caller is None or sid != caller:
@@ -463,10 +482,11 @@ class TestRegistrar:
         reg.reconcile()
         assert fake.registered == ["6"]
 
-    def test_register_then_owner_error_retires_connection(self, fake):
-        """Register landed but the daemon owner cannot be resolved: the
-        registration cannot be tied to a polkitd instance, so the
-        connection is retired rather than retried into a duplicate."""
+    def test_owner_resolution_failure_retires_uncertain_state(self, fake):
+        """A get_name_owner failure the registrar cannot classify leaves
+        doubt about what the connection did: the conservative answer is
+        to retire it, so a later retry can never hit a duplicate
+        registration refusal on uncertain state."""
         _login(fake, "6")
         reg = _registrar(fake)
         fake.owner_error = dbus.DBusException("bus hiccup")
@@ -477,6 +497,45 @@ class TestRegistrar:
         fake.owner_error = None
         reg.reconcile()
         assert reg.session_id == "6"
+        assert _held(fake) == ["6"]
+
+    def test_absent_polkitd_retries_on_the_same_connection(self, fake):
+        """NameHasNoOwner proves nothing was registered, so the private
+        connection survives and the next reconcile registers on it."""
+        _login(fake, "6")
+        fake.polkit_owner = None
+        reg = _registrar(fake)
+        reg.reconcile()
+        assert reg.session_id is None
+        assert _held(fake) == []
+        conn = reg._conn
+        assert conn is not None and not conn.closed
+        fake.polkit_owner = ":1.40"
+        reg.reconcile()
+        assert reg.session_id == "6"
+        assert reg._conn is conn
+
+    def test_restart_inside_registration_keeps_the_retry_clean(self, fake):
+        """astra r153: the owner is resolved (D1) and the daemon restarts
+        before the Register call runs. The proxy is bound to D1's unique
+        name, so the call fails on the dead destination rather than
+        landing on D2 -- and the retry registers with, and caches, D2.
+        Caching D2's owner next to a D1-made (now-dead) registration was
+        the defect: reconcile would then never notice the loss."""
+        _login(fake, "6")
+        reg = _registrar(fake)
+        fake.register_hook = lambda: fake.restart_polkitd(":1.99")
+        reg.reconcile()
+        assert reg.session_id is None      # the call died with D1
+        assert _held(fake) == []
+        fake.register_hook = None
+        reg.reconcile()
+        assert reg.session_id == "6"
+        assert reg._polkit_owner == ":1.99"   # cached owner is the live one
+        assert _held(fake) == ["6"]
+        fake.restart_polkitd(":1.100")        # and a later restart registers
+        reg.reconcile()                       # with the instance after it
+        assert reg._polkit_owner == ":1.100"
         assert _held(fake) == ["6"]
 
     def test_polkit_refusal_is_retried_not_fatal(self, fake):

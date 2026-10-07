@@ -105,7 +105,7 @@ class TestMainBusWiring:
         def fake_register(bus, path):
             seen["register_bus"] = bus
             seen["register_path"] = path
-            return "1"
+            return "1", ":1.fake"
 
         monkeypatch.setattr(agent_mod, "QdistroPolkitAgent", fake_agent)
         monkeypatch.setattr(agent_mod, "_register", fake_register)
@@ -302,3 +302,110 @@ class TestBrokerDelegation:
         ):
             assert make_agent(_RecordingBroker(**kwargs))._ask_broker(
                 "qsu.exec", {}) is False, kwargs
+
+
+class _BrokerWorld:
+    """System-bus fake where each broker generation owns a unique name and
+    an independent request-id counter. A restart mints a new owner; proxies
+    bound to a dead unique name fail every call, while the well-known name
+    re-resolves — the same rules the real bus daemon applies."""
+
+    def __init__(self):
+        self.generation = 0
+        self.instances: dict[str, _BrokerInstance] = {}
+        self.restart()
+
+    def restart(self):
+        self.owner = f":1.broker-{self.generation}"
+        self.instances[self.owner] = _BrokerInstance()
+        self.generation += 1
+
+    def get_name_owner(self, name):
+        return self.owner
+
+    def get_object(self, bus_name, path):
+        return _BrokerProxy(self, bus_name)
+
+
+class _BrokerInstance:
+    def __init__(self):
+        self.filed: list = []
+        self.waited: list = []
+
+
+class _BrokerProxy:
+    def __init__(self, world, dest):
+        self.world, self.dest = world, str(dest)
+
+    def _instance(self):
+        dest = self.dest
+        if not dest.startswith(":"):
+            dest = self.world.owner       # well-known name re-resolves
+        inst = self.world.instances.get(dest)
+        if inst is None or dest != self.world.owner:
+            raise _dbus_error("org.freedesktop.DBus.Error.ServiceUnknown")
+        return inst
+
+    def RequestPermission(self, action, details, **kw):
+        inst = self._instance()
+        inst.filed.append(action)
+        return len(inst.filed)            # per-instance ids restart at 1
+
+    def WaitForDecision(self, rid, **kw):
+        inst = self._instance()
+        inst.waited.append(rid)
+        return True
+
+
+class TestBrokerInstanceBinding:
+
+    @pytest.fixture
+    def agent(self, monkeypatch):
+        monkeypatch.setattr(agent_mod.dbus, "Interface",
+                            lambda obj, iface: obj)
+        a = agent_mod.QdistroPolkitAgent.__new__(agent_mod.QdistroPolkitAgent)
+        a._broker = None
+        a._sysbus = _BrokerWorld()
+        a._config = []
+        return a
+
+    def test_the_proxy_is_bound_to_the_unique_owner(self, agent):
+        iface, rid = agent._file_request("qsu.exec", {})
+        assert rid == 1
+        assert iface.dest == ":1.broker-0", (
+            "the proxy is addressed to the well-known name — it would "
+            "re-resolve to a restarted broker and pair this request's id "
+            "with another instance's counter")
+
+    def test_a_wait_cannot_cross_to_a_restarted_broker(self, agent):
+        """astra r153: worker A files rid 1 on instance D1, the broker
+        restarts, D2 issues its own rid 1 for an unrelated request. A
+        WaitForDecision(1) through the re-resolving well-known name
+        would reach D2 and consume the unrelated decision. The proxy is
+        bound to D1's unique name, so the wait fails instead."""
+        iface_d1, rid1 = agent._file_request("qsu.exec", {})
+        assert rid1 == 1
+        agent._sysbus.restart()
+        d2 = agent._sysbus.instances[agent._sysbus.owner]
+        # an unrelated request on D2 reuses rid 1 — the collision the
+        # well-known-name proxy would have silently accepted
+        assert agent._sysbus.get_object(
+            agent._sysbus.owner,
+            agent_mod.QDISTRO_BROKER_OBJ).RequestPermission(
+                "qdfileman.trash", {}) == rid1
+        with pytest.raises(agent_mod.dbus.DBusException):
+            iface_d1.WaitForDecision(rid1, timeout=1)
+        assert d2.waited == [], "D2 must never see a wait for its own rid"
+
+    def test_filing_after_a_restart_repins_to_the_new_instance(self, agent):
+        """A dead cached proxy raises ServiceUnknown at file time —
+        provably nothing was filed — so the retry re-resolves and files
+        on, then waits on, the new instance."""
+        agent._broker_iface()                     # cache a D1 proxy
+        agent._sysbus.restart()
+        assert agent._ask_broker("qsu.exec", {}) is True
+        d2 = agent._sysbus.instances[agent._sysbus.owner]
+        assert d2.filed == ["qsu.exec"]
+        assert d2.waited == [1]
+        d1 = agent._sysbus.instances[":1.broker-0"]
+        assert d1.filed == [] and d1.waited == []
