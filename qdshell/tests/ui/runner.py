@@ -519,6 +519,50 @@ def _vm_run_script(session: VMSession, script: str, *, timeout: float = 60.0
     )
 
 
+def guest_sh_vm(session: VMSession, script: str, *, timeout: float = 60.0
+                ) -> subprocess.CompletedProcess:
+    """Run a bash snippet in the guest as admin, on qdshell's session bus.
+
+    qdshell runs under `dbus-run-session`, so its D-Bus services (the
+    notification daemon, MPRIS discovery, …) live on a PRIVATE bus — not
+    the systemd user bus at /run/user/1000/bus. The private address is
+    recovered from the shell worker's environ so fixtures (notify-send, the
+    test MPRIS player) publish where qdshell actually listens.
+
+    The snippet itself is opaque to qemu-guest-agent (base64'd twice, like
+    _vm_run_script). Returns the CompletedProcess; callers decide whether a
+    nonzero rc is fatal.
+    """
+    inner_b64 = base64.b64encode(script.encode()).decode("ascii")
+    wrapper = (
+        "set -u\n"
+        # Find a shell process INSIDE qdshell.service's cgroup. pgrep -f
+        # 'qs -p <path>' also matches the `dbus-run-session -- qs -p ...`
+        # wrapper, whose environ still carries the systemd USER bus — while
+        # the actual shell sits on the private bus dbus-run-session spawned.
+        # The cgroup filter picks a real quickshell/qs child, whose environ
+        # holds the private DBUS_SESSION_BUS_ADDRESS the NotificationServer,
+        # MPRIS tracker, and fixtures must reach.
+        "CG=$(systemctl --user -M admin@ show qdshell.service "
+        "-p ControlGroup --value 2>/dev/null)\n"
+        'if [ -z "$CG" ]; then CG=$(runuser -u admin -- systemctl --user '
+        'show qdshell.service -p ControlGroup --value 2>/dev/null); fi\n'
+        "WPID=\n"
+        'for p in $(cat "/sys/fs/cgroup$CG/cgroup.procs" 2>/dev/null); do\n'
+        '  c=$(cat /proc/$p/comm 2>/dev/null)\n'
+        '  case "$c" in quickshell|qs) WPID=$p; break;; esac\n'
+        "done\n"
+        'if [ -z "$WPID" ]; then echo "guest_sh_vm: no qdshell worker" >&2; exit 66; fi\n'
+        'DBUS_ADDR=$(tr "\\0" "\\n" < /proc/$WPID/environ '
+        '| sed -n "s/^DBUS_SESSION_BUS_ADDRESS=//p")\n'
+        f"echo {inner_b64} | base64 -d | runuser -u {VM_USER} -- env "
+        'DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" '
+        f"XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
+        f"WAYLAND_DISPLAY={VM_WAYLAND_DISPLAY} bash\n"
+    )
+    return _vm_run_script(session, wrapper, timeout=timeout)
+
+
 def ipc_vm(session: VMSession, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
     """Send a `qs ipc call` to the qdshell instance running inside the VM.
 
@@ -614,14 +658,143 @@ def write_settings_vm(session: VMSession, content: str, *, timeout: float = 30.0
         )
 
 
+def reap_qs_crash_reporters_vm(session: VMSession) -> int:
+    """Kill orphaned Quickshell crash-reporter processes inside the VM.
+
+    qdshell.service runs `dbus-run-session -- qs -p <qdshell>`: quickshell
+    re-execs into a bare-argv `quickshell` supervisor which spawns the real
+    `qs -p ...` worker. When the worker dies on a signal the supervisor
+    launches a SECOND bare-argv `quickshell` — the crash reporter that draws
+    the "Quickshell has crashed" dialog — marked by `__QUICKSHELL_CRASH_*`
+    env vars. A reporter that outlives its supervisor (reparented before the
+    unit's cgroup kill) survives `systemctl restart` and its dialog toplevel
+    pollutes every later capture — including unrelated GUI scenarios that run
+    on the same VM afterwards (observed 2026-10-07: a stray dialog failed
+    58-tier3s-window-visible's healthy-desktop frame).
+
+    The supervisor is ALSO a bare-argv `quickshell` carrying the crash env
+    vars (it sets them to hand the dump fds to the reporter), so argv/env
+    alone cannot separate them: the supervisor is the DIRECT child of the
+    service's dbus-run-session and is excluded by parent comm. Everything
+    else matching comm=quickshell + the crash marker is a reporter and dies.
+    """
+    script = (
+        f"set -u\n"
+        f"killed=0\n"
+        f"for p in $(pgrep -xu {VM_USER} quickshell); do\n"
+        f"  ppid=$(awk '{{print $4}}' /proc/$p/stat 2>/dev/null) || continue\n"
+        f"  [ \"$(cat /proc/$ppid/comm 2>/dev/null)\" = dbus-run-sessio ] && continue\n"
+        f"  tr '\\0' '\\n' < /proc/$p/environ 2>/dev/null"
+        f"    | grep -q __QUICKSHELL_CRASH_DUMP_PID || continue\n"
+        f"  kill \"$p\" 2>/dev/null && killed=$((killed+1))\n"
+        f"done\n"
+        f"echo reaped=$killed\n"
+    )
+    res = _vm_run_script(session, script, timeout=30.0)
+    if res.returncode != 0:
+        # A failed reap must not hard-fail the caller: the dialog is cosmetic
+        # residue — warn loudly so a polluted frame still has its cause on
+        # record, but let the test proceed and judge what it sees.
+        print(
+            f"WARN: crash-reporter reap failed (rc={res.returncode}): "
+            f"{res.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return 0
+    m = re.search(r"reaped=(\d+)", res.stdout)
+    return int(m.group(1)) if m else 0
+
+
+def _await_qdwin_binding_vm(session: VMSession, cursor: str, *,
+                            timeout: float = 30.0) -> None:
+    """Wait for qdshell's qdwin binding to (re)attach after a restart.
+
+    Quickshell's IPC socket answers `qs ipc` calls BEFORE the shell binds
+    qdwin_shell_v1 again; in that gap the ctrl-socket `capture` verb answers
+    `error: qdshell is not bound to qdwin` and every screenshot-based test
+    fails on a transport-looking error (observed 2026-10-07:
+    test_settings_tab[settings_sessionmenu]/[settings_systemmonitor] lost
+    captures in the post-restart bind gap on two consecutive gui runs).
+
+    The binding emits `qdwin_shell_v1 bound v<N>` in the unit journal the
+    moment it attaches; `cursor` should be a journal cursor captured BEFORE
+    the restart so a `bound` line from the previous generation cannot satisfy
+    the wait (empty skips the journal fast-path and waits on the probe
+    alone). After the line lands we still confirm with one real `capture`:
+    wl_shm/weston_capture_v1 bind in the same registry burst, and probing the
+    exact verb the tests use retires any ordering assumption instead of
+    hoping the log line implies capture readiness.
+    """
+    deadline = time.time() + timeout
+    if cursor:
+        while time.time() < deadline:
+            script = (
+                f"runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
+                f"journalctl --user -u {VM_QDSHELL_UNIT} --no-pager -o cat "
+                f"--after-cursor {shlex.quote(cursor)} 2>/dev/null "
+                f"| grep -q 'qdwin_shell_v1 bound'\n"
+            )
+            res = _vm_run_script(session, script, timeout=20.0)
+            if res.returncode == 0:
+                break
+            time.sleep(1.0)
+        else:
+            raise RuntimeError(
+                f"qdshell did not log 'qdwin_shell_v1 bound' within {timeout}s "
+                f"after restart (cursor {cursor[:40]}…)"
+            )
+    # Confirmation probe on the verb the tests actually call. qdwin refuses
+    # to overwrite a capture path, so each attempt gets a unique scratch PNG;
+    # they are removed once the binding answers.
+    guests: list[str] = []
+    last = ""
+    try:
+        while time.time() < deadline:
+            guest = (f"{VM_XDG_RUNTIME_DIR}/qdshell-ui-bindprobe-"
+                     f"{os.getpid()}-{uuid.uuid4().hex}.png")
+            guests.append(guest)
+            try:
+                reply = ctrl_socket_vm(session, f"capture Virtual-1 {guest}",
+                                       timeout=CTRL_SOCAT_T + 20.0)
+            except RuntimeError as exc:
+                last = f"ctrl-socket: {exc}"
+                time.sleep(1.0)
+                continue
+            if reply.startswith("ok "):
+                return
+            last = reply
+            time.sleep(1.0)
+        raise RuntimeError(
+            f"qdshell bound but capture not ready within {timeout}s after "
+            f"restart; last reply: {last!r}"
+        )
+    finally:
+        if guests:
+            args = " ".join(shlex.quote(g) for g in guests)
+            with contextlib.suppress(Exception):
+                _vm_run_script(session, f"rm -f -- {args}\n", timeout=10.0)
+
+
 def restart_qdshell_vm(session: VMSession, *, settle: float = 6.0,
                        timeout: float = 60.0) -> None:
-    """Restart the qdshell user service inside the VM and wait for IPC to return.
+    """Restart the qdshell user service inside the VM and wait for it back.
 
     This is the real persistence path: a setting changed in one qdshell process
     must survive a full process restart and reload from settings.json. Restart
-    is via the admin user's systemd (the deployed unit), then we poll IPC.
+    is via the admin user's systemd (the deployed unit), then we poll IPC,
+    then the qdwin binding — IPC answers first, and a test that captures in
+    the gap between them sees `qdshell is not bound to qdwin` — and finally
+    reap any orphaned crash-reporter dialogs left by a worker that died on
+    the way down.
     """
+    cur = _vm_run_script(
+        session,
+        f"runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
+        f"journalctl --user -u {VM_QDSHELL_UNIT} -n0 --show-cursor --no-pager "
+        f"2>/dev/null | sed -n 's/^-- cursor: //p'\n",
+        timeout=20.0,
+    )
+    cursor = cur.stdout.strip() if cur.returncode == 0 else ""
     script = (
         f"set -eu\n"
         f"runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
@@ -637,14 +810,22 @@ def restart_qdshell_vm(session: VMSession, *, settle: float = 6.0,
     while time.time() < deadline:
         try:
             ipc_vm(session, "bar", "showBar", timeout=15)
-            return
+            break
         except RuntimeError as exc:
             last_exc = exc
             time.sleep(1.0)
-    raise RuntimeError(
-        f"qdshell did not answer IPC within {settle + 20:.0f}s after restart; "
-        f"last error: {last_exc}"
-    )
+    else:
+        raise RuntimeError(
+            f"qdshell did not answer IPC within {settle + 20:.0f}s after restart; "
+            f"last error: {last_exc}"
+        )
+    # The journal cursor is a fast path; even without it the capture probe
+    # inside still verifies the binding before we return.
+    _await_qdwin_binding_vm(session, cursor)
+    reaped = reap_qs_crash_reporters_vm(session)
+    if reaped:
+        print(f"INFO: reaped {reaped} orphaned quickshell crash reporter(s)",
+              file=sys.stderr)
 
 
 def ctrl_socket_vm(session: VMSession, command: str, *, timeout: float = 30.0) -> str:
@@ -811,6 +992,22 @@ def mouse_click(session: VMSession, x: int, y: int, button: str = "left") -> Non
         time.sleep(0.05)
 
 
+def mouse_wheel(session: VMSession, x: int, y: int, steps: int,
+                direction: str = "down") -> None:
+    """Move to (x, y) and emit `steps` wheel clicks (real evdev scroll)."""
+    if direction not in ("up", "down"):
+        raise ValueError(f"invalid wheel direction {direction!r}")
+    mouse_move(session, x, y)
+    time.sleep(0.05)
+    for _ in range(steps):
+        for down in ("true", "false"):
+            _qmp(session,
+                 '{"execute": "input-send-event", "arguments": {"events": ['
+                 f'{{"type":"btn","data":{{"button":"wheel-{direction}",'
+                 f'"down":{down}}}}}]}}}}')
+        time.sleep(0.04)
+
+
 def _convert_ppm_to_png(ppm_path: Path, png_path: Path) -> None:
     """Convert a virsh-screenshot PPM to PNG so codex --image accepts it."""
     if shutil.which("pnmtopng"):
@@ -884,20 +1081,51 @@ def screenshot_vm(session: VMSession, out_path: Path, *,
 
     try:
         attempts = max(1, live_retries + 1)
-        for _attempt in range(attempts):
+        bind_recovered = False
+        _attempt = 0
+        while True:
             guest = _next_guest()
             # Host deadline > CTRL_SOCAT_T, with room for vm-exec's own
             # guest-agent round trips on a loaded host.
-            reply = ctrl_socket_vm(session, f"capture Virtual-1 {guest}",
-                                   timeout=CTRL_SOCAT_T + 20.0)
+            try:
+                reply = ctrl_socket_vm(session, f"capture Virtual-1 {guest}",
+                                       timeout=CTRL_SOCAT_T + 20.0)
+            except RuntimeError as exc:
+                # `Connection refused`/`No such file` mean qdshell.sock does
+                # not exist yet — the deeper end of the same restart gap:
+                # the shell has not even opened its ctrl socket. One bounded
+                # readiness wait covers it; anything else re-raises as before.
+                if (not bind_recovered
+                        and ("Connection refused" in str(exc)
+                             or "No such file" in str(exc))):
+                    bind_recovered = True
+                    _await_qdwin_binding_vm(session, "")
+                    continue
+                raise
+            # `error: qdshell is not bound to qdwin` is the transient gap a
+            # respawning worker leaves while qdwin-binding's reconnect loop
+            # re-attaches (journal: `reconnect attempt N` -> `bound v35`).
+            # The restart/session waits cover startup; this covers a worker
+            # that crashed DURING the test — observed 2026-10-07: a qs worker
+            # SEGV dropped the binding between the fixture's probe and the
+            # test's capture. Wait for the binding on the same verb the tests
+            # use (bounded inside _await_qdwin_binding_vm: a shell that never
+            # re-binds fails there with the reply as evidence), then retry
+            # the capture WITHOUT spending a live=0 retry. A healed binding
+            # still surfaces a crash-dialog desktop to the judge — only the
+            # transport gap is retired, never the content assertion.
+            if "not bound to qdwin" in reply and not bind_recovered:
+                bind_recovered = True
+                _await_qdwin_binding_vm(session, "")
+                continue
             # A retained frame often means the repaint had not landed yet.
             # Ask once more before treating staleness as terminal.
             if " live=0" not in reply:
                 break
-            # Do not sleep after the final attempt -- there is nothing left to
-            # wait for.
-            if _attempt < attempts - 1:
-                time.sleep(0.5)
+            _attempt += 1
+            if _attempt >= attempts:
+                break
+            time.sleep(0.5)
         # qdshell v33 can answer with a RETAINED frame when no repaint was
         # possible (seat away, power off, repaint wedge), appending
         # `live=0 age_ms=<n>` and sometimes `msc=<n>`. That is a VALID image
@@ -1002,6 +1230,91 @@ def screenshot_vm(session: VMSession, out_path: Path, *,
     return out_path
 
 
+def _frames_identical(a: Path, b: Path) -> bool:
+    """True when two captures decode to identical frames below the bar.
+
+    The top bar contains a live clock ("13:28") that repaints every minute —
+    comparing full frames can therefore never reach the bottom-of-scroll
+    fixed point (observed live: pages 3-6 of a scrolled tab were identical
+    content yet the captures differed). Everything interesting for a
+    scroll-stitched tab lives below the bar; crop it off both frames.
+    """
+    from PIL import Image, ImageChops
+    with Image.open(a) as ia, Image.open(b) as ib:
+        ia.load(); ib.load()
+        if ia.size != ib.size:
+            return False
+        w, h = ia.size
+        crop = (0, 56, w, h)   # bar height is ~48px at 800p; keep margin
+        da = ia.convert("RGB").crop(crop)
+        db = ib.convert("RGB").crop(crop)
+        diff = ImageChops.difference(da, db).convert("L")
+        # Tolerate tiny repaint jitter: a blinking text caret (~30px) or a
+        # hovered icon shifts a few dozen pixels; a real scroll moves whole
+        # text rows (thousands). 0.05% of the cropped frame separates them
+        # (observed live: systemmonitor's focused text field blinked its
+        # caret, so pixel-perfect bottom detection never converged).
+        changed = sum(diff.histogram()[16:])   # pixels differing >15 levels
+        return changed < (da.width * da.height) * 0.0005
+
+
+def _describe_scrolled_vm(session: VMSession, surface, first_png: Path,
+                          first_desc: str, *, max_pages: int = 10
+                          ) -> str:
+    """Page the settings tab down to the bottom, describing every viewport.
+
+    The settings expectation files describe the WHOLE tab ("Buttons & Click",
+    "Per-device overrides", ...) — but a single 1280x800 capture only sees the
+    viewport, so sections below the fold scored MISSING forever while the
+    describe/judge backend was silently returning SKIP (see _run_codex).
+    Verified live on 2026-10-07: settings_mouse's Scrolling / Touchpad /
+    Double-click & Drag sections appear only after wheel-scroll.
+
+    Each page is a separate shell capture + describe; the judge gets the
+    concatenation, so "what must be visible when this tab is open" now means
+    "present in the tab's scrollable content" — MORE of the surface is
+    asserted, not less. Bottom-of-scroll is detected by pixel-identical
+    consecutive frames (wheel events at the bottom change nothing); the
+    duplicate bottom frame is not described. Bounded by max_pages.
+    """
+    pages: list[tuple[Path, str]] = [(first_png, first_desc)]
+    prev = first_png
+    for page in range(2, max_pages + 1):
+        # Scroll over the right content column — the left strip is the tab
+        # rail, not the Flickable. 5 clicks ≈ half a viewport: pages overlap
+        # enough that a section clipped at one page's bottom lands mid-frame
+        # on the next (verified live: 9 clicks/page skipped Buttons & Click
+        # and Scrolling between pages entirely).
+        mouse_wheel(session, int(VM_SCREEN_W * 0.55),
+                    int(VM_SCREEN_H * 0.55), 5, "down")
+        time.sleep(0.7)
+        page_png = ARTIFACTS_DIR / f"{surface.id}-p{page}.png"
+        screenshot_vm(session, page_png)
+        if _frames_identical(prev, page_png):
+            # An unchanged FIRST scroll can mean the tab was still
+            # incubating when the wheel events landed (swallowed, not
+            # bottom). Wait for the incubation to settle and retry once
+            # before declaring bottom — a genuinely bottomed-out view
+            # stays identical, so this costs one frame in that case.
+            time.sleep(1.5)
+            mouse_wheel(session, int(VM_SCREEN_W * 0.55),
+                        int(VM_SCREEN_H * 0.55), 5, "down")
+            time.sleep(0.7)
+            screenshot_vm(session, page_png)
+            if _frames_identical(prev, page_png):
+                with contextlib.suppress(OSError):
+                    page_png.unlink()
+                break
+        pages.append((page_png, describe(page_png)))
+        prev = page_png
+    if len(pages) == 1:
+        return first_desc
+    return "\n\n".join(
+        f"=== page {i} of {len(pages)} (scrolled) ===\n{desc}"
+        for i, (_, desc) in enumerate(pages, 1)
+    )
+
+
 def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
                        ) -> tuple[Path, str]:
     """VM analogue of capture_surface: open via in-VM IPC, shell-capture, describe."""
@@ -1013,17 +1326,76 @@ def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
         raise RuntimeError(
             f"{surface.id} has no IPC handle; cannot drive automatically"
         )
-    if surface.open_cmd is not None:
-        ipc_vm(session, *surface.open_cmd)
-        time.sleep(settle)
 
-    screenshot_vm(session, png_path)
-    description = describe(png_path)
+    def _teardown_guest() -> None:
+        for cmd in surface.teardown_guest:
+            res = guest_sh_vm(session, cmd)
+            if res.returncode != 0:
+                print(f"warning: teardown_guest for {surface.id} rc="
+                      f"{res.returncode}: {res.stderr.strip()[:200]}")
 
-    if surface.close_cmd is not None and surface.close_cmd is not NO_IPC:
-        with contextlib.suppress(Exception):
-            ipc_vm(session, *surface.close_cmd)
+    try:
+        for cmd in surface.setup_guest:
+            res = guest_sh_vm(session, cmd)
+            if res.returncode != 0:
+                raise RuntimeError(
+                    f"setup_guest for {surface.id} failed (rc={res.returncode})\n"
+                    f"  stderr: {res.stderr.strip()[:400]}"
+                )
+        if surface.open_cmd is not None:
+            ipc_vm(session, *surface.open_cmd)
+            time.sleep(settle)
+
+        for fx, fy in surface.post_open_moves:
+            mouse_move(session, int(VM_SCREEN_W * fx), int(VM_SCREEN_H * fy))
             time.sleep(0.4)
+        for qcode in surface.post_open_keys:
+            tap_key(session, qcode)
+            time.sleep(0.3)
+
+        if surface.kind == "settings":
+            # Scroll position PERSISTS across openTab/toggle — a tab left
+            # mid-scroll by an earlier capture (or a crashed previous attempt)
+            # starts there, and page 1 then misses the tab's head. Wheel-up
+            # clamps at the top, so resetting costs a no-op when already there.
+            mouse_wheel(session, int(VM_SCREEN_W * 0.55),
+                        int(VM_SCREEN_H * 0.55), 30, "up")
+            time.sleep(0.5)
+
+        screenshot_vm(session, png_path)
+        description = describe(png_path)
+        if surface.kind == "settings":
+            description = _describe_scrolled_vm(session, surface, png_path,
+                                              description)
+
+        # Additional views (e.g. the audio panel's Devices tab): each click
+        # lands on a different page of the SAME surface; every page is
+        # described and concatenated so the judge sees the union.
+        if surface.post_open_clicks and surface.kind == "settings":
+            # Scroll-stitch leaves the view at the bottom, and the settings
+            # subtab strip scrolls WITH the content — the fractional click
+            # coords only hit the subtab when the view is at the top.
+            mouse_wheel(session, int(VM_SCREEN_W * 0.55),
+                        int(VM_SCREEN_H * 0.55), 30, "up")
+            time.sleep(0.5)
+        for idx, (fx, fy) in enumerate(surface.post_open_clicks):
+            mouse_click(session, int(VM_SCREEN_W * fx), int(VM_SCREEN_H * fy))
+            # Subtab switches animate the pill + re-incubate the page; under
+            # suite load (post scroll-stitch) transitions can exceed 2s —
+            # 0.8s and 1.5s both caught mid-animation frames (empty pill,
+            # previous subtab's content still rendered).
+            time.sleep(2.5)
+            page_png = ARTIFACTS_DIR / f"{surface.id}-click{idx + 1}.png"
+            screenshot_vm(session, page_png)
+            page_desc = describe(page_png)
+            description += (f"\n\n=== after click {idx + 1} "
+                            f"({page_png.name}) ===\n" + page_desc)
+    finally:
+        if surface.close_cmd is not None and surface.close_cmd is not NO_IPC:
+            with contextlib.suppress(Exception):
+                ipc_vm(session, *surface.close_cmd)
+                time.sleep(0.4)
+        _teardown_guest()
 
     return png_path, description
 
@@ -1147,12 +1519,24 @@ Cover, as bullet points:
   - The header/title text shown at the top of the visible panel or tab.
   - Visible labelled controls: button labels, toggle states (on/off),
     slider values if numeric values are shown, dropdown current values.
+  - Icon-only buttons (especially in header/toolbar rows): name each one's
+    apparent FUNCTION from its icon — e.g. "a close button (X)", "a
+    list/grid view-toggle button", "a settings gear button", "a clear/trash
+    button" — not just "an icon".
   - Visible section headings inside the panel.
-  - Notable icons (by their general subject: "battery icon", "wifi icon", etc.).
+  - ALL visible text — including small or dimmed secondary description /
+    note / caption paragraphs under headings and controls. Transcribe them;
+    do not omit them just because they are low-contrast or secondary.
+  - For editor/list rows: transcribe each visible row's LABEL or identifier
+    verbatim (e.g. dotted monospace key paths like `bar.showOutline`), the
+    small status markers beside them (colored dots, badges), and the row's
+    buttons/fields — not just the field values.
+  - Notable icons (by their general subject: "battery icon", "wifi icon",
+    "warning triangle", "magnifier inside the search field", etc.).
   - Approximate layout: tabs along which side; content arranged in rows/cards/columns.
 
 Constraints:
-  - Be concise. Under ~150 words total.
+  - Be concise. Under ~220 words total.
   - Do not invent text you cannot read.
   - If the panel appears empty / shell still loading, say so explicitly.
 """
@@ -1164,11 +1548,19 @@ def describe(image_path: Path) -> str:
     Uses the local Codex CLI, unless QDSHELL_UI_NO_CODEX=1 is set. Falls
     back to `pi` when available. Returns "" when no backend is available;
     callers should treat that as "describe step skipped".
+
+    A single bounded retry covers transient codex failures (empty output is
+    an observability gap, never a pass — a second failure still returns "").
     """
-    if shutil.which("codex") and os.environ.get("QDSHELL_UI_NO_CODEX") != "1":
-        return _describe_with_codex(image_path)
-    if shutil.which("pi") and os.environ.get("QDSHELL_UI_NO_PI") != "1":
-        return _describe_with_pi(image_path)
+    for _ in range(2):
+        desc = ""
+        if shutil.which("codex") and os.environ.get("QDSHELL_UI_NO_CODEX") != "1":
+            desc = _describe_with_codex(image_path)
+        elif shutil.which("pi") and os.environ.get("QDSHELL_UI_NO_PI") != "1":
+            desc = _describe_with_pi(image_path)
+        if desc.strip():
+            return desc
+        time.sleep(2)
     return ""
 
 
@@ -1184,7 +1576,12 @@ def _run_codex(prompt: str, image_path: Optional[Path] = None) -> str:
             "--output-last-message", str(output_path),
         ]
         if image_path is not None:
-            cmd.extend(["--image", str(image_path)])
+            # `--image <FILE>...` is VARIADIC: as a separate token pair placed
+            # before the prompt it greedily consumes the positional too, and
+            # codex falls back to reading the prompt from stdin -> "No prompt
+            # provided via stdin" -> empty describe -> judge SKIP. The `=`
+            # form binds exactly one file.
+            cmd.append(f"--image={image_path}")
         cmd.append(prompt)
         try:
             result = subprocess.run(

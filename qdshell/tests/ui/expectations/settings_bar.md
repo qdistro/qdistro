@@ -4,7 +4,7 @@ What must be visible when this tab is open:
 
 - Tab header text: "Bar" (i18n key `panels.bar.title`).
 - Subtab bar with at least: "Appearance", "Widgets", "Behavior", "Monitors".
-- An "Appearance" section heading.
+- The "Appearance" subtab is the selected/default one.
 - A "Position" dropdown (top / bottom / left / right).
 - A "Density" dropdown.
 - A "Type" dropdown.

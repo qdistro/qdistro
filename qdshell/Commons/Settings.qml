@@ -124,19 +124,7 @@ Singleton {
         if (repairSettingsFileIfNeeded()) {
           return;
         }
-
-        loadRuntimeSettings();
-        Logger.i("Settings", "Settings loaded");
-
-        // qdshell: migrations stripped (fresh schema v1). Just stamp
-        // the version so any future migration framework has a baseline.
-        data.settingsVersion = settingsVersion;
-
-        // Emit the signal
-        root.isLoaded = true;
-        root.settingsLoaded();
-
-        upgradeSettings();
+        finishInitialLoad();
       }
     }
     onLoadFailed: function (error) {
@@ -214,23 +202,70 @@ Singleton {
     return false;
   }
 
-  function defineObservableSettingProperty(target, key, initialValue) {
-    var stored = makeObservableSettings(initialValue);
-    Object.defineProperty(target, key, {
-      enumerable: true,
-      configurable: true,
-      get: function () {
-        return stored;
+  // Observable settings via Proxy rather than Object.defineProperty
+  // accessors. QV4 can SIGSEGV in internalDefineOwnProperty when a
+  // defineProperty lands while the object's internal class is in flux —
+  // e.g. a setter firing under component incubation (the settings tab
+  // Loader) or a deferred callback after bindings already touched the
+  // object. A Proxy never mutates the target's shape, so no engine class
+  // transition ever happens on the write path.
+  //
+  // Sections are wrapped once (WeakMap raw→proxy keeps identity stable,
+  // so `owner === Settings.data.<section>` holds for consumers); nested
+  // objects wrap lazily in the get trap.
+  property var _settingsProxies: null
+
+  function makeObservableSettings(value) {
+    if (Array.isArray(value)) {
+      for (var i = 0; i < value.length; i++) {
+        value[i] = makeObservableSettings(value[i]);
+      }
+      return value;
+    }
+
+    if (!isPlainObject(value)) {
+      return value;
+    }
+
+    // A proxy's own get trap answers true — re-wrapping an already
+    // observable section is a no-op.
+    if (value.__qdshellObservable === true) {
+      return value;
+    }
+
+    if (!root._settingsProxies) {
+      root._settingsProxies = new WeakMap();
+    }
+    if (root._settingsProxies.has(value)) {
+      return root._settingsProxies.get(value);
+    }
+
+    var proxy = new Proxy(value, {
+      get: function (target, key) {
+        if (key === "__qdshellObservable") {
+          return true;
+        }
+        var v = target[key];
+        var w = makeObservableSettings(v);
+        if (w !== v) {
+          target[key] = w;
+        }
+        return w;
       },
-      set: function (newValue) {
-        var changed = newValue !== stored || isPlainObject(newValue) || Array.isArray(newValue);
-        stored = makeObservableSettings(newValue);
+      set: function (target, key, newValue) {
+        var old = target[key];
+        var stored = makeObservableSettings(newValue);
+        var changed = newValue !== old || isPlainObject(newValue) || Array.isArray(newValue);
+        target[key] = stored;
         root.queueSettingsSave();
         if (changed && !root.loadingSettingsData) {
-          root.settingChanged(target, key, stored);
+          root.settingChanged(proxy, key, stored);
         }
+        return true;
       }
     });
+    root._settingsProxies.set(value, proxy);
+    return proxy;
   }
 
   function isPlainObject(value) {
@@ -261,34 +296,22 @@ Singleton {
     saveTimer.start();
   }
 
-  function makeObservableSettings(value) {
-    if (Array.isArray(value)) {
-      for (var i = 0; i < value.length; i++) {
-        value[i] = makeObservableSettings(value[i]);
-      }
-      return value;
+  function finishInitialLoad() {
+    if (root.isLoaded) {
+      return;
     }
+    loadRuntimeSettings();
+    Logger.i("Settings", "Settings loaded");
 
-    if (!isPlainObject(value)) {
-      return value;
-    }
+    // qdshell: migrations stripped (fresh schema v1). Just stamp
+    // the version so any future migration framework has a baseline.
+    data.settingsVersion = settingsVersion;
 
-    if (value.__qdshellObservable === true) {
-      return value;
-    }
+    // Emit the signal
+    root.isLoaded = true;
+    root.settingsLoaded();
 
-    var keys = Object.keys(value);
-    for (var k = 0; k < keys.length; k++) {
-      defineObservableSettingProperty(value, keys[k], value[keys[k]]);
-    }
-
-    Object.defineProperty(value, "__qdshellObservable", {
-      value: true,
-      enumerable: false,
-      configurable: false
-    });
-
-    return value;
+    upgradeSettings();
   }
 
   function loadRuntimeSettings() {

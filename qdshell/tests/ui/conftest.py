@@ -141,7 +141,45 @@ def _vm_session():
             f"QDSHELL_UI_VM={session.vm} but no usable qdshell session: {reason}",
             pytrace=False,
         )
-    return session
+    # IPC answers before qdwin_shell_v1 re-binds; a freshly-booted VM can sit
+    # in that gap when the suite starts. Confirm capture-readiness (the exact
+    # verb the tests use) rather than trusting IPC alone.
+    runner._await_qdwin_binding_vm(session, "")
+    # The gui gate reuses the same qdwin VM for the markdown scenarios that
+    # run after this suite; an orphaned "Quickshell has crashed" reporter
+    # toplevel — left by a worker SEGV in ANY earlier consumer — would
+    # contaminate their frames, and a stale one from a previous suite run
+    # would contaminate ours. Reap at both boundaries of the session.
+    _reap_reporters(session, "session start")
+    yield session
+    _reap_reporters(session, "session end")
+
+
+def _reap_reporters(session, when: str) -> None:
+    try:
+        reaped = runner.reap_qs_crash_reporters_vm(session)
+    except Exception as exc:  # reap must never turn a test run into an error
+        print(f"WARN: crash-reporter reap at {when} failed: {exc}")
+        return
+    if reaped:
+        print(f"INFO: reaped {reaped} orphaned quickshell crash "
+              f"reporter(s) at {when}")
+
+
+@pytest.fixture(autouse=True)
+def _reap_reporters_each_test(_vm_session):
+    """Clear stale quickshell crash-reporter dialogs before each test.
+
+    A worker SEGV leaves a reporter toplevel that can outlive the restart
+    that replaces its unit generation; if it lands between two tests the
+    NEXT test's capture fails on a dialog that is not its own state. The
+    reap only matches bare-argv `quickshell` processes carrying the
+    __QUICKSHELL_CRASH_* marker env vars outside the service's own
+    supervisor, so a live healthy shell is never touched — and a crashed
+    one still fails honestly on its missing IPC/socket.
+    """
+    if _vm_session is not None:
+        _reap_reporters(_vm_session, "test setup")
 
 
 @pytest.fixture(scope="session")
