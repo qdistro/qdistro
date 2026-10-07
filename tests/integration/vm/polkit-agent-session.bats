@@ -25,8 +25,17 @@ teardown_file() {
             rm -f /usr/share/polkit-1/actions/org.qdistro.test.agentsession.policy; true"
 }
 
+# vm_run merges vm-exec's own stderr into $output; when the identity probe
+# answers before a fast guest command exits, the "[vm-exec] guest identity
+# pinned" line lands in the capture and breaks exact-match assertions.
+# Scalar reads go through this: guest output minus transport diagnostics.
+_guest_value() {
+    grep -v '^\[vm-exec\]' <<<"$output" | tail -1
+}
+
 _agent_restarts() {
     vm_run_admin "systemctl --user show -p NRestarts --value qdistro-polkit-agent.service"
+    output="$(_guest_value)"
 }
 
 @test "polkit-agent-session: waits without a login, registers on login, serves an authorization" {
@@ -50,7 +59,7 @@ _agent_restarts() {
     _agent_restarts
     assert_eq_evidence "0" "$output" "agent NRestarts with no login session"
     vm_run_admin "systemctl --user is-active qdistro-polkit-agent.service"
-    assert_eq_evidence "active" "$output" "agent state with no login session"
+    assert_eq_evidence "active" "$(_guest_value)" "agent state with no login session"
     vm_run "journalctl -b --no-pager -o cat -t qdistro-polkit-agent"
     echo "$output" >&2
     assert_output_contains "no login session for uid 1000 yet; waiting"
@@ -71,10 +80,10 @@ _agent_restarts() {
         || loginctl show-user admin -p Display --value | grep -q ." 30 \
         || fail_loud "the PAM login on tty6 did not create a logind session"
     vm_run "loginctl show-user admin -p Display --value"
-    sid="$output"
+    sid="$(_guest_value)"
     [[ -n "$sid" ]] || fail_loud "admin has no display session after the tty6 login"
     vm_run "loginctl show-session '$sid' -p Class --value"
-    assert_eq_evidence "user" "$output" "class of admin's display session"
+    assert_eq_evidence "user" "$(_guest_value)" "class of admin's display session"
 
     step "the running agent registers for that session without a restart"
     wait_until_succeeds "journalctl -b --no-pager -o cat -t qdistro-polkit-agent | grep -F 'registered as session polkit agent (path=/org/qdistro/PolkitAgent, session=$sid)'" 30 \
@@ -108,7 +117,7 @@ _agent_restarts() {
 POL"
     assert_success
     vm_run "systemctl show -p MainPID --value qci-polkit-login.service"
-    subject_pid="$output"
+    subject_pid="$(_guest_value)"
     [[ "$subject_pid" =~ ^[1-9][0-9]*$ ]] || fail_loud "no subject pid in the login session (got '$subject_pid')"
     vm_run "systemd-run --unit=qci-polkit-subject -p StandardOutput=file:/run/qci-pkcheck.out \
             -p StandardError=file:/run/qci-pkcheck.out /bin/sh -c \
@@ -150,11 +159,11 @@ POL"
         || fail_loud "no admin session of type wayland appeared"
     vm_run "for s in \$(loginctl list-sessions --no-legend | awk '\$3==\"admin\"{print \$1}'); do \
         [ \"\$(loginctl show-session \$s -p Type --value)\" = wayland ] && { echo \$s; break; }; done"
-    sid_b="$(head -1 <<<"$output" | tr -d ' ')"
+    sid_b="$(_guest_value | tr -d ' ')"
     [[ -n "$sid_b" && "$sid_b" != "$sid_a" ]] \
         || fail_loud "no second admin session of type wayland (got '$sid_b')"
     vm_run "loginctl show-session '$sid_b' -p Class --value"
-    assert_eq_evidence "user" "$output" "class of the second session"
+    assert_eq_evidence "user" "$(_guest_value)" "class of the second session"
     wait_until_succeeds "loginctl show-user admin -p Display --value | grep -qx '$sid_b'" 30 \
         || { vm_run "loginctl show-user admin -p Display --value; loginctl show-session '$sid_b' -p Class -p Type -p Active -p State"; \
              echo "$output" >&2; \
@@ -221,12 +230,12 @@ POL"
     # display moved from $sid_a to $sid_b; only a NEW line proves the final
     # logout was reconciled, so compare counts, not presence.
     vm_run "journalctl -b --no-pager -o cat -t qdistro-polkit-agent | grep -cF 'ended or is no longer'"
-    drops_before="$output"
+    drops_before="$(_guest_value)"
     vm_run "systemctl stop qci-polkit-login.service"
     wait_until_succeeds "journalctl -b --no-pager -o cat -t qdistro-polkit-agent | grep -cF 'ended or is no longer' | awk -v n='$drops_before' '\$1 > n {f=1} END{exit !f}'" 30 \
         || fail_loud "agent did not notice session $sid_a ending"
     _agent_restarts
     assert_eq_evidence "0" "$output" "agent NRestarts after logout"
     vm_run_admin "systemctl --user is-active qdistro-polkit-agent.service"
-    assert_eq_evidence "active" "$output" "agent state after logout"
+    assert_eq_evidence "active" "$(_guest_value)" "agent state after logout"
 }
