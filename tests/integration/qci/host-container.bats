@@ -188,7 +188,7 @@ SH
     for agent in codex claude; do
         printf '#!/bin/sh\nexit 127\n' > "$BATS_TEST_TMPDIR/bin/$agent"
         chmod +x "$BATS_TEST_TMPDIR/bin/$agent"
-        run env TEST_AGENT="$agent" bash -eo pipefail -c '
+        run env -u QCI_AGENT_MODEL TEST_AGENT="$agent" bash -eo pipefail -c '
             . "$SOURCE_ROOT/ci/lib/gates/gui.sh"
             kv() { printf "%s=%s\n" "$1" "$2"; }
             QCI_AGENT_CMD="$TEST_AGENT --model fixture-model" record_agent_identity
