@@ -116,6 +116,24 @@ ssh_vm 'test -S /run/user/1000/wayland-1' || { echo "FAIL: wayland-1 never appea
 # locker on the throwaway worker (ctrl socket has no unlock, by design).
 ssh_vm 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop qdlocker.service' \
     || echo "WARN: could not stop qdlocker — GUI sections may idle-lock"
+# compositor presentation health: a boot where virtio-gpu atomic commits
+# fail EINVAL never reaches scanout — the screen stays on fbcon while the
+# wayland socket exists, and the latency desk/win frames are identical.
+# Detect a climbing repaint-flush count here, restart the session once,
+# and bail (VM preserved) if it keeps failing.
+repaint_fails() {
+    ssh_vm 'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --no-pager -b" 2>/dev/null | grep -c "repaint-flush failed"'
+}
+sleep 5; rf1=$(repaint_fails); sleep 4; rf2=$(repaint_fails)
+if [ "${rf2:-0}" -gt 5 ] && [ "${rf2:-0}" -gt "${rf1:-0}" ]; then
+    echo "   compositor repaint failing ($rf1->$rf2) — restarting the session once"
+    ssh_vm 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop qdwin-session.target; sleep 2; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start qdwin-session.target'
+    for i in $(seq 1 60); do ssh_vm 'test -S /run/user/1000/wayland-1' && break; sleep 1; done
+    sleep 8; rf3=$(repaint_fails); sleep 4; rf4=$(repaint_fails)
+    [ "${rf4:-0}" -le "${rf3:-0}" ] \
+        || { echo "FAIL: compositor repaint still failing after restart ($rf3->$rf4) — VM $VM preserved"; exit 1; }
+    echo "   repaint failures stopped after restart (total $rf4)"
+fi
 ssh_vm "cd /var/tmp/t3s-dl && bash tier3s-guest-setup.sh $U --expect-fresh --gui weston-terminal,foot" \
     > "$L/setup.log" 2>&1
 if ! grep -q '\[t3s-setup\] [0-9]* passes, 0 failures' "$L/setup.log"; then
@@ -176,7 +194,7 @@ if [ "$SAMPLES" -gt 0 ]; then
             echo "window-rect MISS(setup)" >> "$L/latency.log"; FAIL=1
             # record compositor paint health — a boot with failing atomic
             # commits (virtio-gpu EINVAL) leaves the desk frame unchanged
-            ssh_vm 'journalctl --user -M admin@ -u qdwin-compositor --no-pager 2>/dev/null | grep -c "repaint-flush failed"' \
+            ssh_vm 'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --no-pager -b" 2>/dev/null | grep -c "repaint-flush failed"' \
                 | sed 's/^/weston-repaint-flush-failures: /' >> "$L/latency.log" || true
         fi
         for i in $(seq 1 "$SAMPLES"); do
