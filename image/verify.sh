@@ -306,31 +306,37 @@ shoot 00-just-booted
 # qemu-guest-agent provides an out-of-band virtio-serial channel we use to
 # start sshd on demand for these verification assertions — no network path is
 # baked into the image. guest-exec runs as root inside the guest.
+# qga <json> [timeout-s] — one agent RPC; with a timeout, libvirt bounds it.
 qga() {
-    virsh -c "$URI" qemu-agent-command "$VM" "$1" 2>/dev/null
+    if [ -n "${2:-}" ]; then
+        virsh -c "$URI" qemu-agent-command --timeout "$2" "$VM" "$1" 2>/dev/null
+    else
+        virsh -c "$URI" qemu-agent-command "$VM" "$1" 2>/dev/null
+    fi
 }
 # qga_root <shell> — run <shell> as ROOT in the guest through the agent
 # (guest-exec + guest-exec-status), print its stdout, relay its stderr, and
 # return its exit code. This is the verifier's root channel: it works on every
 # profile (the release image deletes admin's sudoers rule), so an assertion
 # that needs root reads through here, not through `sudo -n` over SSH.
-# The status polling has a 60 s deadline (each agent call is bounded by
-# libvirt, not by this shell); a timeout or an agent error returns 97/98
-# (never 0).
+# [timeout-s] (default 60) bounds the whole call: every RPC and the status
+# polling share one deadline; <= 0 returns 98 without contacting the guest.
+# A timeout or an agent error returns 97/98 (never 0).
 command -v jq >/dev/null 2>&1 || die "jq not installed; install with: sudo zypper in jq"
 qga_root() {
-    local cmd="$1" out pid st="" deadline
-    out=$(qga "$(jq -cn --arg c "$cmd" '{execute:"guest-exec",arguments:{path:"/bin/bash",arg:["-c",$c],"capture-output":true}}')")
+    local cmd="$1" limit="${2:-60}" out pid st="" deadline left
+    [ "$limit" -gt 0 ] || { echo "qga_root: no time left: $cmd" >&2; return 98; }
+    deadline=$(( $(date +%s) + limit ))
+    out=$(qga "$(jq -cn --arg c "$cmd" '{execute:"guest-exec",arguments:{path:"/bin/bash",arg:["-c",$c],"capture-output":true}}')" "$limit")
     pid=$(printf '%s' "$out" | jq -r '.return.pid // empty' 2>/dev/null)
     [ -n "$pid" ] || { echo "qga_root: guest-exec failed: $out" >&2; return 97; }
-    deadline=$(( $(date +%s) + 60 ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        st=$(qga "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$pid}}")
+    while left=$(( deadline - $(date +%s) )); [ "$left" -gt 0 ]; do
+        st=$(qga "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$pid}}" "$left")
         [ "$(printf '%s' "$st" | jq -r '.return.exited' 2>/dev/null)" = true ] && break
         sleep 1
     done
     [ "$(printf '%s' "$st" | jq -r '.return.exited' 2>/dev/null)" = true ] \
-        || { echo "qga_root: timed out after 60s: $cmd" >&2; return 98; }
+        || { echo "qga_root: timed out after ${limit}s: $cmd" >&2; return 98; }
     printf '%s' "$st" | jq -r '.return."out-data" // empty' | base64 -d
     printf '%s' "$st" | jq -r '.return."err-data" // empty' | base64 -d >&2
     return "$(printf '%s' "$st" | jq -r '.return.exitcode // 99')"
@@ -363,19 +369,9 @@ if [ "$POWEROFF" = 1 ]; then
     QGA_T=$(( $(date +%s) - BOOT_T0 ))
     log "guest agent up after power-off in ${QGA_T}s"
 fi
-log "guest agent up; starting sshd over the agent channel"
-exec_out=$(qga '{"execute":"guest-exec","arguments":{"path":"/usr/bin/systemctl","arg":["start","sshd.service"],"capture-output":true}}')
-qga_pid=$(printf '%s' "$exec_out" | grep -oE '"pid":[0-9]+' | grep -oE '[0-9]+' | head -1)
-[ -n "$qga_pid" ] || { shoot 99-qga-exec; die "guest-exec to start sshd failed: $exec_out"; }
-# Poll guest-exec-status until the systemctl call exits (bounded).
-st_deadline=$(( $(date +%s) + 60 ))
-while [ "$(date +%s)" -lt "$st_deadline" ]; do
-    st=$(qga "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$qga_pid}}")
-    printf '%s' "$st" | grep -q '"exited":true' && break
-    sleep 2
-done
-ec=$(printf '%s' "$st" | grep -oE '"exitcode":[0-9]+' | grep -oE '[0-9]+' | head -1)
-[ "${ec:-0}" = 0 ] || warn "systemctl start sshd returned exitcode=$ec (continuing; SSH wait loop will confirm)"
+# sshd start + SSH wait under one absolute deadline (image/lib/sshd-wait.sh).
+. "$HERE/lib/sshd-wait.sh"
+log "guest agent up; sshd is started over the agent channel by the SSH wait"
 
 #-- 6. SSH wrapper + wait for auth to actually succeed -----------------------
 # First-boot resize + greetd autologin together take ~2-5 min; we poll
@@ -388,15 +384,11 @@ remote() {
 }
 
 log "waiting for sshd to accept auth (max 600s)..."
-deadline=$(( $(date +%s) + 600 ))
-ready=0
-while [ "$(date +%s)" -lt "$deadline" ]; do
-    if remote 'true' 2>/dev/null; then
-        ready=1; break
-    fi
-    sleep 5
-done
-[ "$ready" = 1 ] || { shoot 99-ssh-timeout; die "SSH never came up; see $VERIFY_DIR/screenshots/99-ssh-timeout.png"; }
+if ! wait_for_ssh boot $(( $(date +%s) + 600 )) 4; then
+    shoot 99-ssh-timeout
+    die "SSH never came up within 600s ($(qdv_ssh_failure_note)); see $VERIFY_DIR/screenshots/99-ssh-timeout.png"
+fi
+[ "$SSHD_START_FAILS" = 0 ] || log "sshd came up after $(qdv_ssh_failure_note)"
 shoot 01-ssh-ready
 
 # admin's user systemd manager comes up under linger right after boot and
@@ -786,12 +778,12 @@ if [ "$DO_PERSIST" = 1 ]; then
         sleep 3
     done
     [ "$qga_up" = 1 ] || { shoot 99-qga-timeout-reboot; die "guest agent never came back after reboot"; }
-    qga '{"execute":"guest-exec","arguments":{"path":"/usr/bin/systemctl","arg":["start","sshd.service"],"capture-output":true}}' >/dev/null || true
-    ssh_deadline=$(( $(date +%s) + 180 ))
-    while [ "$(date +%s)" -lt "$ssh_deadline" ]; do
-        remote 'true' 2>/dev/null && break
-        sleep 4
-    done
+    # SSH must come back after the reboot too: the agent-backed persistence
+    # checks below would otherwise pass on a guest whose sshd never returned.
+    if ! wait_for_ssh reboot $(( $(date +%s) + 180 )) 4; then
+        shoot 99-ssh-timeout-reboot
+        die "SSH never came back within 180s after reboot ($(qdv_ssh_failure_note)); see $VERIFY_DIR/screenshots/99-ssh-timeout-reboot.png"
+    fi
     expect "persist marker survived reboot" \
         qga_root 'grep -qx persist-ok /var/lib/qdistro/verify-persist-marker'
     expect "btrfs snapshot survived reboot" \

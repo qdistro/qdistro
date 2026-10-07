@@ -174,7 +174,10 @@ host_free_check $(( IMAGE_SIZE_MB * 1024 * 1024 + 8 * 1024 * 1024 * 1024 )) "the
 qdistro_load_test_substrate || die "invalid cloud test substrate manifest"
 BAKED_BASE="$(qdistro_substrate_base_path baked)"
 [ -f "$BAKED_BASE" ] || die "$BAKED_BASE missing (build it via scripts/vm/build-baked-baseweed.sh)"
-virsh dominfo qdistro-template >/dev/null 2>&1 || die "qdistro-template domain missing"
+# clone-baseweed.sh dumps QDWIN_VM_TEMPLATE (default qdistro-template), so
+# check the same domain it will clone from, not a hardcoded name.
+BUILD_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}"
+virsh dominfo "$BUILD_TEMPLATE" >/dev/null 2>&1 || die "template domain '$BUILD_TEMPLATE' missing (QDWIN_VM_TEMPLATE)"
 
 #-- 2. Clone baseweed via the project's own tool ------------------------------
 if [ "$REUSE" = 1 ] && virsh dominfo "$VM" >/dev/null 2>&1; then

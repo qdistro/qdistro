@@ -332,6 +332,10 @@ is "live rule-driven allow: cross-silo $SA -> $SB (source-peer relay)" \
 kill_clip_src "$XSRC_PID"; CLIP_SRC_PID=""
 
 step "4b. live attested allow: bound tagged source -> same-silo"
+AUDIT_MARK_4B=$(sqlite3 "$AUDIT_DB" "SELECT coalesce(max(id),0) FROM audit;")
+case "$AUDIT_MARK_4B" in
+    ""|*[!0-9]*) fail "audit mark for step 4b unreadable (${AUDIT_MARK_4B:-empty})"; AUDIT_MARK_4B="" ;;
+esac
 # Same-silo is the other live allow shape: a tagged clip source that owns
 # a real xdg_toplevel in its own silo s127c, focused, registered,
 # verified — the exact trust shape a tier3s bridge takes when its own
@@ -366,11 +370,20 @@ wait_for 30 bash -c "comp_log \"\$1\" | grep -q 'seat_focus_changed seat=default
 # attested the relayed pid — an allow here is earned, never a default.
 wait_for 30 bash -c "qdshell_log \"\$1\" | grep -q 'CLIPBOARD_GATE .*src_silo=$SC .*verdict=allow'" _ "$J0" \
     || fail "bound tagged source never reached a live attested allow"
-line=$(clip_gate_line "$SC"); info "gate: $line"
+# Assert on the allow the wait saw, not the newest line: the source keeps
+# re-offering every 400 ms and a later offer can still hit a transient
+# broker-unavailable deny (busctl --timeout=200ms under load).
+same=$(qdshell_log "$J0" | grep "CLIPBOARD_GATE .*src_silo=$SC dst_silo=$SC ")
+line=$(printf '%s\n' "$same" | grep 'verdict=allow' | head -1); info "gate: $line"
 is "live attested allow: bound tagged source -> same-silo (verify + record resolution)" \
     "$(printf '%s' "$line" | grep -c 'verdict=allow')" 1
-is "cold-verify bound offers denied first (the allow was earned)" \
-    "$(qdshell_log "$J0" | grep -c "CLIPBOARD_GATE .*src_silo=$SC .*verdict=deny" | awk '{print ($1>=1)?1:0}')" 1
+# The allow is earned only through the broker's verified same-silo path
+# (identity_verified from VerifyClientIdentity AND launch-record lineage of
+# the relayed source pid), which alone writes this audit row. Whether a
+# cold-cache deny comes first depends on whether step 4a already verified
+# the identity, so it is not asserted.
+is "same-silo allow is broker-verified (identity + launch-record lineage audit row)" \
+    "$([ -n "$AUDIT_MARK_4B" ] && sqlite3 "$AUDIT_DB" "SELECT count(*) FROM audit WHERE id > $AUDIT_MARK_4B AND action='qdistro.clipboard.transfer:$SC:$SC' AND decision=1 AND source LIKE 'clipboard_same_silo_verified lineage=%';" 2>/dev/null | awk '{print ($1>=1)?"yes":"no"}')" yes
 is "live allow carries dst_silo=$SC (bound => focused => same-silo)" \
     "$(printf '%s' "$line" | grep -c "dst_silo=$SC")" 1
 kill_clip_src "$CLIP_SRC_PID"; CLIP_SRC_PID=""

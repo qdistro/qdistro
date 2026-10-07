@@ -331,15 +331,26 @@ if [ "$(id -un)" != "$USER_NAME" ]; then
     # The uid lookup is status-gated and shape-checked like the getent
     # below: rc 0 AND exactly one numeric uid line, or no result at all —
     # a line printed before the timeout kill is never a uid (sol B-i r1).
-    AS_UID="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)" \
-        && [[ "$AS_UID" =~ ^[0-9]+$ ]] || AS_UID=""
+    # nss_why/nss_t0 only DESCRIBE a failure (which lookup, its status, the
+    # elapsed time): a timeout kill (rc 124) and a missing entry (getent
+    # rc 2) are otherwise indistinguishable in the verdict line. They never
+    # change it.
+    nss_why=""; nss_t0="$(date +%s%N)"
+    AS_UID="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)"; nss_rc=$?
+    [ "$nss_rc" -eq 0 ] && [[ "$AS_UID" =~ ^[0-9]+$ ]] \
+        || { nss_why="id -u rc=$nss_rc"; AS_UID=""; }
     puid=""; pw=""
-    [ -n "$AS_UID" ] && pw="$(timeout 5 getent passwd "$USER_NAME")" \
-        && puid="$(printf '%s\n' "$pw" | cut -d: -f3)" \
-        && AS_HOME="$(printf '%s\n' "$pw" | cut -d: -f6)"
+    if [ -n "$AS_UID" ]; then
+        pw="$(timeout 5 getent passwd "$USER_NAME")"; nss_rc=$?
+        if [ "$nss_rc" -eq 0 ]; then
+            puid="$(printf '%s\n' "$pw" | cut -d: -f3)" \
+                && AS_HOME="$(printf '%s\n' "$pw" | cut -d: -f6)"
+        else nss_why="getent passwd rc=$nss_rc"; fi
+    fi
     [ -n "$AS_UID" ] && [ "$puid" = "$AS_UID" ] && [ "${AS_HOME#/}" != "$AS_HOME" ] \
         && [[ "$pw" != *$'\n'* ]] \
-        || { fail nss "no passwd entry for $USER_NAME within the 5 s bound"; AS_UID=""; AS_HOME=""; }
+        || { fail nss "no passwd entry for $USER_NAME within the 5 s bound (${nss_why:-entry shape: uid/home/line count}; $(( ($(date +%s%N) - nss_t0) / 1000000 )) ms)"
+             AS_UID=""; AS_HOME=""; }
 fi
 # podman's runtime dir for the probed user: a logind session dir when it
 # exists (admin), else the per-silo dir the spawn creates (a silo account has

@@ -1505,8 +1505,11 @@ SH
         [[ "$output" == *"blocked image verify-contents"* ]]
         [[ "$output" != *"release-identity"* ]]
         [ ! -f "$RDIR/host/image-release-identity.log" ]
+        # No artifact is not a pass: the boot stage is blocked and the gate
+        # exits with the build class (--no-boot above stays a static-only
+        # developer mode and keeps its rc).
         run gate_image
-        [ "$status" -eq 0 ]
+        [ "$status" -eq 1 ]
         [[ "$output" == *"blocked image verify-contents"*"blocked image verify.sh"* ]]
         [[ "$output" != *"release-identity"* ]]
     done
