@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # packaging/env.sh — default download sources and build settings for the
-# qdistro packaging subtree. Source this file before using the values; every
-# variable accepts an environment override, and packaging/env.local.sh
-# (gitignored, optional) is sourced last for persistent local overrides.
+# qdistro packaging subtree. Source this file before using the values.
+#
+# Precedence:  environment  >  packaging/env.local.sh  >  defaults here.
+# env.local.sh (gitignored, optional) is applied BEFORE the defaults so that
+# dependent defaults (e.g. QDISTRO_WORK deriving from QDISTRO_BUILD_TMP,
+# QDISTRO_TARGET_RPM_REPO_URL deriving from QDISTRO_RPM_REPO_URL) compute
+# from the resolved value — but an explicitly exported variable always wins.
 #
 # Nothing here is pinned to a Tumbleweed snapshot: the defaults float on
 # Tumbleweed proper. To reproduce an exact package set, point the repo URLs
@@ -11,6 +15,36 @@
 # The kiwi image pipeline has its own pin mechanism (repo-root
 # snapshot.conf, overridable wholesale via QDISTRO_TEST_SUBSTRATE pointing
 # at an alternate manifest). This file intentionally does not consume it.
+
+_packaging_vars=(
+    QDISTRO_TW_OSS_URL QDISTRO_TW_NONOSS_URL
+    QDISTRO_TARGET_OSS_URL QDISTRO_TARGET_NONOSS_URL
+    QDISTRO_RPM_REPO_URL QDISTRO_TARGET_RPM_REPO_URL QDISTRO_RPM_KEY_FP
+    QDISTRO_RPM_BUILDER QDISTRO_ISO_TOOL
+    AGAMA_STOCK_ISO AGAMA_STOCK_ISO_URL AGAMA_STOCK_ISO_SHA256
+    QDISTRO_ADMIN_PASSWORD QDISTRO_ROOT_PASSWORD
+    QDISTRO_SNAPSHOT_LABEL QDISTRO_VERSION
+    QDISTRO_BUILD_TMP QDISTRO_VM_NAME QDISTRO_WORK
+)
+
+# Snapshot env-set values, source env.local.sh, restore: local fills only
+# variables the environment left unset.
+for _v in "${_packaging_vars[@]}"; do
+    if [[ -v $_v ]]; then declare "_packaging_saved_$_v=${!_v}"; fi
+done
+# shellcheck source=/dev/null
+if [ -f "$(dirname "${BASH_SOURCE[0]}")/env.local.sh" ]; then
+    . "$(dirname "${BASH_SOURCE[0]}")/env.local.sh"
+fi
+for _v in "${_packaging_vars[@]}"; do
+    declare -n _s="_packaging_saved_$_v"
+    if [[ -v _s ]]; then
+        printf -v "$_v" '%s' "$_s"
+        unset "_packaging_saved_$_v"
+    fi
+    unset -n _s
+done
+unset _packaging_vars _v
 
 # --- upstream Tumbleweed repositories used at INSTALL time (Agama) --------
 : "${QDISTRO_TW_OSS_URL:=https://download.opensuse.org/tumbleweed/repo/oss/}"
@@ -72,9 +106,4 @@
 # manifest> (consumed by scripts/vm/lib/test-substrate.sh). No packaging-side
 # knob is needed — set that variable when booting a different cloud image.
 
-# --- local overrides --------------------------------------------------------
-# shellcheck source=/dev/null
-if [ -f "$(dirname "${BASH_SOURCE[0]}")/env.local.sh" ]; then
-    . "$(dirname "${BASH_SOURCE[0]}")/env.local.sh"
-fi
 return 0 2>/dev/null || true   # sourcing must not propagate a nonzero status

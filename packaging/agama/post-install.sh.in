@@ -48,5 +48,13 @@ autorefresh=0
 baseurl=@QDISTRO_TARGET_NONOSS_URL@
 gpgcheck=1
 EOF
+cat > /etc/zypp/repos.d/qdistro.repo <<EOF
+[qdistro]
+name=qdistro RPM repository
+enabled=1
+autorefresh=1
+baseurl=@QDISTRO_TARGET_RPM_REPO_URL@
+gpgcheck=1
+EOF
 
 echo 'qdistro post-install: done'

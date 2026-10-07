@@ -14,7 +14,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 yaml=$here/../../agama/out/qdistro.yaml
 [ -f "$yaml" ] || { echo "$yaml missing — run agama/render-profile.sh first" >&2; exit 1; }
 
-work=$(mktemp -d "${QDISTRO_BUILD_TMP:-/tmp}/dud.XXXXXX")
+mkdir -p "$QDISTRO_BUILD_TMP"
+work=$(mktemp -d "${QDISTRO_BUILD_TMP}/dud.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work"/{SPECS,SOURCES,BUILD,BUILDROOT,RPMS,SRPMS}
 cp "$here/qdistro-product-dud.spec" "$work/SPECS/"
