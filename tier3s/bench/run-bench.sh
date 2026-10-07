@@ -111,16 +111,12 @@ ssh_vm "mkdir -p /var/tmp/t3s-dl /var/tmp/t3s-bench && cd /var/tmp/t3s-dl && for
 ssh_vm 'loginctl enable-linger admin >/dev/null 2>&1; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start qdwin-session.target'
 for i in $(seq 1 60); do ssh_vm 'test -S /run/user/1000/wayland-1' && break; sleep 1; done
 ssh_vm 'test -S /run/user/1000/wayland-1' || { echo "FAIL: wayland-1 never appeared — VM $VM preserved"; exit 1; }
-# the bench runs for minutes with no input: the idle lock would blank the
-# session mid-pass and starve the bridge/latency probes of damage. Stop the
-# locker on the throwaway worker (ctrl socket has no unlock, by design).
-ssh_vm 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop qdlocker.service' \
-    || echo "WARN: could not stop qdlocker — GUI sections may idle-lock"
 # compositor presentation health: a boot where virtio-gpu atomic commits
 # fail EINVAL never reaches scanout — the screen stays on fbcon while the
 # wayland socket exists, and the latency desk/win frames are identical.
 # Detect a climbing repaint-flush count here, restart the session once,
-# and bail (VM preserved) if it keeps failing.
+# and bail (VM preserved) if it keeps failing. The gate runs BEFORE the
+# qdlocker stop below: the session restart resurrects the locker.
 repaint_fails() {
     ssh_vm 'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --no-pager -b" 2>/dev/null | grep -c "repaint-flush failed"'
 }
@@ -134,6 +130,11 @@ if [ "${rf2:-0}" -gt 5 ] && [ "${rf2:-0}" -gt "${rf1:-0}" ]; then
         || { echo "FAIL: compositor repaint still failing after restart ($rf3->$rf4) — VM $VM preserved"; exit 1; }
     echo "   repaint failures stopped after restart (total $rf4)"
 fi
+# the bench runs for minutes with no input: the idle lock would blank the
+# session mid-pass and starve the bridge/latency probes of damage. Stop the
+# locker on the throwaway worker (ctrl socket has no unlock, by design).
+ssh_vm 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop qdlocker.service' \
+    || echo "WARN: could not stop qdlocker — GUI sections may idle-lock"
 ssh_vm "cd /var/tmp/t3s-dl && bash tier3s-guest-setup.sh $U --expect-fresh --gui weston-terminal,foot" \
     > "$L/setup.log" 2>&1
 if ! grep -q '\[t3s-setup\] [0-9]* passes, 0 failures' "$L/setup.log"; then
