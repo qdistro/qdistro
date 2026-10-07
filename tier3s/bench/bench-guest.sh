@@ -556,7 +556,7 @@ teardown_one() {
 
 main() {
     case "${1:-all}" in
-        latency-up)   sec_latency_up; T3S_DONE=1; exit $? ;;
+        latency-up)   local rc; sec_latency_up; rc=$?; T3S_DONE=1; exit $rc ;;
         latency-down) sec_latency_down; T3S_DONE=1; exit 0 ;;
     esac
     local secs="${*:-env cold mem sys io bridge overhead}"
