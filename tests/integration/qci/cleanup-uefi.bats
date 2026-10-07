@@ -3,7 +3,9 @@
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
-    REAL_QEMU_IMG="$(command -v qemu-img)"
+    # Resolved before the stub bin dir shadows it. Optional: only the cases
+    # that build real qcow2 chains need it (require_real_qemu_img).
+    REAL_QEMU_IMG="$(command -v qemu-img || true)"
     TMP="$(mktemp -d)"
     RDIR="$TMP/run"; mkdir -p "$RDIR/host"
     QDWIN_IMG_DIR="$TMP/images"; mkdir -p "$QDWIN_IMG_DIR"
@@ -132,6 +134,13 @@ SH
     source "$REPO_ROOT/ci/lib/gates/cleanup.sh"
 }
 
+# Cases that build real qcow2 backing chains need the real qemu-img. It is a
+# host prerequisite of the VM gates, so `qci selftest` on the host always has
+# it; the offline dev container (ci/bin/qci-host-run) does not ship it.
+require_real_qemu_img() {
+    [ -n "$REAL_QEMU_IMG" ] || skip "qemu-img not installed: this case builds real qcow2 chains (run it on the host, e.g. via qci selftest)"
+}
+
 teardown() {
     # A test that fails an assertion never reaches _release_storage_lock.
     if [ -n "${LOCK_HOLDER_PID:-}" ]; then
@@ -205,6 +214,7 @@ teardown() {
 }
 
 @test "cleanup preserves a real qcow2 parent referenced by a recent child" {
+    require_real_qemu_img
     FIRMWARE=uefi; export FIRMWARE
     local child="$QDWIN_IMG_DIR/qci-recent-child.qcow2"
     rm -f "$DISK" "$BIN/qemu-img"
@@ -227,6 +237,7 @@ teardown() {
 }
 
 @test "cleanup protects a real secondary parent disk through the orphan sweep" {
+    require_real_qemu_img
     FIRMWARE=uefi; export FIRMWARE
     local secondary="$QDWIN_IMG_DIR/qci-secondary-parent.qcow2"
     local child="$QDWIN_IMG_DIR/qci-recent-child.qcow2"
@@ -501,6 +512,7 @@ teardown() {
 }
 
 @test "post-undefine refresh preserves a real qcow2 attached by a new owner" {
+    require_real_qemu_img
     FIRMWARE=uefi
     rm -f "$DISK" "$BIN/qemu-img"
     "$REAL_QEMU_IMG" create -q -f qcow2 "$DISK" 1M
@@ -519,6 +531,7 @@ teardown() {
 }
 
 @test "orphan refresh preserves a real qcow2 after an existing owner changes attachment" {
+    require_real_qemu_img
     local prior="$TMP/prior-owner-disk.qcow2"
     rm -f "$DISK" "$BIN/qemu-img"
     "$REAL_QEMU_IMG" create -q -f qcow2 "$DISK" 1M
@@ -540,6 +553,7 @@ teardown() {
 }
 
 @test "post-undefine final backing audit catches a child created during ownership refresh" {
+    require_real_qemu_img
     local child="$QDWIN_IMG_DIR/qci-refresh-child.qcow2"
     FIRMWARE=uefi
     rm -f "$DISK" "$BIN/qemu-img"
@@ -560,6 +574,7 @@ teardown() {
 }
 
 @test "orphan final backing audit catches a child created during ownership refresh" {
+    require_real_qemu_img
     local child="$QDWIN_IMG_DIR/qci-refresh-child.qcow2"
     rm -f "$DISK" "$BIN/qemu-img"
     "$REAL_QEMU_IMG" create -q -f qcow2 "$DISK" 1M
@@ -666,6 +681,7 @@ teardown() {
 # non-qci-named qcow2 backing onto a qci-named candidate was invisible, so the
 # orphan sweep unlinked a LIVE backing file and corrupted the human's image.
 @test "orphan sweep preserves a candidate backing a non-qci-named qcow2" {
+    require_real_qemu_img
     local kept="$QDWIN_IMG_DIR/kept.qcow2"
     rm -f "$DISK" "$BIN/qemu-img"
     "$REAL_QEMU_IMG" create -q -f qcow2 "$DISK" 1M
@@ -690,6 +706,7 @@ teardown() {
 # the intermediate living OUTSIDE the images directory. An immediate-parent
 # scan -- even a widened one -- reads `clear` here and deletes the candidate.
 @test "orphan sweep walks the whole chain, not just the immediate parent" {
+    require_real_qemu_img
     local kept="$QDWIN_IMG_DIR/kept.qcow2" mid="$TMP/outside-mid.qcow2"
     rm -f "$DISK" "$BIN/qemu-img"
     "$REAL_QEMU_IMG" create -q -f qcow2 "$DISK" 1M
@@ -713,6 +730,7 @@ teardown() {
 # reachable only through the inventory, which cleanup publishes to
 # backing_referrer_state as BACKING_REFERRER_EXTRA_LIST.
 @test "orphan sweep preserves a candidate backing a domain disk outside the images dir" {
+    require_real_qemu_img
     local outside="$TMP/outside-kept.qcow2"
     rm -f "$DISK" "$BIN/qemu-img"
     "$REAL_QEMU_IMG" create -q -f qcow2 "$DISK" 1M
@@ -1046,6 +1064,7 @@ _release_storage_lock() {
 # BACKING_REFERRER_EXTRA_LIST, so the chain was never walked and the orphan
 # sweep unlinked a live backing file.
 @test "a foreign domain's out-of-tree child protects its backing in our images dir" {
+    require_real_qemu_img
     local outside="$TMP/foreign-child.qcow2"
     rm -f "$DISK" "$BIN/qemu-img"
     "$REAL_QEMU_IMG" create -q -f qcow2 "$DISK" 1M
@@ -1234,6 +1253,7 @@ SH
 # candidate, the audit must re-inspect it and keep the candidate. Trusting a
 # stale entry here would unlink a live backing file.
 @test "a referrer rebased after being cached is re-inspected, not trusted" {
+    require_real_qemu_img
     local kept="$QDWIN_IMG_DIR/kept.qcow2"
     rm -f "$DISK" "$BIN/qemu-img"
     "$REAL_QEMU_IMG" create -q -f qcow2 "$DISK" 1M
@@ -1273,6 +1293,7 @@ SH
 # delete anything, because the unlink is gated on an uncached audit taken
 # under the exclusive storage lock.
 @test "a same-tick rebase fools the cache and still does not delete" {
+    require_real_qemu_img
     local kept="$QDWIN_IMG_DIR/kept.qcow2"
     # Same basename LENGTH as the candidate, so the two header rewrites cannot
     # differ in file size even in principle.
@@ -1356,6 +1377,7 @@ SH
 # defect -- no signature scheme can reject it -- so the only safe design is to
 # not consult it.
 @test "the authoritative audit neither reads nor writes the parent cache" {
+    require_real_qemu_img
     local kept="$QDWIN_IMG_DIR/kept.qcow2" before after
     rm -f "$DISK" "$BIN/qemu-img"
     "$REAL_QEMU_IMG" create -q -f qcow2 "$DISK" 1M
@@ -1403,6 +1425,7 @@ SH
 # for defects reproduced OUTSIDE the suite, so they belong in it.
 
 _foreign_chain_fixture() {
+    require_real_qemu_img
     # $DISK  <- backing of an out-of-tree foreign child.
     OUTSIDE="$TMP/foreign-child.qcow2"
     rm -f "$DISK" "$BIN/qemu-img"

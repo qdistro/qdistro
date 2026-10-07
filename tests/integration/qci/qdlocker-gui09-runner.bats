@@ -663,6 +663,10 @@ alarm_png() { magick -size 1280x800 'xc:#FD4663' "PNG24:$1"; }
     # probe (reading its program from stdin) reports a camera node
     printf '#!/bin/bash\ncase "$*" in *" -c "*) echo /usr/lib64/python3.14/site-packages/qdlocker/indicators.py ;; *) cat >/dev/null; echo cam0 ;; esac\n' > "$S/python3"
     printf '#!/bin/bash\nexit 0\n' > "$S/pw-cli"
+    # Preflight B only checks that pw-dump is installed (the sink probe runs
+    # it from the python3 stub above, which never does). Stub it, so the case
+    # does not depend on the host's PipeWire tools (the dev container has none).
+    printf '#!/bin/bash\necho "[]"\n' > "$S/pw-dump"
     # install -d creates directories only inside the test tree
     printf '#!/bin/bash\necho "install $*" >>"%s/calls"\nd=${@: -1}\ncase "$*" in *-d*) case $d in %s/*) mkdir -p "$d" ;; esac ;; esac\nexit 0\n' "$T" "$T" > "$S/install"
     chmod +x "$S"/*

@@ -136,6 +136,9 @@ host qdfirefox-extension-coverage-floor coverage'
 }
 
 @test "private row entrypoint refuses to execute on host" {
+    # The refusal keys on /run/.containerenv, so inside the dev container
+    # (ci/bin/qci-host-run) the entrypoint is legitimately allowed to run.
+    [ ! -e /run/.containerenv ] || skip "running inside a Podman container: the host refusal cannot be observed here"
     run bash "$SOURCE_ROOT/ci/containers/run-host.sh"
     echo "$output"; [ "$status" = 2 ]; [[ "$output" = *'require Podman'* ]]
 }
