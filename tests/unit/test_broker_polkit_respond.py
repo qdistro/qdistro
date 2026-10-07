@@ -19,6 +19,9 @@ _peer_info, and intercept the actual polkitd call
 from __future__ import annotations
 
 import concurrent.futures
+import fcntl
+import os
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -39,6 +42,12 @@ from qdistro_admin_rules import RulesEngine  # noqa: E402
 ADMIN_UID = B.ADMIN_UID
 NON_ADMIN_UID = 2000
 PEER_EXE = "/usr/bin/test-app"
+AGENT_EXE = "/usr/bin/python3"
+AGENT_ARGV = ["/usr/bin/python3", "-I",
+              "/usr/libexec/qdistro/qdistro_polkit_agent.py"]
+# read_cgroup returns the raw 0::/… path — leading slash included.
+AGENT_CGROUP = ("/user.slice/user-1000.slice/"
+                "qdistro-polkit-agent.service")
 
 IDENT_ROOT = ("unix-user", {"uid": dbus.UInt32(0)})
 IDENT_ADMIN = ("unix-user", {"uid": dbus.UInt32(ADMIN_UID)})
@@ -53,6 +62,7 @@ class _StubBroker(Broker):
         self._next_id = 1
         self._pending: dict = {}
         self._cancelled_polkit_cookies: dict = {}
+        self._announced_polkit: dict = {}
         self.cache = ApprovalCache(cache_db)
         self.audit = AuditLog(audit_db)
         self.rules = RulesEngine(rules_dir)
@@ -60,10 +70,34 @@ class _StubBroker(Broker):
         self._audit_retention_days = 0
         self._io_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="stub-broker-io")
+        # The default peer is the session polkit agent itself: the three
+        # polkit relay methods are bound to its installed script, not
+        # merely to ADMIN_UID.
         self._peer_uid = ADMIN_UID
         self._peer_pid = 1
-        self._peer_exe = PEER_EXE
+        self._peer_exe = AGENT_EXE
+        self._peer_argv = list(AGENT_ARGV)
         self._peer_start = 0
+        self._peer_label = ("system_u:system_r:unconfined_t:s0",
+                            "unconfined_t")
+        self._peer_cgroup_val = AGENT_CGROUP
+        self._peer_env_names: set | None = set()
+        # The agent is a system service, so the peer must be spawned by
+        # init itself — a foreign process migrated into the unit cgroup
+        # keeps its own parent (sol r168/r169).
+        self._peer_ppid_val: int | None = 1
+        # And it must BE the unit's main process — a descendant can
+        # double-fork into the same cgroup with PPID 1 and a rewritten
+        # argv (astra r172). None = "report the peer pid as MainPID"
+        # (the default peer IS the agent); any other value overrides.
+        self._agent_main_pid: int | None = None
+        self._agent_main_pid_unreadable = False
+        # The daemon's ProcessFD for the caller's connection — a pidfd
+        # for the ORIGIN task. None = "report the peer pid as the live
+        # origin" (default peer IS the agent); a different value models
+        # a connection outliving its process into pid reuse; False
+        # models a dead origin / missing credential (astra r173).
+        self._peer_origin_live_pid: int | None | bool = None
         self.pending_signals: list[int] = []
         self.decided_signals: list[tuple[int, str]] = []
         # Captured (uid, cookie, identity) tuples from _respond_polkit.
@@ -72,16 +106,48 @@ class _StubBroker(Broker):
         from qdistro_hook_client import HookClient
         self.hooks = HookClient(enabled=False)
 
-    def set_peer(self, uid: int, pid: int = 100, exe: str = PEER_EXE,
-                 start: int = 0) -> None:
+    def set_peer(self, uid: int, pid: int = 100, exe: str = AGENT_EXE,
+                 start: int = 0, argv: list | None = None) -> None:
         self._peer_uid = uid
         self._peer_pid = pid
         self._peer_exe = exe
+        self._peer_argv = list(AGENT_ARGV) if argv is None else argv
         self._peer_start = start
 
     def _peer_info(self, sender, conn):
         return (self._peer_uid, self._peer_pid, self._peer_exe,
                 self._peer_start)
+
+    def _peer_cmdline(self, pid):
+        return self._peer_argv
+
+    def _peer_label_type(self, pid):
+        return self._peer_label
+
+    def _peer_cgroup(self, pid):
+        return self._peer_cgroup_val
+
+    def _peer_environ_names(self, pid):
+        if self._peer_env_names is None:
+            return None
+        return set(self._peer_env_names)
+
+    def _peer_ppid(self, pid):
+        return self._peer_ppid_val
+
+    def _unit_main_pid(self, unit):
+        if self._agent_main_pid_unreadable:
+            return None
+        if self._agent_main_pid is not None:
+            return self._agent_main_pid
+        return self._peer_pid
+
+    def _peer_connection_live_pid(self, sender):
+        if self._peer_origin_live_pid is False:
+            return None
+        if self._peer_origin_live_pid is not None:
+            return self._peer_origin_live_pid
+        return self._peer_pid
 
     def _peer_matches_admin_control(self, *, uid: int, pid: int,
                                     exe: str, method: str = ""
@@ -232,6 +298,7 @@ class TestRequestPolkitAuth:
 class TestRespondPolkitAuth:
 
     def test_relays_the_verdict_to_polkitd(self, broker):
+        broker.AnnouncePolkitAuth("cookie-9")
         broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT])
         assert broker.polkit_responded == [
             (ADMIN_UID, "cookie-9", ("unix-user", {"uid": dbus.UInt32(0)}))]
@@ -242,8 +309,187 @@ class TestRespondPolkitAuth:
             broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT])
 
     def test_empty_identities_fail_closed(self, broker):
+        broker.AnnouncePolkitAuth("cookie-9")
         with pytest.raises(dbus.DBusException):
             broker.RespondPolkitAuth("cookie-9", [])
+        assert broker.polkit_responded == []
+
+    def test_an_unannounced_cookie_cannot_be_responded(self, broker):
+        """A cookie is a bearer secret: a peer that never announced or
+        filed it cannot drive the relay (sol r164 — the secret may have
+        been learned, but the unique bus name can't be forged)."""
+        with pytest.raises(dbus.DBusException):
+            broker.RespondPolkitAuth("stray-cookie", [IDENT_ROOT])
+        assert broker.polkit_responded == []
+
+    def test_respond_is_bound_to_the_announcing_sender(self, broker):
+        """The same unique bus name must announce and respond — a
+        second connection knowing the cookie is refused."""
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+        with pytest.raises(dbus.DBusException):
+            broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT],
+                                     sender=":1.10")
+        assert broker.polkit_responded == []
+        broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT],
+                                 sender=":1.9")
+        assert len(broker.polkit_responded) == 1
+
+    def test_respond_releases_a_pending_filed_request(self, broker):
+        """A local verdict on a filed cookie resolves the queued
+        request too — the prompt is moot and waiters release."""
+        rid = _file_polkit(broker, "cookie-x", [IDENT_ROOT])
+        replies = []
+        broker._pending[rid].waiters.append(
+            (replies.append, lambda e: None))
+        broker.RespondPolkitAuth("cookie-x", [IDENT_ROOT])
+        assert broker._pending[rid].decision is True
+        assert replies == [True]
+        assert (rid, "allow") in broker.decided_signals
+        assert len(broker.polkit_responded) == 1
+
+    def test_respond_for_a_denied_request_is_refused(self, broker):
+        rid = _file_polkit(broker, "cookie-y", [IDENT_ROOT])
+        broker.DecideRequest(rid, "deny", "once")
+        broker.RespondPolkitAuth("cookie-y", [IDENT_ROOT])
+        assert broker.polkit_responded == []
+
+
+class TestAnnouncePolkitAuth:
+
+    def test_a_second_sender_cannot_steal_the_binding(self, broker):
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+        with pytest.raises(dbus.DBusException):
+            broker.AnnouncePolkitAuth("cookie-9", sender=":1.10")
+        # The original binding still stands.
+        broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT],
+                                 sender=":1.9")
+        assert len(broker.polkit_responded) == 1
+
+    def test_reannounce_by_the_same_sender_is_a_no_op(self, broker):
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+
+    def test_announcing_an_own_cancelled_cookie_keeps_it_dead(
+            self, broker, capsys):
+        """Cancel-before-announce from the same sender: the cookie must
+        stay dead — a respond for it is refused."""
+        broker.CancelPolkitAuth("dead", sender=":1.9")
+        broker.AnnouncePolkitAuth("dead", sender=":1.9")
+        broker.RespondPolkitAuth("dead", [IDENT_ROOT], sender=":1.9")
+        assert broker.polkit_responded == []
+        assert "already cancelled" in capsys.readouterr().out
+
+    def test_an_empty_cookie_is_a_no_op(self, broker):
+        broker.AnnouncePolkitAuth("")
+        assert broker._announced_polkit == {}
+
+    def test_announcing_a_cookie_filed_by_another_sender_is_refused(
+            self, broker):
+        """The first declaration wins: a filed request's cookie cannot
+        be rebound by a different connection (sol r165)."""
+        rid = broker.RequestPolkitAuth(
+            "qdistro.test.action", {}, "cookie-9", [IDENT_ROOT],
+            sender=":1.9")
+        with pytest.raises(dbus.DBusException):
+            broker.AnnouncePolkitAuth("cookie-9", sender=":1.10")
+        assert broker._announced_polkit == {}
+        # The filing itself is undisturbed.
+        assert broker._pending[rid].decision is None
+        # ...while the filer's own announce is a harmless no-op.
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+        assert broker._announced_polkit["cookie-9"][0] == ":1.9"
+
+    def test_the_announce_map_never_evicts_a_live_binding(self, broker):
+        """Flood resistance: fresh entries are not evicted to make
+        room, so a dummy-cookie flood cannot push out a live binding
+        and rebind the cookie to another sender (sol r165)."""
+        broker.AnnouncePolkitAuth("real", sender=":1.9")
+        with broker._lock:
+            now = time.time()
+            for i in range(B.POLKIT_CANCELLED_MAX - 1):
+                broker._announced_polkit[f"pad-{i}"] = (":1.10", now)
+        with pytest.raises(dbus.DBusException):
+            broker.AnnouncePolkitAuth("one-more", sender=":1.10")
+        # The live binding survived the flood.
+        assert broker._announced_polkit["real"][0] == ":1.9"
+        broker.RespondPolkitAuth("real", [IDENT_ROOT], sender=":1.9")
+        assert len(broker.polkit_responded) == 1
+
+    def test_the_cancel_map_never_evicts_a_live_mark(self, broker):
+        broker.CancelPolkitAuth("mine", sender=":1.9")
+        with broker._lock:
+            now = time.time()
+            for i in range(B.POLKIT_CANCELLED_MAX - 1):
+                broker._cancelled_polkit_cookies[f"pad-{i}"] = (
+                    {":1.10"}, now)
+        with pytest.raises(dbus.DBusException):
+            broker.CancelPolkitAuth("one-more", sender=":1.10")
+        # Same-sender cancel still holds.
+        broker.AnnouncePolkitAuth("mine", sender=":1.9")
+        broker.RespondPolkitAuth("mine", [IDENT_ROOT], sender=":1.9")
+        assert broker.polkit_responded == []
+
+    def test_a_foreign_cancel_does_not_erase_the_owners_tombstone(
+            self, broker):
+        """Cancel marks accumulate senders: a foreign CancelPolkitAuth
+        must not overwrite the owner's mark and resurrect the cookie
+        for the owner (astra r172)."""
+        broker.CancelPolkitAuth("c", sender=":1.9")
+        broker.CancelPolkitAuth("c", sender=":1.10")
+        # Both marks are present — neither cancelled the other's out.
+        assert broker._cancelled_polkit_cookies["c"][0] == {
+            ":1.9", ":1.10"}
+        # The owner's respond still sees the cookie as dead.
+        broker.AnnouncePolkitAuth("c", sender=":1.9")
+        broker.RespondPolkitAuth("c", [IDENT_ROOT], sender=":1.9")
+        assert broker.polkit_responded == []
+
+
+class TestPolkitCookieOwnershipConflicts:
+    """First declaration wins: whichever unique sender announced or
+    filed a cookie owns it, and a later conflicting declaration from a
+    different sender is refused (sol r165)."""
+
+    def test_filing_a_cookie_announced_by_another_sender_is_refused(
+            self, broker):
+        """A peer that learned a live cookie cannot file it under its
+        own sender to become its owner."""
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+        with pytest.raises(dbus.DBusException):
+            broker.RequestPolkitAuth(
+                "qdistro.test.action", {}, "cookie-9", [IDENT_ROOT],
+                sender=":1.10")
+        assert broker._pending == {}
+        # The owner's own filing of an announced cookie still works.
+        rid = broker.RequestPolkitAuth(
+            "qdistro.test.action", {}, "cookie-9", [IDENT_ROOT],
+            sender=":1.9")
+        assert rid in broker._pending
+        assert broker._pending[rid].filed_by == ":1.9"
+
+    def test_filing_a_cookie_pending_under_another_sender_is_refused(
+            self, broker):
+        rid = broker.RequestPolkitAuth(
+            "qdistro.test.action", {}, "cookie-9", [IDENT_ROOT],
+            sender=":1.9")
+        with pytest.raises(dbus.DBusException):
+            broker.RequestPolkitAuth(
+                "qdistro.test.action", {}, "cookie-9", [IDENT_ROOT],
+                sender=":1.10")
+        assert list(broker._pending) == [rid]
+
+    def test_a_foreign_respond_after_a_conflict_attempt_stays_denied(
+            self, broker):
+        """The conflict refusal is not itself a binding: the would-be
+        thief still cannot respond to the cookie."""
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+        with pytest.raises(dbus.DBusException):
+            broker.RequestPolkitAuth(
+                "qdistro.test.action", {}, "cookie-9", [IDENT_ROOT],
+                sender=":1.10")
+        with pytest.raises(dbus.DBusException):
+            broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT],
+                                     sender=":1.10")
         assert broker.polkit_responded == []
 
 
@@ -302,10 +548,31 @@ class TestCancelPolkitAuth:
             self, broker, capsys):
         """PAM/fprint can finish just as polkitd cancels — the relay
         must not answer a dead cookie."""
+        broker.AnnouncePolkitAuth("dead")
         broker.CancelPolkitAuth("dead")
         broker.RespondPolkitAuth("dead", [IDENT_ROOT])
         assert broker.polkit_responded == []
         assert "already cancelled" in capsys.readouterr().out
+
+    def test_a_foreign_cancel_does_not_kill_the_filing(self, broker):
+        """A cancel from a different unique name must not pre-deny the
+        cookie owner's filing — only the owner's own cancel does."""
+        broker.CancelPolkitAuth("ghost", sender=":1.10")
+        rid = _file_polkit(broker, "ghost", [IDENT_ROOT])
+        assert broker._pending[rid].decision is None
+        # ...while the owner's own cancel still wins the race.
+        broker.CancelPolkitAuth("ghost2", sender=":1.9")
+        rid2 = broker.RequestPolkitAuth(
+            "qdistro.test.action", {}, "ghost2", [IDENT_ROOT],
+            sender=":1.9")
+        assert broker._pending[rid2].decision is False
+
+    def test_a_foreign_cancel_leaves_the_pending_request_alive(
+            self, broker):
+        rid = _file_polkit(broker, "cookie-abc", [IDENT_ROOT])
+        broker.CancelPolkitAuth("cookie-abc", sender=":1.10")
+        assert broker._pending[rid].decision is None
+        assert (rid, "deny") not in broker.decided_signals
 
     def test_an_empty_cookie_never_matches_ordinary_requests(
             self, broker):
@@ -322,6 +589,355 @@ class TestCancelPolkitAuth:
             broker.CancelPolkitAuth("cookie-abc")
         broker.set_peer(ADMIN_UID)
         assert broker._pending[rid].decision is None
+
+
+class TestPolkitAgentPeerBinding:
+    """The relay methods must bind the caller to the installed agent
+    script — ADMIN_UID alone lets any admin-uid process that learned a
+    live cookie file, approve, or cancel a polkit prompt (astra r159
+    P1)."""
+
+    def test_an_untrusted_admin_exe_cannot_file(self, broker):
+        broker.set_peer(ADMIN_UID, exe=PEER_EXE,
+                        argv=[PEER_EXE])
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_admin_python_off_the_agent_script_cannot_file(self, broker):
+        """`python3 -c ...` as admin must not impersonate the agent."""
+        broker.set_peer(ADMIN_UID, exe=AGENT_EXE,
+                        argv=["python3", "-c", "evil()"])
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_the_script_path_as_an_argument_is_not_the_agent(
+            self, broker):
+        """`python3 -c 'evil()' /usr/libexec/.../agent.py` puts the
+        script at argv[-1] — position alone would admit it, but -c is
+        an argument-taking flag outside the safe-flag whitelist
+        (sol r161/r165)."""
+        broker.set_peer(ADMIN_UID, exe=AGENT_EXE,
+                        argv=["python3", "-c", "evil()", AGENT_ARGV[-1]])
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_an_argument_taking_flag_before_the_script_is_rejected(
+            self, broker):
+        """`-W`/`-X`/`-m` consume the next argv element as their
+        argument — allowing arbitrary flags before the script would let
+        `python3 -W ignore <script>`-style shapes smuggle a non-script
+        position or mask `-c`. Only the no-argument isolation flags
+        (-I/-E/-s/-P/-u/…) the unit may legitimately use are admitted
+        (sol r165)."""
+        for argv in (
+                ["python3", "-W", "ignore", AGENT_ARGV[-1]],
+                ["python3", "-X", "utf8", AGENT_ARGV[-1]],
+                ["python3", "-m", "site", AGENT_ARGV[-1]],
+                ["python3", "--check-hash-based-pycs", "always",
+                 AGENT_ARGV[-1]]):
+            broker.set_peer(ADMIN_UID, exe=AGENT_EXE, argv=argv)
+            with pytest.raises(dbus.DBusException):
+                _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_an_attacker_owned_python_named_binary_is_rejected(
+            self, broker):
+        """A drop-in ExecStart=/home/admin/evil/python3 gives a process
+        whose exe BASENAME is python3 while the file is attacker code —
+        it can present `-I <script>` argv and a clean environ. The exe
+        must resolve under a root-owned system dir (sol r167)."""
+        for exe in ("/home/admin/evil/python3",
+                    "/tmp/python3",
+                    "/home/admin/.local/bin/python3",
+                    "/usr/bin/python3 (deleted)"):
+            broker.set_peer(ADMIN_UID, exe=exe, argv=list(AGENT_ARGV))
+            with pytest.raises(dbus.DBusException):
+                _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_the_unisolated_interpreter_form_is_rejected(self, broker):
+        """A drop-in ExecStart of `python3 <script>` (no -I) still
+        loads attacker-writable user-site sitecustomize/.pth — without
+        any env var. Isolated mode is part of the accepted argv shape
+        (sol r166)."""
+        broker.set_peer(ADMIN_UID, exe=AGENT_EXE,
+                        argv=["python3", AGENT_ARGV[-1]])
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_an_unreadable_environ_fails_closed(self, broker):
+        """A peer whose environ cannot be read cannot be shown to be
+        injection-free — deny rather than skip the check (sol r166)."""
+        broker._peer_env_names = None
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_injection_capable_environment_is_rejected(self, broker):
+        """A same-uid caller can push PYTHONPATH/LD_PRELOAD into the
+        user manager's environment and restart the unit — startup code
+        would then share the agent's trusted connection (sol r165).
+        The peer's environ names must carry none of them."""
+        for env in ({"PYTHONPATH"}, {"LD_PRELOAD"}, {"PYTHONHOME"},
+                    {"PYTHONSTARTUP"}, {"BASH_ENV"}, {"LD_AUDIT"},
+                    {"PYTHONBREAKPOINT"},
+                    {"QDISTRO_POLKIT_NONINTERACTIVE"}):
+            broker._peer_env_names = set(env)
+            with pytest.raises(dbus.DBusException):
+                _file_polkit(broker)
+            broker._peer_env_names = set()
+        assert broker._pending == {}
+
+    def test_matching_argv_outside_the_agent_unit_is_rejected(
+            self, broker):
+        """PYTHONPATH/usercustomize lets an attacker run code inside a
+        process whose argv matches the agent — so the cgroup must also
+        match the agent unit's exact path (sol r162)."""
+        broker._peer_cgroup_val = (
+            f"/user.slice/user-{ADMIN_UID}.slice/"
+            f"user@{ADMIN_UID}.service/"
+            "session.slice/session-42.scope")
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+        with pytest.raises(dbus.DBusException):
+            broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT])
+        assert broker.polkit_responded == []
+
+    def test_the_expected_cgroup_matches_proc_format(self):
+        """read_cgroup returns the raw ``0::/…`` path — leading slash
+        included. A constant without it never matches a real peer:
+        the relay would deny every live call (found by the
+        polkit-agent-session bats gate, which was the first live
+        exercise of this check)."""
+        for path in B._POLKIT_AGENT_CGROUPS:
+            assert path.startswith("/"), (
+                "expected cgroup paths must keep /proc's leading slash")
+        own = B._pi.read_cgroup(os.getpid())
+        assert own.startswith("/"), "read_cgroup must not strip the /"
+
+    def test_a_same_named_child_cgroup_is_not_the_unit(self, broker):
+        """A delegated scope can contain a child cgroup literally named
+        `qdistro-polkit-agent.service` — suffix matching would pass it
+        while the real unit still runs (sol r163). Only the exact
+        systemd-anchored path is the unit."""
+        base = (f"/user.slice/user-{ADMIN_UID}.slice/"
+                f"user@{ADMIN_UID}.service")
+        for forged in (
+                f"{base}/app.slice/run-u7.scope/qdistro-polkit-agent.service",
+                f"{base}/evil.slice/qdistro-polkit-agent.service",
+                f"{base}/app.slice/nested/qdistro-polkit-agent.service",
+                # The pre-r169 USER-unit path is no longer the agent.
+                f"{base}/app.slice/qdistro-polkit-agent.service",
+                f"{base}/session.slice/qdistro-polkit-agent.service",
+                # The r173 Slice= placement is exact: neither the bare
+                # system.slice path nor a child/sibling of the real
+                # unit's cgroup passes.
+                "/system.slice/qdistro-polkit-agent.service",
+                "/system.slice/run-ra9.scope/qdistro-polkit-agent.service",
+                "/user.slice/user-1000.slice/"
+                "qdistro-polkit-agent.service/extra",
+                "/user.slice/user-1000.slice/run-r7.scope/"
+                "qdistro-polkit-agent.service"):
+            broker._peer_cgroup_val = forged
+            with pytest.raises(dbus.DBusException):
+                _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_an_empty_cgroup_fails_closed(self, broker):
+        broker._peer_cgroup_val = ""
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_a_process_not_spawned_by_init_is_rejected(
+            self, broker):
+        """Only init spawns a system service's main process. A foreign
+        process presenting the perfect exe/argv/env — whether it somehow
+        reached the unit cgroup or simply lies about its attributes —
+        keeps its own parent pid, so only PPID=1 peers pass (sol
+        r168/r169)."""
+        # Foreign parent (a shell, systemd-run --scope, a migrated
+        # cgroup squatter, …)
+        broker._peer_ppid_val = 9999
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        # Unreadable ppid fails closed.
+        broker._peer_ppid_val = None
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+        # And the init-spawned shape still admits the real agent.
+        broker._peer_ppid_val = 1
+        rid = _file_polkit(broker, "cookie-ok", [IDENT_ROOT])
+        assert rid in broker._pending
+
+    def test_an_orphaned_descendant_inside_the_unit_is_rejected(
+            self, broker):
+        """A compromised unit descendant can double-fork and reappear
+        inside the genuine cgroup with PPID 1 and a rewritten argv —
+        exe/argv/env/cgroup/ppid all match. It is still not the unit's
+        main process, so systemd's MainPID rejects it (astra r172 P1).
+        """
+        broker._peer_ppid_val = 1
+        broker._peer_cgroup_val = AGENT_CGROUP
+        broker._agent_main_pid = 4242  # the real agent; peer is a child
+        assert broker._peer_pid != broker._agent_main_pid
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+        with pytest.raises(dbus.DBusException):
+            broker.AnnouncePolkitAuth("cookie-9")
+        with pytest.raises(dbus.DBusException):
+            broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT])
+        assert broker.polkit_responded == []
+
+    def test_an_unresolvable_main_pid_fails_closed(self, broker):
+        """If systemd cannot name the unit's main process the relay
+        must not guess — the peer check denies."""
+        broker._agent_main_pid_unreadable = True
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_a_connection_outliving_its_process_is_rejected(
+            self, broker):
+        """astra r173: a same-uid caller can connect to the bus, pass
+        the socket to a child, and exit; after its pid is recycled by
+        an agent restart the daemon still reports the stale numeric
+        pid, and /proc + MainPID describe the GENUINE agent. Only the
+        connection's origin-task pidfd distinguishes them — a dead
+        origin fails ESRCH; a live foreign origin carries a different
+        pid."""
+        # Dead origin: the ProcessFD pidfd no longer resolves to a live
+        # task even though the numeric pid now names the real agent.
+        broker._peer_origin_live_pid = False
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        with pytest.raises(dbus.DBusException):
+            broker.AnnouncePolkitAuth("cookie-9")
+        assert broker._pending == {}
+        # Live foreign origin: the connector still runs, just not as
+        # the agent's main pid.
+        broker._peer_origin_live_pid = broker._peer_pid + 1
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_a_hostile_selinux_type_rejects_even_root(self, broker):
+        """uid 0 in a container/tier domain must not reach the relay."""
+        broker.set_peer(0, exe=PEER_EXE, argv=[PEER_EXE])
+        broker._peer_label = (
+            "system_u:system_r:container_t:s0", "container_t")
+        with pytest.raises(dbus.DBusException):
+            broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT])
+        assert broker.polkit_responded == []
+
+    def test_an_untrusted_admin_exe_cannot_respond(self, broker):
+        broker.set_peer(ADMIN_UID, exe=PEER_EXE,
+                        argv=[PEER_EXE])
+        with pytest.raises(dbus.DBusException):
+            broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT])
+        assert broker.polkit_responded == []
+
+    def test_an_untrusted_admin_exe_cannot_cancel(self, broker):
+        rid = _file_polkit(broker, "cookie-abc", [IDENT_ROOT])
+        broker.set_peer(ADMIN_UID, exe=PEER_EXE,
+                        argv=[PEER_EXE])
+        with pytest.raises(dbus.DBusException):
+            broker.CancelPolkitAuth("cookie-abc")
+        assert broker._pending[rid].decision is None
+
+    def test_a_hostile_selinux_type_is_rejected(self, broker):
+        """An admin-uid process in a container/tier domain running the
+        agent argv still must not reach the relay."""
+        broker._peer_label = (
+            "system_u:system_r:qdistro_tier3_t:s0", "qdistro_tier3_t")
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+
+    def test_root_needs_no_relay(self, broker):
+        """uid 0 may answer polkitd directly; the broker does not
+        pretend to gate it."""
+        broker.set_peer(0, exe=PEER_EXE, argv=[PEER_EXE])
+        rid = _file_polkit(broker, "cookie-root", [IDENT_ROOT])
+        assert rid in broker._pending
+
+
+class TestConnectionOriginHelpers:
+    """Real-helper coverage for the connection-origin check (astra
+    r174): the seam-based tests above fake `_peer_connection_live_pid`,
+    so these exercise the production fd handling itself."""
+
+    class _Creds:
+        def unpack(self):
+            return [{"ProcessFD": 0}]
+
+    class _FDList:
+        """The shape of GUnixFDList for the call site: get() hands the
+        caller an owned descriptor (g_unix_fd_list_get dups internally)."""
+        def __init__(self, fd):
+            self._fd = fd
+
+        def get(self, idx):
+            assert idx == 0
+            return self._fd
+
+    def _fake_bus(self, monkeypatch, fd):
+        fd_list = self._FDList(fd)
+
+        class _Bus:
+            def call_with_unix_fd_list_sync(self, *a, **kw):
+                return TestConnectionOriginHelpers._Creds(), fd_list
+
+        monkeypatch.setattr(B.Gio, "bus_get_sync",
+                            lambda *a, **kw: _Bus())
+
+    def test_the_received_fd_is_the_one_closed(
+            self, broker, monkeypatch):
+        """astra r174 P2: g_unix_fd_list_get already returns a
+        caller-owned dup; dup'ing it again leaked one descriptor per
+        credential check. The helper must use and close exactly the fd
+        the daemon handed it."""
+        proc = subprocess.Popen(["sleep", "30"])
+        pidfd = os.pidfd_open(proc.pid)
+        try:
+            self._fake_bus(monkeypatch, pidfd)
+            live = Broker._peer_connection_live_pid(broker, ":1.999")
+            assert live == proc.pid
+            with pytest.raises(OSError):
+                fcntl.fcntl(pidfd, fcntl.F_GETFD)
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_pidfd_live_pid_real_kernel_semantics(self):
+        """A pidfd pins the TASK: live referent returns its pid; once
+        the task is reaped, signal-0 fails and fdinfo reports -1 —
+        either way the helper returns None (fails closed). A plain
+        non-pidfd never parses."""
+        proc = subprocess.Popen(["sleep", "30"])
+        pidfd = os.pidfd_open(proc.pid)
+        try:
+            assert B._pidfd_live_pid(pidfd) == proc.pid
+        finally:
+            proc.kill()
+            proc.wait()
+        assert B._pidfd_live_pid(pidfd) is None
+        os.close(pidfd)
+        rfd, wfd = os.pipe()
+        try:
+            assert B._pidfd_live_pid(rfd) is None
+            # not a pidfd: the helper must not consume caller fds
+            fcntl.fcntl(rfd, fcntl.F_GETFD)
+        finally:
+            os.close(rfd)
+            os.close(wfd)
 
 
 class TestStalePolkitReap:

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """qdistro-polkit-prompt — minimal admin-credential prompt subprocess.
 
 Spawned by qdistro-polkit-agent on BeginAuthentication when the

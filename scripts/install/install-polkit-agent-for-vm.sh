@@ -4,15 +4,23 @@
 # AuthenticationAgent") onto a fresh-clone VM.
 #
 # Layout:
-#   /usr/libexec/qdistro/qdistro_polkit_agent.py     # ExecStart target
-#   /usr/local/bin/qdistro-polkit-prompt             # password-prompt subprocess
-#   /etc/systemd/user/qdistro-polkit-agent.service   # per-user session unit
-#   /etc/qdistro/polkit-agent.conf                   # per-action method config
+#   /usr/libexec/qdistro/qdistro_polkit_agent.py      # ExecStart target
+#   /usr/local/bin/qdistro-polkit-prompt              # password-prompt subprocess
+#   /etc/systemd/system/qdistro-polkit-agent.service  # system unit, User=admin
+#   /etc/qdistro/polkit-agent.conf                    # per-action method config
 #
-# The agent is a per-user (not system) daemon — it needs the admin's
-# session bus to expose the AuthenticationAgent interface, and
-# polkitd registers it scoped to the session subject. Enabled via
-# `systemctl --user enable --now` for the admin uid (admin).
+# The agent is a SYSTEM service (User=admin), not a per-user unit: a
+# user unit's drop-ins and manager environment are writable by every
+# same-uid process — including an empty drop-in UnsetEnvironment= that
+# resets the unit's injection denylist — so the agent's launch
+# environment would be attacker-controllable (sol r169). As a system
+# unit its unit file, drop-in dirs, environment and cgroup are all
+# root-owned; the unit pins Slice=user-1000.slice because polkitd can
+# only resolve a caller session under user-<uid>.slice (the service's
+# own cgroup stays root-owned — only the user@ subtree is delegated).
+# It still registers with polkitd scoped to the
+# admin's login session, and reaches the session bus via an explicit
+# DBUS_SESSION_BUS_ADDRESS (linger keeps user@1000 up from early boot).
 set -euo pipefail
 
 # Offline-install contract (todo/iso/14 Phase B): file drops always run;
@@ -31,10 +39,10 @@ fi
 
 DEST_LIB=/usr/libexec/qdistro
 DEST_BIN=/usr/local/bin
-DEST_USER_SYSD=/etc/systemd/user
+DEST_SYSTEM_SYSD=/etc/systemd/system
 DEST_ETC=/etc/qdistro
 
-install -d -m 0755 "$DEST_LIB" "$DEST_BIN" "$DEST_USER_SYSD" "$DEST_ETC"
+install -d -m 0755 "$DEST_LIB" "$DEST_BIN" "$DEST_SYSTEM_SYSD" "$DEST_ETC"
 
 # Defensive: ensure python-pam is present. The agent works without it
 # (PAM auth fails closed with a clear message) but pretty much every
@@ -47,8 +55,19 @@ fi
 
 install -m 0755 "$SRC/qdistro_polkit_agent.py" "$DEST_LIB/qdistro_polkit_agent.py"
 install -m 0755 "$SRC/qdistro-polkit-prompt.py" "$DEST_BIN/qdistro-polkit-prompt"
+
+# Migrate the pre-systemd-service user unit (sol r170): the old
+# /etc/systemd/user/ unit plus its `systemctl --global enable` wants link
+# must go, or an upgraded system would run BOTH agents — the old one could
+# claim the session-bus singleton first and would fail the broker's new
+# system-cgroup check anyway. `--global disable` must run while the unit
+# file still exists, so it knows which wants links to remove.
+systemctl --global disable qdistro-polkit-agent.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/user/qdistro-polkit-agent.service
+rm -rf /etc/systemd/user/qdistro-polkit-agent.service.d
+
 install -m 0644 "$SRC/qdistro-polkit-agent.service" \
-    "$DEST_USER_SYSD/qdistro-polkit-agent.service"
+    "$DEST_SYSTEM_SYSD/qdistro-polkit-agent.service"
 
 # Per-action method config. Don't clobber an admin's edits — only
 # install if absent.
@@ -58,48 +77,73 @@ else
     echo "[install-polkit-agent] keeping existing $DEST_ETC/polkit-agent.conf"
 fi
 
-# Enable.
-#
-# `systemctl --global enable`, NOT the per-user `runuser -u admin --
-# systemctl --user enable --now` this used to do. That form failed on every
-# install and said OK anyway. This installer is chain step 5
-# (qdistro-bootstrap.sh) and the admin user manager does not exist until the
-# session is installed much later (fresh-vm-bootstrap.sh:462), so the enable
-# died with
-#
-#     Failed to connect to user scope bus via local transport: No such file
-#
-# — deterministically, on the release path, swallowed by the `| tail -5 ||
-# true` and followed by the script's own "OK" line. Nothing ever wrote the
-# .wants symlink, so the agent was disabled and had never run. VM-verified
-# 2026-07-26.
-#
-# --global writes /etc/systemd/user/qdwin-session.target.wants/ and needs no
-# running user manager, so it cannot fail for this reason. It applies to every
-# uid, which is correct and costs nothing: the unit is WantedBy the desktop
-# session target, and a silo uid never reaches it.
+# Enable via the SYSTEM manager. `systemctl enable` writes the
+# multi-user.target.wants symlink — a pure filesystem operation, so it
+# works at this chain position (step 5) and in offline installs, unlike
+# the per-user forms this script used historically: `runuser -u admin --
+# systemctl --user enable --now` died on every install ("Failed to
+# connect to user scope bus") before the admin user manager existed, and
+# the failure was swallowed — the agent had never run (VM-verified
+# 2026-07-26). The system-unit move (sol r169) removes the need for any
+# user manager at enable time, and failure is fatal rather than
+# swallowed.
 sd_daemon_reload || true
-if ! systemctl --global enable qdistro-polkit-agent.service >/dev/null 2>&1; then
+if ! systemctl enable qdistro-polkit-agent.service >/dev/null 2>&1; then
     echo "[install-polkit-agent] ERROR: could not enable qdistro-polkit-agent.service" >&2
     echo "       the polkit agent would be installed and never started" >&2
     exit 4
 fi
 
-# Opportunistic start, ONLY if the admin session is already up (a re-install
-# on a running system). Failure here is genuinely fine — the --global enable
-# above is what makes it come up on the next session — so unlike the old code
-# this is allowed to fail quietly, and it is not the thing the install depends
-# on.
+# Opportunistic start on a running system (a re-install); on an offline
+# chroot or a build-time image the first boot's multi-user.target brings
+# it up via the wants link above. Failure here is genuinely fine — the
+# enable is what the install depends on. On a live reinstall the old
+# user-unit agent may still be running under admin's user manager:
+# stop it and reload that manager's unit definitions so the removed
+# user unit never comes back.
 ADMIN_UID=1000
-ADMIN_USER=admin
+ADMIN_USER="admin"
 if is_offline; then
-    echo "[offline] skipped (needs a running user manager): start qdistro-polkit-agent.service for admin"
-elif id "$ADMIN_USER" >/dev/null 2>&1 && [ -d "/run/user/$ADMIN_UID" ]; then
-    runuser -u "$ADMIN_USER" -- env \
-        XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
-        systemctl --user start qdistro-polkit-agent.service >/dev/null 2>&1 \
-        || echo "[install-polkit-agent] note: no live admin session to start into;" \
-                "the agent starts with the next desktop session" >&2
+    echo "[offline] skipped (needs a running system manager): start qdistro-polkit-agent.service"
+else
+    if id "$ADMIN_USER" >/dev/null 2>&1 && [ -d "/run/user/$ADMIN_UID" ]; then
+        runuser -u "$ADMIN_USER" -- env \
+            XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
+            systemctl --user stop qdistro-polkit-agent.service >/dev/null 2>&1 || true
+        # Verify the handover rather than assuming it (astra r172): a
+        # still-running old agent would claim the session-bus singleton
+        # first, shadowing the new one until logout.
+        old_still_active=0
+        for _ in 1 2 3 4 5; do
+            if ! runuser -u "$ADMIN_USER" -- env \
+                    XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
+                    systemctl --user is-active --quiet \
+                    qdistro-polkit-agent.service 2>/dev/null; then
+                old_still_active=0
+                break
+            fi
+            old_still_active=1
+            sleep 1
+        done
+        if [ "$old_still_active" -eq 1 ]; then
+            echo "[install-polkit-agent] WARN: old user-unit agent is" \
+                 "still active; it may hold the session-bus singleton" \
+                 "until the admin logs out" >&2
+        fi
+        runuser -u "$ADMIN_USER" -- env \
+            XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
+            systemctl --user daemon-reload >/dev/null 2>&1 || true
+    fi
+    systemctl start qdistro-polkit-agent.service >/dev/null 2>&1 \
+        || echo "[install-polkit-agent] note: live start failed;" \
+                "the agent starts on the next boot" >&2
+    # `systemctl start` returning 0 only proves the fork happened —
+    # confirm the unit is actually running (Type=simple reports active
+    # as soon as the main process is up).
+    if ! systemctl is-active --quiet qdistro-polkit-agent.service; then
+        echo "[install-polkit-agent] WARN: system agent is not active" \
+             "after start; check journalctl -u qdistro-polkit-agent" >&2
+    fi
 fi
 
 echo "[install-polkit-agent] OK — qdistro-polkit-agent installed at $DEST_LIB"
