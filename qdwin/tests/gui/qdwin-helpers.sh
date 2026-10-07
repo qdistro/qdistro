@@ -287,6 +287,7 @@ _qdwin_linux_to_qcode() {
         KEY_BACKSPACE) echo backspace ;;
         KEY_DOT)       echo dot ;;
         KEY_MINUS)     echo minus ;;
+        KEY_SLASH)     echo slash ;;
         KEY_UP)        echo up ;;
         KEY_DOWN)      echo down ;;
         KEY_LEFT)      echo left ;;

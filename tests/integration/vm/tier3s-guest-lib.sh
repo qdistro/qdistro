@@ -241,6 +241,22 @@ for s in rows:
     if s["name"] == sys.argv[1]: print(s["state"]); break
 else: print("absent")' "$1"
 }
+# silo_observed <name> -> "<observed_status>\t<observed_reason>" for the row,
+# or "absent" (QUERY-FAILED on a failed call). state is user intent; this is
+# the runtime-observer thread's evidence (refreshed ~every 10 s).
+silo_observed() {
+    as_admin busctl --system --timeout=300 --json=short call org.qdistro.SessionManager1 \
+        /org/qdistro/SessionManager1 org.qdistro.SessionManager1 ListSilos | python3 -c '
+import json, sys
+try:
+    rows = json.loads(json.load(sys.stdin)["data"][0])
+except Exception:
+    print("QUERY-FAILED"); sys.exit(0)
+for s in rows:
+    if s["name"] == sys.argv[1]:
+        print(s["observed_status"], s["observed_reason"], sep="\t"); break
+else: print("absent")' "$1"
+}
 wait_for() {   # wait_for <secs> <cmd...>
     local n="$1"; shift
     # a wedged probe call (a stalled podman/busctl IPC) must fail the
@@ -956,8 +972,10 @@ up_gui_silo() {
     snapshot_launch "$tok"; snapshot_bridge "$tok"
     # the compositor + qdshell see the tagged toplevel once the sandboxed app
     # maps through the bridge — wait for qdshell's own observation line so the
-    # caller can grep its handle/compositor evidence deterministically.
-    if ! wait_for 90 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat | grep -q '\\[tier3s\\] toplevel observed silo=$s '"; then
+    # caller can grep its handle/compositor evidence deterministically. Scope
+    # the wait to THIS start's cursor: a stale observation from a previous
+    # launch of the same silo must not satisfy it (astra gui r1).
+    if ! wait_for 90 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat --after-cursor='$cur' | grep -q '\\[tier3s\\] toplevel observed silo=$s '"; then
         echo "up_gui_silo: $s: no '[tier3s] toplevel observed silo=$s' in the qdshell journal" >&2
         echo ""; return 1
     fi
