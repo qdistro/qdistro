@@ -1,0 +1,142 @@
+#!/usr/bin/env bats
+# qdistro-polkit-agent — logind session handling in a real guest.
+#
+# Regression for the agent crash-loop seen in every lingering guest journal:
+#
+#   qdistro-polkit-agent: registration failed:
+#     org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the
+#     caller is in
+#   qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 55.
+#
+# The user unit starts with admin's lingering user manager, before (or
+# without) any login. polkitd only accepts a registration for the caller's
+# session, which for a user@.service process is the user's DISPLAY session;
+# with only logind's class=manager session there is none. The agent must wait
+# for a login instead of exiting, register once a login session appears, and
+# still route a real authorization through itself to the broker.
+load helpers
+
+setup_file() {
+    export VM_NAME VM_EXEC
+}
+
+teardown_file() {
+    vm_run "systemctl stop qci-polkit-login.service qci-polkit-subject.service 2>/dev/null; \
+            rm -f /usr/share/polkit-1/actions/org.qdistro.test.agentsession.policy; true"
+}
+
+_agent_restarts() {
+    vm_run_admin "systemctl --user show -p NRestarts --value qdistro-polkit-agent.service"
+}
+
+@test "polkit-agent-session: waits without a login, registers on login, serves an authorization" {
+    ensures "the admin polkit agent stays up without a login session and registers for the admin's login session when one appears"
+
+    step "precondition: the agent unit is installed and admin has no login session"
+    vm_run "test -f /etc/systemd/user/qdistro-polkit-agent.service"
+    require "qdistro-polkit-agent.service installed in /etc/systemd/user"
+    vm_run "loginctl list-sessions --no-legend -o json 2>/dev/null; echo; \
+            for s in \$(loginctl list-sessions --no-legend | awk '\$3==\"admin\"{print \$1}'); do \
+              loginctl show-session \"\$s\" -p Id -p Class -p Type -p State; done"
+    echo "$output" >&2
+    if grep -q '^Class=user$' <<<"$output"; then
+        fail_loud "admin already has a class=user login session; the no-session case cannot be observed on this VM"
+    fi
+
+    step "with only the manager session, the agent stays active and does not restart"
+    wait_for_unit qdistro-polkit-agent.service 30 --user \
+        || fail_loud "qdistro-polkit-agent.service never went active"
+    vm_run "sleep 10"
+    _agent_restarts
+    assert_eq_evidence "0" "$output" "agent NRestarts with no login session"
+    vm_run_admin "systemctl --user is-active qdistro-polkit-agent.service"
+    assert_eq_evidence "active" "$output" "agent state with no login session"
+    vm_run "journalctl -b --no-pager -o cat -t qdistro-polkit-agent"
+    echo "$output" >&2
+    assert_output_contains "no login session for uid 1000 yet; waiting"
+    if grep -q "registration failed" <<<"$output"; then
+        check_fail "no registration failures" \
+            "$(grep 'registration failed' <<<"$output" | head -1)" \
+            "the agent logs no registration failure while waiting"
+        return 1
+    fi
+    check_pass "agent waits instead of failing" "NRestarts=0, waiting line logged"
+
+    step "open a real logind login session for admin (PAM login stack on tty6)"
+    vm_run "systemd-run --unit=qci-polkit-login -p PAMName=login -p User=admin \
+            -p TTYPath=/dev/tty6 -p StandardInput=tty -p StandardOutput=journal \
+            /usr/bin/sleep 900"
+    assert_success
+    wait_until_succeeds "loginctl list-sessions --no-legend | awk '\$3==\"admin\" && \$NF ~ /tty6/ {f=1} END{exit !f}' \
+        || loginctl show-user admin -p Display --value | grep -q ." 30 \
+        || fail_loud "the PAM login on tty6 did not create a logind session"
+    vm_run "loginctl show-user admin -p Display --value"
+    sid="$output"
+    [[ -n "$sid" ]] || fail_loud "admin has no display session after the tty6 login"
+    vm_run "loginctl show-session '$sid' -p Class --value"
+    assert_eq_evidence "user" "$output" "class of admin's display session"
+
+    step "the running agent registers for that session without a restart"
+    wait_until_succeeds "journalctl -b --no-pager -o cat -t qdistro-polkit-agent | grep -F 'registered as session polkit agent (path=/org/qdistro/PolkitAgent, session=$sid)'" 30 \
+        || fail_loud "agent did not register for login session $sid"
+    _agent_restarts
+    assert_eq_evidence "0" "$output" "agent NRestarts after registering"
+
+    # The decision is DENY on purpose. An ALLOW cannot complete today, for a
+    # reason outside this file's subject: polkitd accepts
+    # AuthenticationAgentResponse/AuthenticationAgentResponse2 only from
+    # uid 0 ("Only uid 0 may invoke this method"), and the agent runs as the
+    # admin -- upstream agents answer through the setuid
+    # polkit-agent-helper-1. What this test owns is that the authorization is
+    # routed to THIS agent for THIS session and the round trip completes.
+    step "an auth_admin check for a process in that session reaches the agent and the broker"
+    vm_run "cat > /usr/share/polkit-1/actions/org.qdistro.test.agentsession.policy <<'POL'
+<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE policyconfig PUBLIC \"-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN\"
+ \"http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd\">
+<policyconfig>
+  <action id=\"org.qdistro.test.agentsession\">
+    <description>qci polkit agent session probe</description>
+    <message>qci polkit agent session probe</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
+POL"
+    assert_success
+    vm_run "systemctl show -p MainPID --value qci-polkit-login.service"
+    subject_pid="$output"
+    [[ "$subject_pid" =~ ^[1-9][0-9]*$ ]] || fail_loud "no subject pid in the login session (got '$subject_pid')"
+    vm_run "systemd-run --unit=qci-polkit-subject -p StandardOutput=file:/run/qci-pkcheck.out \
+            -p StandardError=file:/run/qci-pkcheck.out /bin/sh -c \
+            'pkcheck --action-id org.qdistro.test.agentsession --process $subject_pid --allow-user-interaction; echo PKCHECK_RC=\$?'"
+    assert_success
+    wait_until_succeeds "runuser -u admin -- python3 -c 'import dbus; b=dbus.SystemBus(); o=b.get_object(\"org.qdistro.AdminBroker1\",\"/org/qdistro/AdminBroker1\"); [print(int(r[\"id\"]), r[\"action\"]) for r in o.GetPending(dbus_interface=\"org.qdistro.AdminBroker1\")]' | grep agentsession" 40 \
+        || { vm_run "cat /run/qci-pkcheck.out; journalctl -b --no-pager -o cat -t qdistro-polkit-agent -u polkit | tail -20"; echo "$output" >&2; \
+             fail_loud "no broker request for the probe action appeared"; }
+    rid="$(awk '/agentsession/{print $1; exit}' <<<"$output")"
+    check_pass "agent filed a broker request" "id=$rid ($output)"
+    vm_run "runuser -u admin -- python3 -c 'import dbus; b=dbus.SystemBus(); o=b.get_object(\"org.qdistro.AdminBroker1\",\"/org/qdistro/AdminBroker1\"); o.DecideRequest($rid, \"deny\", \"once\", dbus_interface=\"org.qdistro.AdminBroker1\")'"
+    assert_success
+    wait_until_succeeds "grep -q PKCHECK_RC= /run/qci-pkcheck.out" 30 \
+        || fail_loud "pkcheck did not complete after the broker decision"
+    vm_run "cat /run/qci-pkcheck.out"
+    echo "$output" >&2
+    assert_output_contains "PKCHECK_RC=1"
+    vm_run "journalctl -b --no-pager -o cat -t qdistro-polkit-agent"
+    assert_output_contains "polkit BeginAuth: action=org.qdistro.test.agentsession method=broker"
+    check_pass "the session's agent handled the authorization and the broker's denial ended it" \
+        "BeginAuth logged; pkcheck PKCHECK_RC=1"
+
+    step "logout: the agent unregisters, keeps running, does not restart"
+    vm_run "systemctl stop qci-polkit-login.service"
+    wait_until_succeeds "journalctl -b --no-pager -o cat -t qdistro-polkit-agent | grep -F 'login session $sid ended'" 30 \
+        || fail_loud "agent did not notice session $sid ending"
+    _agent_restarts
+    assert_eq_evidence "0" "$output" "agent NRestarts after logout"
+    vm_run_admin "systemctl --user is-active qdistro-polkit-agent.service"
+    assert_eq_evidence "active" "$output" "agent state after logout"
+}
