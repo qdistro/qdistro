@@ -34,4 +34,10 @@ teardown_file() {
     assert_output_contains "PASS: s132live: refused on the live uid"
     assert_output_contains "PASS: s132live: account not deleted while its uid is live"
     assert_output_contains "PASS: s132live: once the process is gone the fragment is repaired"
+    assert_output_contains "PASS: s132one: repair did NOT fire (a subid row exists)"
+    assert_output_contains "PASS: s132one: account and its planted row are still there"
+    assert_output_contains "PASS: s132sym: repair did NOT fire (the path is not absent)"
+    assert_output_contains "PASS: s132sym: account and planted symlink are still there"
+    assert_output_contains "PASS: s132err: refusal cites the unreadable subid db"
+    assert_output_contains "PASS: s132err: repair did NOT fire on a lookup error"
 }
