@@ -115,6 +115,9 @@ class _Conn:
     def __init__(self, world):
         self.world = world
         self.closed = False
+        # libdbus's default: the process exits when this connection drops
+        # or is closed. The registrar must clear it.
+        self.exit_on_disconnect = True
         world.conns.append(self)
 
     def get_object(self, bus_name, path):
@@ -128,6 +131,11 @@ class _Conn:
 
     def get_is_connected(self):
         return not self.closed
+
+    def set_exit_on_disconnect(self, flag):
+        # libdbus bus connections default this to True; the registrar must
+        # disarm it or close() would exit(1) the whole process.
+        self.exit_on_disconnect = flag
 
     def close(self):
         self.closed = True
@@ -329,6 +337,17 @@ class TestRegistrar:
         assert _held(fake) == ["8"]
         assert reg.session_id == "8"
         assert reg._conn is not conn6
+
+    def test_private_connection_is_disarmed_for_exit_on_disconnect(
+            self, fake):
+        """libdbus bus connections exit(1) the process when they disconnect
+        -- including the deliberate close() we use to retract a stale
+        registration. SessionRegistrar must disarm that flag or every
+        session change silently kills the agent."""
+        _login(fake, "6")
+        reg = _registrar(fake)
+        reg.reconcile()
+        assert reg._conn.exit_on_disconnect is False
 
     def test_return_to_same_session_reregisters(self, fake):
         """A -> B -> A: the first A registration was dropped with its

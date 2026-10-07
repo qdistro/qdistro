@@ -65,6 +65,12 @@ class _FakeBus:
     def get_is_connected(self):
         return not self.closed
 
+    def set_exit_on_disconnect(self, flag):
+        # libdbus bus connections exit(1) the process on disconnect; the
+        # registrar relies on closing the private connection to retract a
+        # stale registration, so it must be disarmed.
+        self.exit_on_disconnect = flag
+
     def close(self):
         self.closed = True
 

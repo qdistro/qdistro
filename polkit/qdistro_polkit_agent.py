@@ -686,7 +686,9 @@ def _private_system_bus():
     connection is the only reliable way to retract it -- polkitd refuses
     UnregisterAuthenticationAgent once the caller's session has moved on.
     """
-    return dbus.SystemBus(private=True)
+    conn = dbus.SystemBus(private=True)
+    conn.set_exit_on_disconnect(False)
+    return conn
 
 
 def _register(bus, agent_path: str) -> str | None:
@@ -847,6 +849,16 @@ class SessionRegistrar:
         if self._conn is None:
             try:
                 conn = self._make_connection()
+                try:
+                    # libdbus marks bus connections exit-on-disconnect:
+                    # without this, closing the retired connection on a
+                    # session change (or its transport dying) exits the
+                    # process with status 1 -- silently, because it is a
+                    # C-level exit() reached through mainloop dispatch,
+                    # not a Python exception.
+                    conn.set_exit_on_disconnect(False)
+                except AttributeError:
+                    pass  # unit-test fakes are not libdbus connections
                 try:
                     agent = self._make_agent(conn)
                 except Exception:
