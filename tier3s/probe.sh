@@ -137,8 +137,23 @@ fail() { printf 'FAIL %s: %s\n' "$1" "$2"; [ -n "$FIRST_FAIL" ] || FIRST_FAIL="$
 # captured output either. Worst case per probe ≈ the shared budget plus one
 # attempt's kill tail (< ~30 s for the defaults).
 NSS_BOUND=5; NSS_TRIES=3; NSS_KILL_GRACE=2
-NSS_WEDGED=0; NSS_SPENT=0
+NSS_WEDGED=0; NSS_SPENT_CS=0
 NSS_OUT=""; NSS_RC=0; NSS_N=0
+
+# _nss_now_cs: elapsed monotonic time in centiseconds, from /proc/uptime.
+# `date +%s` is adjustable REALTIME — a backwards NTP step or clock set
+# could make NSS_SPENT_CS go negative and hand back more than the
+# budget — and its whole-second truncation lets an attempt of 4.2 s that
+# crosses a second boundary read as >= a 5 s bound, misclassifying an
+# early external SIGKILL as our own escalation (sol r154). /proc/uptime
+# ticks in centiseconds and only ever moves forward.
+_nss_now_cs() {
+    local up idle
+    read -r up idle < /proc/uptime || return 1
+    case "$up" in *.*) ;; *) up="$up.00";; esac
+    # "1234.56" -> "123456" (the kernel always prints two decimals)
+    printf '%s\n' "${up%.*}${up##*.}"
+}
 
 _nss_attempt() {   # $1 = TERM bound (seconds); rest = the lookup command
     local bound=$1; shift
@@ -162,26 +177,34 @@ _nss_attempt() {   # $1 = TERM bound (seconds); rest = the lookup command
 nss_q() {
     NSS_OUT=""; NSS_N=0; NSS_RC=0
     if [ "$NSS_WEDGED" = 1 ]; then NSS_RC=124; return 124; fi
-    local budget=$(( NSS_TRIES * (NSS_BOUND + NSS_KILL_GRACE) ))
+    local budget_cs=$(( NSS_TRIES * (NSS_BOUND + NSS_KILL_GRACE) * 100 ))
     while :; do
-        local avail bound t0
-        avail=$(( budget - NSS_SPENT ))
-        bound=$(( avail - NSS_KILL_GRACE - 1 ))   # leave room for the kill tail
+        local bound t0 t1 elapsed_cs
+        # Whole-second bound for `timeout`, leaving the kill tail inside
+        # the remaining budget; fractional remainders charge correctly
+        # through NSS_SPENT_CS even when they buy no further attempt.
+        bound=$(( (budget_cs - NSS_SPENT_CS) / 100 - NSS_KILL_GRACE - 1 ))
         [ "$bound" -gt "$NSS_BOUND" ] && bound=$NSS_BOUND
         [ "$bound" -lt 1 ] && { NSS_RC=124; break; }
         NSS_N=$((NSS_N + 1))
-        t0="$(date +%s)"
+        t0="$(_nss_now_cs)" || { NSS_RC=1; NSS_OUT=""; return 1; }
         _nss_attempt "$bound" "$@"
-        NSS_SPENT=$(( NSS_SPENT + $(date +%s) - t0 ))
-        # 124 is the TERM bound. 137 means the child died of SIGKILL: if it
-        # took at least <bound> seconds that is OUR escalation landing —
-        # the lookup ignored TERM and overran its bound, the same verdict
-        # (normalise to 124 so callers see one "timed out" status). A 137
-        # arriving early is a real SIGKILL (OOM, external kill): final, and
-        # not an NSS wedge.
+        t1="$(_nss_now_cs)" || t1=$(( t0 + bound * 100 ))
+        elapsed_cs=$(( t1 - t0 ))
+        [ "$elapsed_cs" -lt 0 ] && elapsed_cs=0
+        NSS_SPENT_CS=$(( NSS_SPENT_CS + elapsed_cs ))
+        # 124 is the TERM bound. 137 means the child died of SIGKILL: if
+        # the attempt ran for at least its bound that is OUR escalation
+        # landing — the lookup ignored TERM and overran its bound, the
+        # same verdict (normalise to 124 so callers see one "timed out"
+        # status). A 137 arriving before the bound is a real SIGKILL
+        # (OOM, external kill): final, and not an NSS wedge. The
+        # centisecond monotonic clock keeps the comparison honest — a
+        # whole-second realtime read could round an early kill UP to the
+        # bound and relabel an external kill as our escalation.
         case "$NSS_RC" in
             124) ;;
-            137) [ $(( $(date +%s) - t0 )) -ge "$bound" ] \
+            137) [ "$elapsed_cs" -ge $(( bound * 100 )) ] \
                      && NSS_RC=124 || break ;;
             *) break ;;
         esac
@@ -223,7 +246,8 @@ else fail ptrace_scope "$ps_scope > 2 (systrap needs ptrace)"; fi
 if ! nss_q id "$USER_NAME"; then
     if [ "$NSS_RC" -eq 124 ]; then
         fail user "the NSS lookup for $USER_NAME timed out (shared NSS wait budget of $(( NSS_TRIES * (NSS_BOUND + NSS_KILL_GRACE) )) s spent)"
-    else fail user "$USER_NAME does not exist"; fi
+    elif [ "$NSS_RC" -eq 1 ]; then fail user "$USER_NAME does not exist"
+    else fail user "the NSS lookup for $USER_NAME failed (id rc=$NSS_RC; $NSS_N tries)"; fi
     for c in subuid subgid; do fail "$c" "not checked: user $USER_NAME missing"; done
     for t in newuidmap newgidmap; do
         p="$(command -v "$t" 2>/dev/null)"

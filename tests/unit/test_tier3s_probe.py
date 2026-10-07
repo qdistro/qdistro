@@ -704,6 +704,38 @@ def test_a_term_resistant_lookup_is_killed_at_the_escalation(tmp_path):
     assert "FAIL user: the NSS lookup for" in r.stdout and "timed out" in r.stdout, r.stdout
 
 
+def test_an_early_sigkill_is_a_real_failure_not_a_timeout(tmp_path):
+    """sol r154 P2: a 137 that arrives BEFORE the attempt's bound is an
+    external SIGKILL (OOM, a kill, a self-kill), not our TERM->KILL
+    escalation — it must stay a final non-timeout failure instead of
+    being relabelled "timed out", retried, or latching the NSS wedge.
+    The whole-second `date +%s` read this replaced could round a 4.2 s
+    kill across a second boundary up to a 5 s bound; the centisecond
+    monotonic clock cannot."""
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "idbin"; b.mkdir()
+    calls = b / "id.calls"
+    (b / "id").write_text(
+        "#!/bin/sh\nfor a; do last=\"$a\"; done\n"
+        "case \"${last:-}\" in -*|\"\") exec /usr/bin/id \"$@\" ;; esac\n"
+        f"echo x >> '{calls}'\n"
+        "kill -9 $$\n")
+    (b / "id").chmod(0o755)
+    t0 = time.time()
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=60)
+    took = time.time() - t0
+    assert took < 20, f"an early SIGKILL was waited on like a timeout ({took:.0f} s)"
+    n = len(calls.read_text().splitlines())
+    assert 1 <= n <= 4, calls.read_text()   # one per lookup site; no retries
+    assert "(id rc=137; 1 tries)" in r.stdout, r.stdout
+    # the wedge latch is NOT set: the nss section's own lookup was still
+    # attempted (rc=137 again) rather than failing fast with "0 tries"
+    assert "(id -u rc=137; 1 tries; " in r.stdout, r.stdout
+    assert "0 tries" not in r.stdout, r.stdout
+
+
 def test_the_nss_budget_is_shared_across_lookup_sites(tmp_path):
     """sol r152 P2: the retry budget is ONE per-probe wait allowance, not a
     fresh NSS_TRIES x NSS_BOUND at every nss_q site. Earlier lookups that
