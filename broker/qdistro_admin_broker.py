@@ -113,6 +113,23 @@ AUDIT_GC_INTERVAL_S = 86400  # once per day
 # tighter memory targets; set to 0 to disable reaping entirely.
 PENDING_RETENTION_S_DEFAULT = 300
 
+# polkit-filed requests (RequestPolkitAuth) live and die with the auth
+# session polkitd is running: the agent's WaitForDecision bound is 900s,
+# so an undecided polkit request older than this belongs to a dead or
+# crashed auth session and is reaped as deny (parked waiters released,
+# stale prompt removed). Ordinary undecided requests are NOT reaped —
+# an admin prompt may legitimately wait on a human indefinitely.
+POLKIT_UNDECIDED_TTL_S = 1200
+
+# CancelPolkitAuth may arrive before the agent's worker finishes filing
+# (cancel is relayed from the agent's mainloop while the file ran on a
+# worker thread). Remember recently-cancelled cookies so a late filing
+# for an already-dead auth session is pre-decided deny instead of
+# queueing a prompt nobody can legitimately answer. Cookies are
+# single-use random nonces; the cap bounds memory and the TTL matches
+# the undecided reap above.
+POLKIT_CANCELLED_MAX = 512
+
 # If True, an audit-log failure on the prompt path (admin pressed
 # Approve/Deny) forces a deny: waiters get False, the admin app gets
 # a DBusException, and the request is marked denied. Cache-hit path
@@ -956,7 +973,8 @@ class _Request:
         "id", "uid", "pid", "exe", "start_time", "action", "details",
         "decision", "waiters", "delegated", "one_shot",
         "exe_sha256", "selinux_label", "cgroup", "layered_pending",
-        "decided_at", "finalizing", "polkit_cookie", "polkit_identities",
+        "created_at", "decided_at", "finalizing", "polkit_cookie",
+        "polkit_identities",
     )
 
     def __init__(self, rid: int, uid: int, pid: int, exe: str,
@@ -1015,6 +1033,10 @@ class _Request:
         # audit-failure downgrade) gets reaped without each one having
         # to remember to set it.
         self.decided_at: float | None = None
+        # Wall-clock creation time. Undecided polkit-filed requests are
+        # reaped once they outlive the agent's wait bound (the cookie's
+        # auth session is certainly gone by then).
+        self.created_at: float = time.time()
         # polkit correlation for requests filed via RequestPolkitAuth:
         # the cookie polkitd waits on, and the identity list it offered
         # (normalized by _polkit_identities). Empty/None for ordinary
@@ -1104,6 +1126,11 @@ class Broker(dbus.service.Object):
         # 0 when none is armed.
         self._receivers_changed_timer = 0
         self._pending: dict[int, _Request] = {}
+        # Cookies relayed by CancelPolkitAuth, kept even when no pending
+        # request matches: the cancel can beat the filing, and the later
+        # RequestPolkitAuth must then come back decided-deny rather than
+        # queueing a prompt for a session polkitd already abandoned.
+        self._cancelled_polkit_cookies: dict[str, float] = {}
         self.cache = ApprovalCache(DB_PATH)
         self.audit = AuditLog(AUDIT_PATH)
         # Declarative pre-approval rules. Broken YAML or an empty
@@ -1446,19 +1473,35 @@ class Broker(dbus.service.Object):
         of at most one extra _gc_tick interval of retention, which is
         immaterial against a 5-minute window.
 
-        Undecided requests are never reaped: they may still have waiters
-        blocked on a verdict, and the admin approvals UI lists them.
+        Undecided non-polkit requests are never reaped: they may still
+        have waiters blocked on a verdict, and the admin approvals UI
+        lists them. Undecided POLKIT requests past
+        POLKIT_UNDECIDED_TTL_S are different: the agent's
+        WaitForDecision bound (900s) is well under the TTL, so an older
+        open request belongs to an auth session polkitd already tore
+        down — a late allow would respond into a dead cookie (and for a
+        cached scope could store a grant nobody authorized). Those are
+        decided deny here: parked waiters release and the stale prompt
+        leaves the queue.
         Returns the number of entries removed (for tests/logging)."""
         retention = getattr(self, "_pending_retention_s", 0.0)
-        if not retention or retention <= 0:
-            return 0  # reaping disabled
         if now is None:
             now = time.time()
         removed = 0
+        expired: list[tuple[int, list]] = []
         with self._lock:
             for rid, req in list(self._pending.items()):
                 if req.decision is None:
-                    continue  # still awaiting a verdict; keep it
+                    if (req.polkit_cookie
+                            and now - req.created_at
+                            >= POLKIT_UNDECIDED_TTL_S):
+                        req.decision = False
+                        req.decided_at = now
+                        expired.append((rid, list(req.waiters)))
+                        req.waiters.clear()
+                    continue
+                if retention <= 0:
+                    continue  # decided-entry reaping disabled
                 if req.decided_at is None:
                     # First sighting after the decision landed: stamp
                     # now, reap on a subsequent pass once retention
@@ -1468,6 +1511,17 @@ class Broker(dbus.service.Object):
                 if now - req.decided_at >= retention:
                     del self._pending[rid]
                     removed += 1
+        for rid, waiters in expired:
+            for reply_cb, _err in waiters:
+                try:
+                    reply_cb(False)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[broker] reply_cb failed: {e}", flush=True)
+            self.RequestDecided(rid, "deny")
+        if expired:
+            print(f"[broker] _pending reap denied {len(expired)} stale "
+                  f"undecided polkit request(s) older than "
+                  f"{POLKIT_UNDECIDED_TTL_S}s", flush=True)
         if removed:
             print(f"[broker] _pending reap removed {removed} decided "
                   f"request(s) older than {retention:g}s", flush=True)
@@ -2622,6 +2676,28 @@ class Broker(dbus.service.Object):
     # waits on is a silent no-op. All three methods are restricted to
     # the admin uid, which is the uid the agent runs as.
 
+    def _note_polkit_cancelled(self, cookie: str) -> None:
+        """Record a cancelled polkit cookie, expiring stale entries.
+
+        Runs on the mainloop like every _pending mutation; the lock
+        keeps ordering explicit."""
+        if not cookie:
+            return
+        now = time.time()
+        with self._lock:
+            for c, t in list(self._cancelled_polkit_cookies.items()):
+                if now - t > POLKIT_UNDECIDED_TTL_S:
+                    del self._cancelled_polkit_cookies[c]
+            while len(self._cancelled_polkit_cookies) \
+                    >= POLKIT_CANCELLED_MAX:
+                self._cancelled_polkit_cookies.pop(
+                    next(iter(self._cancelled_polkit_cookies)))
+            self._cancelled_polkit_cookies[cookie] = now
+
+    def _polkit_cookie_cancelled(self, cookie: str) -> bool:
+        with self._lock:
+            return cookie in self._cancelled_polkit_cookies
+
     @dbus.service.method(BUS_NAME, in_signature="sa{sv}sa(sa{sv})",
                          out_signature="i",
                          sender_keyword="sender", connection_keyword="conn")
@@ -2662,13 +2738,20 @@ class Broker(dbus.service.Object):
                 f"RespondPolkitAuth is restricted to the session polkit "
                 f"agent (uid {ADMIN_UID})",
                 name=BUS_NAME + ".AccessDenied")
+        cookie_s = str(cookie)
+        if self._polkit_cookie_cancelled(cookie_s):
+            # polkitd already abandoned this auth session — the response
+            # would land on a dead cookie.
+            print("[broker] polkit respond: cookie already cancelled; "
+                  "not relaying", flush=True)
+            return
         identity = _pick_polkit_identity(
             _polkit_identities(identities), int(uid))
         if identity is None:
             raise dbus.DBusException(
                 "polkit offered no identities to respond as",
                 name=BUS_NAME + ".BadArgument")
-        self._respond_polkit_call(int(uid), str(cookie), identity)
+        self._respond_polkit_call(int(uid), cookie_s, identity)
 
     @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
                          sender_keyword="sender", connection_keyword="conn")
@@ -2676,7 +2759,11 @@ class Broker(dbus.service.Object):
         """polkitd cancelled an auth session (caller gave up or timed
         out) — decide the matching queued request deny so the prompt
         does not linger in the admin queue and parked waiters release.
-        An unknown cookie is a no-op. Restricted to the admin uid."""
+        The cookie is remembered even when nothing pending matches:
+        the agent relays cancel from its mainloop while the filing ran
+        on a worker thread, so the cancel can beat the file — a later
+        RequestPolkitAuth with this cookie comes back decided deny.
+        Restricted to the admin uid."""
         uid, _pid, _exe, _st = self._peer_info(sender, conn)
         if int(uid) != ADMIN_UID:
             raise dbus.DBusException(
@@ -2684,6 +2771,7 @@ class Broker(dbus.service.Object):
                 f"agent (uid {ADMIN_UID})",
                 name=BUS_NAME + ".AccessDenied")
         cookie_s = str(cookie)
+        self._note_polkit_cancelled(cookie_s)
         with self._lock:
             hit = None
             for rid, req in self._pending.items():
@@ -2709,6 +2797,10 @@ class Broker(dbus.service.Object):
         allow path for a RequestPolkitAuth-filed request. A stale or
         cancelled cookie makes polkitd reject the call — the decision
         and its audit row stand, so failure is logged, never raised."""
+        if self._polkit_cookie_cancelled(req.polkit_cookie):
+            print(f"[broker] polkit respond: rid={req.id} cookie "
+                  f"cancelled; approval undeliverable", flush=True)
+            return
         identity = _pick_polkit_identity(req.polkit_identities, req.uid)
         if identity is None:
             print(f"[broker] polkit respond: rid={req.id} carried no "
@@ -4283,9 +4375,18 @@ class Broker(dbus.service.Object):
         # _cache_sandboxed); it falls through to an argv-pinned row, a
         # rule/hook, or the admin prompt (default-deny). Cross-silo
         # actions additionally use tier-specific synthetic action strings.
+        # A cookie polkitd already cancelled (CancelPolkitAuth beat this
+        # filing — the agent relays cancel from its mainloop while the
+        # file ran on a worker) must not reach a rule/cache/hook allow
+        # or the admin prompt: the auth session is dead, and an allow
+        # would respond into a void. The request is still created —
+        # pre-decided deny — so the caller's WaitForDecision gets its
+        # verdict rather than waiting out the timeout.
+        polkit_cancelled = bool(
+            polkit and self._polkit_cookie_cancelled(str(polkit[0])))
         matched_rule = None
         cached_row = None
-        if not one_shot:
+        if not one_shot and not polkit_cancelled:
             argv = _argv_from_details(details)
             # Permission lineage (finding P0-1): resolve the live caller
             # and use launcher-attested app_id/sandbox_engine in enforce
@@ -4323,7 +4424,7 @@ class Broker(dbus.service.Object):
         # a hostile caller can inject ANSI escapes or newlines that
         # draw fake approval banners inside the detail pane.
         clean_details = _sanitize_details(details)
-        if not one_shot:
+        if not one_shot and not polkit_cancelled:
             clean_details.update(app_id=lin_app, sandbox_engine=lin_engine)
 
         # --- Phase 2 (synchronous, fast): allocate rid + _Request ----
@@ -4346,7 +4447,10 @@ class Broker(dbus.service.Object):
                            one_shot=one_shot, layered_pending=True,
                            polkit_cookie=polkit[0] if polkit else "",
                            polkit_identities=polkit[1] if polkit else None)
-            if matched_rule is not None:
+            if polkit_cancelled:
+                req.decision = False
+                req.layered_pending = False
+            elif matched_rule is not None:
                 req.decision = (matched_rule.decision == "allow")
                 req.layered_pending = False  # no layered IO needed
             elif cached_row is not None:
@@ -4394,6 +4498,14 @@ class Broker(dbus.service.Object):
                     req.layered_pending = False
             if one_shot or not self._start_hook(req):
                 self.RequestPending(rid)
+            return rid
+
+        if polkit_cancelled:
+            # Not audited as a rule/cache decision — the cancel is the
+            # event; a prompt-deny row would be noise.
+            print(f"[broker] polkit auth filed for an already-cancelled "
+                  f"cookie; rid={rid} decided deny without prompting",
+                  flush=True)
             return rid
 
         # Audit before returning the decided request. A rule hit is history,

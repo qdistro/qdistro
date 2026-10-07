@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,7 @@ class _StubBroker(Broker):
         self._lock = threading.Lock()
         self._next_id = 1
         self._pending: dict = {}
+        self._cancelled_polkit_cookies: dict = {}
         self.cache = ApprovalCache(cache_db)
         self.audit = AuditLog(audit_db)
         self.rules = RulesEngine(rules_dir)
@@ -271,6 +273,40 @@ class TestCancelPolkitAuth:
         broker.CancelPolkitAuth("cookie-abc")
         assert broker._pending[rid].decision is True
 
+    def test_a_cancel_that_beats_the_file_predenies_it(self, broker):
+        """CancelAuthentication is relayed from the agent's mainloop and
+        can arrive before the worker's RequestPolkitAuth — the filing
+        must come back decided deny, never a queued prompt for a dead
+        auth session (astra r159)."""
+        broker.CancelPolkitAuth("ghost")
+        rid = _file_polkit(broker, "ghost", [IDENT_ROOT])
+        req = broker._pending[rid]
+        assert req.decision is False
+        assert rid not in broker.pending_signals
+        assert broker.polkit_responded == []
+        # WaitForDecision answers immediately for a decided request.
+        seen = []
+        broker.WaitForDecision(rid, seen.append, lambda e: None)
+        assert seen == [False]
+
+    def test_a_late_duplicate_file_for_a_cancelled_cookie_denies(
+            self, broker):
+        rid = _file_polkit(broker, "dup", [IDENT_ROOT])
+        broker.CancelPolkitAuth("dup")
+        rid2 = _file_polkit(broker, "dup", [IDENT_ROOT])
+        assert broker._pending[rid].decision is False
+        assert broker._pending[rid2].decision is False
+        assert broker.polkit_responded == []
+
+    def test_a_respond_relay_for_a_cancelled_cookie_is_a_no_op(
+            self, broker, capsys):
+        """PAM/fprint can finish just as polkitd cancels — the relay
+        must not answer a dead cookie."""
+        broker.CancelPolkitAuth("dead")
+        broker.RespondPolkitAuth("dead", [IDENT_ROOT])
+        assert broker.polkit_responded == []
+        assert "already cancelled" in capsys.readouterr().out
+
     def test_an_empty_cookie_never_matches_ordinary_requests(
             self, broker):
         """polkit_cookie is "" on non-polkit requests; an empty cancel
@@ -285,6 +321,42 @@ class TestCancelPolkitAuth:
         with pytest.raises(dbus.DBusException):
             broker.CancelPolkitAuth("cookie-abc")
         broker.set_peer(ADMIN_UID)
+        assert broker._pending[rid].decision is None
+
+
+class TestStalePolkitReap:
+    """Undecided polkit requests outliving the agent's wait bound belong
+    to dead auth sessions — they must not sit in the queue awaiting an
+    approval that would respond into a void (astra r159)."""
+
+    def test_a_stale_undecided_polkit_request_is_denied_and_released(
+            self, broker):
+        rid = _file_polkit(broker, "stale", [IDENT_ROOT])
+        replies = []
+        broker._pending[rid].waiters.append(
+            (replies.append, lambda e: None))
+        broker._pending[rid].created_at = \
+            time.time() - B.POLKIT_UNDECIDED_TTL_S - 1
+        broker._reap_pending()
+        req = broker._pending[rid]
+        assert req.decision is False
+        assert replies == [False]
+        assert (rid, "deny") in broker.decided_signals
+        assert broker.polkit_responded == []
+
+    def test_a_fresh_undecided_polkit_request_survives(self, broker):
+        rid = _file_polkit(broker, "fresh", [IDENT_ROOT])
+        broker._reap_pending()
+        assert broker._pending[rid].decision is None
+
+    def test_an_undecided_ordinary_request_is_never_reaped(self, broker):
+        """An admin prompt may legitimately wait on a human
+        indefinitely — only polkit-filed requests have a session
+        deadline."""
+        rid = broker.RequestPermission("qdistro.test.action", {})
+        broker._pending[rid].created_at = \
+            time.time() - 10 * B.POLKIT_UNDECIDED_TTL_S
+        broker._reap_pending()
         assert broker._pending[rid].decision is None
 
 

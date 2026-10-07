@@ -28,6 +28,7 @@ healthy throughout.
 from __future__ import annotations
 
 import sys
+import threading
 from typing import ClassVar
 from unittest import mock
 
@@ -221,6 +222,8 @@ def make_agent(monkeypatch):
         a._broker = broker
         a._sysbus = mock.MagicMock()
         a._config = []
+        a._cancel_lock = threading.Lock()
+        a._cancelled_cookies = {}
         monkeypatch.setattr(a, "_broker_iface", lambda: broker)
         return a
     return _make
@@ -280,6 +283,36 @@ class TestBrokerDelegation:
         assert len(broker.filed) == 1, (
             f"the request was filed {len(broker.filed)} times; a lost "
             "decision must never re-file")
+
+    def test_a_lost_decision_retires_the_queued_request(self, make_agent):
+        """On a WaitForDecision failure the request may still be pending
+        in the broker — a late admin click would respond into a session
+        polkitd already tore down (and could store a persistent grant).
+        Retire it by cookie on the same pinned proxy (astra r159)."""
+        broker = _RecordingBroker(
+            wait_raises=[_dbus_error("org.freedesktop.DBus.Error.NoReply")])
+        assert make_agent(broker)._ask_broker(
+            "qsu.exec", {}, "cookie1", []) is False
+        assert broker.cancelled == [("cookie1", mock.ANY)]
+
+    def test_an_uncertain_filing_also_retires_by_cookie(self, make_agent):
+        """A lost file reply means the request may have landed — cancel
+        by cookie so it cannot be decided against an abandoned auth."""
+        broker = _RecordingBroker(
+            file_raises=[_dbus_error("org.freedesktop.DBus.Error.NoReply")])
+        assert make_agent(broker)._ask_broker(
+            "qsu.exec", {}, "cookie1", []) is False
+        assert broker.cancelled == [("cookie1", mock.ANY)]
+
+    def test_a_cancelled_cookie_is_never_filed(self, make_agent):
+        """CancelAuthentication runs on the mainloop while the worker
+        may still be queuing to file — the dead cookie must not produce
+        a prompt (astra r159)."""
+        broker = _RecordingBroker()
+        a = make_agent(broker)
+        a.CancelAuthentication("cookie1")
+        assert a._ask_broker("qsu.exec", {}, "cookie1", []) is False
+        assert broker.filed == []
 
     def test_a_missing_broker_is_retried_once(self, make_agent):
         """ServiceUnknown positively means nothing was filed — the name had
@@ -396,6 +429,28 @@ class TestPolkitRespondRelay:
         assert ok == [1] and err == []
         assert broker.responded == []
 
+    def test_a_cancel_during_local_auth_suppresses_the_relay(
+            self, make_agent, monkeypatch):
+        """PAM can complete just as polkitd cancels the session — the
+        positive verdict must not be relayed for the dead cookie
+        (astra r159)."""
+        broker = _RecordingBroker()
+        a = make_agent(broker)
+        monkeypatch.setattr(
+            agent_mod.threading, "Thread",
+            lambda target, daemon=None: _SyncThread(target))
+        monkeypatch.setenv("QDISTRO_POLKIT_METHOD", "pam")
+        monkeypatch.setenv("QDISTRO_POLKIT_NONINTERACTIVE", "allow")
+        a.CancelAuthentication("cookie9")
+        ok_calls, err_calls = [], []
+        a.BeginAuthentication(
+            "org.qdistro.test", "m", "", {}, "cookie9", self._IDENTS,
+            ok_cb=lambda: ok_calls.append(1),
+            err_cb=lambda e: err_calls.append(e))
+        assert err_calls == []
+        assert broker.responded == [], (
+            "a cancelled cookie must not get a response relay")
+
     def test_a_relay_failure_fails_closed(self, make_agent, monkeypatch):
         """If the broker cannot deliver the response, polkit gets an
         error — never a silent success."""
@@ -454,6 +509,7 @@ class _BrokerInstance:
     def __init__(self):
         self.filed: list = []
         self.waited: list = []
+        self.cancelled: list = []
 
 
 class _BrokerProxy:
@@ -479,6 +535,10 @@ class _BrokerProxy:
         inst.waited.append(rid)
         return True
 
+    def CancelPolkitAuth(self, cookie, **kw):
+        inst = self._instance()
+        inst.cancelled.append(cookie)
+
 
 class TestBrokerInstanceBinding:
 
@@ -490,6 +550,8 @@ class TestBrokerInstanceBinding:
         a._broker = None
         a._sysbus = _BrokerWorld()
         a._config = []
+        a._cancel_lock = threading.Lock()
+        a._cancelled_cookies = {}
         return a
 
     def test_the_proxy_is_bound_to_the_unique_owner(self, agent):
@@ -532,3 +594,16 @@ class TestBrokerInstanceBinding:
         assert d2.waited == [1]
         d1 = agent._sysbus.instances[":1.broker-0"]
         assert d1.filed == [] and d1.waited == []
+
+    def test_a_retire_falls_back_to_the_live_instance(self, agent):
+        """astra r159: a failed wait retires the request by cookie. The
+        pinned proxy tries the owning instance first; once it is dead,
+        a fresh lookup records the cancel on the live broker so the
+        cookie can never be filed or answered again."""
+        iface, _rid = agent._file_request("qsu.exec", {}, "cookie1", [])
+        agent._sysbus.restart()
+        agent._retire_request(iface, "cookie1")
+        d1 = agent._sysbus.instances[":1.broker-0"]
+        d2 = agent._sysbus.instances[agent._sysbus.owner]
+        assert d1.cancelled == []
+        assert d2.cancelled == ["cookie1"]
