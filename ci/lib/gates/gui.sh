@@ -250,7 +250,11 @@ gui_scenario_requires_qdwin() {
         qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md|\
         tests/integration/permissions-gui/56-tier4-rdp-window-visible.md|\
         qdistro/tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md|\
-        tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md)
+        tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md|\
+        qdistro/tests/integration/permissions-gui/58-tier3s-window-visible.md|\
+        tests/integration/permissions-gui/58-tier3s-window-visible.md|\
+        qdistro/tests/integration/permissions-gui/59-tier3s-close-cleanup.md|\
+        tests/integration/permissions-gui/59-tier3s-close-cleanup.md)
             return 0 ;;
         *)
             return 1 ;;
@@ -4095,6 +4099,16 @@ gui_scenario_skip_reason() {
         qdistro/tests/integration/permissions-gui/19-tier5-loopback-visible.md)
             [ "$qdshell_active" != 1 ] && \
                 printf '%s\n' "qdshell session not active in this VM profile" ;;
+        qdistro/tests/integration/permissions-gui/58-tier3s-window-visible.md|\
+        qdistro/tests/integration/permissions-gui/59-tier3s-close-cleanup.md)
+            # Tier-3s outer stack: the qdwin/qdshell compositor on wayland-1.
+            # The tier3s substrate itself is provisioned per-VM by the
+            # scenario's own Setup (tier3s-gui-provision.sh) — no opt-in
+            # base image and no nested KVM — so the ONLY skip is a missing
+            # product session. A present-but-broken tier3s install runs and
+            # reports a real failure, never a skip.
+            [ "$qdshell_active" != 1 ] && \
+                printf '%s\n' "tier-3s outer stack not provisioned: qdwin/qdshell session (wayland-1) absent in this VM profile" ;;
         qdistro/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md)
             [ "$qdshell_active" != 1 ] && \
                 printf '%s\n' "qdshell session not active in this VM profile" ;;
