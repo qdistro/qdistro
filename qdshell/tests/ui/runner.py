@@ -614,14 +614,143 @@ def write_settings_vm(session: VMSession, content: str, *, timeout: float = 30.0
         )
 
 
+def reap_qs_crash_reporters_vm(session: VMSession) -> int:
+    """Kill orphaned Quickshell crash-reporter processes inside the VM.
+
+    qdshell.service runs `dbus-run-session -- qs -p <qdshell>`: quickshell
+    re-execs into a bare-argv `quickshell` supervisor which spawns the real
+    `qs -p ...` worker. When the worker dies on a signal the supervisor
+    launches a SECOND bare-argv `quickshell` — the crash reporter that draws
+    the "Quickshell has crashed" dialog — marked by `__QUICKSHELL_CRASH_*`
+    env vars. A reporter that outlives its supervisor (reparented before the
+    unit's cgroup kill) survives `systemctl restart` and its dialog toplevel
+    pollutes every later capture — including unrelated GUI scenarios that run
+    on the same VM afterwards (observed 2026-10-07: a stray dialog failed
+    58-tier3s-window-visible's healthy-desktop frame).
+
+    The supervisor is ALSO a bare-argv `quickshell` carrying the crash env
+    vars (it sets them to hand the dump fds to the reporter), so argv/env
+    alone cannot separate them: the supervisor is the DIRECT child of the
+    service's dbus-run-session and is excluded by parent comm. Everything
+    else matching comm=quickshell + the crash marker is a reporter and dies.
+    """
+    script = (
+        f"set -u\n"
+        f"killed=0\n"
+        f"for p in $(pgrep -xu {VM_USER} quickshell); do\n"
+        f"  ppid=$(awk '{{print $4}}' /proc/$p/stat 2>/dev/null) || continue\n"
+        f"  [ \"$(cat /proc/$ppid/comm 2>/dev/null)\" = dbus-run-sessio ] && continue\n"
+        f"  tr '\\0' '\\n' < /proc/$p/environ 2>/dev/null"
+        f"    | grep -q __QUICKSHELL_CRASH_DUMP_PID || continue\n"
+        f"  kill \"$p\" 2>/dev/null && killed=$((killed+1))\n"
+        f"done\n"
+        f"echo reaped=$killed\n"
+    )
+    res = _vm_run_script(session, script, timeout=30.0)
+    if res.returncode != 0:
+        # A failed reap must not hard-fail the caller: the dialog is cosmetic
+        # residue — warn loudly so a polluted frame still has its cause on
+        # record, but let the test proceed and judge what it sees.
+        print(
+            f"WARN: crash-reporter reap failed (rc={res.returncode}): "
+            f"{res.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return 0
+    m = re.search(r"reaped=(\d+)", res.stdout)
+    return int(m.group(1)) if m else 0
+
+
+def _await_qdwin_binding_vm(session: VMSession, cursor: str, *,
+                            timeout: float = 30.0) -> None:
+    """Wait for qdshell's qdwin binding to (re)attach after a restart.
+
+    Quickshell's IPC socket answers `qs ipc` calls BEFORE the shell binds
+    qdwin_shell_v1 again; in that gap the ctrl-socket `capture` verb answers
+    `error: qdshell is not bound to qdwin` and every screenshot-based test
+    fails on a transport-looking error (observed 2026-10-07:
+    test_settings_tab[settings_sessionmenu]/[settings_systemmonitor] lost
+    captures in the post-restart bind gap on two consecutive gui runs).
+
+    The binding emits `qdwin_shell_v1 bound v<N>` in the unit journal the
+    moment it attaches; `cursor` should be a journal cursor captured BEFORE
+    the restart so a `bound` line from the previous generation cannot satisfy
+    the wait (empty skips the journal fast-path and waits on the probe
+    alone). After the line lands we still confirm with one real `capture`:
+    wl_shm/weston_capture_v1 bind in the same registry burst, and probing the
+    exact verb the tests use retires any ordering assumption instead of
+    hoping the log line implies capture readiness.
+    """
+    deadline = time.time() + timeout
+    if cursor:
+        while time.time() < deadline:
+            script = (
+                f"runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
+                f"journalctl --user -u {VM_QDSHELL_UNIT} --no-pager -o cat "
+                f"--after-cursor {shlex.quote(cursor)} 2>/dev/null "
+                f"| grep -q 'qdwin_shell_v1 bound'\n"
+            )
+            res = _vm_run_script(session, script, timeout=20.0)
+            if res.returncode == 0:
+                break
+            time.sleep(1.0)
+        else:
+            raise RuntimeError(
+                f"qdshell did not log 'qdwin_shell_v1 bound' within {timeout}s "
+                f"after restart (cursor {cursor[:40]}…)"
+            )
+    # Confirmation probe on the verb the tests actually call. qdwin refuses
+    # to overwrite a capture path, so each attempt gets a unique scratch PNG;
+    # they are removed once the binding answers.
+    guests: list[str] = []
+    last = ""
+    try:
+        while time.time() < deadline:
+            guest = (f"{VM_XDG_RUNTIME_DIR}/qdshell-ui-bindprobe-"
+                     f"{os.getpid()}-{uuid.uuid4().hex}.png")
+            guests.append(guest)
+            try:
+                reply = ctrl_socket_vm(session, f"capture Virtual-1 {guest}",
+                                       timeout=CTRL_SOCAT_T + 20.0)
+            except RuntimeError as exc:
+                last = f"ctrl-socket: {exc}"
+                time.sleep(1.0)
+                continue
+            if reply.startswith("ok "):
+                return
+            last = reply
+            time.sleep(1.0)
+        raise RuntimeError(
+            f"qdshell bound but capture not ready within {timeout}s after "
+            f"restart; last reply: {last!r}"
+        )
+    finally:
+        if guests:
+            args = " ".join(shlex.quote(g) for g in guests)
+            with contextlib.suppress(Exception):
+                _vm_run_script(session, f"rm -f -- {args}\n", timeout=10.0)
+
+
 def restart_qdshell_vm(session: VMSession, *, settle: float = 6.0,
                        timeout: float = 60.0) -> None:
-    """Restart the qdshell user service inside the VM and wait for IPC to return.
+    """Restart the qdshell user service inside the VM and wait for it back.
 
     This is the real persistence path: a setting changed in one qdshell process
     must survive a full process restart and reload from settings.json. Restart
-    is via the admin user's systemd (the deployed unit), then we poll IPC.
+    is via the admin user's systemd (the deployed unit), then we poll IPC,
+    then the qdwin binding — IPC answers first, and a test that captures in
+    the gap between them sees `qdshell is not bound to qdwin` — and finally
+    reap any orphaned crash-reporter dialogs left by a worker that died on
+    the way down.
     """
+    cur = _vm_run_script(
+        session,
+        f"runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
+        f"journalctl --user -u {VM_QDSHELL_UNIT} -n0 --show-cursor --no-pager "
+        f"2>/dev/null | sed -n 's/^-- cursor: //p'\n",
+        timeout=20.0,
+    )
+    cursor = cur.stdout.strip() if cur.returncode == 0 else ""
     script = (
         f"set -eu\n"
         f"runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
@@ -637,14 +766,22 @@ def restart_qdshell_vm(session: VMSession, *, settle: float = 6.0,
     while time.time() < deadline:
         try:
             ipc_vm(session, "bar", "showBar", timeout=15)
-            return
+            break
         except RuntimeError as exc:
             last_exc = exc
             time.sleep(1.0)
-    raise RuntimeError(
-        f"qdshell did not answer IPC within {settle + 20:.0f}s after restart; "
-        f"last error: {last_exc}"
-    )
+    else:
+        raise RuntimeError(
+            f"qdshell did not answer IPC within {settle + 20:.0f}s after restart; "
+            f"last error: {last_exc}"
+        )
+    # The journal cursor is a fast path; even without it the capture probe
+    # inside still verifies the binding before we return.
+    _await_qdwin_binding_vm(session, cursor)
+    reaped = reap_qs_crash_reporters_vm(session)
+    if reaped:
+        print(f"INFO: reaped {reaped} orphaned quickshell crash reporter(s)",
+              file=sys.stderr)
 
 
 def ctrl_socket_vm(session: VMSession, command: str, *, timeout: float = 30.0) -> str:
@@ -884,20 +1021,51 @@ def screenshot_vm(session: VMSession, out_path: Path, *,
 
     try:
         attempts = max(1, live_retries + 1)
-        for _attempt in range(attempts):
+        bind_recovered = False
+        _attempt = 0
+        while True:
             guest = _next_guest()
             # Host deadline > CTRL_SOCAT_T, with room for vm-exec's own
             # guest-agent round trips on a loaded host.
-            reply = ctrl_socket_vm(session, f"capture Virtual-1 {guest}",
-                                   timeout=CTRL_SOCAT_T + 20.0)
+            try:
+                reply = ctrl_socket_vm(session, f"capture Virtual-1 {guest}",
+                                       timeout=CTRL_SOCAT_T + 20.0)
+            except RuntimeError as exc:
+                # `Connection refused`/`No such file` mean qdshell.sock does
+                # not exist yet — the deeper end of the same restart gap:
+                # the shell has not even opened its ctrl socket. One bounded
+                # readiness wait covers it; anything else re-raises as before.
+                if (not bind_recovered
+                        and ("Connection refused" in str(exc)
+                             or "No such file" in str(exc))):
+                    bind_recovered = True
+                    _await_qdwin_binding_vm(session, "")
+                    continue
+                raise
+            # `error: qdshell is not bound to qdwin` is the transient gap a
+            # respawning worker leaves while qdwin-binding's reconnect loop
+            # re-attaches (journal: `reconnect attempt N` -> `bound v35`).
+            # The restart/session waits cover startup; this covers a worker
+            # that crashed DURING the test — observed 2026-10-07: a qs worker
+            # SEGV dropped the binding between the fixture's probe and the
+            # test's capture. Wait for the binding on the same verb the tests
+            # use (bounded inside _await_qdwin_binding_vm: a shell that never
+            # re-binds fails there with the reply as evidence), then retry
+            # the capture WITHOUT spending a live=0 retry. A healed binding
+            # still surfaces a crash-dialog desktop to the judge — only the
+            # transport gap is retired, never the content assertion.
+            if "not bound to qdwin" in reply and not bind_recovered:
+                bind_recovered = True
+                _await_qdwin_binding_vm(session, "")
+                continue
             # A retained frame often means the repaint had not landed yet.
             # Ask once more before treating staleness as terminal.
             if " live=0" not in reply:
                 break
-            # Do not sleep after the final attempt -- there is nothing left to
-            # wait for.
-            if _attempt < attempts - 1:
-                time.sleep(0.5)
+            _attempt += 1
+            if _attempt >= attempts:
+                break
+            time.sleep(0.5)
         # qdshell v33 can answer with a RETAINED frame when no repaint was
         # possible (seat away, power off, repaint wedge), appending
         # `live=0 age_ms=<n>` and sometimes `msc=<n>`. That is a VALID image
@@ -1184,7 +1352,12 @@ def _run_codex(prompt: str, image_path: Optional[Path] = None) -> str:
             "--output-last-message", str(output_path),
         ]
         if image_path is not None:
-            cmd.extend(["--image", str(image_path)])
+            # `--image <FILE>...` is VARIADIC: as a separate token pair placed
+            # before the prompt it greedily consumes the positional too, and
+            # codex falls back to reading the prompt from stdin -> "No prompt
+            # provided via stdin" -> empty describe -> judge SKIP. The `=`
+            # form binds exactly one file.
+            cmd.append(f"--image={image_path}")
         cmd.append(prompt)
         try:
             result = subprocess.run(
