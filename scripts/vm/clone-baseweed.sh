@@ -122,6 +122,8 @@ IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 
 # shellcheck source=lib/vm-base.sh
 . "$SCRIPT_DIR/lib/vm-base.sh"
+# shellcheck source=lib/host-port.sh
+. "$SCRIPT_DIR/lib/host-port.sh"
 
 if [ -n "$FROM_GOLDEN" ]; then
     BACKING="$FROM_GOLDEN"
@@ -460,27 +462,7 @@ fi
 # rare across parallel clones; fall back to a random retry up to 8x.
 SSH_PORT=
 if [ "$SSH_CLONE" = 1 ]; then
-    pick_port() {
-        local p
-        for _ in 1 2 3 4 5 6 7 8; do
-            p=$((30000 + RANDOM % 10000))
-            # ss is more reliable than nc on Tumbleweed.
-            if ! ss -ltn "sport = :$p" 2>/dev/null | grep -q LISTEN; then
-                # Also reject if any existing libvirt domain XML
-                # already binds it (best-effort, may miss VMs not in
-                # this user's session).
-                if ! virsh -c qemu:///session list --all --name 2>/dev/null \
-                        | xargs -r -n1 virsh -c qemu:///session dumpxml 2>/dev/null \
-                        | grep -q "start='$p'"; then
-                    echo "$p"
-                    return 0
-                fi
-            fi
-        done
-        echo "ERROR: could not pick a free SSH port" >&2
-        return 1
-    }
-    SSH_PORT=$(pick_port) || exit 1
+    SSH_PORT=$(qdistro_pick_free_port) || exit 1
 
     # libvirt 12.x requires the user-mode interface to use the `passt`
     # backend (or `vhostuser`) for <portForward> to be valid; the

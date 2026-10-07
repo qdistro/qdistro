@@ -1,6 +1,6 @@
 #!/bin/bash
 # fresh-vm-bootstrap.sh — run inside a freshly-cloned baseweed VM to:
-#   1. Fetch the qdistro monorepo as one tarball from host:8765.
+#   1. Fetch the qdistro monorepo as one tarball from the host staging server.
 #   2. Install Podman-built native components, or build them on a developer VM.
 #   3. Load SELinux modules built against the pinned snapshot.
 #   4. Install the Python broker / polkit-agent / pwd / etc. services.
@@ -15,15 +15,20 @@
 #   - quickshell + qt6-* for qdshell
 #   - bats for in-VM integration tests
 #
-# Host must be serving the monorepo tarball at http://10.0.2.2:8765/:
+# Host must be serving the monorepo tarball at $QDISTRO_HTTP_HOST (required;
+# a http://10.0.2.2:<port> URL — the port is whatever the host-side server
+# bound, callers pick a free one):
 #   /qdistro.tar.gz   (repo root: qdistro content + qdwin/, qdshell/, ... in-tree)
 #
-# spin-test-vm.sh handles the host-side staging. To bootstrap manually:
+# spin-test-vm.sh handles the host-side staging and passes QDISTRO_HTTP_HOST.
+# To bootstrap manually (pick any free port — a fixed one collides when
+# several test users share the host):
 #   STAGE=$(mktemp -d)
 #   tar czf $STAGE/qdistro.tar.gz --exclude=.git -C ~/path/to/qdistro .
 #   cp ~/path/to/qdistro/scripts/vm/fresh-vm-bootstrap.sh $STAGE/
-#   (cd $STAGE && python3 -m http.server 8765 --bind 127.0.0.1) &
-#   vm-exec <vm> "wget -O- http://10.0.2.2:8765/fresh-vm-bootstrap.sh | bash"
+#   P=8765   # or any port you bound the server to
+#   (cd $STAGE && python3 -m http.server $P --bind 127.0.0.1) &
+#   vm-exec <vm> "wget -O- http://10.0.2.2:$P/fresh-vm-bootstrap.sh | QDISTRO_HTTP_HOST=http://10.0.2.2:$P bash"
 
 set -eo pipefail
 
@@ -47,7 +52,10 @@ case "$QDISTRO_PROFILE" in
     *) echo "[bootstrap] invalid QDISTRO_PROFILE=$QDISTRO_PROFILE" >&2; exit 2 ;;
 esac
 
-HOST="${QDISTRO_HTTP_HOST:-http://10.0.2.2:8765}"
+# Required, no default: a baked-in host port (the old 10.0.2.2:8765) silently
+# fetches from whichever user's staging server holds that port on a shared
+# host. The fetch that delivered THIS script already used the right URL.
+HOST="${QDISTRO_HTTP_HOST:?QDISTRO_HTTP_HOST is required (e.g. http://10.0.2.2:<port>)}"
 SRC=/root/qdistro-src
 
 log() { echo "[bootstrap] $*"; }

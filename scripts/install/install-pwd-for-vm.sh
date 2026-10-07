@@ -4,7 +4,7 @@
 #
 # Mirrors install-broker-for-qdwin.sh but for the pwd daemon. Sources
 # come from /root/pwd-src/ (staged by fresh-vm-bootstrap.sh from
-# host:8765/pwd/).
+# the host staging server's /pwd/).
 #
 # Layout (matches the broker's split for the same lib_t-vs-bin_t reason):
 #   /usr/libexec/qdistro/qdistro_pwd_daemon.py     # ExecStart target

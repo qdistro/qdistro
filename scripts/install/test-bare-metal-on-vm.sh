@@ -203,11 +203,30 @@ stage_sources_in_vm() {
         --exclude=./ci/runs --exclude=./image/root/root -C "$QDISTRO_DIR" .
 
     # Serve via host:port forwarded over user-mode net (10.0.2.2 = host).
-    local port=$(( 18800 + RANDOM % 1000 ))
-    (cd "$stage" && python3 -m http.server "$port" --bind 127.0.0.1 \
-        >/dev/null 2>&1) &
-    local http_pid=$!
+    # Kernel-assigned free port (bind 0, read back the real port): the port
+    # space is host-global and a probe->bind gap could let a peer run claim it;
+    # a bare RANDOM draw collides outright. Same pattern as spin-test-vm.sh.
+    local port_file="$stage/http-port"
+    : > "$port_file"
+    (
+        cd "$stage" || exit 1
+        exec python3 -c '
+import http.server, socketserver, sys
+socketserver.TCPServer.allow_reuse_address = False
+httpd = socketserver.TCPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
+sys.stdout.write(str(httpd.server_address[1]) + "\n"); sys.stdout.flush()
+httpd.serve_forever()
+' > "$port_file" 2>"$stage/http.log"
+    ) &
+    local http_pid=$! port=""
     trap "kill $http_pid 2>/dev/null || true; rm -rf '$stage'" RETURN
+    for _ in $(seq 1 50); do
+        port=$(head -1 "$port_file" 2>/dev/null | tr -dc '0-9')
+        [ -n "$port" ] && break
+        kill -0 "$http_pid" 2>/dev/null || break
+        sleep 0.2
+    done
+    [ -n "$port" ] || { log "[$distro] ERROR: staging HTTP server failed to bind"; return 1; }
 
     log "[$distro] downloading the monorepo inside VM..."
     "$SCRIPT_DIR/../vm/vm-exec" "$name" "mkdir -p /opt/qdistro-src && cd /opt/qdistro-src && wget -q -O - http://10.0.2.2:$port/qdistro.tar.gz | tar xz -C /opt/qdistro-src"

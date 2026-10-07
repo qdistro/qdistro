@@ -47,7 +47,11 @@ VM_IMAGE=${2:?VM_IMAGE}
 ACCEL=${3:?QEMU_ACCEL}
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 OUT=$VM_DIR/suites
-PORT=${QDISTRO_SUITES_SSH_PORT:-2224}
+# shellcheck source=lib/host-port.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/host-port.sh"
+# Ports are host-global: default is a probed free port so two users' runs on
+# one host don't collide; QDISTRO_SUITES_SSH_PORT pins it when needed.
+PORT=${QDISTRO_SUITES_SSH_PORT:-$(qdistro_pick_free_port)}
 OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
 BATS_TIMEOUT=${QDISTRO_SUITES_BATS_TIMEOUT:-1200}

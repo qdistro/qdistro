@@ -16,6 +16,7 @@ setup() {
     cp "$REPO_ROOT/scripts/vm/clone-baseweed.sh" "$FIXTURE/clone-baseweed.sh"
     cp "$REPO_ROOT/scripts/vm/vm-start-and-wait" "$FIXTURE/vm-start-and-wait"
     cp "$REPO_ROOT/scripts/vm/lib/vm-base.sh" "$FIXTURE/lib/vm-base.sh"
+    cp "$REPO_ROOT/scripts/vm/lib/host-port.sh" "$FIXTURE/lib/host-port.sh"
     chmod +x "$FIXTURE/clone-baseweed.sh" "$FIXTURE/vm-start-and-wait"
 
     # Keep the real XML injector; substitute only the firmware locator so the

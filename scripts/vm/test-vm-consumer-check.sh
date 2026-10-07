@@ -27,7 +27,11 @@ ACCEL=${3:?QEMU_ACCEL}
 SNAPSHOT=${4:?SNAPSHOT}
 PASSWORD=${QDISTRO_TEST_VM_PASSWORD:-qdistro}
 C=$VM_DIR/consumer
-PORT=${QDISTRO_CONSUMER_SSH_PORT:-2223}
+# shellcheck source=lib/host-port.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/host-port.sh"
+# Ports are host-global: default is a probed free port so two users' runs on
+# one host don't collide; QDISTRO_CONSUMER_SSH_PORT pins it when needed.
+PORT=${QDISTRO_CONSUMER_SSH_PORT:-$(qdistro_pick_free_port)}
 # Ubuntu runner paths; override for a local run.
 OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}

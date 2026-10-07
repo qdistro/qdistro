@@ -3,7 +3,7 @@
 # vm-gui — GUI automation for VMs via xdotool + virsh screenshot.
 #
 # Usage:
-#   vm-gui <vm> screenshot [file]        Take screenshot (default: /tmp/vm-screenshot.png)
+#   vm-gui <vm> screenshot [file]        Take screenshot (default: $XDG_RUNTIME_DIR/vm-screenshot-<uid>.png, /tmp fallback)
 #   vm-gui <vm> screenshot-fresh <file> [baseline] [attempts]
 #                                         Retry stale/near-black captures (default: 3 tries)
 #   vm-gui <vm> start <command>          Launch a GUI app
@@ -935,7 +935,9 @@ screenshot_fresh() {
 
 case "$CMD" in
     screenshot)
-        OUT="${1:-/tmp/vm-screenshot.png}"
+        # Default is uid-qualified: /tmp is host-global, and two test users
+        # sharing one host must not overwrite each other's capture.
+        OUT="${1:-${XDG_RUNTIME_DIR:-/tmp}/vm-screenshot-$(id -u).png}"
         capture_usable_screenshot "$OUT" "${QCI_SCREENSHOT_ATTEMPTS:-3}" || exit $?
         echo "$OUT"
         ;;

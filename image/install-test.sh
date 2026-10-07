@@ -25,7 +25,11 @@ STAMP="$(date +%y%m%d-%H%M)"
 VM="${QDISTRO_INSTALL_VM:-qdistro-install-${STAMP}}"
 TARGET="$BUILD_DIR/$VM-target.qcow2"
 TARGET_SIZE_GB=30
-SSH_PORT="${QDISTRO_INSTALL_PORT:-2300}"
+# shellcheck source=../scripts/vm/lib/host-port.sh
+. "$HERE/../scripts/vm/lib/host-port.sh"
+# Ports are host-global: under several test users a fixed 2300 collides, so the
+# default is a probed free port; QDISTRO_INSTALL_PORT pins it when needed.
+SSH_PORT="${QDISTRO_INSTALL_PORT:-$(qdistro_pick_free_port)}"
 SSH_PASS="${QDISTRO_IMAGE_PASSWORD:-qdistro}"
 INSTALL_DIR="$HERE/logs/install-${STAMP}$(date +%S)"
 mkdir -p "$INSTALL_DIR/screenshots"
@@ -34,7 +38,7 @@ log()  { printf '\033[1;36m[install-test]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[install-test] FATAL:\033[0m %s\n' "$*" >&2; exit 1; }
 
 teardown() {
-    # Sweep any prior install VM (current + stale) so port 2300 is free.
+    # Sweep any prior install VM (current + stale) so the forwarded port is free.
     local v
     for v in $(virsh list --all --name 2>/dev/null | grep '^qdistro-install-'); do
         log "tearing down $v"

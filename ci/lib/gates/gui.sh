@@ -1548,7 +1548,7 @@ gui_visual_frames() {
 #
 # `scope` is `in-tree` when the capture's destination was inside the artifact
 # directory the harness handed the agent, `out-of-tree` otherwise (e.g. the
-# vm-gui default /tmp/vm-screenshot.png, which many scenarios then copy in).
+# vm-gui default $XDG_RUNTIME_DIR/vm-screenshot-<uid>.png, which many scenarios then copy in).
 # The distinction matters for omission detection: an in-tree capture was written
 # where evidence is collected, so its later absence is omission; an out-of-tree
 # capture may legitimately never be harvested, so its absence is reported, not

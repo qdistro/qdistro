@@ -52,6 +52,7 @@ stick_matrix() {
         STICK=1 KEEP=0 VM=vm SSH_PORT=2200 HERE=/nonexistent IMG=/img BUILD_DIR=/b
         VERIFY_DIR="$2" PASS=0 FAIL=0 QDISTRO_RESOLVED_XZ=/img.raw.xz
         log() { :; }
+        qdistro_pick_free_port() { echo 30123; }
         bash() { printf "child parent=%s login=%s args=%s\n" "$QDISTRO_VERIFY_PARENT" "$QDISTRO_VERIFY_LOGIN" "${*:2}"; }
         eval "$1"
         echo "fail=$FAIL"
