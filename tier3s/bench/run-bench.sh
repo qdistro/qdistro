@@ -118,15 +118,28 @@ ssh_vm 'test -S /run/user/1000/wayland-1' || { echo "FAIL: wayland-1 never appea
 # and bail (VM preserved) if it keeps failing. The gate runs BEFORE the
 # qdlocker stop below: the session restart resurrects the locker.
 repaint_fails() {
-    ssh_vm 'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --no-pager -b" 2>/dev/null | grep -c "repaint-flush failed"'
+    # echo the repaint-flush count; rc=1 when the query itself failed —
+    # an unknown count is never substituted as 0. The remote exits 9 when
+    # the journal read fails so it cannot be mistaken for a real zero.
+    local n
+    n=$(ssh_vm 'j=$(runuser -l admin -c "journalctl --user -u qdwin-compositor.service --no-pager -b" 2>/dev/null) || exit 9; printf "%s\n" "$j" | grep -c "repaint-flush failed" || :' 2>/dev/null) \
+        || return 1
+    [[ "$n" =~ ^[0-9]+$ ]] || return 1
+    echo "$n"
 }
-sleep 5; rf1=$(repaint_fails); sleep 4; rf2=$(repaint_fails)
-if [ "${rf2:-0}" -gt 5 ] && [ "${rf2:-0}" -gt "${rf1:-0}" ]; then
+sleep 5
+rf1=$(repaint_fails) || { echo "FAIL: compositor repaint health unreadable — VM $VM preserved"; exit 1; }
+sleep 4
+rf2=$(repaint_fails) || { echo "FAIL: compositor repaint health unreadable — VM $VM preserved"; exit 1; }
+if [ "$rf2" -gt 5 ] && [ "$rf2" -gt "$rf1" ]; then
     echo "   compositor repaint failing ($rf1->$rf2) — restarting the session once"
     ssh_vm 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop qdwin-session.target; sleep 2; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start qdwin-session.target'
     for i in $(seq 1 60); do ssh_vm 'test -S /run/user/1000/wayland-1' && break; sleep 1; done
-    sleep 8; rf3=$(repaint_fails); sleep 4; rf4=$(repaint_fails)
-    [ "${rf4:-0}" -le "${rf3:-0}" ] \
+    sleep 8
+    rf3=$(repaint_fails) || { echo "FAIL: compositor repaint health unreadable — VM $VM preserved"; exit 1; }
+    sleep 4
+    rf4=$(repaint_fails) || { echo "FAIL: compositor repaint health unreadable — VM $VM preserved"; exit 1; }
+    [ "$rf4" -le "$rf3" ] \
         || { echo "FAIL: compositor repaint still failing after restart ($rf3->$rf4) — VM $VM preserved"; exit 1; }
     echo "   repaint failures stopped after restart (total $rf4)"
 fi
@@ -195,8 +208,8 @@ if [ "$SAMPLES" -gt 0 ]; then
             echo "window-rect MISS(setup)" >> "$L/latency.log"; FAIL=1
             # record compositor paint health — a boot with failing atomic
             # commits (virtio-gpu EINVAL) leaves the desk frame unchanged
-            ssh_vm 'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --no-pager -b" 2>/dev/null | grep -c "repaint-flush failed"' \
-                | sed 's/^/weston-repaint-flush-failures: /' >> "$L/latency.log" || true
+            { repaint_fails || echo unreadable; } \
+                | sed 's/^/weston-repaint-flush-failures: /' >> "$L/latency.log"
         fi
         for i in $(seq 1 "$SAMPLES"); do
             [ -n "$winrect" ] || break

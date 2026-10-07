@@ -65,6 +65,9 @@ HSACCT=; HSUID=
 # runsc default.
 SECCOMP_JSON=/usr/lib/qdistro/tier3s/seccomp/headless-smoke.json
 t3s_spec() {
+    # drop the previous spec first: a failure here must never leave a
+    # stale config.json for runsc to reuse
+    rm -f "$BUNDLE/config.json"
     python3 - "$1" "$BUNDLE/config.json" "$SECCOMP_JSON" "$ROOTFS" "$RSHARE" <<'PY'
 import json, sys
 args, cfg, prof, rootfs, rshare = sys.argv[1:6]
@@ -87,7 +90,7 @@ PY
 # t3s_run <id> <args-json> [extra runsc flags...]
 t3s_run() {
     local id=$1 args=$2; shift 2
-    t3s_spec "$args"
+    t3s_spec "$args" || { echo "t3s_run $id: spec generation failed" >&2; return 1; }
     runuser -u "$HSACCT" -- env -i PATH=/usr/bin:/bin \
         "$RPLAIN" "--root=$RUNSC_BASE/$HSUID" --ignore-cgroups \
         --platform=systrap --oci-seccomp --network=none --rootless "$@" \
@@ -269,7 +272,7 @@ sec_mem() {
     [ -n "$tok" ] || { fail "mem: GUI launch failed"; return; }
     sleep 15
     scope_cg=$(rec "$tok" scope_cgroup)
-    procs=$(tree_procs "/sys/fs/cgroup$scope_cg")
+    procs=$(tree_procs "/sys/fs/cgroup$scope_cg") || procs=""
     scope_cur=$(cg_mem "$scope_cg")
     pss=$(sum_pss_kb $procs)
     bridge_pss=$(pss_kb "$(rec "$tok" bridge_client_pid)")
@@ -286,7 +289,7 @@ sec_mem() {
     if [ -n "$htok" ]; then
         sleep 10
         hcg=$(rec "$htok" scope_cgroup)
-        procs=$(tree_procs "/sys/fs/cgroup$hcg")
+        procs=$(tree_procs "/sys/fs/cgroup$hcg") || procs=""
         local hcur hpss
         hcur=$(cg_mem "$hcg"); hpss=$(sum_pss_kb $procs)
         if [ -n "$hcg" ] && [ -n "$hcur" ] && [ -n "$hpss" ] && [ -n "$procs" ]; then
@@ -310,9 +313,11 @@ sec_mem() {
     [ -n "$t2cg" ] && t2cur=$(cg_mem "$t2cg")
     if [ -n "$t2cur" ]; then
         emit t2_idle_memory_current_mb "$(mb_b "$t2cur")" MB
-        local t2pss; t2pss=$(sum_pss_kb $(tree_procs "/sys/fs/cgroup$t2cg"))
-        [ -n "$t2pss" ] && emit t2_idle_pss_mb "$(mb_kb "$t2pss")" MB \
-            || fail "mem: t2 PSS sum failed"
+        local t2procs t2pss
+        t2procs=$(tree_procs "/sys/fs/cgroup$t2cg") || t2procs=""
+        [ -n "$t2procs" ] && t2pss=$(sum_pss_kb $t2procs) || t2pss=""
+        [ -n "${t2pss:-}" ] && emit t2_idle_pss_mb "$(mb_kb "$t2pss")" MB \
+            || fail "mem: t2 cgroup.procs/PSS collection failed"
     else
         # report the delegation chain so a miss is diagnosable from the log
         local cgpath="/sys/fs/cgroup$t2cg" anc ctl=""
