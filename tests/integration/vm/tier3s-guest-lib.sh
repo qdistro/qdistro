@@ -241,6 +241,22 @@ for s in rows:
     if s["name"] == sys.argv[1]: print(s["state"]); break
 else: print("absent")' "$1"
 }
+# silo_observed <name> -> "<observed_status>\t<observed_reason>" for the row,
+# or "absent" (QUERY-FAILED on a failed call). state is user intent; this is
+# the runtime-observer thread's evidence (refreshed ~every 10 s).
+silo_observed() {
+    as_admin busctl --system --timeout=300 --json=short call org.qdistro.SessionManager1 \
+        /org/qdistro/SessionManager1 org.qdistro.SessionManager1 ListSilos | python3 -c '
+import json, sys
+try:
+    rows = json.loads(json.load(sys.stdin)["data"][0])
+except Exception:
+    print("QUERY-FAILED"); sys.exit(0)
+for s in rows:
+    if s["name"] == sys.argv[1]:
+        print(s["observed_status"], s["observed_reason"], sep="\t"); break
+else: print("absent")' "$1"
+}
 wait_for() {   # wait_for <secs> <cmd...>
     local n="$1"; shift
     # a wedged probe call (a stalled podman/busctl IPC) must fail the

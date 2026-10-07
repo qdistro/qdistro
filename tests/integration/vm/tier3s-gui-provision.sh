@@ -49,7 +49,7 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///session}"
 
 here=$(cd "$(dirname "$0")" && pwd)
-repo=$(cd "$here/../.." && pwd)
+repo=$(cd "$here/../../.." && pwd)
 VMEXEC=${QDISTRO_VM_EXEC:-$repo/scripts/vm/vm-exec}
 
 fail() { echo "[tier3s-gui-provision] FAIL: $*" >&2; exit 1; }

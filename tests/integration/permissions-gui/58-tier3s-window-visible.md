@@ -61,6 +61,7 @@ for s in t3sgui t3scls; do
     sm DeleteSilo s "$s" >/dev/null 2>&1 || :
 done
 set_rules none
+finish
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -76,7 +77,6 @@ helpers the bats lanes use. The silo is named `t3sgui`, workload
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-set -e
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
 SILO=t3sgui
 GUISPAWN="qdistro.tier3s.spawn:weston-terminal/weston-terminal"
@@ -90,6 +90,7 @@ TOK=$(up_gui_silo "$SILO")
 echo "TOK=$TOK" > /tmp/s58-tok
 t3s_window_handle "$SILO" > /tmp/s58-handle
 echo "silo up: token=$TOK handle=$(cat /tmp/s58-handle) uid=$(silo_uid "$SILO")"
+finish
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -107,7 +108,6 @@ Scope every grep to the cursor captured just before the launch.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-set -e
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
 cur=$(cat /tmp/s58-journal.cur); TOK=$(sed -n 's/^TOK=//p' /tmp/s58-tok)
 SILO=t3sgui; APPID="qdistro.tier3s.$SILO"
@@ -118,6 +118,7 @@ SILO=t3sgui; APPID="qdistro.tier3s.$SILO"
 [ "$(comp_log "$cur" | grep -c "toplevel_security_context handle=[0-9]* engine=qdistro.tier3s app_id=$APPID instance=$TOK")" = 1 ] \
     || { echo "FAIL: no secctx line with launch token"; exit 1; }
 echo "journal: toplevel observed, [3s:$SILO] title, secctx engine=qdistro.tier3s instance=$TOK"
+finish
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -144,11 +145,15 @@ at this desktop sees an ordinary window, not a broken or absent surface.
 Focus the silo window, then type two commands on the KVM keyboard and
 read the answers off the screen.
 
+`qdwin_focus_window` is guest-side (`/tmp/qci-gui-waiters.sh`); the
+typing helpers are host-side QMP:
+
 ```bash
-qdwin_focus_window '\[3s:t3sgui\]'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "\\[3s:t3sgui\\].*"' \
+    || { echo "FAIL: silo window not focusable"; exit 1; }
 qdwin_type_lower 'id'
 qdwin_send_key KEY_ENTER
-qdwin_type_lower 'hostname'
+qdwin_type_lower 'uname -n'
 qdwin_send_key KEY_ENTER
 qdwin_type_lower 'echo t3s-visible-ok'
 qdwin_send_key KEY_ENTER
@@ -158,11 +163,12 @@ qdwin_screenshot "$ART/s4-typed.png"
 **Assert (visual + structured)**: open `$ART/s4-typed.png`. The terminal
 shows the three commands and their output:
 
-- `id` prints `uid=<N>` where N equals the silo uid printed at the end
-  of S1 (read it from that transcript line, not from memory) — the
-  sandbox runs as the per-silo account, not admin.
-- `hostname` prints the container name `qdistro-tier3s-t3sgui` —
-  distinct from the VM's own hostname.
+- `id` prints `uid=<N>(qt3s-t3sgui)` where N equals the silo uid printed
+  at the end of S1 (read it from that transcript line, not from
+  memory) — the sandbox runs as the per-silo account, not admin.
+- `uname -n` prints the container's hostname — a 12-char hex podman ID
+  prefix, plainly NOT the VM's own hostname (the VM's is its clone
+  name; cross-check with `hostname` on the host-side `vm-exec`).
 - `t3s-visible-ok` is echoed back.
 
 That proves host input travelled compositor → waypipe client →
@@ -176,45 +182,47 @@ once to rule out a slow repaint; a still-empty terminal is a FAIL
 
 ### S5 — network=none is visible inside the sandbox
 
-The container's only interface must be `lo`. Typed proof on screen,
-then the structured cross-check.
+Under `network=none` the sandbox's only interface is `lo`; gVisor does
+not even mount `/sys/class/net` (`ls` there fails) — `/proc/net/dev`
+is the in-sandbox source of truth. Type it, read the frame, then take
+the structured cross-check.
 
 ```bash
-qdwin_type_lower 'ls '
+qdwin_type_lower 'cat '
 qdwin_send_key KEY_SLASH
-qdwin_type_lower 'sys'
-qdwin_send_key KEY_SLASH
-qdwin_type_lower 'class'
+qdwin_type_lower 'proc'
 qdwin_send_key KEY_SLASH
 qdwin_type_lower 'net'
+qdwin_send_key KEY_SLASH
+qdwin_type_lower 'dev'
 qdwin_send_key KEY_ENTER
 qdwin_screenshot "$ART/s5-netnone.png"
 ```
 
-**Assert (visual)**: the listing shows exactly `lo` — no `eth0`, no
-`wlan*`.
+**Assert (visual)**: the `/proc/net/dev` table lists exactly one
+interface, `lo` — no `eth0`, no `wlan*`, no sit/tun.
 
 Structured cross-check (same fact, authoritative):
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-set -e
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
 SILO=t3sgui; CTR=$(ctr_of "$SILO")
-pm_s "$SILO" exec "$CTR" ls /sys/class/net
+pm_s "$SILO" exec "$CTR" cat /proc/net/dev
 pm_s "$SILO" inspect --format '{{.HostConfig.NetworkMode}}' "$CTR"
+finish
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```
 
-**Assert**: the transcript prints `lo` (only) and then `none`.
+**Assert**: the transcript's interface table names `lo` and nothing
+else, then prints `none`.
 
 ### S6 — stop the silo; the window leaves
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-set -e
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
 SILO=t3sgui; TOK=$(sed -n 's/^TOK=//p' /tmp/s58-tok); UNIT=$(unit_of "$SILO")
 H=$(cat /tmp/s58-handle)
@@ -228,6 +236,7 @@ wait_for 30 bash -c "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no
 assert_launch_gone teardown "$TOK" "$SILO"
 assert_bridge_gone teardown "$TOK"
 echo "teardown: unit down, toplevel_removed seen, launch+bridge gone"
+finish
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -249,6 +258,7 @@ SILO=t3sgui
 sm StopSilo si "$SILO" 10 >/dev/null 2>&1 || :
 sm DeleteSilo s "$SILO" >/dev/null 2>&1 || :
 set_rules none
+finish
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -265,6 +275,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 - **Input goes through the compositor's focus.** `qdwin_focus_window`
   must report focus before typing; do not drive the window by pixel
   click.
-- **The container hostname is the assertion.** `hostname` inside the
-  sandbox prints `qdistro-tier3s-<silo>` — distinct from the guest's
-  own; the screenshot must show that exact string.
+- **The container hostname is the assertion.** `uname -n` inside the
+  sandbox prints podman's 12-char container-ID hostname — distinct from
+  the guest's own; the screenshot must show a value that is NOT the VM
+  hostname.

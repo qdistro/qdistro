@@ -54,6 +54,7 @@ s=t3scls
     sm DeleteSilo s "$s" >/dev/null 2>&1 || :
 }
 set_rules none
+finish
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -65,7 +66,6 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-set -e
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
 SILO=t3scls
 GUISPAWN="qdistro.tier3s.spawn:weston-terminal/weston-terminal"
@@ -79,6 +79,7 @@ echo "TOK=$TOK" > /tmp/s59-tok
 t3s_window_handle "$SILO" > /tmp/s59-handle
 snapshot_launch "$TOK"; snapshot_bridge "$TOK"
 echo "silo up: token=$TOK handle=$(cat /tmp/s59-handle)"
+finish
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -100,8 +101,12 @@ present on the desktop.
 Type `exit` into the sandboxed shell — the window closes because the
 *application* ended, the way a user closes a terminal.
 
+`qdwin_focus_window` is guest-side (`/tmp/qci-gui-waiters.sh`); typing
+is host-side QMP:
+
 ```bash
-qdwin_focus_window '\[3s:t3scls\]'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "\\[3s:t3scls\\].*"' \
+    || { echo "FAIL: silo window not focusable"; exit 1; }
 qdwin_type_lower 'exit'
 qdwin_send_key KEY_ENTER
 ```
@@ -113,7 +118,6 @@ gone.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-set -e
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
 SILO=t3scls; UNIT=$(unit_of "$SILO")
 TOK=$(sed -n 's/^TOK=//p' /tmp/s59-tok); H=$(cat /tmp/s59-handle)
@@ -123,12 +127,20 @@ wait_for 60 bash -c "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no
     || { echo "FAIL: no toplevel_removed for handle $H"; comp_log | tail -15; exit 1; }
 # the launch unit follows the container exit
 wait_for 90 unit_down "$UNIT" || { echo "FAIL: $UNIT still up after app exit"; exit 1; }
-# and the session manager must observe the end (not leave it Active)
-wait_for 30 bash -c "[ \"\$(silo_state '$SILO')\" != Active ]" \
-    || { echo "FAIL: silo still Active with its app dead"; exit 1; }
+# Nominal state stays Active — it is user intent, not runtime truth
+# (session_manager observes but never rewrites it). The checkable
+# contract is the observer thread's evidence: it must report `stopped`
+# once the launcher is inactive AND the container is gone (probed every
+# ~10 s; allow for teardown + one extra cycle). NB: wait_for calls its
+# command in a subshell — lib functions are visible, `bash -c` is not.
+obs_stopped() { silo_observed "$1" | grep -q '^stopped'; }
+wait_for 60 obs_stopped "$SILO" \
+    || { echo "FAIL: observed_status not stopped; last=$(silo_observed "$SILO")"; exit 1; }
+[ "$(silo_state "$SILO")" = Active ] || { echo "FAIL: nominal state moved; got $(silo_state "$SILO")"; exit 1; }
 assert_launch_gone app-exit "$TOK" "$SILO"
 assert_bridge_gone app-exit "$TOK"
-echo "app-exit unwind: toplevel_removed, unit down, state=$(silo_state "$SILO"), launch+bridge gone"
+echo "app-exit unwind: toplevel_removed, unit down, observed=$(silo_observed "$SILO"), launch+bridge gone"
+finish
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -143,23 +155,39 @@ window is gone from the desktop.
 container in the silo's store, the runsc state tree, the per-launch dir,
 the control record, and both bridge pids — the complete residue list.
 
-### S4 — the silo launches again
+### S4 — the silo launches again (via the documented stop-then-start)
 
-A clean unwind must leave the silo reusable: same silo, second launch,
-new token, new window.
+`state=Active` is intent, so a bare `StartSilo` after an app-exit is a
+deliberate idempotent no-op (`session_manager.py` — "reports success
+without launching anything"; relaunch is stop-then-start). Verify that
+contract explicitly — the call succeeds but nothing launches — then take
+the documented path: `StopSilo`, then `StartSilo` for real.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-set -e
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
-SILO=t3scls
+SILO=t3scls; UNIT=$(unit_of "$SILO")
 TOK1=$(sed -n 's/^TOK=//p' /tmp/s59-tok)
+# Contract check: StartSilo while state=Active returns success yet must
+# NOT start the unit (idempotent no-op, not a hidden relaunch).
+sm StartSilo s "$SILO" >/dev/null \
+    || { echo "FAIL: StartSilo on Active silo errored"; exit 1; }
+sleep 5
+[ "$(unit_state "$UNIT")" = inactive ] \
+    || { echo "FAIL: bare StartSilo relaunched the unit — the no-op contract changed; update this scenario"; unit_log "$UNIT" "" | tail -10; exit 1; }
+obs_stopped() { silo_observed "$1" | grep -q '^stopped'; }
+obs_stopped "$SILO" \
+    || { echo "FAIL: observed status drifted: $(silo_observed "$SILO")"; exit 1; }
+# Documented relaunch: stop the stale intent, then start.
+sm StopSilo si "$SILO" 10 >/dev/null
+[ "$(silo_state "$SILO")" = Stopped ] || { echo "FAIL: not Stopped after StopSilo"; exit 1; }
 TOK2=$(up_gui_silo "$SILO")
 [ -n "$TOK2" ] || { echo "FAIL: relaunch did not come up"; exit 1; }
 [ "$TOK2" != "$TOK1" ] || { echo "FAIL: relaunch reused token $TOK1"; exit 1; }
 echo "TOK=$TOK2" > /tmp/s59-tok2
 t3s_window_handle "$SILO" > /tmp/s59-handle2
 echo "relaunch up: token=$TOK2 handle=$(cat /tmp/s59-handle2)"
+finish
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -173,7 +201,6 @@ shows the `[3s:t3scls]` window back on the desktop.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-set -e
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
 SILO=t3scls; UNIT=$(unit_of "$SILO")
 TOK=$(sed -n 's/^TOK=//p' /tmp/s59-tok2); H=$(cat /tmp/s59-handle2)
@@ -190,6 +217,7 @@ sm DeleteSilo s "$SILO" >/dev/null
 set_rules none
 assert_all_clear end
 echo "final teardown clean"
+finish
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -208,6 +236,7 @@ s=t3scls
 sm StopSilo si "$s" 10 >/dev/null 2>&1 || :
 sm DeleteSilo s "$s" >/dev/null 2>&1 || :
 set_rules none
+finish
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -216,13 +245,27 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ## Known caveats
 
 - **App-exit unwind is the subject.** The toplevel must be removed
-  because the sandboxed process died; if the product requires an
-  explicit `StopSilo` to reap it, that is a finding — report what stayed
-  up (unit, scope, bridge) rather than calling it a pass.
-- **`silo_state` after app-exit may be `Active` for a poll or two** —
-  the session manager learns of the exit via the unit's notification.
-  The bounded wait (`!= Active` within 30 s) is the contract; a silo
-  still `Active` a minute after its app died is a FAIL.
+  because the sandboxed process died; if the launch unit or any residue
+  survives the container's exit, that is a FAIL — report what stayed up
+  (unit, scope, bridge) rather than calling it a pass.
+- **`state` vs `observed_status` is the contract.** `state` is user
+  intent and stays `Active` after the app dies — deliberately
+  (`Silo.to_dict`, `observe_runtime_once`: observations are "ephemeral
+  evidence, never lifecycle authority"). The runtime truth is
+  `observed_status`, refreshed ~every 10 s; it must read `stopped` with
+  `launcher inactive and workload boundary observed absent`. Asserting
+  `state != Active` here would be wrong.
+- **Relaunch after app-exit needs `StopSilo` first** — `start()` from
+  `Active` is an idempotent no-op that returns success without launching
+  (see the `StartNotCancelled` comment in `session_manager.py`). The
+  scenario pins that no-op in S4 so a future semantic change (e.g.
+  reconcile-on-start) fails loudly instead of passing silently.
+- **Product finding surfaced by this scenario:** a user who closes a
+  tier3s window and relaunches via `StartSilo` alone gets a silent
+  no-op — no window, no error. Whether `StartSilo` should reconcile an
+  `Active`-intent/`stopped`-observed silo is a product question; this
+  test pins today's documented contract and the finding is tracked in
+  `todo/open-followups.md`.
 - **Silo accounts persist across launches** by design (the store and
   subuid rows are the silo's); `assert_all_clear` does not flag the
   account, only launch residue.
