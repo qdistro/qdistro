@@ -972,8 +972,10 @@ up_gui_silo() {
     snapshot_launch "$tok"; snapshot_bridge "$tok"
     # the compositor + qdshell see the tagged toplevel once the sandboxed app
     # maps through the bridge — wait for qdshell's own observation line so the
-    # caller can grep its handle/compositor evidence deterministically.
-    if ! wait_for 90 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat | grep -q '\\[tier3s\\] toplevel observed silo=$s '"; then
+    # caller can grep its handle/compositor evidence deterministically. Scope
+    # the wait to THIS start's cursor: a stale observation from a previous
+    # launch of the same silo must not satisfy it (astra gui r1).
+    if ! wait_for 90 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat --after-cursor='$cur' | grep -q '\\[tier3s\\] toplevel observed silo=$s '"; then
         echo "up_gui_silo: $s: no '[tier3s] toplevel observed silo=$s' in the qdshell journal" >&2
         echo ""; return 1
     fi

@@ -103,7 +103,10 @@ PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); pr
 BIND=$(ip -o -4 addr show | awk -v ip="$HOST_IP" '$4 ~ "^"ip"/" {print ip; exit}')
 (cd "$STAGE" && exec python3 -m http.server "$PORT" --bind "${BIND:-0.0.0.0}" >/dev/null 2>&1) &
 HTTP_PID=$!
-sleep 0.5; kill -0 "$HTTP_PID" || fail "staging http server did not start on port $PORT"
+# Readiness is an answered request, not a live pid (astra gui r1).
+ok=0
+for _ in $(seq 1 50); do curl -fsS -o /dev/null "http://127.0.0.1:$PORT/" && { ok=1; break; }; sleep 0.2; done
+[ "$ok" = 1 ] || fail "staging http server did not answer on port $PORT"
 U="http://$HOST_IP:$PORT"
 note "staging server $U for VM $VM"
 
@@ -130,7 +133,10 @@ EOF
 # to pretend a present non-dev file is dev.
 B64=$(base64 -w0 <<'EOF'
 if [ -f /etc/qdistro/profile ]; then
-    grep -qx 'QDISTRO_PROFILE=dev' /etc/qdistro/profile || exit 3
+    # match the launcher's semantics: the LAST QDISTRO_PROFILE= line wins
+    # (spawn-tier3s.sh reads it with sed ... | tail -1), so a dev line
+    # followed by a non-dev reassignment must still refuse.
+    [ "$(sed -n 's/^QDISTRO_PROFILE=//p' /etc/qdistro/profile | tail -1)" = dev ] || exit 3
 else
     printf 'QDISTRO_PROFILE=dev\n' > /etc/qdistro/profile; chmod 0644 /etc/qdistro/profile
 fi

@@ -89,7 +89,7 @@ journal_cursor > "$D/journal.cur"
 TOK=$(up_gui_silo "$SILO")
 [ -n "$TOK" ] || { echo "FAIL: launch did not come up"; exit 1; }
 echo "TOK=$TOK" > "$D/tok"
-t3s_window_handle "$SILO" > "$D/handle"
+t3s_window_handle "$SILO" "$(cat "$D/journal.cur")" > "$D/handle"
 echo "silo up: token=$TOK handle=$(cat "$D/handle") uid=$(silo_uid "$SILO")"
 finish
 EOF

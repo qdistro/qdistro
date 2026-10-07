@@ -77,7 +77,7 @@ journal_cursor > "$D/journal.cur"
 TOK=$(up_gui_silo "$SILO")
 [ -n "$TOK" ] || { echo "FAIL: launch did not come up"; exit 1; }
 echo "TOK=$TOK" > "$D/tok"
-t3s_window_handle "$SILO" > "$D/handle"
+t3s_window_handle "$SILO" "$(cat "$D/journal.cur")" > "$D/handle"
 snapshot_launch "$TOK"; snapshot_bridge "$TOK"
 echo "silo up: token=$TOK handle=$(cat "$D/handle")"
 finish
@@ -172,26 +172,37 @@ D=/tmp/t3s-59.d
 SILO=t3scls; UNIT=$(unit_of "$SILO")
 TOK1=$(sed -n 's/^TOK=//p' "$D/tok")
 # Contract check: StartSilo while state=Active returns success yet must
-# NOT start the unit (idempotent no-op, not a hidden relaunch). Poll a
-# bounded window for the unit leaving inactive — if it ever does, the
-# no-op contract changed and this scenario must be revisited.
+# NOT start the unit (idempotent no-op, not a hidden relaunch). A state
+# poll alone could miss a transient start+finish between samples, so the
+# durable check is journal evidence: zero launcher start jobs since the
+# call (units_started_since counts pid-1 "Starting" lines), alongside a
+# bounded poll for the unit leaving inactive.
+cur=$(journal_cursor)
 sm StartSilo s "$SILO" >/dev/null \
     || { echo "FAIL: StartSilo on Active silo errored"; exit 1; }
 unit_came_up() { [ "$(unit_state "$UNIT")" != inactive ]; }
 wait_for 10 unit_came_up \
-    && { echo "FAIL: bare StartSilo relaunched the unit — the no-op contract changed; update this scenario"; unit_log "$UNIT" "" | tail -10; exit 1; }
+    && { echo "FAIL: bare StartSilo relaunched the unit — the no-op contract changed; update this scenario"; unit_log "$UNIT" "$cur" | tail -10; exit 1; }
+[ "$(units_started_since "$cur" "qdistro-tier3s-silo@$SILO")" = 0 ] \
+    || { echo "FAIL: a launcher start job ran after bare StartSilo — the no-op contract changed; update this scenario"; unit_log "$UNIT" "$cur" | tail -10; exit 1; }
 obs_stopped() { silo_observed "$1" | grep -q '^stopped'; }
 obs_stopped "$SILO" \
     || { echo "FAIL: observed status drifted: $(silo_observed "$SILO")"; exit 1; }
-# Documented relaunch: stop the stale intent, then start.
+# Documented relaunch: stop the stale intent, then start. A fresh
+# cursor scopes the handle read so a stale qdshell observation from the
+# first launch can't satisfy the wait or be captured as the new handle.
 sm StopSilo si "$SILO" 10 >/dev/null
 [ "$(silo_state "$SILO")" = Stopped ] || { echo "FAIL: not Stopped after StopSilo"; exit 1; }
+cur2=$(journal_cursor)
 TOK2=$(up_gui_silo "$SILO")
 [ -n "$TOK2" ] || { echo "FAIL: relaunch did not come up"; exit 1; }
 [ "$TOK2" != "$TOK1" ] || { echo "FAIL: relaunch reused token $TOK1"; exit 1; }
 echo "TOK=$TOK2" > "$D/tok2"
-t3s_window_handle "$SILO" > "$D/handle2"
-echo "relaunch up: token=$TOK2 handle=$(cat "$D/handle2")"
+t3s_window_handle "$SILO" "$cur2" > "$D/handle2"
+H1=$(cat "$D/handle"); H2=$(cat "$D/handle2")
+[ -n "$H2" ] && [ "$H2" != "$H1" ] \
+    || { echo "FAIL: relaunch handle $H2 is empty or stale (was $H1)"; exit 1; }
+echo "relaunch up: token=$TOK2 handle=$H2"
 finish
 EOF
 )
