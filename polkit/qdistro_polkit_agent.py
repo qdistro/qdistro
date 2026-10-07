@@ -784,8 +784,10 @@ class QdistroPolkitAgent(dbus.service.Object):
 # is in" / "Passed session and the session the caller is in differs").
 # polkitd computes that session as sd_pid_get_session(caller pid) and, when
 # the caller is not inside a session scope -- always true here, the agent
-# runs in system.slice/qdistro-polkit-agent.service -- falls back to
-# sd_uid_get_display(uid): the user's display session.
+# runs in user-1000.slice/qdistro-polkit-agent.service -- falls back to
+# sd_pid_get_owner_uid -> sd_uid_get_display: the user's display session.
+# The owner-uid step resolves only under user-<uid>.slice, which is why the
+# unit pins Slice=user-1000.slice instead of the default system.slice.
 #
 # The system manager starts this unit at boot (WantedBy=multi-user.target),
 # so the agent routinely runs while the admin has no display session at

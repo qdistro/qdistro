@@ -45,7 +45,9 @@ PEER_EXE = "/usr/bin/test-app"
 AGENT_EXE = "/usr/bin/python3"
 AGENT_ARGV = ["/usr/bin/python3", "-I",
               "/usr/libexec/qdistro/qdistro_polkit_agent.py"]
-AGENT_CGROUP = "system.slice/qdistro-polkit-agent.service"
+# read_cgroup returns the raw 0::/… path — leading slash included.
+AGENT_CGROUP = ("/user.slice/user-1000.slice/"
+                "qdistro-polkit-agent.service")
 
 IDENT_ROOT = ("unix-user", {"uid": dbus.UInt32(0)})
 IDENT_ADMIN = ("unix-user", {"uid": dbus.UInt32(ADMIN_UID)})
@@ -696,7 +698,7 @@ class TestPolkitAgentPeerBinding:
         process whose argv matches the agent — so the cgroup must also
         match the agent unit's exact path (sol r162)."""
         broker._peer_cgroup_val = (
-            f"user.slice/user-{ADMIN_UID}.slice/"
+            f"/user.slice/user-{ADMIN_UID}.slice/"
             f"user@{ADMIN_UID}.service/"
             "session.slice/session-42.scope")
         with pytest.raises(dbus.DBusException):
@@ -706,24 +708,41 @@ class TestPolkitAgentPeerBinding:
             broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT])
         assert broker.polkit_responded == []
 
+    def test_the_expected_cgroup_matches_proc_format(self):
+        """read_cgroup returns the raw ``0::/…`` path — leading slash
+        included. A constant without it never matches a real peer:
+        the relay would deny every live call (found by the
+        polkit-agent-session bats gate, which was the first live
+        exercise of this check)."""
+        for path in B._POLKIT_AGENT_CGROUPS:
+            assert path.startswith("/"), (
+                "expected cgroup paths must keep /proc's leading slash")
+        own = B._pi.read_cgroup(os.getpid())
+        assert own.startswith("/"), "read_cgroup must not strip the /"
+
     def test_a_same_named_child_cgroup_is_not_the_unit(self, broker):
         """A delegated scope can contain a child cgroup literally named
         `qdistro-polkit-agent.service` — suffix matching would pass it
         while the real unit still runs (sol r163). Only the exact
         systemd-anchored path is the unit."""
-        base = (f"user.slice/user-{ADMIN_UID}.slice/"
+        base = (f"/user.slice/user-{ADMIN_UID}.slice/"
                 f"user@{ADMIN_UID}.service")
         for forged in (
                 f"{base}/app.slice/run-u7.scope/qdistro-polkit-agent.service",
                 f"{base}/evil.slice/qdistro-polkit-agent.service",
                 f"{base}/app.slice/nested/qdistro-polkit-agent.service",
-                # The pre-r169 USER-unit path is no longer the agent —
-                # the agent runs under root-owned system.slice now.
+                # The pre-r169 USER-unit path is no longer the agent.
                 f"{base}/app.slice/qdistro-polkit-agent.service",
                 f"{base}/session.slice/qdistro-polkit-agent.service",
-                # Same unit name under a system scope is not the unit.
-                "system.slice/run-ra9.scope/qdistro-polkit-agent.service",
-                "system.slice/qdistro-polkit-agent.service/extra"):
+                # The r173 Slice= placement is exact: neither the bare
+                # system.slice path nor a child/sibling of the real
+                # unit's cgroup passes.
+                "/system.slice/qdistro-polkit-agent.service",
+                "/system.slice/run-ra9.scope/qdistro-polkit-agent.service",
+                "/user.slice/user-1000.slice/"
+                "qdistro-polkit-agent.service/extra",
+                "/user.slice/user-1000.slice/run-r7.scope/"
+                "qdistro-polkit-agent.service"):
             broker._peer_cgroup_val = forged
             with pytest.raises(dbus.DBusException):
                 _file_polkit(broker)

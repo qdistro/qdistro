@@ -485,3 +485,24 @@ def test_polkit_agent_unit_is_a_system_service():
     assert not any(_SESSION_TARGET in v
                    for v in _values(unit, "Install", "WantedBy")
                    + _values(unit, "Unit", "PartOf"))
+
+
+def test_polkit_agent_unit_lands_in_the_admin_slice():
+    """The unit must pin ``Slice=user-1000.slice`` — polkitd's
+    caller-session resolution (``sd_pid_get_owner_uid`` →
+    ``sd_uid_get_display``) only works under ``user-<uid>.slice``; a
+    plain ``system.slice`` caller is refused with "Cannot determine
+    session the caller is in" (live-verified 2026-10-07). The unit
+    cgroup stays pid-1-owned there; only the ``user@`` subtree is
+    delegated to uid 1000."""
+    unit = _REPO / "polkit" / "qdistro-polkit-agent.service"
+    svc = _section(unit, "Service")
+    assert svc.get("Slice") == "user-1000.slice", (
+        "without Slice=user-1000.slice polkitd cannot determine the "
+        "caller's session and refuses RegisterAuthenticationAgent")
+    # Keep the slice ordering visible so a future edit cannot drop it
+    # silently — an early boot with no slice yet must still land the
+    # unit at the pinned path, not fail the start.
+    after = " ".join(_values(unit, "Unit", "After")).split()
+    assert "user-1000.slice" in after, (
+        "the unit must start after user-1000.slice exists")

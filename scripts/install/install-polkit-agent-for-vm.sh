@@ -14,8 +14,11 @@
 # same-uid process — including an empty drop-in UnsetEnvironment= that
 # resets the unit's injection denylist — so the agent's launch
 # environment would be attacker-controllable (sol r169). As a system
-# unit its unit file, drop-in dirs, environment and system.slice cgroup
-# are all root-owned. It still registers with polkitd scoped to the
+# unit its unit file, drop-in dirs, environment and cgroup are all
+# root-owned; the unit pins Slice=user-1000.slice because polkitd can
+# only resolve a caller session under user-<uid>.slice (the service's
+# own cgroup stays root-owned — only the user@ subtree is delegated).
+# It still registers with polkitd scoped to the
 # admin's login session, and reaches the session bus via an explicit
 # DBUS_SESSION_BUS_ADDRESS (linger keeps user@1000 up from early boot).
 set -euo pipefail

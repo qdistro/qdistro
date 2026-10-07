@@ -266,12 +266,22 @@ _POLKIT_AGENT_SCRIPT_PATHS = frozenset((
 # under a delegated scope passes a suffix check while the real unit
 # still runs (sol r163). The agent runs as a system service because a
 # USER unit's environment is same-uid writable: drop-ins can even reset
-# an UnsetEnvironment= denylist outright (sol r169). Under system.slice
-# the unit cgroup's cgroup.procs is root-owned, so a same-uid process
-# cannot migrate into it (sol r164) — and the PPID=1 pin below confirms
-# init itself spawned the peer.
+# an UnsetEnvironment= denylist outright (sol r169). It pins
+# Slice=user-1000.slice so polkitd's sd_pid_get_owner_uid →
+# sd_uid_get_display chain can resolve the admin's display session for
+# a caller not inside any session scope — a system.slice caller gets
+# ENODATA and RegisterAuthenticationAgent is refused outright. The unit
+# cgroup is still created by pid 1 and its cgroup.procs stays
+# root-owned (only user@1000.service's subtree is delegated), so a
+# same-uid process cannot migrate into it (sol r164) — and the PPID=1
+# pin below confirms init itself spawned the peer.
+# Note the leading slash: _pi.read_cgroup returns the raw
+# ``0::/…`` path from /proc — without it the constant never matched and
+# every real relay was refused (first exercised live by the
+# polkit-agent-session bats gate).
 _POLKIT_AGENT_UNIT = "qdistro-polkit-agent.service"
-_POLKIT_AGENT_CGROUPS = frozenset((f"system.slice/{_POLKIT_AGENT_UNIT}",))
+_POLKIT_AGENT_CGROUPS = frozenset((
+    f"/user.slice/user-{ADMIN_UID}.slice/{_POLKIT_AGENT_UNIT}",))
 
 # systemd's own bookkeeping names the unit's main process. PPID=1 and
 # the exact cgroup are corroborating signals, but neither is proof the
@@ -824,7 +834,7 @@ def _read_proc_ppid(pid: int) -> int | None:
 # The agent is a system service, so its main process is a direct child
 # of init. A foreign process migrated into the unit's cgroup keeps its
 # own (attacker) parent (sol r168); an orphan reparented to PID 1 still
-# fails the exact system.slice cgroup match above.
+# fails the exact unit cgroup match above.
 _POLKIT_AGENT_PPID = 1
 
 _libc = ctypes.CDLL(None, use_errno=True)
@@ -1924,7 +1934,7 @@ class Broker(dbus.service.Object):
         a readable environ naming no injection-capable variable (sol
         r165; the read must not truncate before a hidden variable, and
         an unreadable environ fails closed — sol r166); an exact match
-        on the agent unit's system.slice cgroup path — forged same-named
+        on the agent unit's user.slice cgroup path — forged same-named
         child cgroups under delegated scopes differ (sol r163) and the
         real cgroup's cgroup.procs is root-owned, so a same-uid process
         cannot migrate in (sol r164); PPID=1 — only init spawns a

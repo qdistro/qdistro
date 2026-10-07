@@ -301,9 +301,15 @@ process can push manager variables (`systemctl --user set-environment`
 loader code could run before `python3 -I` took effect and scrub its own
 `/proc/<pid>/environ` entries before the broker ever read them. As a
 system unit the unit file, drop-in dirs, manager environment and the
-`system.slice` cgroup's `cgroup.procs` are all root-owned: uid 1000 can
-neither inject into the agent's environment or argv nor migrate a
-foreign process into its cgroup.
+unit cgroup's `cgroup.procs` are all root-owned: uid 1000 can neither
+inject into the agent's environment or argv nor migrate a foreign
+process into its cgroup. The unit pins `Slice=user-1000.slice` so
+polkitd can resolve "the session the caller is in" — its
+`sd_pid_get_owner_uid` → `sd_uid_get_display` fallback only resolves
+under `user-<uid>.slice`, and a plain `system.slice` caller is refused
+with "Cannot determine session the caller is in". Only the
+`user@1000.service` subtree is delegated to the user, so the service's
+own cgroup remains root-owned.
 
 The remaining hardenings keep attacker code off the trusted
 connection:

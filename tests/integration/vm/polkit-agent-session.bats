@@ -10,7 +10,14 @@
 #
 # The agent is a SYSTEM service (User=admin) — its environment and cgroup
 # must be root-owned so a same-uid process cannot inject code into the
-# process the broker's relay trusts (sol r169). It starts at boot, before
+# process the broker's relay trusts (sol r169). Its unit pins
+# Slice=user-1000.slice: polkitd resolves a caller's session via
+# sd_pid_get_owner_uid → sd_uid_get_display, which only resolves under
+# user-<uid>.slice — a plain system.slice caller is refused with "Cannot
+# determine session the caller is in" (observed live in this gate). The
+# unit cgroup under user-1000.slice is created by pid 1 and stays
+# root-owned; only the user@ subtree is delegated.
+# It starts at boot, before
 # (or without) any login. polkitd only accepts a registration for the
 # caller's session, and with only logind's class=manager session there is
 # none. The agent must wait for a login instead of exiting, register once
@@ -62,6 +69,9 @@ _agent_restarts() {
     assert_eq_evidence "0" "$output" "agent NRestarts with no login session"
     vm_run "systemctl is-active qdistro-polkit-agent.service"
     assert_eq_evidence "active" "$(_guest_value)" "agent state with no login session"
+    vm_run "cat /proc/\$(systemctl show -p MainPID --value qdistro-polkit-agent.service)/cgroup"
+    assert_eq_evidence "0::/user.slice/user-1000.slice/qdistro-polkit-agent.service" \
+        "$(_guest_value)" "agent cgroup pinned under user-1000.slice"
     vm_run "journalctl -b --no-pager -o cat -t qdistro-polkit-agent"
     echo "$output" >&2
     assert_output_contains "no login session for uid 1000 yet; waiting"

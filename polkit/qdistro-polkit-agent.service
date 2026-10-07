@@ -7,22 +7,35 @@ Documentation=https://qdistro.invalid/spec/13
 # set-environment` + restart) or write drop-ins, and an empty drop-in
 # `UnsetEnvironment=` RESETS this unit's denylist outright
 # (systemd.exec(5)) — sol r169. As a system unit the unit file, its
-# drop-in dirs, the manager environment and the unit's cgroup under
-# system.slice are all root-owned; uid 1000 cannot inject into the
-# agent's environment or argv at all. The agent registers with polkitd
-# scoped to the admin's login session.
-After=user@1000.service qdistro-admin-broker.service
+# drop-in dirs, the manager environment and the unit's cgroup are all
+# root-owned; uid 1000 cannot inject into the agent's environment or
+# argv at all. The agent registers with polkitd scoped to the admin's
+# login session.
+#
+# The Slice= placement is load-bearing, not cosmetic: polkitd resolves
+# "the session the caller is in" via sd_pid_get_owner_uid →
+# sd_uid_get_display, and sd_pid_get_owner_uid only resolves for
+# processes under user-<uid>.slice — a plain system.slice caller gets
+# ENODATA and RegisterAuthenticationAgent is refused ("Cannot determine
+# session the caller is in", observed live). Inside user-1000.slice the
+# unit cgroup is still created by pid 1 and stays root-owned — only the
+# user@1000.service subtree is delegated to the user — so the broker's
+# exact-cgroup check loses nothing.
+After=user@1000.service user-1000.slice qdistro-admin-broker.service
 Wants=qdistro-admin-broker.service
 
 [Service]
 Type=simple
 User=admin
+Slice=user-1000.slice
 # -I isolates interpreter startup: PYTHONPATH/PYTHONHOME/
 # sitecustomize/usercustomize are ignored and the script dir is not
 # added to sys.path. The broker additionally verifies exe/argv, the
-# system.slice cgroup, PPID=1 and — decisively — that the peer pid IS
-# this unit's MainPID per systemd, which no descendant or foreign
-# process can satisfy (sol r161/r162/r164/r167/r169, astra r172).
+# exact unit cgroup, PPID=1 and — decisively — that the peer pid IS
+# this unit's MainPID per systemd plus that the D-Bus connection's
+# origin pidfd is that same live task, which no descendant, foreign
+# process or recycled-pid connection can satisfy
+# (sol r161/r162/r164/r167/r169, astra r172/r173).
 ExecStart=/usr/bin/python3 -I /usr/libexec/qdistro/qdistro_polkit_agent.py
 # The agent does not exit when the admin has no login session yet: it
 # waits for logind and registers then. on-failure is for real crashes
