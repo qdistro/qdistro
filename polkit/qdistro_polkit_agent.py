@@ -678,6 +678,17 @@ def _session_subject(session_id: str):
     return ("unix-session", {"session-id": dbus.String(session_id)})
 
 
+def _private_system_bus():
+    """A dedicated system-bus connection for the agent + its registration.
+
+    Not the shared ``dbus.SystemBus()``: the registration polkitd records
+    belongs to the unique name of the calling connection, and closing that
+    connection is the only reliable way to retract it -- polkitd refuses
+    UnregisterAuthenticationAgent once the caller's session has moved on.
+    """
+    return dbus.SystemBus(private=True)
+
+
 def _register(bus, agent_path: str) -> str | None:
     """Register for the current session; return its id, or None if none.
 
@@ -694,19 +705,19 @@ def _register(bus, agent_path: str) -> str | None:
     return sid
 
 
-def _unregister(bus, agent_path: str, session_id: str) -> None:
-    try:
-        _authority(bus).UnregisterAuthenticationAgent(
-            _session_subject(session_id), agent_path)
-    except dbus.DBusException as e:
-        # The session is usually already gone, and polkitd dropped the
-        # agent with it; nothing to undo.
-        syslog.syslog(syslog.LOG_INFO,
-                      f"unregister from session {session_id}: {e}")
-
-
 class SessionRegistrar:
     """Keep the agent registered for the user's current login session.
+
+    The agent object and its polkitd registration live on a private
+    system-bus connection this class owns and recreates per session. On a
+    session change polkitd refuses UnregisterAuthenticationAgent for the old
+    session -- the subject must equal the session it computes for the
+    caller, which by then is the new session or none -- so the old entry
+    could only be dropped by asking at exactly the right moment. Instead the
+    connection itself is closed: polkitd removes an agent's registration
+    when the unique name that registered it vanishes, so no stale
+    registration survives a session change (or accumulates across ordinary
+    sequential logins).
 
     ``reconcile()`` is idempotent: it looks up the session polkitd would
     attribute us to and (re-)registers only when that differs from the one
@@ -714,9 +725,20 @@ class SessionRegistrar:
     waiting for a login does not spam the journal.
     """
 
-    def __init__(self, bus, agent_path: str):
+    def __init__(self, bus, agent_path: str,
+                 make_connection=None, make_agent=None):
+        # `bus` is the shared system bus, used only for logind queries and
+        # signal watches so it never has to be torn down. The exported agent
+        # object goes on the private connection together with its
+        # registration -- polkitd calls BeginAuthentication back on the
+        # registering unique name, so both must be the same connection.
         self.bus = bus
         self.agent_path = agent_path
+        self._make_connection = make_connection or _private_system_bus
+        self._make_agent = make_agent or (
+            lambda conn: QdistroPolkitAgent(conn, agent_path))
+        self._conn = None
+        self._agent = None
         self.session_id: str | None = None
         self._last_state: object = object()
 
@@ -725,6 +747,18 @@ class SessionRegistrar:
             self._last_state = state
             syslog.syslog(priority, message)
 
+    def _drop_connection(self) -> None:
+        conn = self._conn
+        self._conn = None
+        self._agent = None
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except Exception as e:  # noqa: BLE001
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"closing the retired agent connection failed: {e}")
+
     def reconcile(self) -> bool:
         try:
             want = _session_id(self.bus)
@@ -732,21 +766,41 @@ class SessionRegistrar:
             self._note(("lookup-error", str(e)), syslog.LOG_WARNING,
                        f"cannot query logind for the login session: {e}")
             return True
+        if self._conn is not None and not self._conn.get_is_connected():
+            # The transport is gone; polkitd's name-owner cleanup already
+            # removed whatever registration this connection held.
+            self._conn = None
+            self._agent = None
+            self.session_id = None
         if want is not None and want == self.session_id:
             return True
-        if self.session_id is not None:
-            _unregister(self.bus, self.agent_path, self.session_id)
-            syslog.syslog(syslog.LOG_NOTICE,
-                          f"login session {self.session_id} ended or is no "
-                          "longer the display session; unregistered")
+        if self.session_id is not None or (
+                want is None and self._conn is not None):
+            old = self.session_id
             self.session_id = None
+            self._drop_connection()
+            if old is not None:
+                syslog.syslog(syslog.LOG_NOTICE,
+                              f"login session {old} ended or is no longer "
+                              "the display session; unregistered")
         if want is None:
             self._note("no-session", syslog.LOG_NOTICE,
                        f"no login session for uid {os.getuid()} yet; "
                        "waiting for one before registering with polkitd")
             return True
+        if self._conn is None:
+            try:
+                self._conn = self._make_connection()
+                self._agent = self._make_agent(self._conn)
+            except Exception as e:  # noqa: BLE001
+                self._conn = None
+                self._agent = None
+                self._note(("connect-error", str(e)), syslog.LOG_ERR,
+                           "cannot open a private system-bus connection: "
+                           f"{e}; will retry when logind sessions change")
+                return True
         try:
-            self.session_id = _register(self.bus, self.agent_path)
+            self.session_id = _register(self._conn, self.agent_path)
         except dbus.DBusException as e:
             self._note(("register-error", want, str(e)), syslog.LOG_ERR,
                        f"registration for session {want} failed: {e}; "
@@ -760,6 +814,15 @@ class SessionRegistrar:
         self.reconcile()
         for delay in _SIGNAL_FOLLOWUP_MS:
             GLib.timeout_add(delay, self._once)
+
+    def _on_polkit_owner(self, name, old_owner, new_owner) -> None:
+        if str(name) != POLKIT_BUS or not str(new_owner):
+            return
+        # polkitd (re)started; agent registrations do not survive that, so
+        # the cached session is stale. The connection itself is still fine --
+        # forget the registration and let reconcile() re-register on it.
+        self.session_id = None
+        self.reconcile()
 
     def _once(self) -> bool:
         self.reconcile()
@@ -776,6 +839,13 @@ class SessionRegistrar:
                 syslog.syslog(syslog.LOG_WARNING,
                               f"cannot watch logind {signal}: {e}; "
                               f"polling every {RECONCILE_POLL_S}s only")
+        try:
+            self.bus.add_signal_receiver(
+                self._on_polkit_owner, signal_name="NameOwnerChanged",
+                dbus_interface="org.freedesktop.DBus")
+        except Exception as e:  # noqa: BLE001
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"cannot watch for a polkitd restart: {e}")
         GLib.timeout_add_seconds(RECONCILE_POLL_S, self.reconcile)
         self.reconcile()
 
@@ -815,8 +885,11 @@ def main() -> int:
     # Registration succeeded, the unit looked healthy, and no authorization
     # ever reached the agent — observed live: polkitd logged "FAILED to
     # authenticate", the agent's journal showed nothing at all.
+    #
+    # The registrar keeps object and registration on one PRIVATE system-bus
+    # connection it owns and replaces on session change — closing the
+    # connection is also the unregistration mechanism (see SessionRegistrar).
     sysbus = dbus.SystemBus()
-    agent = QdistroPolkitAgent(sysbus, AGENT_OBJ)  # noqa: F841
     # Register now if the admin is logged in, otherwise wait for a login
     # without exiting (see SessionRegistrar): exiting made the user manager
     # respawn the agent every RestartSec for as long as no session existed.

@@ -32,7 +32,20 @@ import qdistro_polkit_agent as agent_mod  # noqa: E402
 
 
 class _Logind:
-    """Fake system bus: logind sessions/users plus polkitd's Authority."""
+    """Fake system bus: logind sessions/users plus polkitd's Authority.
+
+    polkitd bookkeeping is modelled faithfully so the tests catch the defect
+    astra r149 found: a registration belongs to the CONNECTION that made it
+    and survives until that connection closes (polkitd removes it in its
+    name-owner cleanup); a second live registration for the same session is
+    refused; and both Register and Unregister refuse a subject session that
+    differs from the one polkitd computes for the caller -- so an
+    Unregister for an already-superseded session never lands.
+
+    The world object itself is the shared connection used for logind queries
+    and signal watches; `new_connection()` mints the private connections a
+    SessionRegistrar asks for.
+    """
 
     def __init__(self):
         # session path -> (id, class)
@@ -40,23 +53,67 @@ class _Logind:
         self.pid_session: str | None = None
         self.display: tuple[str, str] = ("", "/")
         self.has_user = True
-        self.registered: list[str] = []
-        self.unregistered: list[str] = []
+        self.registered: list[str] = []       # accepted Register calls, in order
+        self.unregistered: list[str] = []     # accepted Unregister calls
+        self.registrations: dict = {}         # _Conn -> session id polkitd holds
+        self.conns: list = []
         self.register_error: Exception | None = None
         self.signals: list[str] = []
 
+    # -- shared-connection surface (logind queries, signal watches) --
     # dbus.Interface(obj, iface) wraps whatever get_object returns; return
     # objects that already expose every method we call.
     def get_object(self, bus_name, path):
-        return _Obj(self, bus_name, path)
+        return _Obj(self, self, bus_name, path)
 
     def add_signal_receiver(self, handler, signal_name=None, **kw):
         self.signals.append(signal_name)
 
+    def get_is_connected(self):
+        return True
+
+    def close(self):
+        raise AssertionError("the shared connection must never be closed")
+
+    # -- private connections and polkitd's name-owner cleanup --
+    def new_connection(self):
+        return _Conn(self)
+
+    def drop_connection(self, conn):
+        self.registrations.pop(conn, None)
+
+    def caller_session(self):
+        """The session polkitd computes for a call: the same lookup the
+        agent performs for itself (own login session else display)."""
+        return agent_mod._session_id(self)
+
+
+class _Conn:
+    """One private connection to the fake system bus."""
+
+    def __init__(self, world):
+        self.world = world
+        self.closed = False
+        world.conns.append(self)
+
+    def get_object(self, bus_name, path):
+        return _Obj(self.world, self, bus_name, path)
+
+    def add_signal_receiver(self, handler, signal_name=None, **kw):
+        self.world.signals.append(signal_name)
+
+    def get_is_connected(self):
+        return not self.closed
+
+    def close(self):
+        self.closed = True
+        self.world.drop_connection(self)
+
 
 class _Obj:
-    def __init__(self, fake, bus_name, path):
-        self.fake, self.bus_name, self.path = fake, bus_name, path
+    def __init__(self, fake, conn, bus_name, path):
+        self.fake, self.conn, self.bus_name, self.path = \
+            fake, conn, bus_name, path
 
     # org.freedesktop.login1.Manager
     def GetSessionByPID(self, pid):
@@ -79,14 +136,42 @@ class _Obj:
         sid, cls = self.fake.sessions[self.path]
         return {"Id": sid, "Class": cls}[prop]
 
-    # org.freedesktop.PolicyKit1.Authority
+    # org.freedesktop.PolicyKit1.Authority — same checks polkitd 127 makes:
+    # the subject session must equal the session computed for the caller's
+    # connection, and one session cannot hold two live registrations.
     def RegisterAuthenticationAgent(self, subject, locale, path):
-        if self.fake.register_error is not None:
-            raise self.fake.register_error
-        self.fake.registered.append(str(subject[1]["session-id"]))
+        fake = self.fake
+        if fake.register_error is not None:
+            raise fake.register_error
+        sid = str(subject[1]["session-id"])
+        caller = fake.caller_session()
+        if caller is None:
+            raise dbus.DBusException(
+                "Cannot determine session the caller is in",
+                name="org.freedesktop.PolicyKit1.Error.Failed")
+        if sid != caller:
+            raise dbus.DBusException(
+                "Passed session and the session the caller is in differs",
+                name="org.freedesktop.PolicyKit1.Error.Failed")
+        for conn, held in fake.registrations.items():
+            if conn is not self.conn and held == sid:
+                raise dbus.DBusException(
+                    f"An authentication agent is already registered for "
+                    f"session {sid}",
+                    name="org.freedesktop.PolicyKit1.Error.Failed")
+        fake.registrations[self.conn] = sid
+        fake.registered.append(sid)
 
     def UnregisterAuthenticationAgent(self, subject, path):
-        self.fake.unregistered.append(str(subject[1]["session-id"]))
+        fake = self.fake
+        sid = str(subject[1]["session-id"])
+        caller = fake.caller_session()
+        if caller is None or sid != caller:
+            raise dbus.DBusException(
+                "Passed session and the session the caller is in differs",
+                name="org.freedesktop.PolicyKit1.Error.Failed")
+        if fake.registrations.pop(self.conn, None) is not None:
+            fake.unregistered.append(sid)
 
 
 @pytest.fixture
@@ -102,6 +187,20 @@ def _login(fake, sid="3", cls="user"):
     fake.sessions[path] = (sid, cls)
     fake.display = (sid, path)
     return path
+
+
+def _registrar(fake):
+    """A SessionRegistrar wired to the fake: shared world for signals and
+    logind, per-registration private connections for the authority."""
+    return agent_mod.SessionRegistrar(
+        fake, agent_mod.AGENT_OBJ,
+        make_connection=fake.new_connection,
+        make_agent=lambda conn: mock.MagicMock())
+
+
+def _held(fake):
+    """Session ids polkitd currently holds registrations for."""
+    return sorted(fake.registrations.values())
 
 
 class TestSessionLookup:
@@ -150,7 +249,7 @@ class TestSessionLookup:
 class TestRegistrar:
 
     def test_no_session_waits_instead_of_failing(self, fake):
-        reg = agent_mod.SessionRegistrar(fake, agent_mod.AGENT_OBJ)
+        reg = _registrar(fake)
         assert reg.reconcile() is True  # GLib source stays installed
         assert fake.registered == []
         assert reg.session_id is None
@@ -160,7 +259,9 @@ class TestRegistrar:
         session = mock.MagicMock()
         monkeypatch.setattr(agent_mod, "_require_admin_account", lambda: None)
         monkeypatch.setattr(agent_mod.dbus, "SessionBus", lambda: session)
-        monkeypatch.setattr(agent_mod.dbus, "SystemBus", lambda: fake)
+        monkeypatch.setattr(
+            agent_mod.dbus, "SystemBus",
+            lambda private=False: fake.new_connection() if private else fake)
         monkeypatch.setattr(agent_mod.dbus.mainloop.glib, "DBusGMainLoop",
                             lambda **kw: None)
         monkeypatch.setattr(agent_mod, "QdistroPolkitAgent",
@@ -172,44 +273,113 @@ class TestRegistrar:
         assert agent_mod.main() == 0
         loop.run.assert_called_once()
         assert fake.registered == []
-        assert {"SessionNew", "SessionRemoved"} <= set(fake.signals)
+        assert {"SessionNew", "SessionRemoved", "NameOwnerChanged"} \
+            <= set(fake.signals)
 
     def test_login_later_registers_for_that_session(self, fake, monkeypatch):
         monkeypatch.setattr(agent_mod.GLib, "timeout_add", lambda *a: 1)
-        reg = agent_mod.SessionRegistrar(fake, agent_mod.AGENT_OBJ)
+        reg = _registrar(fake)
         reg.reconcile()
         _login(fake, "6")
         reg._on_logind_signal("6", "/org/freedesktop/login1/session/_36")
         assert fake.registered == ["6"]
+        assert _held(fake) == ["6"]
         assert reg.session_id == "6"
         reg.reconcile()  # idempotent
         assert fake.registered == ["6"]
 
     def test_relogin_moves_the_registration(self, fake):
         _login(fake, "6")
-        reg = agent_mod.SessionRegistrar(fake, agent_mod.AGENT_OBJ)
+        reg = _registrar(fake)
+        reg.reconcile()
+        conn6 = reg._conn
+        _login(fake, "8")
+        reg.reconcile()
+        # The stale registration for 6 is gone with its connection — polkitd
+        # refuses UnregisterAuthenticationAgent once the caller's session has
+        # moved on, so dropping the connection is the removal mechanism.
+        assert conn6.closed
+        assert fake.registered == ["6", "8"]
+        assert _held(fake) == ["8"]
+        assert reg.session_id == "8"
+        assert reg._conn is not conn6
+
+    def test_return_to_same_session_reregisters(self, fake):
+        """A -> B -> A: the first A registration was dropped with its
+        connection, so registering for A again is accepted. With the old
+        shared-connection code polkitd kept the stale A entry (the Unregister
+        it refused) and refused the second registration as a duplicate."""
+        _login(fake, "6")
+        reg = _registrar(fake)
         reg.reconcile()
         _login(fake, "8")
         reg.reconcile()
-        assert fake.unregistered == ["6"]
-        assert fake.registered == ["6", "8"]
-        assert reg.session_id == "8"
+        _login(fake, "6")  # B ended; A is the display session again
+        reg.reconcile()
+        assert fake.registered == ["6", "8", "6"]
+        assert _held(fake) == ["6"]
+        assert reg.session_id == "6"
+
+    def test_unregister_of_a_superseded_session_is_refused(self, fake):
+        """Pins the polkitd rule that makes connection-drop necessary: once
+        the caller's session has moved on, UnregisterAuthenticationAgent for
+        the old session is rejected — the stale entry can only leave with
+        the connection that owns it."""
+        conn = fake.new_connection()
+        _login(fake, "6")
+        agent_mod._authority(conn).RegisterAuthenticationAgent(
+            agent_mod._session_subject("6"), "en_US.UTF-8",
+            agent_mod.AGENT_OBJ)
+        _login(fake, "8")
+        with pytest.raises(dbus.DBusException):
+            agent_mod._authority(conn).UnregisterAuthenticationAgent(
+                agent_mod._session_subject("6"), agent_mod.AGENT_OBJ)
+        assert _held(fake) == ["6"]
+        conn.close()  # the name-owner cleanup is what actually removes it
+        assert _held(fake) == []
 
     def test_logout_unregisters_and_waits(self, fake):
         _login(fake, "6")
-        reg = agent_mod.SessionRegistrar(fake, agent_mod.AGENT_OBJ)
+        reg = _registrar(fake)
         reg.reconcile()
+        conn6 = reg._conn
         fake.display = ("", "/")
         reg.reconcile()
-        assert fake.unregistered == ["6"]
+        assert conn6.closed
+        assert _held(fake) == []
         assert reg.session_id is None
+
+    def test_dead_connection_forgets_the_registration(self, fake):
+        """If the private transport dies (bus restart), polkitd already
+        dropped the registration; the next reconcile re-registers instead of
+        trusting the cached session."""
+        _login(fake, "6")
+        reg = _registrar(fake)
+        reg.reconcile()
+        reg._conn.close()
+        reg.reconcile()
+        assert fake.registered == ["6", "6"]
+        assert _held(fake) == ["6"]
+
+    def test_polkitd_restart_reregisters_on_the_same_connection(self, fake):
+        """polkitd keeps no state across a restart; the connection is still
+        fine, so only the cached registration is dropped."""
+        _login(fake, "6")
+        reg = _registrar(fake)
+        reg.reconcile()
+        fake.registrations.clear()  # what the restart did to polkitd
+        conn = reg._conn
+        reg._on_polkit_owner(agent_mod.POLKIT_BUS, ":1.9", ":1.20")
+        assert reg.session_id == "6"
+        assert fake.registered == ["6", "6"]
+        assert reg._conn is conn
 
     def test_polkit_refusal_is_retried_not_fatal(self, fake):
         _login(fake, "6")
         fake.register_error = dbus.DBusException(
             "Cannot determine session the caller is in",
             name="org.freedesktop.PolicyKit1.Error.Failed")
-        reg = agent_mod.SessionRegistrar(fake, agent_mod.AGENT_OBJ)
+        reg = _registrar(fake)
         assert reg.reconcile() is True
         assert reg.session_id is None
         fake.register_error = None
@@ -217,7 +387,7 @@ class TestRegistrar:
         assert fake.registered == ["6"]
 
     def test_waiting_logs_once(self, fake):
-        reg = agent_mod.SessionRegistrar(fake, agent_mod.AGENT_OBJ)
+        reg = _registrar(fake)
         for _ in range(5):
             reg.reconcile()
         assert agent_mod.syslog.syslog.call_count == 1

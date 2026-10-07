@@ -21,7 +21,7 @@ setup_file() {
 }
 
 teardown_file() {
-    vm_run "systemctl stop qci-polkit-login.service qci-polkit-subject.service 2>/dev/null; \
+    vm_run "systemctl stop qci-polkit-login.service qci-polkit-login2.service qci-polkit-subject.service 2>/dev/null; \
             rm -f /usr/share/polkit-1/actions/org.qdistro.test.agentsession.policy; true"
 }
 
@@ -130,6 +130,74 @@ POL"
     assert_output_contains "polkit BeginAuth: action=org.qdistro.test.agentsession method=broker"
     check_pass "the session's agent handled the authorization and the broker's denial ended it" \
         "BeginAuth logged; pkcheck PKCHECK_RC=1"
+
+    step "a second login becomes the display session and the agent moves to it"
+    sid_a="$sid"
+    vm_run "systemd-run --unit=qci-polkit-login2 -p PAMName=login -p User=admin \
+            -p TTYPath=/dev/tty7 -p StandardInput=tty -p StandardOutput=journal \
+            /usr/bin/sleep 900"
+    assert_success
+    vm_run "loginctl list-sessions --no-legend | awk '\$NF ~ /tty7/ {print \$1}'"
+    sid_b="$(head -1 <<<"$output" | tr -d ' ')"
+    [[ -n "$sid_b" && "$sid_b" != "$sid_a" ]] \
+        || fail_loud "no second admin session on tty7 (got '$sid_b')"
+    vm_run "loginctl activate '$sid_b'"
+    wait_until_succeeds "loginctl show-user admin -p Display --value | grep -qx '$sid_b'" 30 \
+        || { vm_run "loginctl show-user admin -p Display --value; loginctl show-session '$sid_b' -p Class -p Type -p Active -p State"; \
+             echo "$output" >&2; \
+             fail_loud "display session did not move to $sid_b"; }
+    # The agent cannot UnregisterAuthenticationAgent for $sid_a any more —
+    # polkitd accepts that call only for the caller's CURRENT session — so
+    # the old registration is retracted by closing its private bus
+    # connection and the session-B registration comes from a fresh one.
+    wait_until_succeeds "journalctl -b --no-pager -o cat -t qdistro-polkit-agent | grep -F 'registered as session polkit agent (path=/org/qdistro/PolkitAgent, session=$sid_b)'" 45 \
+        || { vm_run "journalctl -b --no-pager -o cat -t qdistro-polkit-agent | tail -20"; echo "$output" >&2; \
+             fail_loud "agent did not register for the new display session $sid_b"; }
+    wait_until_succeeds "journalctl -b --no-pager -o cat -t qdistro-polkit-agent | grep -F 'login session $sid_a ended'" 30 \
+        || fail_loud "agent did not drop the registration for $sid_a"
+    _agent_restarts
+    assert_eq_evidence "0" "$output" "agent NRestarts after moving to $sid_b"
+    check_pass "agent moved its registration to the new display session" \
+        "registered session=$sid_b; session=$sid_a dropped"
+
+    step "the second login ends; the agent must re-register the first session — the stale registration must not block it"
+    # With a lingered stale entry polkitd refuses the second registration
+    # for $sid_a as a duplicate; that is the astra r149 defect this case
+    # reproduces.
+    vm_run "systemctl stop qci-polkit-login2.service"
+    vm_run "loginctl activate '$sid_a'"
+    wait_until_succeeds "loginctl show-user admin -p Display --value | grep -qx '$sid_a'" 30 \
+        || { vm_run "loginctl show-user admin -p Display --value"; echo "$output" >&2; \
+             fail_loud "display session did not return to $sid_a"; }
+    wait_until_succeeds "journalctl -b --no-pager -o cat -t qdistro-polkit-agent | grep -cF 'session=$sid_a)' | awk '\$1 >= 2 {f=1} END{exit !f}'" 45 \
+        || { vm_run "journalctl -b --no-pager -o cat -t qdistro-polkit-agent | tail -20"; echo "$output" >&2; \
+             fail_loud "agent never re-registered session $sid_a (stale registration left behind?)"; }
+    vm_run "journalctl -b --no-pager -o cat -t qdistro-polkit-agent | grep -F 'registration for session'"
+    if grep -q 'already registered' <<<"$output"; then
+        check_fail "re-registration of $sid_a accepted" \
+            "already registered" "polkitd kept the stale $sid_a registration and refused the new one"
+        return 1
+    fi
+    check_pass "re-registration for the returning session succeeded" \
+        "second 'session=$sid_a' registration logged"
+
+    step "the re-registered agent still serves authorizations for that session"
+    vm_run "systemd-run --unit=qci-polkit-subject -p StandardOutput=file:/run/qci-pkcheck.out \
+            -p StandardError=file:/run/qci-pkcheck.out /bin/sh -c \
+            'pkcheck --action-id org.qdistro.test.agentsession --process $subject_pid --allow-user-interaction; echo PKCHECK_RC=\$?'"
+    assert_success
+    wait_until_succeeds "runuser -u admin -- python3 -c 'import dbus; b=dbus.SystemBus(); o=b.get_object(\"org.qdistro.AdminBroker1\",\"/org/qdistro/AdminBroker1\"); [print(int(r[\"id\"]), r[\"action\"]) for r in o.GetPending(dbus_interface=\"org.qdistro.AdminBroker1\")]' | grep agentsession" 40 \
+        || { vm_run "cat /run/qci-pkcheck.out; journalctl -b --no-pager -o cat -t qdistro-polkit-agent -u polkit | tail -20"; echo "$output" >&2; \
+             fail_loud "no broker request for the re-registered session"; }
+    rid="$(awk '/agentsession/{print $1; exit}' <<<"$output")"
+    vm_run "runuser -u admin -- python3 -c 'import dbus; b=dbus.SystemBus(); o=b.get_object(\"org.qdistro.AdminBroker1\",\"/org/qdistro/AdminBroker1\"); o.DecideRequest($rid, \"deny\", \"once\", dbus_interface=\"org.qdistro.AdminBroker1\")'"
+    assert_success
+    wait_until_succeeds "grep -q PKCHECK_RC= /run/qci-pkcheck.out" 30 \
+        || fail_loud "pkcheck did not complete after the broker decision"
+    vm_run "cat /run/qci-pkcheck.out"
+    assert_output_contains "PKCHECK_RC=1"
+    check_pass "re-registered session still routes to the agent" \
+        "BeginAuth round trip after A->B->A; PKCHECK_RC=1"
 
     step "logout: the agent unregisters, keeps running, does not restart"
     vm_run "systemctl stop qci-polkit-login.service"

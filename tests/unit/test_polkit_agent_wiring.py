@@ -47,10 +47,21 @@ class _FakeBus:
     def __init__(self, label: str):
         self.label = label
         self.requested_names: list[str] = []
+        self.signals: list[str] = []
+        self.closed = False
 
     def request_name(self, name, flags):
         self.requested_names.append(name)
         return 1
+
+    def add_signal_receiver(self, handler, signal_name=None, **kw):
+        self.signals.append(signal_name)
+
+    def get_is_connected(self):
+        return not self.closed
+
+    def close(self):
+        self.closed = True
 
     def __repr__(self):
         return f"<_FakeBus {self.label}>"
@@ -63,11 +74,14 @@ class TestMainBusWiring:
         """Run main() far enough to see which bus gets what, then stop."""
         session = _FakeBus("session")
         system = _FakeBus("system")
+        priv = _FakeBus("system-private")
         seen: dict = {}
 
         monkeypatch.setattr(agent_mod, "_require_admin_account", lambda: None)
         monkeypatch.setattr(agent_mod.dbus, "SessionBus", lambda: session)
-        monkeypatch.setattr(agent_mod.dbus, "SystemBus", lambda: system)
+        monkeypatch.setattr(
+            agent_mod.dbus, "SystemBus",
+            lambda private=False: priv if private else system)
         monkeypatch.setattr(
             agent_mod.dbus.mainloop.glib, "DBusGMainLoop",
             lambda **kw: None)
@@ -94,6 +108,7 @@ class TestMainBusWiring:
         seen["rc"] = rc
         seen["session"] = session
         seen["system"] = system
+        seen["private"] = priv
         return seen
 
     def test_object_and_registration_share_one_connection(self, wired):
@@ -106,10 +121,12 @@ class TestMainBusWiring:
             "BeginAuthentication on the registering connection, where no "
             "object exists, and every authorization will silently fail")
 
-    def test_that_connection_is_the_system_bus(self, wired):
-        """polkitd is a system-bus service; a session-bus connection cannot
-        register with it at all."""
-        assert wired["register_bus"] is wired["system"]
+    def test_that_connection_is_a_private_system_bus(self, wired):
+        """polkitd is a system-bus service, and the registration connection
+        must be the dedicated private one so a session change can retract it
+        by closing — the shared connection cannot be closed."""
+        assert wired["register_bus"] is wired["private"]
+        assert wired["register_bus"] is not wired["system"]
 
     def test_object_and_registration_use_one_path(self, wired):
         assert wired["object_path"] == wired["register_path"] == \
@@ -119,7 +136,8 @@ class TestMainBusWiring:
         """The session-bus name is what stops two agents racing inside one
         login. Moving the object to the system bus must not drop it."""
         assert wired["session"].requested_names == [agent_mod.AGENT_BUS]
-        assert wired["system"].requested_names == [], (
+        assert wired["system"].requested_names == []
+        assert wired["private"].requested_names == [], (
             "the agent must not claim its well-known name on the SYSTEM bus "
             "— that is a machine-wide name and the system-bus policy does "
             "not grant it")
