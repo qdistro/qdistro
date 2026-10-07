@@ -16,7 +16,10 @@ python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$profile" \
 command -v mformat mcopy >/dev/null || { echo "needs mtools" >&2; exit 1; }
 
 umask 077
+rm -f "$out"                       # start fresh — the profile embeds credentials
+install -m 600 /dev/null "$out"
 truncate -s 16M "$out"
+chmod 600 "$out"                   # enforce even if install's mode was bypassed
 mformat -i "$out" -v OEMDRV -F ::
 mcopy -i "$out" "$profile" ::autoinst.json
 mdir -i "$out" ::

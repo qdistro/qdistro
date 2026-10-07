@@ -26,9 +26,13 @@ mkdir -p "$QDISTRO_BUILD_TMP"
 STOCK_ISO=${AGAMA_STOCK_ISO:-}
 if [ -z "$STOCK_ISO" ]; then
     STOCK_ISO=$QDISTRO_BUILD_TMP/agama-installer-stock.iso
-    if [ ! -f "$STOCK_ISO" ]; then
+    # The cache is keyed to its source URL — a changed AGAMA_STOCK_ISO_URL
+    # must not silently reuse an ISO downloaded from somewhere else.
+    if [ ! -f "$STOCK_ISO" ] || \
+       [ "$(cat "$STOCK_ISO.url" 2>/dev/null)" != "$AGAMA_STOCK_ISO_URL" ]; then
         echo "==> downloading $AGAMA_STOCK_ISO_URL"
         curl -fL --retry 3 -o "$STOCK_ISO" "$AGAMA_STOCK_ISO_URL"
+        echo "$AGAMA_STOCK_ISO_URL" > "$STOCK_ISO.url"
     fi
 fi
 [ -f "$STOCK_ISO" ] || { echo "stock ISO not found: $STOCK_ISO" >&2; exit 1; }
