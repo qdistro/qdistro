@@ -29,6 +29,11 @@ KEYFILE="$HOME/.ssh/qdistro_enforcing_id_ed25519"
 [ -f "$KEYFILE" ] || { echo "ERROR: $KEYFILE missing" >&2; exit 2; }
 [ -e "$L/INDEX.md" ] && { echo "refusing: $L already has a run"; exit 2; }
 mkdir -p "$L"
+# keep a verbatim driver transcript in the evidence dir — the health-gate
+# recovery lines and the VM-removal confirmation are otherwise only in the
+# systemd journal and cannot be verified from the committed result set
+exec > >(tee -a "$L/driver.log") 2>&1
+TEE_PID=$!
 
 dirty=$(git -C "$repo" status --porcelain -- tier3s session_manager broker templates scripts/install tests/integration/vm/tier3s-guest-lib.sh tests/integration/vm/tier3s-guest-setup.sh)
 [ -z "$dirty" ] || { echo "ERROR: uncommitted changes under installed trees; the worker installs git archive HEAD: $dirty" >&2; exit 2; }
@@ -44,7 +49,7 @@ ssh_vm() {
 STAGE=$(mktemp -d /tmp/t3s-bench-stage.XXXXXX)
 # cleanup must cover early staging failures too — trap before any exit path
 HTTP_PID=
-trap '[ -n "$HTTP_PID" ] && kill $HTTP_PID 2>/dev/null; rm -rf "$STAGE"' EXIT
+trap '[ -n "$HTTP_PID" ] && kill $HTTP_PID 2>/dev/null; rm -rf "$STAGE"; exec >&- 2>&-; wait "$TEE_PID" 2>/dev/null' EXIT
 git -C "$repo" archive --format=tar HEAD > "$STAGE/src.tar"
 git -C "$repo" rev-parse HEAD > "$STAGE/commit.txt"
 cp "$VM_DIR/tier3s-guest-lib.sh" "$VM_DIR/tier3s-guest-setup.sh" "$STAGE/"
