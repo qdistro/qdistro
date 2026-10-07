@@ -306,11 +306,15 @@ peers whose `/proc/<pid>/environ` (read untruncated, fail-closed)
 names an injection-capable variable (`PYTHON*`, `LD_PRELOAD`,
 `LD_AUDIT`, …, and `QDISTRO_POLKIT_NONINTERACTIVE`, which a same-uid
 drop-in could otherwise re-arm past the unit's `UnsetEnvironment=`).
+The peer's `/proc/<pid>/exe` must also resolve to a python under a
+root-owned system directory — an attacker binary merely *named*
+`python3` would satisfy a basename check while ignoring argv.
 Residual: a same-uid drop-in can still rewrite the unit entirely —
-but every non-`python3 -I <installed script>` ExecStart fails the
-peer check, so the fake agent cannot reach the relay; the worst
-outcome is a denial of service, not a forged approval. ptrace
-injection into the live agent is outside this boundary's reach.
+but every ExecStart that is not a system `python3 -I <installed
+script>` with a clean environ fails the peer check, so the fake agent
+cannot reach the relay; the worst outcome is a denial of service, not
+a forged approval. ptrace injection into the live agent is outside
+this boundary's reach.
 
 History: before this responder existed the agent was verified end-to-end
 on a real seat session (registration, dispatch, broker delegation, fail-

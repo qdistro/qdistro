@@ -284,6 +284,13 @@ _POLKIT_AGENT_SAFE_FLAGS = frozenset((
     "-I", "-E", "-s", "-S", "-P", "-u", "-B", "-O", "-OO", "-q",
 ))
 
+# Directories the interpreter exe must live in — root-owned on the
+# image. Basename alone is not enough: an attacker-owned binary named
+# `python3` in a same-uid dir would satisfy it (sol r167).
+_POLKIT_AGENT_EXE_DIRS = frozenset((
+    "/usr/bin", "/bin", "/usr/local/bin",
+))
+
 # Environment variables that inject attacker code into a python peer or
 # its loader. A same-uid process can push these into the user manager
 # (`systemctl --user set-environment` + restart the unit), so a peer
@@ -1761,8 +1768,10 @@ class Broker(dbus.service.Object):
 
         The relay methods answer or cancel real polkitd
         authentications. The agent is `python3 -I <installed script>`
-        inside its user unit, so the peer must satisfy all of: python
-        exe basename; the script as argv[-1]; -I REQUIRED among the
+        inside its user unit, so the peer must satisfy all of: a python
+        exe resolving under a root-owned system dir (an attacker-owned
+        binary merely NAMED python3 ignores argv entirely — sol r167);
+        the script as argv[-1]; -I REQUIRED among the
         preceding flags, all of which must be no-argument isolation
         flags (the bare `python3 <script>` form loads attacker-writable
         user-site sitecustomize/usercustomize/.pth — sol r166 — and
@@ -1791,7 +1800,14 @@ class Broker(dbus.service.Object):
         exe_s = str(exe or "")
         argv = self._peer_cmdline(pid)
         flags = argv[1:-1]
+        # The interpreter must be a root-owned system binary — an
+        # attacker-owned executable merely NAMED python3 (a drop-in
+        # ExecStart=/home/admin/evil/python3) would pass the basename
+        # check while ignoring argv entirely (sol r167).
         if not (os.path.basename(exe_s) in _PYTHON_EXE_BASENAMES
+                and os.path.dirname(exe_s)
+                in _POLKIT_AGENT_EXE_DIRS
+                and " (deleted)" not in exe_s
                 and len(argv) > 2
                 and argv[-1] in _POLKIT_AGENT_SCRIPT_PATHS
                 and "-I" in flags

@@ -592,6 +592,21 @@ class TestPolkitAgentPeerBinding:
                 _file_polkit(broker)
         assert broker._pending == {}
 
+    def test_an_attacker_owned_python_named_binary_is_rejected(
+            self, broker):
+        """A drop-in ExecStart=/home/admin/evil/python3 gives a process
+        whose exe BASENAME is python3 while the file is attacker code —
+        it can present `-I <script>` argv and a clean environ. The exe
+        must resolve under a root-owned system dir (sol r167)."""
+        for exe in ("/home/admin/evil/python3",
+                    "/tmp/python3",
+                    "/home/admin/.local/bin/python3",
+                    "/usr/bin/python3 (deleted)"):
+            broker.set_peer(ADMIN_UID, exe=exe, argv=list(AGENT_ARGV))
+            with pytest.raises(dbus.DBusException):
+                _file_polkit(broker)
+        assert broker._pending == {}
+
     def test_the_unisolated_interpreter_form_is_rejected(self, broker):
         """A drop-in ExecStart of `python3 <script>` (no -I) still
         loads attacker-writable user-site sitecustomize/.pth — without
