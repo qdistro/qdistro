@@ -124,8 +124,11 @@ D=/tmp/t3s-59.d
 SILO=t3scls; UNIT=$(unit_of "$SILO")
 TOK=$(sed -n 's/^TOK=//p' "$D/tok"); H=$(cat "$D/handle")
 [ -n "$TOK" ] && [ -n "$H" ] || { echo "FAIL: missing token/handle from S1"; exit 1; }
-# the app exiting must drop its toplevel without an explicit StopSilo
-wait_for 60 bash -c "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager -o cat | grep -q 'toplevel_removed handle=$H'" \
+# the app exiting must drop its toplevel without an explicit StopSilo.
+# Scope to S1's cursor: handles can repeat after a compositor restart,
+# so only a removal logged since THIS launch counts.
+cur0=$(cat "$D/journal.cur")
+wait_for 60 bash -c "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager -o cat --after-cursor='$cur0' | grep -q 'toplevel_removed handle=$H'" \
     || { echo "FAIL: no toplevel_removed for handle $H"; comp_log | tail -15; exit 1; }
 # the launch unit follows the container exit
 wait_for 90 unit_down "$UNIT" || { echo "FAIL: $UNIT still up after app exit"; exit 1; }
@@ -183,7 +186,7 @@ sm StartSilo s "$SILO" >/dev/null \
 unit_came_up() { [ "$(unit_state "$UNIT")" != inactive ]; }
 wait_for 10 unit_came_up \
     && { echo "FAIL: bare StartSilo relaunched the unit — the no-op contract changed; update this scenario"; unit_log "$UNIT" "$cur" | tail -10; exit 1; }
-[ "$(units_started_since "$cur" "qdistro-tier3s-silo@$SILO")" = 0 ] \
+[ "$(units_started_since "$cur" "qdistro-tier3s-silo@$SILO[.]service")" = 0 ] \
     || { echo "FAIL: a launcher start job ran after bare StartSilo — the no-op contract changed; update this scenario"; unit_log "$UNIT" "$cur" | tail -10; exit 1; }
 obs_stopped() { silo_observed "$1" | grep -q '^stopped'; }
 obs_stopped "$SILO" \

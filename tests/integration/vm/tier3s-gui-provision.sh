@@ -103,10 +103,16 @@ PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); pr
 BIND=$(ip -o -4 addr show | awk -v ip="$HOST_IP" '$4 ~ "^"ip"/" {print ip; exit}')
 (cd "$STAGE" && exec python3 -m http.server "$PORT" --bind "${BIND:-0.0.0.0}" >/dev/null 2>&1) &
 HTTP_PID=$!
-# Readiness is an answered request, not a live pid (astra gui r1).
+# Readiness is an answered request, not a live pid (astra gui r1) — and
+# the probe must hit the address the server actually bound (BIND may
+# select a specific interface address; astra gui r2). Each attempt is
+# time-bounded so a stalled connect can't hang the loop.
 ok=0
-for _ in $(seq 1 50); do curl -fsS -o /dev/null "http://127.0.0.1:$PORT/" && { ok=1; break; }; sleep 0.2; done
-[ "$ok" = 1 ] || fail "staging http server did not answer on port $PORT"
+for _ in $(seq 1 50); do
+    curl -fsS --max-time 2 -o /dev/null "http://${BIND:-127.0.0.1}:$PORT/" && { ok=1; break; }
+    sleep 0.2
+done
+[ "$ok" = 1 ] || fail "staging http server did not answer on ${BIND:-127.0.0.1}:$PORT"
 U="http://$HOST_IP:$PORT"
 note "staging server $U for VM $VM"
 
