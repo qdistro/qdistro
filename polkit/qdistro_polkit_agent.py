@@ -574,14 +574,210 @@ class QdistroPolkitAgent(dbus.service.Object):
 
 
 # -- Registration with polkitd -------------------------------------------
+#
+# polkitd only accepts RegisterAuthenticationAgent for a unix-session subject
+# that EQUALS the session it computes for the caller
+# (polkitbackendinteractiveauthority.c: "Cannot determine session the caller
+# is in" / "Passed session and the session the caller is in differs").
+# polkitd computes that session as sd_pid_get_session(caller pid) and, when
+# the caller is not inside a session scope -- always true here, the agent
+# runs in user@UID.service -- falls back to sd_uid_get_display(uid): the
+# user's display session.
+#
+# The user manager starts this unit from qdwin-session.target, which the
+# lingering admin's default.target also wants, so the agent routinely runs
+# while the admin has no display session at all: only logind's class=manager
+# session for user@.service exists until greetd logs the admin in (and in
+# headless/linger-only guests it never exists). Exiting non-zero there made
+# Restart=on-failure respawn the agent every RestartSec forever. Instead the
+# agent stays up, registers when a display session appears, and re-registers
+# when the display session changes.
 
-def _register(bus, agent_path: str) -> None:
-    polkitd = bus.get_object(POLKIT_BUS, POLKIT_OBJ)
-    authority = dbus.Interface(polkitd, POLKIT_IFACE_AUTHORITY)
-    subject = ("unix-session", {"session-id": dbus.String(_session_id())})
-    authority.RegisterAuthenticationAgent(subject, "en_US.UTF-8", agent_path)
+LOGIND_BUS = "org.freedesktop.login1"
+LOGIND_OBJ = "/org/freedesktop/login1"
+LOGIND_IFACE_MANAGER = "org.freedesktop.login1.Manager"
+LOGIND_IFACE_SESSION = "org.freedesktop.login1.Session"
+LOGIND_IFACE_USER = "org.freedesktop.login1.User"
+DBUS_IFACE_PROPS = "org.freedesktop.DBus.Properties"
+
+# logind session classes that never count as "the session the caller is in"
+# for polkitd: sd_pid_get_session() only resolves session-*.scope cgroups,
+# and logind never elects a manager/background session as a user's display.
+_NON_LOGIN_CLASSES = frozenset({"manager", "manager-early", "background",
+                                "background-light", "none"})
+
+# Safety-net poll for display-session changes logind does not signal as
+# SessionNew/SessionRemoved (e.g. display re-election). Cheap: two D-Bus
+# property reads, silent unless the outcome changes.
+RECONCILE_POLL_S = 30
+# Short follow-up checks after a logind session signal: a new session is
+# announced before logind elects it as the user's display session.
+_SIGNAL_FOLLOWUP_MS = (300, 1500, 5000)
+
+
+def _logind_session_props(bus, session_path) -> tuple[str, str]:
+    obj = bus.get_object(LOGIND_BUS, session_path)
+    props = dbus.Interface(obj, DBUS_IFACE_PROPS)
+    sid = str(props.Get(LOGIND_IFACE_SESSION, "Id"))
+    cls = str(props.Get(LOGIND_IFACE_SESSION, "Class"))
+    return sid, cls
+
+
+def _session_id(bus) -> str | None:
+    """The logind session polkitd will attribute this process to, or None.
+
+    Mirrors polkitd's own lookup so the subject we pass equals the session it
+    computes for the caller: the process's own login session if it has one
+    (agent started by hand from a terminal), else the user's display session
+    (agent started by the user manager -- the normal case). Returns None when
+    neither exists; the caller then waits instead of failing.
+    ``QDISTRO_POLKIT_SESSION_ID`` overrides for tests.
+
+    ``XDG_SESSION_ID`` is deliberately not consulted: the user manager's
+    environment is shared by every login and keeps a value imported by an
+    earlier one, so it can name a session that is gone or is not the one
+    polkitd sees.
+    """
+    test = os.environ.get("QDISTRO_POLKIT_SESSION_ID")
+    if test:
+        return test
+    manager = dbus.Interface(bus.get_object(LOGIND_BUS, LOGIND_OBJ),
+                             LOGIND_IFACE_MANAGER)
+    try:
+        path = manager.GetSessionByPID(dbus.UInt32(os.getpid()))
+        sid, cls = _logind_session_props(bus, path)
+        if sid and cls not in _NON_LOGIN_CLASSES:
+            return sid
+    except dbus.DBusException:
+        pass  # NoSessionForPID: not in a session scope (user@.service)
+    try:
+        user_path = manager.GetUser(dbus.UInt32(os.getuid()))
+    except dbus.DBusException:
+        return None  # NoUserForUID
+    props = dbus.Interface(bus.get_object(LOGIND_BUS, user_path),
+                           DBUS_IFACE_PROPS)
+    display = props.Get(LOGIND_IFACE_USER, "Display")
+    sid, path = str(display[0]), str(display[1])
+    if not sid or path in ("", "/"):
+        return None
+    try:
+        _sid, cls = _logind_session_props(bus, path)
+    except dbus.DBusException:
+        return None  # session vanished between the two calls
+    if cls in _NON_LOGIN_CLASSES:
+        return None
+    return sid
+
+
+def _authority(bus):
+    return dbus.Interface(bus.get_object(POLKIT_BUS, POLKIT_OBJ),
+                          POLKIT_IFACE_AUTHORITY)
+
+
+def _session_subject(session_id: str):
+    return ("unix-session", {"session-id": dbus.String(session_id)})
+
+
+def _register(bus, agent_path: str) -> str | None:
+    """Register for the current session; return its id, or None if none.
+
+    Raises dbus.DBusException when polkitd refuses the registration.
+    """
+    sid = _session_id(bus)
+    if sid is None:
+        return None
+    _authority(bus).RegisterAuthenticationAgent(
+        _session_subject(sid), "en_US.UTF-8", agent_path)
     syslog.syslog(syslog.LOG_NOTICE,
-                  f"registered as session polkit agent (path={agent_path})")
+                  f"registered as session polkit agent (path={agent_path}, "
+                  f"session={sid})")
+    return sid
+
+
+def _unregister(bus, agent_path: str, session_id: str) -> None:
+    try:
+        _authority(bus).UnregisterAuthenticationAgent(
+            _session_subject(session_id), agent_path)
+    except dbus.DBusException as e:
+        # The session is usually already gone, and polkitd dropped the
+        # agent with it; nothing to undo.
+        syslog.syslog(syslog.LOG_INFO,
+                      f"unregister from session {session_id}: {e}")
+
+
+class SessionRegistrar:
+    """Keep the agent registered for the user's current login session.
+
+    ``reconcile()`` is idempotent: it looks up the session polkitd would
+    attribute us to and (re-)registers only when that differs from the one
+    we registered for. Logging happens on state changes only, so an agent
+    waiting for a login does not spam the journal.
+    """
+
+    def __init__(self, bus, agent_path: str):
+        self.bus = bus
+        self.agent_path = agent_path
+        self.session_id: str | None = None
+        self._last_state: object = object()
+
+    def _note(self, state, priority, message: str) -> None:
+        if state != self._last_state:
+            self._last_state = state
+            syslog.syslog(priority, message)
+
+    def reconcile(self) -> bool:
+        try:
+            want = _session_id(self.bus)
+        except dbus.DBusException as e:
+            self._note(("lookup-error", str(e)), syslog.LOG_WARNING,
+                       f"cannot query logind for the login session: {e}")
+            return True
+        if want is not None and want == self.session_id:
+            return True
+        if self.session_id is not None:
+            _unregister(self.bus, self.agent_path, self.session_id)
+            syslog.syslog(syslog.LOG_NOTICE,
+                          f"login session {self.session_id} ended or is no "
+                          "longer the display session; unregistered")
+            self.session_id = None
+        if want is None:
+            self._note("no-session", syslog.LOG_NOTICE,
+                       f"no login session for uid {os.getuid()} yet; "
+                       "waiting for one before registering with polkitd")
+            return True
+        try:
+            self.session_id = _register(self.bus, self.agent_path)
+        except dbus.DBusException as e:
+            self._note(("register-error", want, str(e)), syslog.LOG_ERR,
+                       f"registration for session {want} failed: {e}; "
+                       "will retry when logind sessions change")
+            return True
+        if self.session_id is not None:
+            self._last_state = ("registered", self.session_id)
+        return True
+
+    def _on_logind_signal(self, *args) -> None:
+        self.reconcile()
+        for delay in _SIGNAL_FOLLOWUP_MS:
+            GLib.timeout_add(delay, self._once)
+
+    def _once(self) -> bool:
+        self.reconcile()
+        return False  # one-shot GLib source
+
+    def start(self) -> None:
+        for signal in ("SessionNew", "SessionRemoved"):
+            try:
+                self.bus.add_signal_receiver(
+                    self._on_logind_signal, signal_name=signal,
+                    dbus_interface=LOGIND_IFACE_MANAGER,
+                    bus_name=LOGIND_BUS, path=LOGIND_OBJ)
+            except Exception as e:  # noqa: BLE001
+                syslog.syslog(syslog.LOG_WARNING,
+                              f"cannot watch logind {signal}: {e}; "
+                              f"polling every {RECONCILE_POLL_S}s only")
+        GLib.timeout_add_seconds(RECONCILE_POLL_S, self.reconcile)
+        self.reconcile()
 
 
 def _admin_user() -> str:
@@ -589,38 +785,6 @@ def _admin_user() -> str:
         or os.environ.get("USER") \
         or os.environ.get("LOGNAME") \
         or "admin"
-
-
-def _session_id() -> str:
-    """Find the logind session id for this process.
-
-    Prefer ``XDG_SESSION_ID`` (set by pam_systemd in any logind-managed
-    session). Fall back to ``/proc/self/sessionid`` (audit-kernel only),
-    then ``loginctl show-session self -p Id``. Test overrides via
-    ``QDISTRO_POLKIT_SESSION_ID``.
-    """
-    test = os.environ.get("QDISTRO_POLKIT_SESSION_ID")
-    if test:
-        return test
-    env = os.environ.get("XDG_SESSION_ID")
-    if env:
-        return env
-    try:
-        with open("/proc/self/sessionid") as f:
-            sid = f.read().strip()
-            if sid and sid != "4294967295":
-                return sid
-    except OSError:
-        pass
-    try:
-        out = subprocess.check_output(
-            ["loginctl", "show-session", "self", "-p", "Id", "--value"],
-            text=True, timeout=5).strip()
-        if out:
-            return out
-    except Exception:  # noqa: BLE001
-        pass
-    raise RuntimeError("cannot determine logind session id for polkit registration")
 
 
 # -- main -----------------------------------------------------------------
@@ -653,13 +817,11 @@ def main() -> int:
     # authenticate", the agent's journal showed nothing at all.
     sysbus = dbus.SystemBus()
     agent = QdistroPolkitAgent(sysbus, AGENT_OBJ)  # noqa: F841
-    try:
-        _register(sysbus, AGENT_OBJ)
-    except Exception as e:  # noqa: BLE001
-        syslog.syslog(syslog.LOG_ERR, f"registration failed: {e}")
-        print(f"qdistro-polkit-agent: registration failed: {e}",
-              file=sys.stderr)
-        return 1
+    # Register now if the admin is logged in, otherwise wait for a login
+    # without exiting (see SessionRegistrar): exiting made the user manager
+    # respawn the agent every RestartSec for as long as no session existed.
+    registrar = SessionRegistrar(sysbus, AGENT_OBJ)
+    registrar.start()
     GLib.MainLoop().run()
     return 0
 

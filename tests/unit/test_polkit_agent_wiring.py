@@ -80,9 +80,12 @@ class TestMainBusWiring:
         def fake_register(bus, path):
             seen["register_bus"] = bus
             seen["register_path"] = path
+            return "1"
 
         monkeypatch.setattr(agent_mod, "QdistroPolkitAgent", fake_agent)
         monkeypatch.setattr(agent_mod, "_register", fake_register)
+        # Registration now waits for a logind session; pretend one exists.
+        monkeypatch.setattr(agent_mod, "_session_id", lambda bus: "1")
         # Stop before blocking forever in the GLib main loop.
         loop = mock.MagicMock()
         monkeypatch.setattr(agent_mod.GLib, "MainLoop", lambda: loop)

@@ -17,6 +17,9 @@ PartOf=qdwin-session.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /usr/libexec/qdistro/qdistro_polkit_agent.py
+# The agent no longer exits when the admin has no login session yet (the
+# lingering user manager starts it at boot, before greetd's login): it waits
+# for logind and registers then. on-failure is for real crashes only.
 Restart=on-failure
 RestartSec=3
 # Subprocess prompt path — agent spawns this on PAM auth.
@@ -30,9 +33,13 @@ UnsetEnvironment=QDISTRO_POLKIT_NONINTERACTIVE
 # TCB no-network discipline. The agent talks to polkitd, qdistro-broker,
 # fprintd/PAM, and its local prompt over AF_UNIX/system facilities only;
 # it has no legitimate IP/vsock egress path.
+#
+# No IPAddressDeny=: this is a USER unit, and IP firewalling needs the
+# system manager (BPF); the user manager only logs "unit configures an IP
+# firewall, but not running as root" and applies nothing. The private
+# network namespace plus the address-family allowlist are what enforce it.
 PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
-IPAddressDeny=any
 
 [Install]
 WantedBy=qdwin-session.target
