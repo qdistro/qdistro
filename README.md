@@ -225,6 +225,9 @@ tests/
 
 deploy/             greetd config, session launchers, dispatcher
                     units installed onto the target machine
+packaging/          RPM specs + Agama installer ISO tooling —
+                    the repository-driven install track alongside the
+                    kiwi raw image (packaging/README.md)
 doc/                project documentation (read [overview.md](doc/overview.md) first)
 pyproject.toml      pytest config
 LICENSE             GPL-3.0-or-later (root content; components: see License)
