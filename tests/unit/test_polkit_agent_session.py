@@ -55,10 +55,14 @@ class _Logind:
         self.has_user = True
         self.registered: list[str] = []       # accepted Register calls, in order
         self.unregistered: list[str] = []     # accepted Unregister calls
-        self.registrations: dict = {}         # _Conn -> session id polkitd holds
+        self.registrations: dict = {}         # session id -> _Conn holding it
         self.conns: list = []
         self.register_error: Exception | None = None
+        self.owner_error: Exception | None = None
         self.signals: list[str] = []
+        # Unique-name owner of polkitd's well-known name. A restart mints a
+        # new one; the name is never owned by two different daemons.
+        self.polkit_owner = ":1.40"
 
     # -- shared-connection surface (logind queries, signal watches) --
     # dbus.Interface(obj, iface) wraps whatever get_object returns; return
@@ -68,6 +72,15 @@ class _Logind:
 
     def add_signal_receiver(self, handler, signal_name=None, **kw):
         self.signals.append(signal_name)
+
+    def get_name_owner(self, name):
+        if self.owner_error is not None:
+            raise self.owner_error
+        if str(name) == agent_mod.POLKIT_BUS and self.polkit_owner:
+            return self.polkit_owner
+        raise dbus.DBusException(
+            "name has no owner",
+            name="org.freedesktop.DBus.Error.NameHasNoOwner")
 
     def get_is_connected(self):
         return True
@@ -80,7 +93,15 @@ class _Logind:
         return _Conn(self)
 
     def drop_connection(self, conn):
-        self.registrations.pop(conn, None)
+        for sid, held_by in list(self.registrations.items()):
+            if held_by is conn:
+                del self.registrations[sid]
+
+    def restart_polkitd(self, owner=":1.99"):
+        """A daemon restart: the registration table dies with the old
+        instance and the name is taken by a new unique owner."""
+        self.registrations.clear()
+        self.polkit_owner = owner
 
     def caller_session(self):
         """The session polkitd computes for a call: the same lookup the
@@ -101,6 +122,9 @@ class _Conn:
 
     def add_signal_receiver(self, handler, signal_name=None, **kw):
         self.world.signals.append(signal_name)
+
+    def get_name_owner(self, name):
+        return self.world.get_name_owner(name)
 
     def get_is_connected(self):
         return not self.closed
@@ -153,13 +177,14 @@ class _Obj:
             raise dbus.DBusException(
                 "Passed session and the session the caller is in differs",
                 name="org.freedesktop.PolicyKit1.Error.Failed")
-        for conn, held in fake.registrations.items():
-            if conn is not self.conn and held == sid:
-                raise dbus.DBusException(
-                    f"An authentication agent is already registered for "
-                    f"session {sid}",
-                    name="org.freedesktop.PolicyKit1.Error.Failed")
-        fake.registrations[self.conn] = sid
+        # polkitd 127 keys agents by subject: a second registration for the
+        # same session is refused even from the connection holding it.
+        if sid in fake.registrations:
+            raise dbus.DBusException(
+                "An authentication agent already exists for the given "
+                "subject",
+                name="org.freedesktop.PolicyKit1.Error.Failed")
+        fake.registrations[sid] = self.conn
         fake.registered.append(sid)
 
     def UnregisterAuthenticationAgent(self, subject, path):
@@ -170,7 +195,8 @@ class _Obj:
             raise dbus.DBusException(
                 "Passed session and the session the caller is in differs",
                 name="org.freedesktop.PolicyKit1.Error.Failed")
-        if fake.registrations.pop(self.conn, None) is not None:
+        if fake.registrations.get(sid) is self.conn:
+            del fake.registrations[sid]
             fake.unregistered.append(sid)
 
 
@@ -200,7 +226,7 @@ def _registrar(fake):
 
 def _held(fake):
     """Session ids polkitd currently holds registrations for."""
-    return sorted(fake.registrations.values())
+    return sorted(fake.registrations)
 
 
 class TestSessionLookup:
@@ -367,12 +393,72 @@ class TestRegistrar:
         _login(fake, "6")
         reg = _registrar(fake)
         reg.reconcile()
-        fake.registrations.clear()  # what the restart did to polkitd
         conn = reg._conn
-        reg._on_polkit_owner(agent_mod.POLKIT_BUS, ":1.9", ":1.20")
+        fake.restart_polkitd(":1.99")
+        reg._on_polkit_owner(agent_mod.POLKIT_BUS, ":1.40", ":1.99")
         assert reg.session_id == "6"
         assert fake.registered == ["6", "6"]
         assert reg._conn is conn
+
+    def test_queued_owner_signal_does_not_invalidate(self, fake):
+        """A Register call can bus-activate polkitd during the synchronous
+        reconcile() in start(); the NameOwnerChanged for that activation
+        then arrives only once the main loop runs. It names the same owner
+        the registration was made against, so it must not invalidate the
+        cache -- the old code forgot session_id here and every later
+        reconcile retried a duplicate registration on the same connection,
+        which polkitd refuses."""
+        _login(fake, "6")
+        reg = _registrar(fake)
+        reg.reconcile()
+        assert fake.registered == ["6"]
+        conn = reg._conn
+        reg._on_polkit_owner(agent_mod.POLKIT_BUS, "", ":1.40")
+        assert reg.session_id == "6"
+        assert reg._conn is conn
+        assert fake.registered == ["6"]   # no duplicate re-registration
+        # A genuine restart afterwards still re-registers, and a later
+        # A -> B -> A migration stays clean.
+        fake.restart_polkitd(":1.99")
+        reg._on_polkit_owner(agent_mod.POLKIT_BUS, ":1.40", ":1.99")
+        assert fake.registered == ["6", "6"]
+        assert reg._conn is conn
+        _login(fake, "8")
+        reg.reconcile()
+        _login(fake, "6")
+        reg.reconcile()
+        assert fake.registered == ["6", "6", "8", "6"]
+        assert _held(fake) == ["6"]
+
+    def test_owner_lookup_failure_keeps_registration(self, fake):
+        """A transient GetNameOwner failure must not invalidate a live
+        registration -- only a proven owner change may."""
+        _login(fake, "6")
+        reg = _registrar(fake)
+        reg.reconcile()
+        fake.owner_error = dbus.DBusException("bus hiccup")
+        reg.reconcile()
+        assert reg.session_id == "6"
+        assert _held(fake) == ["6"]
+        fake.owner_error = None
+        reg.reconcile()
+        assert fake.registered == ["6"]
+
+    def test_register_then_owner_error_retires_connection(self, fake):
+        """Register landed but the daemon owner cannot be resolved: the
+        registration cannot be tied to a polkitd instance, so the
+        connection is retired rather than retried into a duplicate."""
+        _login(fake, "6")
+        reg = _registrar(fake)
+        fake.owner_error = dbus.DBusException("bus hiccup")
+        reg.reconcile()
+        assert reg.session_id is None
+        assert _held(fake) == []
+        assert reg._conn is None
+        fake.owner_error = None
+        reg.reconcile()
+        assert reg.session_id == "6"
+        assert _held(fake) == ["6"]
 
     def test_polkit_refusal_is_retried_not_fatal(self, fake):
         _login(fake, "6")

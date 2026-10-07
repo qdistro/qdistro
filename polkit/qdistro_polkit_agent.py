@@ -705,6 +705,20 @@ def _register(bus, agent_path: str) -> str | None:
     return sid
 
 
+def _polkit_owner(bus) -> str | None:
+    """Unique name currently owning polkitd's well-known name.
+
+    None means the name is unowned (polkitd absent); a DBusException means
+    the lookup itself failed and callers should not draw conclusions.
+    """
+    try:
+        return str(bus.get_name_owner(POLKIT_BUS))
+    except dbus.DBusException as e:
+        if e.get_dbus_name() == "org.freedesktop.DBus.Error.NameHasNoOwner":
+            return None
+        raise
+
+
 class SessionRegistrar:
     """Keep the agent registered for the user's current login session.
 
@@ -718,6 +732,12 @@ class SessionRegistrar:
     when the unique name that registered it vanishes, so no stale
     registration survives a session change (or accumulates across ordinary
     sequential logins).
+
+    A registration is cached together with the unique-name owner of
+    POLKIT_BUS it was made against. Owner changes mean the daemon (and its
+    registration table) restarted, so the cache is dropped; a queued
+    owner-acquired signal for the same owner is ignored. This ordering is
+    what makes a Register call that itself bus-activated polkitd safe.
 
     ``reconcile()`` is idempotent: it looks up the session polkitd would
     attribute us to and (re-)registers only when that differs from the one
@@ -740,6 +760,12 @@ class SessionRegistrar:
         self._conn = None
         self._agent = None
         self.session_id: str | None = None
+        # Unique-name owner of POLKIT_BUS the current registration was made
+        # against. Registrations die with their polkitd instance; a queued
+        # NameOwnerChanged for an activation that already happened must not
+        # invalidate this cache, so reconcile() compares owners rather than
+        # trusting signal order.
+        self._polkit_owner: str | None = None
         self._last_state: object = object()
 
     def _note(self, state, priority, message: str) -> None:
@@ -751,6 +777,7 @@ class SessionRegistrar:
         conn = self._conn
         self._conn = None
         self._agent = None
+        self._polkit_owner = None
         if conn is None:
             return
         try:
@@ -758,6 +785,20 @@ class SessionRegistrar:
         except Exception as e:  # noqa: BLE001
             syslog.syslog(syslog.LOG_WARNING,
                           f"closing the retired agent connection failed: {e}")
+
+    def _forget_registration(self, reason: str) -> None:
+        """The polkitd instance we registered with is gone or restarted.
+
+        Registrations do not survive their daemon, so only the cache needs
+        clearing; the private connection is still usable and registering on
+        it lands in the new instance's empty table.
+        """
+        old = self.session_id
+        self.session_id = None
+        self._polkit_owner = None
+        syslog.syslog(syslog.LOG_NOTICE,
+                      f"{reason}; the registration for session {old} died "
+                      "with the old polkitd instance")
 
     def reconcile(self) -> bool:
         try:
@@ -772,6 +813,21 @@ class SessionRegistrar:
             self._conn = None
             self._agent = None
             self.session_id = None
+            self._polkit_owner = None
+        if self.session_id is not None:
+            # The registration is only valid while the polkitd instance we
+            # registered with owns the name. Checking here (not just in the
+            # signal handler) covers the race where our Register call
+            # bus-activated polkitd and its owner-acquired signal is still
+            # queued behind the main loop.
+            try:
+                owner = _polkit_owner(self.bus)
+            except dbus.DBusException as e:
+                self._note(("owner-error", str(e)), syslog.LOG_WARNING,
+                           f"cannot resolve polkitd's bus name owner: {e}")
+                return True
+            if owner != self._polkit_owner:
+                self._forget_registration("polkitd restarted or vanished")
         if want is not None and want == self.session_id:
             return True
         if self.session_id is not None or (
@@ -790,18 +846,32 @@ class SessionRegistrar:
             return True
         if self._conn is None:
             try:
-                self._conn = self._make_connection()
-                self._agent = self._make_agent(self._conn)
+                conn = self._make_connection()
+                try:
+                    agent = self._make_agent(conn)
+                except Exception:
+                    # Do not leak the fresh connection when the agent
+                    # object cannot be exported on it.
+                    conn.close()
+                    raise
             except Exception as e:  # noqa: BLE001
-                self._conn = None
-                self._agent = None
                 self._note(("connect-error", str(e)), syslog.LOG_ERR,
                            "cannot open a private system-bus connection: "
                            f"{e}; will retry when logind sessions change")
                 return True
+            self._conn, self._agent = conn, agent
         try:
             self.session_id = _register(self._conn, self.agent_path)
+            self._polkit_owner = _polkit_owner(self._conn)
         except dbus.DBusException as e:
+            if self.session_id is not None:
+                # Register landed but the owner lookup failed: the cached
+                # registration cannot be tied to a daemon instance, so a
+                # retry on this connection could hit a duplicate refusal.
+                # Retire the connection instead — its disappearance
+                # retracts whatever polkitd holds.
+                self.session_id = None
+                self._drop_connection()
             self._note(("register-error", want, str(e)), syslog.LOG_ERR,
                        f"registration for session {want} failed: {e}; "
                        "will retry when logind sessions change")
@@ -818,10 +888,10 @@ class SessionRegistrar:
     def _on_polkit_owner(self, name, old_owner, new_owner) -> None:
         if str(name) != POLKIT_BUS or not str(new_owner):
             return
-        # polkitd (re)started; agent registrations do not survive that, so
-        # the cached session is stale. The connection itself is still fine --
-        # forget the registration and let reconcile() re-register on it.
-        self.session_id = None
+        # A polkitd owner appeared. The signal may describe an activation
+        # that predates a registration we already made on this same daemon
+        # (queued behind a synchronous reconcile()), so it must not clear
+        # state on its own -- reconcile() decides by comparing owners.
         self.reconcile()
 
     def _once(self) -> bool:
@@ -840,9 +910,14 @@ class SessionRegistrar:
                               f"cannot watch logind {signal}: {e}; "
                               f"polling every {RECONCILE_POLL_S}s only")
         try:
+            # bus_name + path pin the watch to signals the bus daemon itself
+            # sends about POLKIT_BUS -- any other sender's identically
+            # shaped payload is not a polkitd lifecycle event.
             self.bus.add_signal_receiver(
                 self._on_polkit_owner, signal_name="NameOwnerChanged",
-                dbus_interface="org.freedesktop.DBus")
+                dbus_interface="org.freedesktop.DBus",
+                bus_name="org.freedesktop.DBus",
+                path="/org/freedesktop/DBus")
         except Exception as e:  # noqa: BLE001
             syslog.syslog(syslog.LOG_WARNING,
                           f"cannot watch for a polkitd restart: {e}")

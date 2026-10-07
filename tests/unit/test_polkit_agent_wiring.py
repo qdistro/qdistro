@@ -48,6 +48,7 @@ class _FakeBus:
         self.label = label
         self.requested_names: list[str] = []
         self.signals: list[str] = []
+        self.signal_specs: list[tuple] = []
         self.closed = False
 
     def request_name(self, name, flags):
@@ -56,6 +57,10 @@ class _FakeBus:
 
     def add_signal_receiver(self, handler, signal_name=None, **kw):
         self.signals.append(signal_name)
+        self.signal_specs.append((signal_name, kw))
+
+    def get_name_owner(self, name):
+        return ":1.fake"
 
     def get_is_connected(self):
         return not self.closed
@@ -144,6 +149,16 @@ class TestMainBusWiring:
 
     def test_main_returns_only_after_the_loop_is_entered(self, wired):
         assert wired["rc"] == 0
+
+    def test_polkitd_owner_watch_is_scoped_to_the_daemon(self, wired):
+        """A forged NameOwnerChanged-shaped payload from another sender
+        must not reach the registration cache: the watch is pinned to the
+        bus daemon's own name and object path."""
+        matched = [kw for sig, kw in wired["system"].signal_specs
+                   if sig == "NameOwnerChanged"]
+        assert matched, "no NameOwnerChanged watch installed"
+        assert matched[0].get("bus_name") == "org.freedesktop.DBus"
+        assert matched[0].get("path") == "/org/freedesktop/DBus"
 
 
 # ---------------------------------------------------------------------------
