@@ -312,11 +312,18 @@ connection:
   `PYTHONHOME`/`sitecustomize`/`usercustomize`, and the broker
   *requires* `-I` in the peer argv — without it, even
   `python3 <script>` loads attacker-writable user-site
-  `sitecustomize`/`.pth` code with no env var at all.
-- The peer's parent must be **init** (`ppid == 1`): only systemd itself
-  spawns a system service's main process, and a foreign process keeps
-  its own parent. Orphans reparented to PID 1 still fail the exact
-  `system.slice/qdistro-polkit-agent.service` cgroup match.
+  `sitecustomize`/`.pth` code with no env var at all. The password
+  prompt is likewise exec'd through `/usr/bin/python3 -I` (never via
+  its shebang), so admin-writable user-site code cannot run inside the
+  trusted unit cgroup as a child.
+- The peer must **be the unit's main process**: the broker asks pid 1
+  itself for `systemd1.Service.MainPID` of
+  `qdistro-polkit-agent.service` and requires the calling pid to equal
+  it. A descendant can double-fork and reappear inside the genuine
+  cgroup with PPID 1 and a rewritten argv — the only attribute it can
+  never satisfy is being the process systemd spawned. When systemd
+  cannot answer, the check fails closed. `ppid == 1` is kept as a
+  cheap pre-filter.
 - Defence-in-depth (checked anyway): exe resolves to a python under a
   root-owned system dir (an attacker binary merely *named* `python3`
   ignores argv), only no-argument isolation flags precede the script,
@@ -326,10 +333,17 @@ connection:
   system unit's environment is root-fixed), the SELinux type is not
   hostile, and the cgroup path matches the unit exactly.
 
-Residual: uid 0 remains able to rewrite or restart the system unit —
-but root needs no relay (it answers polkitd itself), so tampering
-yields at most a denial of service, never a forged approval. ptrace
-injection into the live agent is outside this boundary's reach.
+Residuals, explicitly narrowed: uid 0 remains able to rewrite or
+restart the system unit — but root needs no relay (it answers polkitd
+itself), so tampering yields at most a denial of service, never a
+forged approval. **Same-uid ptrace injection into the live agent is
+outside the threat model**: a same-uid tracer could attach to the main
+process and run code on the trusted connection regardless of any peer
+check; containing that needs OS-level policy (Yama scope or an
+SELinux domain for the agent), which this slice does not ship.
+TTL'd announcements also mean a cookie can be re-declared once its
+binding expires — safe only because the polkit auth session it names
+is long dead by then.
 
 History: before this responder existed the agent was verified end-to-end
 on a real seat session (registration, dispatch, broker delegation, fail-

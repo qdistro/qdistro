@@ -171,6 +171,30 @@ class TestPromptNonInteractive:
                                prompt_bin=absent, env={})
         assert out is None
 
+    def test_the_prompt_is_execd_through_python_dash_i(
+            self, tmp_path, monkeypatch):
+        """astra r172 P1: a bare `#!/usr/bin/env python3` exec loads
+        admin-writable user-site sitecustomize/usercustomize/.pth —
+        attacker code inside the trusted unit cgroup. The agent must
+        run the prompt via a root-owned interpreter with -I."""
+        import qdistro_polkit_agent as agent_mod
+        prompt = tmp_path / "qdistro-polkit-prompt"
+        prompt.write_text("#")
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return mock.Mock(returncode=0, stdout="hunter2\n")
+
+        monkeypatch.setattr(agent_mod.subprocess, "run", fake_run)
+        out = _prompt_password("act", "msg",
+                               prompt_bin=str(prompt), env={})
+        assert out == "hunter2"
+        assert calls[0][:3] == [
+            agent_mod.PROMPT_INTERPRETER, "-I", str(prompt)], (
+            "the prompt must be exec'd as `python3 -I <prompt>`, never "
+            "via its shebang")
+
 
 # -- _sanitize_polkit_details ------------------------------------------
 

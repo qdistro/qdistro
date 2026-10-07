@@ -107,6 +107,26 @@ else
         runuser -u "$ADMIN_USER" -- env \
             XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
             systemctl --user stop qdistro-polkit-agent.service >/dev/null 2>&1 || true
+        # Verify the handover rather than assuming it (astra r172): a
+        # still-running old agent would claim the session-bus singleton
+        # first, shadowing the new one until logout.
+        old_still_active=0
+        for _ in 1 2 3 4 5; do
+            if ! runuser -u "$ADMIN_USER" -- env \
+                    XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
+                    systemctl --user is-active --quiet \
+                    qdistro-polkit-agent.service 2>/dev/null; then
+                old_still_active=0
+                break
+            fi
+            old_still_active=1
+            sleep 1
+        done
+        if [ "$old_still_active" -eq 1 ]; then
+            echo "[install-polkit-agent] WARN: old user-unit agent is" \
+                 "still active; it may hold the session-bus singleton" \
+                 "until the admin logs out" >&2
+        fi
         runuser -u "$ADMIN_USER" -- env \
             XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
             systemctl --user daemon-reload >/dev/null 2>&1 || true
@@ -114,6 +134,13 @@ else
     systemctl start qdistro-polkit-agent.service >/dev/null 2>&1 \
         || echo "[install-polkit-agent] note: live start failed;" \
                 "the agent starts on the next boot" >&2
+    # `systemctl start` returning 0 only proves the fork happened —
+    # confirm the unit is actually running (Type=simple reports active
+    # as soon as the main process is up).
+    if ! systemctl is-active --quiet qdistro-polkit-agent.service; then
+        echo "[install-polkit-agent] WARN: system agent is not active" \
+             "after start; check journalctl -u qdistro-polkit-agent" >&2
+    fi
 fi
 
 echo "[install-polkit-agent] OK — qdistro-polkit-agent installed at $DEST_LIB"

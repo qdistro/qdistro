@@ -104,11 +104,23 @@ ADMIN_UID = _resolve_admin_uid()
 _REQUEST_TIMEOUT_S = 90
 _WAIT_TIMEOUT_S = 900
 
+# D-Bus errors that prove a call did NOT reach a broker: the name had
+# no owner to receive it (dead or restarting). Only these are safe to
+# retry on a re-resolved proxy — NoReply or a mid-call disconnect are
+# unknowable, so they must not be retried.
+_BROKER_OWNER_LOSS = (
+    "org.freedesktop.DBus.Error.ServiceUnknown",
+    "org.freedesktop.DBus.Error.NameHasNoOwner",
+)
+
 DEFAULT_METHOD = "broker"
 DEFAULT_PAM_SERVICE = "login"
 DEFAULT_CONFIG_PATH = "/etc/qdistro/polkit-agent.conf"
 DEFAULT_USER_CONFIG_PATH = "~/.config/qdistro/polkit-agent.conf"
 DEFAULT_PROMPT_BIN = "/usr/local/bin/qdistro-polkit-prompt"
+# Root-owned system interpreter used to exec the prompt with -I — the
+# same directory policy the broker checks for the agent itself.
+PROMPT_INTERPRETER = "/usr/bin/python3"
 
 VALID_METHODS = ("pam", "fprint", "broker")
 
@@ -337,8 +349,13 @@ def _prompt_password(action_id: str, message: str,
         # No prompt UI available + no test override — fail closed.
         return None
     try:
+        # Run the prompt through the system interpreter with -I rather
+        # than trusting its shebang: a bare `#!/usr/bin/env python3`
+        # exec loads admin-writable user-site sitecustomize/
+        # usercustomize/.pth, which would put attacker code inside the
+        # trusted unit cgroup (astra r172 P1).
         proc = subprocess.run(
-            [prompt_bin, "--mode=pam",
+            [PROMPT_INTERPRETER, "-I", prompt_bin, "--mode=pam",
              f"--action={action_id}",
              f"--message={message or 'Authentication required'}"],
             input="", capture_output=True, text=True,
@@ -483,9 +500,7 @@ class QdistroPolkitAgent(dbus.service.Object):
                 qdistro_action, details, str(cookie), identities,
                 timeout=_REQUEST_TIMEOUT_S))
         except dbus.DBusException as e:
-            if e.get_dbus_name() not in (
-                    "org.freedesktop.DBus.Error.ServiceUnknown",
-                    "org.freedesktop.DBus.Error.NameHasNoOwner"):
+            if e.get_dbus_name() not in _BROKER_OWNER_LOSS:
                 raise
             # The broker was not on the bus. Drop the cached proxy (it may
             # be bound to a dead unique name) and try once more, in case it
@@ -722,17 +737,43 @@ class QdistroPolkitAgent(dbus.service.Object):
         # Re-announce first: a broker restart forgets every binding, and
         # without this a live pam/fprint verdict would fail closed for
         # the rest of the auth session. Idempotent — same sender, same
-        # cookie — and the broker rejects a rebind attempt.
-        try:
-            self._broker_iface().AnnouncePolkitAuth(
-                str(cookie), timeout=_REQUEST_TIMEOUT_S)
-        except Exception as e:  # noqa: BLE001
-            syslog.syslog(
-                syslog.LOG_WARNING,
-                f"could not re-announce polkit cookie to the broker: "
-                f"{e}; the respond relay may be refused")
-        self._broker_iface().RespondPolkitAuth(
-            str(cookie), identities, timeout=_REQUEST_TIMEOUT_S)
+        # cookie — and the broker rejects a rebind attempt. The cached
+        # proxy is pinned to the broker's UNIQUE name, so a restart
+        # leaves announce+respond aimed at a dead owner: on an
+        # owner-loss error the proxy is re-resolved once and the pair
+        # retried against the new instance (astra r172 P2). NoReply and
+        # friends stay unretried — the respond may already have landed.
+        last: dbus.DBusException | None = None
+        for _attempt in (1, 2):
+            iface = self._broker_iface()
+            try:
+                iface.AnnouncePolkitAuth(
+                    str(cookie), timeout=_REQUEST_TIMEOUT_S)
+            except dbus.DBusException as e:
+                if e.get_dbus_name() in _BROKER_OWNER_LOSS:
+                    last = e
+                    self._broker = None
+                    continue
+                syslog.syslog(
+                    syslog.LOG_WARNING,
+                    f"could not re-announce polkit cookie to the "
+                    f"broker: {e}; the respond relay may be refused")
+            except Exception as e:  # noqa: BLE001
+                syslog.syslog(
+                    syslog.LOG_WARNING,
+                    f"could not re-announce polkit cookie to the "
+                    f"broker: {e}; the respond relay may be refused")
+            try:
+                iface.RespondPolkitAuth(
+                    str(cookie), identities, timeout=_REQUEST_TIMEOUT_S)
+                return
+            except dbus.DBusException as e:
+                if e.get_dbus_name() in _BROKER_OWNER_LOSS:
+                    last = e
+                    self._broker = None
+                    continue
+                raise
+        raise last
 
 
 # -- Registration with polkitd -------------------------------------------
@@ -743,17 +784,17 @@ class QdistroPolkitAgent(dbus.service.Object):
 # is in" / "Passed session and the session the caller is in differs").
 # polkitd computes that session as sd_pid_get_session(caller pid) and, when
 # the caller is not inside a session scope -- always true here, the agent
-# runs in user@UID.service -- falls back to sd_uid_get_display(uid): the
-# user's display session.
+# runs in system.slice/qdistro-polkit-agent.service -- falls back to
+# sd_uid_get_display(uid): the user's display session.
 #
-# The user manager starts this unit from qdwin-session.target, which the
-# lingering admin's default.target also wants, so the agent routinely runs
-# while the admin has no display session at all: only logind's class=manager
-# session for user@.service exists until greetd logs the admin in (and in
-# headless/linger-only guests it never exists). Exiting non-zero there made
-# Restart=on-failure respawn the agent every RestartSec forever. Instead the
-# agent stays up, registers when a display session appears, and re-registers
-# when the display session changes.
+# The system manager starts this unit at boot (WantedBy=multi-user.target),
+# so the agent routinely runs while the admin has no display session at
+# all: only logind's class=manager session for user@.service exists until
+# greetd logs the admin in (and in headless/linger-only guests it never
+# exists). Exiting non-zero there made Restart=on-failure respawn the
+# agent every RestartSec forever. Instead the agent stays up, registers
+# when a display session appears, and re-registers when the display
+# session changes.
 
 LOGIND_BUS = "org.freedesktop.login1"
 LOGIND_OBJ = "/org/freedesktop/login1"

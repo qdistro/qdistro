@@ -272,6 +272,21 @@ _POLKIT_AGENT_SCRIPT_PATHS = frozenset((
 _POLKIT_AGENT_UNIT = "qdistro-polkit-agent.service"
 _POLKIT_AGENT_CGROUPS = frozenset((f"system.slice/{_POLKIT_AGENT_UNIT}",))
 
+# systemd's own bookkeeping names the unit's main process. PPID=1 and
+# the exact cgroup are corroborating signals, but neither is proof the
+# peer is the process systemd spawned: a descendant of the unit (the
+# prompt subprocess, or anything compromised inside it) can double-fork
+# and come back as an orphan with PPID 1 inside the same cgroup, then
+# present a rewritten argv (astra r172 P1). Requiring the peer pid to
+# EQUAL systemd's MainPID for the unit collapses the question to "is
+# this literally the process pid 1 forked for ExecStart": no child,
+# grandchild or migrated foreign process ever is.
+_SYSTEMD1_BUS = "org.freedesktop.systemd1"
+_SYSTEMD1_OBJ = "/org/freedesktop/systemd1"
+_SYSTEMD1_MGR_IFACE = "org.freedesktop.systemd1.Manager"
+_SYSTEMD1_SERVICE_IFACE = "org.freedesktop.systemd1.Service"
+_SYSTEMD1_PROPS_IFACE = "org.freedesktop.DBus.Properties"
+
 # Interpreter flags the agent's unit may legitimately pass — argument-
 # taking forms (-c, -m, -W, -X, --check-hash-based-pycs) are excluded:
 # `python3 -c 'evil()' <script path>` must never match the script
@@ -1254,11 +1269,14 @@ class Broker(dbus.service.Object):
         # 0 when none is armed.
         self._receivers_changed_timer = 0
         self._pending: dict[int, _Request] = {}
-        # Cookies relayed by CancelPolkitAuth as {cookie: (sender, ts)},
-        # kept even when no pending request matches: the cancel can beat
-        # the filing, and a later RequestPolkitAuth from the SAME sender
-        # must then come back decided-deny rather than queueing a prompt
-        # for a session polkitd already abandoned.
+        # Cookies relayed by CancelPolkitAuth as {cookie: ({senders},
+        # ts)}, kept even when no pending request matches: the cancel
+        # can beat the filing, and a later RequestPolkitAuth from a
+        # sender that cancelled must then come back decided-deny rather
+        # than queueing a prompt for a session polkitd already
+        # abandoned. The senders form a SET, not a single slot: a
+        # foreign cancel must not overwrite the owner's tombstone
+        # (astra r172).
         self._cancelled_polkit_cookies: dict[str, tuple] = {}
         # Cookies bound to their declaring connection's unique D-Bus
         # name by AnnouncePolkitAuth, {cookie: (sender, ts)}: the
@@ -1708,6 +1726,30 @@ class Broker(dbus.service.Object):
     def _peer_ppid(self, pid: int) -> int | None:
         return _read_proc_ppid(pid)
 
+    def _unit_main_pid(self, unit: str) -> int | None:
+        """systemd's MainPID for `unit` — the pid 1 spawned for it.
+
+        This is the one peer attribute a same-uid caller cannot forge
+        or inherit: it comes from pid 1's own bookkeeping, not from
+        /proc state the process itself controls. Returns None when the
+        unit is unknown or has no running main process — callers must
+        treat that as untrusted (fail closed)."""
+        try:
+            system_bus = dbus.SystemBus()
+            mgr = dbus.Interface(
+                system_bus.get_object(_SYSTEMD1_BUS, _SYSTEMD1_OBJ),
+                _SYSTEMD1_MGR_IFACE)
+            unit_path = mgr.GetUnit(unit)
+            props = dbus.Interface(
+                system_bus.get_object(_SYSTEMD1_BUS, unit_path),
+                _SYSTEMD1_PROPS_IFACE)
+            main_pid = int(props.Get(_SYSTEMD1_SERVICE_IFACE, "MainPID"))
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] polkit peer check: could not read MainPID "
+                  f"for {unit}: {e}", flush=True)
+            return None
+        return main_pid if main_pid > 0 else None
+
     def _peer_label_type(self, pid: int) -> tuple[str, str]:
         label = _read_proc_selinux_label(pid)
         return label, _selinux_type(label)
@@ -1819,9 +1861,14 @@ class Broker(dbus.service.Object):
         on the agent unit's system.slice cgroup path — forged same-named
         child cgroups under delegated scopes differ (sol r163) and the
         real cgroup's cgroup.procs is root-owned, so a same-uid process
-        cannot migrate in (sol r164); and PPID=1 — only init spawns a
+        cannot migrate in (sol r164); PPID=1 — only init spawns a
         system service's main process, while foreign processes keep
-        their own parent (sol r168). The environment check is
+        their own parent (sol r168); and, decisively, the peer pid must
+        EQUAL the unit's MainPID as reported by systemd itself — a
+        compromised descendant can double-fork into the same cgroup
+        with PPID 1 and a rewritten argv, but can never be the process
+        pid 1 forked for ExecStart (astra r172 P1). The environment
+        check is
         defence-in-depth only: injected loader code could scrub its own
         entries before the broker reads them (sol r168), and no user-unit
         denylist survives same-uid drop-ins (an empty drop-in
@@ -1868,19 +1915,34 @@ class Broker(dbus.service.Object):
         if cgroup not in _POLKIT_AGENT_CGROUPS:
             return False, (f"peer cgroup {cgroup!r} is not the "
                            f"{_POLKIT_AGENT_UNIT} unit")
-        # Pin the peer's parent to init: only systemd itself spawns a
-        # system service's main process. PPID is kernel-assigned at fork
-        # and cannot be adopted away; the system.slice cgroup above is
-        # root-owned, so a same-uid process can neither migrate into it
-        # (sol r164) nor spawn under it with PPID=1. Loader environ
-        # attestation can't fill this gap — injected code could scrub
-        # its own entries before we read them (sol r168) — and no
-        # unit-file denylist survives same-uid drop-ins, which is why
-        # the agent is a system service (sol r169).
+        # Cheap pre-filter: only systemd itself spawns a system
+        # service's main process, and PPID is kernel-assigned at fork.
+        # NOT sufficient on its own — a descendant orphaned inside the
+        # unit reappears with PPID 1 in the same cgroup (astra r172 P1),
+        # which is why the MainPID equality check below is the decisive
+        # one. Loader environ attestation can't fill this gap —
+        # injected code could scrub its own entries before we read them
+        # (sol r168) — and no unit-file denylist survives same-uid
+        # drop-ins, which is why the agent is a system service
+        # (sol r169).
         ppid = self._peer_ppid(pid)
         if ppid != _POLKIT_AGENT_PPID:
             return False, (f"peer ppid {ppid} is not init — the agent "
                            "must be spawned by systemd into its unit")
+        # The decisive check: the peer must BE the unit's main process.
+        # Everything above can be inherited or forged by a descendant —
+        # a compromised child can double-fork and reappear inside the
+        # same cgroup with PPID 1 and a rewritten argv (astra r172 P1).
+        # MainPID is pid 1's own bookkeeping: the exact process systemd
+        # forked for ExecStart, which no descendant or foreign process
+        # can ever be. Fail closed when systemd cannot answer.
+        main_pid = self._unit_main_pid(_POLKIT_AGENT_UNIT)
+        if main_pid is None:
+            return False, (f"could not resolve {_POLKIT_AGENT_UNIT}'s "
+                           "MainPID from systemd")
+        if int(pid) != main_pid:
+            return False, (f"peer pid {pid} is not the "
+                           f"{_POLKIT_AGENT_UNIT} main pid {main_pid}")
         return True, "system polkit agent unit"
 
     def _require_polkit_agent_peer(self, sender, conn, method: str
@@ -2944,17 +3006,23 @@ class Broker(dbus.service.Object):
     def _note_polkit_cancelled(self, cookie: str, sender: str) -> None:
         """Record a cancelled polkit cookie, expiring stale entries.
 
-        Runs on the mainloop like every _pending mutation; the lock
-        keeps ordering explicit."""
+        The mark accumulates senders: a cancel from a *different* unique
+        name adds a mark, it never replaces an existing one — a foreign
+        cancel must not erase the owner's tombstone (astra r172). Runs
+        on the mainloop like every _pending mutation; the lock keeps
+        ordering explicit."""
         if not cookie:
             return
         now = time.time()
         with self._lock:
             self._prune_polkit_marks(now)
-            if cookie not in self._cancelled_polkit_cookies:
+            mark = self._cancelled_polkit_cookies.get(cookie)
+            if mark is None:
                 self._polkit_mark_room(
                     self._cancelled_polkit_cookies, "cancel")
-            self._cancelled_polkit_cookies[cookie] = (sender, now)
+                self._cancelled_polkit_cookies[cookie] = ({sender}, now)
+            else:
+                mark[0].add(sender)
 
     def _polkit_cookie_cancelled(self, cookie: str,
                                  sender: str = "") -> bool:
@@ -2967,7 +3035,7 @@ class Broker(dbus.service.Object):
             mark = self._cancelled_polkit_cookies.get(cookie)
             if mark is None:
                 return False
-            return not sender or mark[0] == sender
+            return not sender or sender in mark[0]
 
     @dbus.service.method(BUS_NAME, in_signature="sa{sv}sa(sa{sv})",
                          out_signature="i",
@@ -3031,7 +3099,7 @@ class Broker(dbus.service.Object):
                 # belongs to that sender's view and does not suppress
                 # this announce.
                 self._cancelled_polkit_cookies[cookie_s] = mark
-                if mark[0] == sender_s:
+                if sender_s in mark[0]:
                     return
             if cookie_s not in self._announced_polkit:
                 self._polkit_mark_room(
@@ -3061,7 +3129,7 @@ class Broker(dbus.service.Object):
             owned = ((req is not None and req.filed_by == sender_s)
                      or (bound is not None and bound[0] == sender_s))
             mark = self._cancelled_polkit_cookies.get(cookie_s)
-            cancelled = mark is not None and mark[0] == sender_s
+            cancelled = mark is not None and sender_s in mark[0]
         if cancelled:
             # polkitd already abandoned this auth session — the response
             # would land on a dead cookie. Checked before ownership so
@@ -4750,9 +4818,11 @@ class Broker(dbus.service.Object):
             with self._lock:
                 mark = self._cancelled_polkit_cookies.get(cookie_s)
                 if mark is not None:
-                    if mark[0] == filed_by:
+                    if filed_by in mark[0]:
                         polkit_cancelled = True
                     else:
+                        # Every mark is foreign — a live filing by the
+                        # cookie's owner retires them.
                         del self._cancelled_polkit_cookies[cookie_s]
         matched_rule = None
         cached_row = None

@@ -81,6 +81,12 @@ class _StubBroker(Broker):
         # init itself — a foreign process migrated into the unit cgroup
         # keeps its own parent (sol r168/r169).
         self._peer_ppid_val: int | None = 1
+        # And it must BE the unit's main process — a descendant can
+        # double-fork into the same cgroup with PPID 1 and a rewritten
+        # argv (astra r172). None = "report the peer pid as MainPID"
+        # (the default peer IS the agent); any other value overrides.
+        self._agent_main_pid: int | None = None
+        self._agent_main_pid_unreadable = False
         self.pending_signals: list[int] = []
         self.decided_signals: list[tuple[int, str]] = []
         # Captured (uid, cookie, identity) tuples from _respond_polkit.
@@ -117,6 +123,13 @@ class _StubBroker(Broker):
 
     def _peer_ppid(self, pid):
         return self._peer_ppid_val
+
+    def _unit_main_pid(self, unit):
+        if self._agent_main_pid_unreadable:
+            return None
+        if self._agent_main_pid is not None:
+            return self._agent_main_pid
+        return self._peer_pid
 
     def _peer_matches_admin_control(self, *, uid: int, pid: int,
                                     exe: str, method: str = ""
@@ -390,12 +403,27 @@ class TestAnnouncePolkitAuth:
             now = time.time()
             for i in range(B.POLKIT_CANCELLED_MAX - 1):
                 broker._cancelled_polkit_cookies[f"pad-{i}"] = (
-                    ":1.10", now)
+                    {":1.10"}, now)
         with pytest.raises(dbus.DBusException):
             broker.CancelPolkitAuth("one-more", sender=":1.10")
         # Same-sender cancel still holds.
         broker.AnnouncePolkitAuth("mine", sender=":1.9")
         broker.RespondPolkitAuth("mine", [IDENT_ROOT], sender=":1.9")
+        assert broker.polkit_responded == []
+
+    def test_a_foreign_cancel_does_not_erase_the_owners_tombstone(
+            self, broker):
+        """Cancel marks accumulate senders: a foreign CancelPolkitAuth
+        must not overwrite the owner's mark and resurrect the cookie
+        for the owner (astra r172)."""
+        broker.CancelPolkitAuth("c", sender=":1.9")
+        broker.CancelPolkitAuth("c", sender=":1.10")
+        # Both marks are present — neither cancelled the other's out.
+        assert broker._cancelled_polkit_cookies["c"][0] == {
+            ":1.9", ":1.10"}
+        # The owner's respond still sees the cookie as dead.
+        broker.AnnouncePolkitAuth("c", sender=":1.9")
+        broker.RespondPolkitAuth("c", [IDENT_ROOT], sender=":1.9")
         assert broker.polkit_responded == []
 
 
@@ -712,6 +740,34 @@ class TestPolkitAgentPeerBinding:
         broker._peer_ppid_val = 1
         rid = _file_polkit(broker, "cookie-ok", [IDENT_ROOT])
         assert rid in broker._pending
+
+    def test_an_orphaned_descendant_inside_the_unit_is_rejected(
+            self, broker):
+        """A compromised unit descendant can double-fork and reappear
+        inside the genuine cgroup with PPID 1 and a rewritten argv —
+        exe/argv/env/cgroup/ppid all match. It is still not the unit's
+        main process, so systemd's MainPID rejects it (astra r172 P1).
+        """
+        broker._peer_ppid_val = 1
+        broker._peer_cgroup_val = AGENT_CGROUP
+        broker._agent_main_pid = 4242  # the real agent; peer is a child
+        assert broker._peer_pid != broker._agent_main_pid
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
+        with pytest.raises(dbus.DBusException):
+            broker.AnnouncePolkitAuth("cookie-9")
+        with pytest.raises(dbus.DBusException):
+            broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT])
+        assert broker.polkit_responded == []
+
+    def test_an_unresolvable_main_pid_fails_closed(self, broker):
+        """If systemd cannot name the unit's main process the relay
+        must not guess — the peer check denies."""
+        broker._agent_main_pid_unreadable = True
+        with pytest.raises(dbus.DBusException):
+            _file_polkit(broker)
+        assert broker._pending == {}
 
     def test_a_hostile_selinux_type_rejects_even_root(self, broker):
         """uid 0 in a container/tier domain must not reach the relay."""

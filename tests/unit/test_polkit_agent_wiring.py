@@ -183,7 +183,9 @@ def _dbus_error(name: str) -> agent_mod.dbus.DBusException:
 class _RecordingBroker:
     """Records RequestPolkitAuth / WaitForDecision calls and their kwargs."""
 
-    def __init__(self, *, file_raises=None, wait_raises=None, decision=True):
+    def __init__(self, *, file_raises=None, wait_raises=None,
+                 announce_raises=None, respond_raises=None,
+                 decision=True):
         self.filed: list[tuple] = []
         self.waited: list[tuple] = []
         self.announced: list[tuple] = []
@@ -191,6 +193,8 @@ class _RecordingBroker:
         self.cancelled: list[tuple] = []
         self._file_raises = list(file_raises or [])
         self._wait_raises = list(wait_raises or [])
+        self._announce_raises = list(announce_raises or [])
+        self._respond_raises = list(respond_raises or [])
         self._decision = decision
 
     def RequestPolkitAuth(self, action, details, cookie, identities, **kw):
@@ -211,9 +215,17 @@ class _RecordingBroker:
 
     def AnnouncePolkitAuth(self, cookie, **kw):
         self.announced.append((cookie, kw))
+        if self._announce_raises:
+            exc = self._announce_raises.pop(0)
+            if exc is not None:
+                raise exc
 
     def RespondPolkitAuth(self, cookie, identities, **kw):
         self.responded.append((cookie, identities, kw))
+        if self._respond_raises:
+            exc = self._respond_raises.pop(0)
+            if exc is not None:
+                raise exc
 
     def CancelPolkitAuth(self, cookie, **kw):
         self.cancelled.append((cookie, kw))
@@ -545,6 +557,7 @@ class _BrokerInstance:
         self.filed: list = []
         self.waited: list = []
         self.announced: list = []
+        self.responded: list = []
         self.cancelled: list = []
 
 
@@ -575,12 +588,18 @@ class _BrokerProxy:
         inst = self._instance()
         inst.announced.append(cookie)
 
+    def RespondPolkitAuth(self, cookie, identities, **kw):
+        inst = self._instance()
+        inst.responded.append(cookie)
+
     def CancelPolkitAuth(self, cookie, **kw):
         inst = self._instance()
         inst.cancelled.append(cookie)
 
 
 class TestBrokerInstanceBinding:
+
+    _IDENTS: ClassVar = [("unix-user", {"uid": 0})]
 
     @pytest.fixture
     def agent(self, monkeypatch):
@@ -647,3 +666,19 @@ class TestBrokerInstanceBinding:
         d2 = agent._sysbus.instances[agent._sysbus.owner]
         assert d1.cancelled == []
         assert d2.cancelled == ["cookie1"]
+
+    def test_a_respond_survives_a_restart_between_announce_and_verdict(
+            self, agent):
+        """astra r172 P2: the pam/fprint relay re-announces at respond
+        time, but the cached proxy is pinned to the dead pre-restart
+        owner — both calls would fail closed for the rest of the auth
+        session. On an owner-loss error the proxy is re-resolved and the
+        announce+respond pair lands on the NEW instance."""
+        agent._broker_iface()                     # cache a D1 proxy
+        agent._sysbus.restart()
+        agent._respond("cookie1", self._IDENTS)
+        d1 = agent._sysbus.instances[":1.broker-0"]
+        d2 = agent._sysbus.instances[agent._sysbus.owner]
+        assert d1.announced == [] and d1.responded == []
+        assert d2.announced == ["cookie1"]
+        assert d2.responded == ["cookie1"]
