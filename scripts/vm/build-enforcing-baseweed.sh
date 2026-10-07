@@ -116,15 +116,20 @@ trap cleanup EXIT
 #    expects /qdistro.tar.gz (the whole monorepo) at the HTTP root.
 STAGE="$(mktemp -d -t bake-enforcing-stage.XXXXXX)"
 echo "[bake-enforcing] tarballing the qdistro monorepo into $STAGE..."
+# Exclude build *output* dirs by anchored path (./build*, ./*/build*): a bare
+# 'build' basename would also drop source dirs the build requires, e.g.
+# qdshell/quickshell-vendored/src/src/build (add_subdirectory(build)).
 TAR_EXCLUDES=(--exclude='__pycache__' --exclude='*.pyc'
               --exclude='.pytest_cache' --exclude='.git'
-              --exclude='build' --exclude='build-qci'
-              --exclude='build-host*'
               --exclude='node_modules' --exclude='.worktrees'
               --exclude='./ci/runs' --exclude='./image/root/root'
-              --exclude='./image/logs')
-tar "${TAR_EXCLUDES[@]}" --exclude='./qdwin/libweston-vendored/src/build' \
-    -czf "$STAGE/qdistro.tar.gz" -C "$REPO_ROOT" .
+              --exclude='./image/logs'
+              --exclude='./qdwin/libweston-vendored/src/build')
+while IFS= read -r _d; do
+    TAR_EXCLUDES+=("--exclude=$_d")
+done < <(find "$REPO_ROOT" -mindepth 1 -maxdepth 2 -type d -name 'build*' \
+        -printf './%P\n')
+tar "${TAR_EXCLUDES[@]}" -czf "$STAGE/qdistro.tar.gz" -C "$REPO_ROOT" .
 cp "$VM_TOOLS/fresh-vm-bootstrap.sh" "$STAGE/fresh-vm-bootstrap.sh"
 
 # Detect + reclaim port: a stale http.server from a prior run silently

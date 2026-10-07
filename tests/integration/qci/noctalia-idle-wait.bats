@@ -29,8 +29,12 @@ SH
     chmod +x "$BIN/vm-exec" "$BIN/systemd-run"
     export PATH="$BIN:$PATH"
     QDWIN_VM_EXEC="$BIN/vm-exec"; VMNAME=fake
-    mkdir -p /tmp/qci
-    GDIR=$(mktemp -d /tmp/qci/bats-idle-wait.XXXXXX)
+    # The guest contract pins result paths under the per-scenario qci dir.
+    # On the host a shared /tmp/qci may be owned by another user's run, so
+    # the tests redirect the root via NOCT_QCI_DIR.
+    mkdir -p "$BATS_TEST_TMPDIR/qci"
+    NOCT_QCI_DIR="$BATS_TEST_TMPDIR/qci"
+    GDIR=$(mktemp -d "$NOCT_QCI_DIR/bats-idle-wait.XXXXXX")
     DPMS="$BATS_TEST_TMPDIR/dpms"; echo Off > "$DPMS"
     NOCT_DPMS_SYSFS=$DPMS
     NOCT_IDLE_POLL_S=0.2

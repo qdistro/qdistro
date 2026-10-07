@@ -176,6 +176,18 @@ if [ "$_net_ok" != 1 ]; then
     log "  WARN: download.opensuse.org did not resolve in 60s; zypper will fail closed if the snapshot repos are unreachable"
 fi
 
+# qdshell's runtime is the vendored upstream Quickshell build; the archived
+# noctalia-qs fork was never a real dep. Bases baked before this change had
+# it installed and locked-in supplements can pull it — remove it if present,
+# then lock it before ANY zypper transaction below can resolve it back in.
+if rpm -q noctalia-qs >/dev/null 2>&1; then
+    log "removing noctalia-qs (superseded by vendored Quickshell)..."
+    zypper -n rm noctalia-qs >/dev/null 2>&1 \
+        || { log "  ERROR: zypper rm noctalia-qs failed"; exit 3; }
+fi
+zypper -n addlock noctalia-qs >/dev/null 2>&1 \
+    || { log "  ERROR: zypper addlock noctalia-qs failed"; exit 3; }
+
 # The admin TUI (installed below by install-admin-cli-for-vm.sh) needs
 # Textual. The kiwi image carries it (image/config.xml); the baked cloud base
 # does not yet (adding it to scripts/vm/install-deps.sh changes the baked
@@ -638,6 +650,12 @@ if [ "$QCI_NATIVE_STAGE" = 0 ]; then
         || { log "  ERROR: qdshell meson compile failed"; exit 3; }
     meson install -C build \
         || { log "  ERROR: qdshell meson install failed"; exit 3; }
+    # The qdshell runtime itself: upstream Quickshell is vendored
+    # (Tumbleweed's only package was the archived noctalia-qs fork).
+    # Without the native stage nothing else provides /usr/bin/qs.
+    log "building vendored Quickshell (qdshell runtime)..."
+    DESTDIR= bash "$SRC/qdshell/quickshell-vendored/build-quickshell.sh" \
+        || { log "  ERROR: vendored Quickshell build failed"; exit 3; }
 else
     log "checking staged native ELF dependencies..."
     while IFS= read -r elf; do

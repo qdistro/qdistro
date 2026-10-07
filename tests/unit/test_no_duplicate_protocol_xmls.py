@@ -63,6 +63,11 @@ EXCLUDE_PARTS = {
     # qdwin vendors a libweston source tree for the popup-grab patch;
     # its protocols/ dir is upstream libweston content, not qdistro's.
     "libweston-vendored",
+    # qdshell vendors upstream Quickshell 0.3.0 (qdshell/quickshell-vendored/);
+    # it ships and must build from its own wayland-protocol XMLs (e.g.
+    # wlr-layer-shell-unstable-v1). qdwin's copies stay canonical for
+    # qdistro's own protocols; the vendored tree is upstream source.
+    "quickshell-vendored",
     # qdistro's CI runs dir holds per-run libvirt domain.xml dumps.
     "runs",
 }

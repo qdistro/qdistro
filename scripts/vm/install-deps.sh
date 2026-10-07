@@ -96,10 +96,18 @@ QDISTRO_PKGS=(
   qemu-x86 qemu-tools
   qemu-audio-pipewire qemu-audio-alsa
   libguestfs guestfs-tools
-  # qdshell QML stack: noctalia-qs is Tumbleweed's quickshell package
-  # (the binary is /usr/bin/qs, despite the package being named
-  # noctalia-qs after the Noctalia project that ships it).
-  noctalia-qs
+  # qdshell QML stack: the runtime is the vendored upstream Quickshell
+  # build (qdshell/quickshell-vendored/build-quickshell.sh), staged by the
+  # native builder — Tumbleweed's only prebuilt runtime was the archived
+  # noctalia-qs fork. The four libs are what the staged binary links
+  # (ldd-verified); the devel set below it keeps the in-guest developer
+  # build path working (it lands only in QDISTRO_PKGS, never the baked
+  # runtime set — cmake/spirv-tools join the toolchain filter below).
+  libjemalloc2 libcpptrace1 libpolkit-agent-1-0 libpolkit-gobject-1-0
+  cmake spirv-tools vulkan-devel pam-devel polkit-devel jemalloc-devel
+  cpptrace-devel qt6-quick-private-devel qt6-qml-private-devel
+  qt6-shadertools-devel qt6-waylandclient-devel
+  qt6-waylandclient-private-devel
   qt6-declarative-imports qt6-svg-devel qt6-shadertools
   # Qt6 devel headers — required so fresh-vm-bootstrap.sh's in-VM
   # `meson setup` of qdshell/qml-plugin/ can find Qt6Core / Qt6Qml /
@@ -123,7 +131,7 @@ PKGS=("${QDISTRO_PKGS[@]}")
 QDISTRO_RUNTIME_PKGS=()
 for _pkg in "${QDISTRO_PKGS[@]}"; do
     case "$_pkg" in
-        *-devel|meson|ninja|gcc|gcc-c++|pkgconf-pkg-config) ;;
+        *-devel|meson|ninja|gcc|gcc-c++|pkgconf-pkg-config|cmake|spirv-tools) ;;
         *) QDISTRO_RUNTIME_PKGS+=("$_pkg") ;;
     esac
 done
@@ -135,6 +143,12 @@ fi
 # J25: verify repo signatures (no --no-gpg-checks) and don't swallow a refresh
 # failure. This VM-side deps install feeds baseweed builder VMs whose output
 # can back a release image build, so it must not accept unsigned metadata.
+# qdshell's runtime is vendored Quickshell (qdshell/quickshell-vendored).
+# noctalia-qs was never a legitimate qdistro dep — qdshell forked Noctalia
+# before that fork existed — so lock it BEFORE the main transaction: no
+# recommends/supplements may pull the archived fork back onto the system.
+zypper -n addlock noctalia-qs \
+    || { echo "[install-deps] ERROR: zypper addlock noctalia-qs failed" >&2; exit 3; }
 zypper -n refresh
 zypper -n install --no-recommends "${QDISTRO_PKGS[@]}" 2>&1 | tail -10
 

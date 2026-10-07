@@ -24,13 +24,27 @@ trap 'rm -rf "$work"' EXIT
 cp "$repo/ci/containers/Containerfile.host" "$repo/ci/containers/install-host-deps.sh" \
     "$repo/ci/containers/host-packages.txt" "$work/"
 cp "$repo/scripts/vm/container-native-deps.sh" "$repo/qdterm/util/build-sip.sh" "$work/"
+# qdshell's runtime: reuse the binaries the shared podman native-stage
+# builder (scripts/vm/build-native-podman.sh) already produces from the
+# vendored Quickshell source — same snapshot, one compile, no second copy
+# inside this recipe.
+native_stage=$(bash "$repo/scripts/vm/build-native-podman.sh") || {
+    echo 'ERROR: native stage build failed' >&2; exit 3;
+}
+mkdir "$work/quickshell-bin"
+tar -C "$work/quickshell-bin" -xf "$native_stage" ./usr/bin/quickshell ./usr/bin/qs
 mkdir "$work/qtermwidget-pyqt"
 # Copy source only; local SIP build outputs must never enter the recipe.
 (cd "$repo/qdterm/qtermwidget-pyqt"
  while IFS= read -r -d '' path; do
      cp --parents "$path" "$work/qtermwidget-pyqt/"
  done < <(git ls-files -z --cached --others --exclude-standard))
-recipe=$(cd "$work" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+# Symlinks are recipe inputs too (the staged usr/bin/qs link): hash their
+# path -> target mapping; sha256sum on a symlink would hash target content.
+recipe=$(cd "$work" && {
+    find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+    find . -type l -printf '%p -> %l\n' | LC_ALL=C sort
+} | sha256sum | cut -d' ' -f1)
 key=$(printf '%s\n' "$base_id" "$QDISTRO_SUBSTRATE_SNAPSHOT" "$recipe" | sha256sum | cut -d' ' -f1)
 image="localhost/qdistro/host-builder:$key"
 exec 9>"$cache/host-podman/.build.lock"
