@@ -24,6 +24,7 @@ _packaging_vars=(
     AGAMA_STOCK_ISO AGAMA_STOCK_ISO_URL AGAMA_STOCK_ISO_SHA256
     QDISTRO_ADMIN_PASSWORD QDISTRO_ROOT_PASSWORD
     QDISTRO_SNAPSHOT_LABEL QDISTRO_VERSION
+    QDISTRO_SOURCE_SHA QDISTRO_SOURCE_STATE
     QDISTRO_BUILD_TMP QDISTRO_VM_NAME QDISTRO_WORK
 )
 
@@ -89,6 +90,33 @@ unset _packaging_vars _v
 # release grammar requires 8 digits — leave empty for floating installs).
 : "${QDISTRO_SNAPSHOT_LABEL:=}"
 : "${QDISTRO_VERSION:=0.1.0}"
+
+# --- source identity for /etc/qdistro/release -------------------------------
+# The SOURCE grammar (image/lib/release-stamp.sh) requires
+#   SOURCE qdistro <40-hex> clean|DIRTY diff-sha256=<16hex> untracked=<n>
+# Defaults resolve the enclosing checkout; override when installing RPMs
+# built from a different tree.
+# Normalize env.sh's own directory first: callers source it as
+# "packaging/agama/../env.sh", and resolving ".." against the raw dirname
+# would climb one level too far (into the enclosing checkout).
+_env_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+_packaging_repo_root=$(cd "$_env_dir/.." && pwd)
+if _head=$(git -C "$_packaging_repo_root" rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null); then
+    : "${QDISTRO_SOURCE_SHA:=$_head}"
+    if [[ ! -v QDISTRO_SOURCE_STATE ]]; then
+        _status=$(git -C "$_packaging_repo_root" status --porcelain 2>/dev/null || true)
+        if [ -n "$_status" ]; then
+            _untracked=$(printf '%s\n' "$_status" | grep -c '^??' || true)
+            _dsha=$(git -C "$_packaging_repo_root" diff HEAD 2>/dev/null | sha256sum | cut -c1-16)
+            QDISTRO_SOURCE_STATE="DIRTY diff-sha256=$_dsha untracked=$_untracked"
+        else
+            QDISTRO_SOURCE_STATE=clean
+        fi
+    fi
+fi
+: "${QDISTRO_SOURCE_SHA:=0000000000000000000000000000000000000000}"
+: "${QDISTRO_SOURCE_STATE:=clean}"
+unset _env_dir _packaging_repo_root _head _status _untracked _dsha
 
 # --- scratch space ----------------------------------------------------------
 # ISO surgery needs ~15G of scratch (ext4 rootfs + squashfs repack) — do not

@@ -24,7 +24,7 @@ mkdir -p /etc/qdistro
   if [ -n "@QDISTRO_SNAPSHOT_LABEL@" ]; then
     echo "SNAPSHOT=@QDISTRO_SNAPSHOT_LABEL@"
   fi
-  echo "SOURCE qdistro packaging/agama unattended"
+  echo "SOURCE qdistro @QDISTRO_SOURCE_SHA@ @QDISTRO_SOURCE_STATE@"
 } > /etc/qdistro/release
 
 # Agama strips the agama-N installation repos from the target (zypp_server

@@ -10,9 +10,11 @@ repo=$here/repo
 gnupg=$here/keys/gnupg
 
 [ -d "$gnupg" ] || { echo "no keyring at $gnupg — see keys/README.md" >&2; exit 1; }
-keyid=$(GNUPGHOME=$gnupg gpg --batch --list-secret-keys --with-colons \
-        | awk -F: '/^sec/ {print $5; exit}')
-[ -n "$keyid" ] || { echo "no secret key in $gnupg" >&2; exit 1; }
+# Sign with the fingerprint the Agama profiles actually trust — picking "the
+# first secret key" would produce a signed repo the installer rejects.
+keyid=$QDISTRO_RPM_KEY_FP
+GNUPGHOME=$gnupg gpg --batch --list-secret-keys "$keyid" >/dev/null 2>&1 \
+    || { echo "no secret key for QDISTRO_RPM_KEY_FP=$keyid in $gnupg" >&2; exit 1; }
 
 command -v rpmsign >/dev/null || { echo "needs rpmsign (rpm-sign)" >&2; exit 1; }
 
