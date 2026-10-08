@@ -119,6 +119,11 @@ class TestMainBusWiring:
         # Stop before blocking forever in the GLib main loop.
         loop = mock.MagicMock()
         monkeypatch.setattr(agent_mod.GLib, "MainLoop", lambda: loop)
+        # And never arm the real 30 s reconcile poll: the timer survives
+        # monkeypatch teardown and fires reconcile() on this fake bus
+        # inside whichever later test owns the GLib/Qt event loop then.
+        monkeypatch.setattr(agent_mod.GLib, "timeout_add_seconds",
+                            lambda *a: 1)
 
         rc = agent_mod.main()
         seen["rc"] = rc

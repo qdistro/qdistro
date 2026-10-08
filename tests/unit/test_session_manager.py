@@ -424,6 +424,27 @@ class _FakeOps:
     # as a completed stop (a queued start is indistinguishable from one).
     systemctl_stop_unacknowledged = False
 
+    def observe_silo(self, name: str, uid: int, kind: str):
+        # Model the real probe's verdicts from this fake's call log: a
+        # launcher unit it started and never stopped reports
+        # "launcher-running"; anything else reports "stopped" (unit
+        # inactive AND the workload boundary absent). Tests needing
+        # "unknown"/"failed"/"starting" or a mid-probe mutation
+        # monkeypatch this method.
+        if kind == sm.KIND_TIER3S:
+            unit = f"qdistro-tier3s-silo@{name}.service"
+        elif kind == sm.KIND_TIER2_TEMPLATE:
+            unit = f"qdistro-tier2-silo@{name}.service"
+        else:
+            unit = f"qdshell-session-{name}@{uid}.service"
+        last = None
+        for op, u in self.systemctl_calls:
+            if u == unit:
+                last = op
+        if last == "start":
+            return "launcher-running", "fake: launcher unit active"
+        return "stopped", "fake: launcher inactive and workload absent"
+
     def tier3s_installed(self) -> bool:
         # No tier3s launch path on this fake host: startup reconciliation of
         # tier3s launches is a no-op (test_session_manager_tier3s covers it).
@@ -735,6 +756,181 @@ class TestLifecycle:
         store.start("work")  # no-op, no second systemctl call
         starts = [c for c in ops.systemctl_calls if c[0] == "start"]
         assert len(starts) == 1
+
+    def test_start_from_active_relaunches_when_dead(self, store, ops):
+        # ACTIVE in the store is not proof the workload runs — the
+        # launcher can die (or an app-initiated exit can tear it down)
+        # behind the store's back. A second start must verify liveness
+        # and re-launch, not report a silent no-op success.
+        store.create("work", 2000)
+        store.start("work")
+        ops.observe_silo = lambda *a: (
+            "stopped", "launcher inactive and workload absent")
+        store.start("work")
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+        assert store.get("work").state == State.ACTIVE
+
+    def test_start_from_active_unknown_probe_fails_closed(self, store, ops):
+        # When the probe cannot prove the silo dead, start() must neither
+        # launch a second workload nor report a false success — even on
+        # a silo flagged start_unresolved by a timed-out earlier start.
+        store.create("work", 2000)
+        store.start("work")
+        store.get("work").start_unresolved = True
+        ops.observe_silo = lambda *a: (
+            "unknown", "launcher has a pending or unknown job")
+        with pytest.raises(sm.SessionError, match="cannot verify"):
+            store.start("work")
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 1
+        assert store.get("work").state == State.ACTIVE
+
+    def test_start_from_active_dead_clears_start_unresolved(
+            self, store, ops):
+        # A StartNotCancelled leaves the silo ACTIVE + start_unresolved.
+        # If a later probe proves it dead (no pending job, inactive unit),
+        # a plain retry relaunches — the queued request never
+        # materialized — and clears the flag on the way through STOPPED.
+        store.create("work", 2000)
+        store.start("work")
+        silo = store.get("work")
+        silo.start_unresolved = True
+        ops.observe_silo = lambda *a: (
+            "stopped", "launcher inactive and workload absent")
+        store.start("work")
+        assert silo.start_unresolved is False
+        assert store.get("work").state == State.ACTIVE
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+
+    def test_start_probe_race_relaunches_after_concurrent_stop(
+            self, store, ops):
+        # The probe runs outside the store lock, so a lifecycle op can
+        # land mid-probe; the stale verdict must be discarded via the
+        # operation_generation check, not trusted.
+        store.create("work", 2000)
+        store.start("work")
+
+        def probe_then_stop(*a):
+            store.stop("work", 0)
+            return ("launcher-running",
+                    "fake: stale verdict — silo was live at probe time")
+
+        ops.observe_silo = probe_then_stop
+        store.start("work")
+        assert store.get("work").state == State.ACTIVE
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+
+    def test_start_from_active_dead_verdict_needs_no_extra_round(
+            self, store, ops):
+        # Stale verdicts are retried, but a confirmed "dead" verdict must
+        # launch in the SAME round — it does not spend a re-evaluation.
+        # Three stale probes then a valid dead verdict on the last round
+        # must still relaunch.
+        store.create("work", 2000)
+        store.start("work")
+        probes = []
+
+        def racing_probe(*a):
+            probes.append(1)
+            if len(probes) <= 3:
+                # A lifecycle op landing mid-probe bumps the generation.
+                store.get("work").operation_generation += 1
+                return ("launcher-running", "fake: stale verdict")
+            return ("stopped", "launcher inactive and workload absent")
+
+        ops.observe_silo = racing_probe
+        store.start("work")
+        assert len(probes) == 4
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+        assert store.get("work").state == State.ACTIVE
+
+    def test_start_from_active_stale_probes_exhaust_and_refuse(
+            self, store, ops):
+        # If every probe is invalidated by a racing lifecycle op, start()
+        # gives up with an error rather than spinning or guessing.
+        store.create("work", 2000)
+        store.start("work")
+
+        def always_raced(*a):
+            store.get("work").operation_generation += 1
+            return ("launcher-running", "fake: stale verdict")
+
+        ops.observe_silo = always_raced
+        with pytest.raises(sm.SessionError, match="could not settle"):
+            store.start("work")
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 1
+        assert store.get("work").state == State.ACTIVE
+
+    def test_start_probe_respects_an_inflight_freeze(self, store, ops):
+        # freeze() claims the in-flight slot and writes cgroup.freeze
+        # BEFORE it commits a state/generation change. A start() probe
+        # overlapping that window must not act on its verdict — otherwise
+        # start could thaw + relaunch, then the freeze commits Frozen
+        # over a running workload. start() waits out the claim, sees the
+        # committed FROZEN, and takes the ordinary FROZEN→ACTIVE path.
+        import threading
+        store.create("work", 2000)
+        store.start("work")
+        freeze_wrote = threading.Event()
+        let_freeze_commit = threading.Event()
+        probe_entered = threading.Event()
+        let_probe_finish = threading.Event()
+        starter_waiting = threading.Event()
+        orig_freeze = ops.cgroup_freeze
+        orig_await = store._await_inflight_locked
+        awaits = []
+
+        def gated_freeze(n, flag):
+            orig_freeze(n, flag)
+            if n == "work" and flag:
+                freeze_wrote.set()
+                let_freeze_commit.wait(10)
+
+        def spy_await(n):
+            awaits.append(n)
+            if len(awaits) == 2:
+                # The stale verdict was discarded while the slot was
+                # still claimed (generation untouched at that point) —
+                # only the in-flight recheck could have caught it.
+                starter_waiting.set()
+            return orig_await(n)
+
+        ops.cgroup_freeze = gated_freeze
+        store._await_inflight_locked = spy_await
+
+        def dead_probe(*a):
+            probe_entered.set()
+            # Sit inside the probe while the freeze claims its slot and
+            # lands its cgroup write — the verdict is stale by the time
+            # start() sees it.
+            let_probe_finish.wait(10)
+            return ("stopped", "launcher inactive and workload absent")
+
+        ops.observe_silo = dead_probe
+        starter = threading.Thread(target=store.start, args=("work",))
+        starter.start()
+        assert probe_entered.wait(10)  # start() is inside its probe
+
+        freezer = threading.Thread(target=store.freeze, args=("work",))
+        freezer.start()
+        assert freeze_wrote.wait(10)   # claimed the slot + wrote, gated
+        let_probe_finish.set()         # verdict arrives mid-freeze
+        assert starter_waiting.wait(10)  # recheck saw the claimed slot
+        let_freeze_commit.set()
+        starter.join(10)
+        freezer.join(10)
+        assert not starter.is_alive() and not freezer.is_alive()
+        # Serialized outcome: the freeze committed, then start() ran the
+        # thaw + relaunch deliberately — never racing the freeze write.
+        assert store.get("work").state == State.ACTIVE
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+        assert ops.cgroup_frozen["work"] is False
 
     def test_freeze_then_resume(self, store, ops):
         store.create("work", 2000)
@@ -1635,6 +1831,30 @@ class TestTier2TemplateKind:
         ops.tier2_stop_fails = False
         store.stop("browser1")
         assert store.get("browser1").state == State.STOPPED
+
+    def test_start_from_active_tier2_confirms_death_with_the_stop_verifier(
+            self, store, ops):
+        # The observation's "stopped" covers the unit, but the dead
+        # verdict is confirmed by the same fail-closed verifier the stop
+        # path uses — a possibly-surviving container refuses the relaunch
+        # rather than launching a second workload over it.
+        store.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
+                     kind="tier2-template", launch=dict(_LAUNCH))
+        store.start("browser1")
+        ops.observe_silo = lambda *a: (
+            "stopped", "launcher inactive and workload absent")
+        ops.tier2_stop_fails = True
+        with pytest.raises(sm.SessionError, match="cannot verify"):
+            store.start("browser1")
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 1
+        assert store.get("browser1").state == State.ACTIVE
+        # Once the verifier reports genuinely gone, the retry relaunches.
+        ops.tier2_stop_fails = False
+        store.start("browser1")
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+        assert store.get("browser1").state == State.ACTIVE
 
 
 def _source_env_via_bash(env_text: str) -> dict:
