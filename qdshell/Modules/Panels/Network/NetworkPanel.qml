@@ -73,13 +73,13 @@ SmartPanel {
     // Restore last view if valid, otherwise choose what's available (prefer Wi‑Fi when both exist)
     if (Settings.data && Settings.data.ui && Settings.data.ui.networkPanelView) {
       const last = Settings.data.ui.networkPanelView;
-      if (last === "ethernet" && NetworkService.hasEthernet()) {
+      if (last === "ethernet" && NetworkService.hasEthernet) {
         panelViewMode = "ethernet";
       } else {
         panelViewMode = "wifi";
       }
     } else {
-      if (!Settings.data.network.wifiEnabled && NetworkService.hasEthernet())
+      if (!Settings.data.network.wifiEnabled && NetworkService.hasEthernet)
         panelViewMode = "ethernet";
       else
         panelViewMode = "wifi";
@@ -104,7 +104,7 @@ SmartPanel {
     id: panelContent
 
     title: panelViewMode === "wifi" ? I18n.tr("common.wifi") : I18n.tr("common.ethernet")
-    icon: panelViewMode === "wifi" ? (Settings.data.network.wifiEnabled ? "wifi" : "wifi-off") : (NetworkService.hasEthernet() ? (NetworkService.ethernetConnected ? "ethernet" : "ethernet") : "ethernet-off")
+    icon: panelViewMode === "wifi" ? (Settings.data.network.wifiEnabled ? "wifi" : "wifi-off") : (NetworkService.hasEthernet ? (NetworkService.ethernetConnected ? "ethernet" : "ethernet") : "ethernet-off")
     iconColor: panelViewMode === "wifi" ? (Settings.data.network.wifiEnabled ? Color.mPrimary : Color.mOnSurfaceVariant) : (NetworkService.ethernetConnected ? Color.mPrimary : Color.mOnSurfaceVariant)
     onCloseRequested: root.close()
 
@@ -145,16 +145,18 @@ SmartPanel {
     ]
 
     // Mode switch (Wi-Fi / Ethernet) — lifted out of the header NBox.
+    // Bind to service state: the child's effective visibility includes this
+    // parent's visibility, so reading it here can latch both items hidden.
     NBox {
       Layout.fillWidth: true
-      visible: modeTabBar.visible
+      visible: NetworkService.hasEthernet
       implicitHeight: modeTabBar.implicitHeight + Style.marginM * 2
 
       NTabBar {
         id: modeTabBar
         anchors.fill: parent
         anchors.margins: Style.marginM
-        visible: NetworkService.hasEthernet()
+        visible: NetworkService.hasEthernet
         spacing: Style.marginM
         distributeEvenly: true
         currentIndex: root.panelViewMode === "wifi" ? 0 : 1
