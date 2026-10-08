@@ -88,8 +88,8 @@ OBJ_PATH = "/org/qdistro/SessionManager1"
 #     0 when the write succeeds, including when the value is already set, so
 #     there is no "already disabled" non-zero to swallow.
 #   * Freeze/resume/stop waiters on an in-flight slot give up after
-#     _T_INFLIGHT_WAIT. That bounds the waiter, not the cgroup.freeze write
-#     (the write staying unbounded is still a separate filed item).
+#     _T_INFLIGHT_WAIT. The cgroup.freeze write itself is bounded by
+#     _T_CGROUP_WRITE in _SystemOps.cgroup_freeze.
 # Other check=False sites still treat a specific non-zero as non-fatal on
 # purpose (userdel "does not exist", systemctl stop "not established", the
 # btrfs probe, a best-effort bus reload).
@@ -400,12 +400,20 @@ DEFAULT_STOP_GRACE_S = 5
 
 # How long freeze/resume/stop will wait for another thread's in-flight
 # lifecycle op on the same silo. This bounds the WAITER, not the
-# cgroup.freeze write itself (that write staying unbounded is a separate
-# filed item). Longer than _T_SYSTEMCTL (30s) and DEFAULT_STOP_GRACE_S
+# cgroup.freeze write itself (that write is bounded separately by
+# _T_CGROUP_WRITE). Longer than _T_SYSTEMCTL (30s) and DEFAULT_STOP_GRACE_S
 # (5s), shorter than the _T_ACCOUNT (300s) allowance: a slow-but-live holder
 # is given time to finish, and a waiter is not stuck forever if the holder
 # never clears the slot.
 _T_INFLIGHT_WAIT = 120
+
+# Bound on a single cgroup.freeze write. The write synchronously waits for
+# the kernel to reach the (un)frozen state, and a task stuck in D state can
+# park it indefinitely on the calling thread — which for freeze()/resume()
+# is a session-manager D-Bus worker. 30s is far beyond any healthy freeze
+# (subsecond); on expiry the op fails fast rather than stalling the store.
+# The write is NOT cancelled — the kernel may still complete it later.
+_T_CGROUP_WRITE = 30
 
 log = logging.getLogger("qdistro_session_manager")
 
@@ -1712,8 +1720,32 @@ class _SystemOps:
         return [p.name for p in CGROUP_ROOT.iterdir() if p.is_dir()]
 
     def cgroup_freeze(self, name: str, frozen: bool) -> None:
+        # cgroupfs has no nonblocking/pollable write: the freeze write
+        # synchronously waits for the kernel to settle the cgroup, and a
+        # task in uninterruptible sleep can hold it forever. Bound it in a
+        # helper thread and join with _T_CGROUP_WRITE; on timeout raise —
+        # the abandoned writer is a daemon thread and the kernel may still
+        # apply the (uncancellable) write later, which the next
+        # freeze/resume reconciles.
         p = CGROUP_ROOT / name / "cgroup.freeze"
-        p.write_text("1\n" if frozen else "0\n")
+        err: list[BaseException] = []
+
+        def _w():
+            try:
+                p.write_text("1\n" if frozen else "0\n")
+            except BaseException as e:  # noqa: BLE001 - relay verbatim
+                err.append(e)
+
+        t = threading.Thread(target=_w, daemon=True,
+                             name=f"cgroup-freeze-{name}")
+        t.start()
+        t.join(_T_CGROUP_WRITE)
+        if t.is_alive():
+            raise TimeoutError(
+                f"cgroup.freeze write for {name!r} still pending after "
+                f"{_T_CGROUP_WRITE}s")
+        if err:
+            raise err[0]
 
     def cgroup_pids(self, name: str) -> list[int]:
         p = CGROUP_ROOT / name / "cgroup.procs"

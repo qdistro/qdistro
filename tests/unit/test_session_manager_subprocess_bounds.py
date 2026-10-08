@@ -22,7 +22,10 @@ Two layers:
 from __future__ import annotations
 
 import ast
+import errno
 import math
+import threading
+import time
 import types
 
 import pytest
@@ -1722,3 +1725,52 @@ class TestLivenessEvidenceIsBoundToTheSiloAsked_About:
         sm._SystemOps().tier2_silo_running("work")
         assert asked == [sm.TIER2_CONTAINER_FMT.format(name="work")], asked
 
+
+
+class TestCgroupFreezeWriteIsBounded:
+    """The cgroup.freeze write synchronously waits for the kernel to settle
+    the cgroup; a task in uninterruptible sleep can park it forever. The
+    write must therefore be bounded so a wedged freeze cannot stall the
+    session-manager worker holding the silo's in-flight slot."""
+
+    def _pin(self, monkeypatch, tmp_path):
+        (tmp_path / "work").mkdir()
+        (tmp_path / "work" / "cgroup.freeze").write_text("0\n")
+        monkeypatch.setattr(sm, "CGROUP_ROOT", tmp_path)
+
+    def test_freeze_writes_the_value(self, monkeypatch, tmp_path):
+        self._pin(monkeypatch, tmp_path)
+        sm._SystemOps().cgroup_freeze("work", True)
+        assert (tmp_path / "work" / "cgroup.freeze").read_text() == "1\n"
+
+    def test_unfreeze_writes_the_value(self, monkeypatch, tmp_path):
+        self._pin(monkeypatch, tmp_path)
+        sm._SystemOps().cgroup_freeze("work", False)
+        assert (tmp_path / "work" / "cgroup.freeze").read_text() == "0\n"
+
+    def test_write_error_propagates(self, monkeypatch, tmp_path):
+        self._pin(monkeypatch, tmp_path)
+
+        def boom(self_p, *a, **kw):
+            raise OSError(errno.EACCES, "denied")
+        monkeypatch.setattr(sm.Path, "write_text", boom)
+
+        with pytest.raises(OSError):
+            sm._SystemOps().cgroup_freeze("work", True)
+
+    def test_wedged_write_fails_fast(self, monkeypatch, tmp_path):
+        """A write the kernel never completes must raise TimeoutError after
+        _T_CGROUP_WRITE — not block the caller indefinitely."""
+        self._pin(monkeypatch, tmp_path)
+        release = threading.Event()
+
+        def wedge(self_p, *a, **kw):
+            release.wait()
+        monkeypatch.setattr(sm.Path, "write_text", wedge)
+        monkeypatch.setattr(sm, "_T_CGROUP_WRITE", 0.25)
+
+        t0 = time.monotonic()
+        with pytest.raises(TimeoutError):
+            sm._SystemOps().cgroup_freeze("work", True)
+        assert time.monotonic() - t0 < 5
+        release.set()  # let the abandoned writer exit
