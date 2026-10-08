@@ -50,6 +50,15 @@ SmartPanel {
     if (panelContent && panelContent.settingsVersion !== undefined) {
       panelContent.settingsVersion++;
     }
+    // Auto-close must also cover the already-empty case:
+    // onTrayValuesChanged only fires on a transition TO empty, so a
+    // drawer opened while trayValues is [] would otherwise stay open as
+    // a bare stub (observed live in qdshell-ui test_panel_degraded[tray]).
+    if (panelContent) {
+      panelContent.updateFilteredItems();
+      if (trayValues.length === 0)
+        close();
+    }
   }
 
   panelContent: Item {

@@ -709,3 +709,89 @@ def test_import_edit_sibling_silo_prefix_not_confused(tmp_path, edit_class):
     _stage_edit(base, source_realpath=str(src), payload_files={"o": "E"})
     with pytest.raises(BadState, match="not under the request silo"):
         _store(tmp_path, ops).import_from_disposable(TOKEN)
+
+
+def test_concurrent_imports_of_one_token_are_serialized(tmp_path,
+                                                        export_class,
+                                                        monkeypatch):
+    """Two overlapping imports must not double-promote a one-shot staging:
+    the second waits on the store's _import_lock, then sees the removed
+    staging dir and answers with the clean zero-file receipt — the same
+    answer the serialized dispatch thread used to produce."""
+    import threading
+
+    ops = _ExportFakeOps()
+    ops.state_path = str(tmp_path / "silostate")
+    (tmp_path / "silostate").mkdir()
+    base = tmp_path / "staging"
+    _stage(base, payload_files={"out.txt": "result"})
+    store = _store(tmp_path, ops)
+
+    # Wrap the store lock so the test can tell when a SECOND caller has
+    # attempted the transaction. The attempt is recorded before the
+    # underlying acquire blocks, so t1 can deterministically stay parked
+    # until t2 is queued on the lock — no timing window where t1 could
+    # finish before t2 even tries.
+    second_attempt = threading.Event()
+
+    class ObservedLock:
+        def __init__(self, real):
+            self._real = real
+            self._attempts = 0
+
+        def __enter__(self):
+            self._attempts += 1
+            if self._attempts >= 2:
+                second_attempt.set()
+            self._real.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self._real.release()
+            return False
+
+    store._import_lock = ObservedLock(store._import_lock)
+
+    entered = threading.Event()
+    release = threading.Event()
+    promotes = []
+
+    real_promote = sm._dispexport.promote_export
+
+    def slow_promote(*a, **kw):
+        entered.set()
+        assert release.wait(10), "test did not release the promoter"
+        receipt = real_promote(*a, **kw)
+        promotes.append(receipt)
+        return receipt
+
+    monkeypatch.setattr(sm._dispexport, "promote_export", slow_promote)
+
+    results, errors = [], []
+
+    def invoke():
+        try:
+            results.append(store.import_from_disposable(TOKEN))
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    t1 = threading.Thread(target=invoke)
+    t2 = threading.Thread(target=invoke)
+    t1.start()
+    assert entered.wait(2), "first import never reached the promoter"
+    # t1 is parked mid-transaction holding _import_lock; start t2 and
+    # require proof it attempted the transaction (i.e. is queued on the
+    # lock) before letting t1 finish — the overlap is established, not
+    # scheduled.
+    t2.start()
+    assert second_attempt.wait(5), (
+        "second import never attempted the transaction while the first "
+        "held _import_lock — the lock is not on the entry path")
+    release.set()
+    t1.join(5)
+    t2.join(5)
+    assert not t1.is_alive() and not t2.is_alive()
+
+    assert errors == []
+    assert len(promotes) == 1, "both imports promoted the same staging"
+    assert sorted(len(r["files"]) for r in results) == [0, 1]

@@ -1318,32 +1318,67 @@ class TestDBusErrorNames:
         assert "disk" in msg
 
     def test_create_silo_translates_any_exception(self):
-        """Supplement: CreateSilo's store handler uses the helper for Exception,
-        not only SessionError. The helper itself is tested above without a bus.
-        """
+        """Supplement: the anything→Generic translation lives in
+        _run_offloaded now that CreateSilo is async. Its unexpected-exception
+        branch must still route through the shared mapper so a
+        non-SessionError is answered as a typed D-Bus error — never a
+        stranded caller. The behavioural pin is in
+        test_session_manager_dbus_async.py."""
         tree = ast.parse(Path(sm.__file__).read_text())
-        create = next(
+        helper = next(
             (n for n in ast.walk(tree)
-             if isinstance(n, ast.FunctionDef) and n.name == "CreateSilo"),
+             if isinstance(n, ast.FunctionDef) and n.name == "_run_offloaded"),
             None)
-        assert create is not None, "CreateSilo not found"
+        assert helper is not None, "_run_offloaded not found"
         matched = False
-        for handler in ast.walk(create):
+        for handler in ast.walk(helper):
             if not isinstance(handler, ast.ExceptHandler):
                 continue
             if not (isinstance(handler.type, ast.Name)
                     and handler.type.id == "Exception"):
                 continue
-            for raised in ast.walk(handler):
-                if not isinstance(raised, ast.Raise):
-                    continue
-                exc = raised.exc
-                if (isinstance(exc, ast.Call)
-                        and isinstance(exc.func, ast.Name)
-                        and exc.func.id == "_to_dbus_exception"):
+            for node in ast.walk(handler):
+                # The unexpected mapper is `unexpected_error or
+                # _to_dbus_exception`, invoked on the raised exception.
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id in (
+                            "map_unexpected", "_to_dbus_exception",
+                            "unexpected_error")):
                     matched = True
         assert matched, (
-            "CreateSilo does not raise _to_dbus_exception from except Exception")
+            "_run_offloaded does not map unexpected exceptions through the "
+            "shared D-Bus error mapper")
+
+    def test_every_mutating_method_runs_offloaded(self):
+        """Every store-mutating D-Bus method must declare async_callbacks and
+        reach the store through _run_offloaded — a synchronous mutator is a
+        minutes-long stall of the whole dispatch loop (useradd -m/userdel -r
+        on a big home tree)."""
+        mutating = {"CreateSilo", "CreateTemplateSilo", "CreateTier3sSilo",
+                    "DeleteSilo", "SetSiloEgress", "StartSilo", "StopSilo",
+                    "FreezeSilo", "ResumeSilo", "LaunchPodApp", "Dispose",
+                    "DisposeByToken", "DisposeByWorkflow",
+                    "ImportFromDisposable"}
+        tree = ast.parse(Path(sm.__file__).read_text())
+        seen: dict[str, bool] = {}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.FunctionDef)
+                    and node.name in mutating):
+                continue
+            is_async = False
+            for dec in node.decorator_list:
+                if not isinstance(dec, ast.Call):
+                    continue
+                for kw in dec.keywords:
+                    if kw.arg == "async_callbacks":
+                        is_async = True
+            seen[node.name] = is_async
+        missing = mutating - seen.keys()
+        assert not missing, f"methods not found: {sorted(missing)}"
+        sync = sorted(n for n, ok in seen.items() if not ok)
+        assert not sync, (
+            f"mutating D-Bus methods missing async_callbacks: {sync}")
 
 
 # ---------------------------------------------------------------------------
@@ -2001,8 +2036,9 @@ def _install_lineage_context_dbus(monkeypatch, outcomes):
     queue = list(outcomes)
     stats = {"system_bus_calls": 0, "get_object_calls": 0, "proxies": []}
 
-    def get_object(bus_name, object_path):
+    def get_object(bus_name, object_path, introspect=True):
         stats["get_object_calls"] += 1
+        stats.setdefault("introspect_flags", []).append(introspect)
         proxy = _LineageContextProxy(queue.pop(0))
         stats["proxies"].append(proxy)
         return proxy
@@ -2030,6 +2066,9 @@ def test_lineage_context_retries_transient_noreply(monkeypatch):
         "chain_head": "head", "issuer": "qdistro-broker", "version": 1}
     assert stats["system_bus_calls"] == 2
     assert stats["get_object_calls"] == 2
+    # introspect=False: proxy construction must not add an unbounded
+    # Introspect round-trip in front of the bounded method call.
+    assert stats["introspect_flags"] == [False, False]
     assert len({id(proxy) for proxy in stats["proxies"]}) == 2
     assert [proxy.calls for proxy in stats["proxies"]] == [1, 1]
     assert sleeps == [0.25]

@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import subprocess
+import threading
 import types
 from pathlib import Path
 
@@ -247,22 +248,47 @@ def test_loader_drops_a_row_with_a_network(ops, tmp_path):
     assert _SiloStore(ops, config_path=cfg).list_silos() == []
 
 
-def test_create_tier3s_dbus_method_creates_a_tier3s_row(store, ops):
+def test_create_tier3s_dbus_method_creates_a_tier3s_row(store, ops,
+                                                       monkeypatch):
     if sm.dbus is None:
         pytest.skip("dbus-python unavailable")
     mgr = object.__new__(sm.SessionManager)
     mgr.store = store
     mgr._peer_caller = lambda _s, _c: {"uid": 1000, "pid": 1, "exe": "/bin/t"}
     mgr._require_admin = lambda _s, _c: None
+    mgr.audit = None
+    # The mutating methods are worker-offloaded; run the reply/error
+    # callback inline so the worker's result is visible to the caller.
+    monkeypatch.setattr(sm.GLib, "idle_add", lambda callback: callback())
+
+    replied, errored = threading.Event(), threading.Event()
+    errors = []
+
+    def on_error(exc):
+        errors.append(exc)
+        errored.set()
+
     mgr.CreateTier3sSilo("smoke", "headless-smoke", "smoke", "none",
+                         replied.set, on_error,
                          sender=":1.2", conn=object())
+    assert replied.wait(2), "CreateTier3sSilo never replied"
     silo = store.get("smoke")
     assert silo.kind == "tier3s" and silo.uid == sm.ADMIN_UID
-    with pytest.raises(sm.dbus.DBusException):
-        mgr.CreateTier3sSilo("other", "headless-smoke", "other", "pasta",
-                             sender=":1.2", conn=object())
+
+    replied.clear()
+    mgr.CreateTier3sSilo("other", "headless-smoke", "other", "pasta",
+                         replied.set, on_error,
+                         sender=":1.2", conn=object())
+    assert errored.wait(2), "CreateTier3sSilo refused call never errored"
+    assert not replied.is_set()
+    assert errors and isinstance(errors[0], sm.dbus.DBusException)
+
     # CreateTemplateSilo keeps its tier-2 kind
-    mgr.CreateTemplateSilo("t2", "browser", "t2", "none", sender=":1.2", conn=object())
+    replied.clear()
+    mgr.CreateTemplateSilo("t2", "browser", "t2", "none",
+                           replied.set, on_error,
+                           sender=":1.2", conn=object())
+    assert replied.wait(2), "CreateTemplateSilo never replied"
     assert store.get("t2").kind == "tier2-template"
 
 
