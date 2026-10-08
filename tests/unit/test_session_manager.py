@@ -3713,11 +3713,60 @@ class TestSystemctlStopMissingUnit:
             if argv[1] == "stop":
                 return self._cp(5, err="Unit qdistro-silo-a@1000.service not loaded.")
             if argv[1] == "show":
-                return self._cp(0, out="LoadState=not-found\n")
+                return self._cp(0, out="LoadState=not-found\n"
+                                     "ActiveState=inactive\nJob=\n")
             raise AssertionError(f"unexpected argv {argv}")
         ops = self._ops(monkeypatch, handler)
         assert ops.systemctl_stop("qdistro-silo-a@1000.service") is True
         assert calls == ["stop", "show"]
+
+    def test_not_found_with_pending_job_stays_unknown(self, monkeypatch):
+        # systemd serializes jobs across reloads: a queued start can survive
+        # while its unit reads not-found, and a later fragment reappearance
+        # would let it execute — the job row vetoes the exception.
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(5)
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=not-found\n"
+                                     "ActiveState=inactive\nJob=1234\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_not_found_with_active_state_stays_unknown(self, monkeypatch):
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(5)
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=not-found\n"
+                                     "ActiveState=active\nJob=\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_not_found_with_transitional_state_stays_unknown(self, monkeypatch):
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(5)
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=not-found\n"
+                                     "ActiveState=activating\nJob=\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_incomplete_show_reply_stays_unknown(self, monkeypatch):
+        # A not-found reply that does not carry the full triple proves
+        # nothing — missing properties are malformed evidence, not absence.
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(5)
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=not-found\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
 
     def test_failed_stop_with_live_unit_stays_unknown(self, monkeypatch):
         def handler(argv):
