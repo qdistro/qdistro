@@ -680,8 +680,15 @@ ignored, and no observations survive daemon restart. Within the current daemon
 lifetime, unresolved starts remain unknown until a successful stop. Restart
 resets that unresolved-start latch and initializes observations as unknown;
 subsequent probes may report runtime evidence, while the persisted lifecycle
-remains conservative. A plain start retry remains an idempotent
-operation from Active; follow the existing stop-then-start recovery path.
+remains conservative.
+
+`StartSilo` on an Active silo is no longer a blind no-op: it runs the same
+liveness probe first. A verifiably live silo (`launcher-running`/`starting`)
+gets the idempotent answer; a verifiably dead one (`stopped`/`failed` — no
+pending job, inactive unit, workload boundary absent) is recorded Stopped and
+relaunched with a fresh incarnation, which also clears the unresolved-start
+latch; anything the probe cannot decide reports an error and asks for
+stop-then-start rather than reporting success or launching a second workload.
 
 Launcher activation and container existence do not establish application
 health. Observations never authorize deletion, relaunch, or broker transfers;

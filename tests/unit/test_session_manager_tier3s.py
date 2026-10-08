@@ -306,6 +306,46 @@ def test_each_start_commits_a_fresh_token(store, ops):
     assert env_of(ops)["TIER3S_LAUNCH_TOKEN"] != first["TIER3S_LAUNCH_TOKEN"]
 
 
+def test_start_from_active_relaunches_a_dead_sandbox(store, ops):
+    # The live defect GUI scenario 59 proved (2026-10-07): after the
+    # sandboxed app exits on its own the launcher tears everything down —
+    # observed_status reads "stopped" but state stays Active, so a plain
+    # StartSilo used to return success and launch nothing. Now it must
+    # verify liveness and relaunch with a FRESH token.
+    make(store)
+    store.start("smoke")
+    first = env_of(ops)
+    ops.observe_silo = lambda *a: (
+        "stopped", "launcher inactive and workload absent")
+    store.start("smoke")
+    assert [e for e in ops.events if e[0] == "start"] == [
+        ("start", UNIT), ("start", UNIT)]
+    assert store.get("smoke").state == State.ACTIVE
+    assert env_of(ops)["TIER3S_LAUNCH_TOKEN"] != first["TIER3S_LAUNCH_TOKEN"]
+
+
+def test_start_from_active_stays_put_when_the_sandbox_is_live(store, ops):
+    # The other half of the contract: a genuinely running silo must not
+    # get a second launcher (and the call reports the idempotent reason).
+    make(store)
+    store.start("smoke")
+    store.start("smoke")   # fake probe: unit started, never stopped
+    assert [e for e in ops.events if e[0] == "start"] == [("start", UNIT)]
+
+
+def test_start_from_active_unknown_probe_fails_closed(store, ops):
+    # e.g. the launcher is active but the container is absent — neither
+    # a second workload nor a false success.
+    make(store)
+    store.start("smoke")
+    ops.observe_silo = lambda *a: (
+        "unknown", "launcher active but container absent")
+    with pytest.raises(SessionError, match="cannot verify"):
+        store.start("smoke")
+    assert [e for e in ops.events if e[0] == "start"] == [("start", UNIT)]
+    assert store.get("smoke").state == State.ACTIVE
+
+
 def test_template_silo_reaches_the_stanza_as_the_binding(store, ops):
     make(store, "smoke2", template_silo="browser1")
     store.start("smoke2")
