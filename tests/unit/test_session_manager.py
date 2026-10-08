@@ -51,6 +51,9 @@ class _FakeOps:
         self.cgroup_remove_ebusy: set[str] = set()
         # When True, cgroup_freeze raises (simulates a wedged kernel write).
         self.cgroup_freeze_should_fail = False
+        # Names where a freeze write timed out in _SystemOps and may still
+        # apply late — resume() must not take the idempotent ACTIVE return.
+        self.freeze_unresolved_set: set[str] = set()
         self.systemctl_calls: list[tuple[str, str]] = []
         self.launch_envs: dict[str, str] = {}   # name → env file content
         # tier3s stanzas live in their own dir (paravirt ΔB5) — a separate
@@ -387,6 +390,9 @@ class _FakeOps:
         if self.cgroup_freeze_should_fail:
             raise OSError("cgroup.freeze write failed (simulated)")
         self.cgroup_frozen[name] = bool(frozen)
+
+    def freeze_unresolved(self, name: str) -> bool:
+        return name in self.freeze_unresolved_set
 
     def cgroup_pids(self, name: str) -> list[int]:
         return list(self.cgroup_pids_map.get(name, []))
@@ -1077,6 +1083,32 @@ class TestS14FreezeLockScope:
         # after stop is vacuous — cgroup_remove clears it regardless.
         assert ops.frozen_at_kill.get("work") is False
         assert store.get("work").state == State.STOPPED
+
+    def test_resume_active_with_unresolved_freeze_thaws(self, store, ops):
+        """astra r2: a freeze write that timed out in _SystemOps may still
+        apply late, so a silo reporting ACTIVE can be physically frozen.
+        resume() must take the real thaw path — the idempotent ACTIVE
+        return would leave it frozen forever."""
+        store.create("work", 2000)
+        store.start("work")
+        ops.cgroup_frozen["work"] = True   # late freeze applied physically
+        ops.freeze_unresolved_set.add("work")
+        store.resume("work")
+        assert ops.cgroup_frozen["work"] is False
+        assert store.get("work").state == State.ACTIVE
+
+    def test_resume_active_without_pending_stays_idempotent(
+            self, store, ops):
+        """The converse: ACTIVE with no unresolved freeze must NOT issue
+        any write — the idempotent path remains a no-op."""
+        store.create("work", 2000)
+        store.start("work")
+        calls = []
+        orig = ops.cgroup_freeze
+        ops.cgroup_freeze = lambda n, f: (calls.append((n, f)), orig(n, f))
+        store.resume("work")
+        assert calls == []
+        assert store.get("work").state == State.ACTIVE
 
     def test_freeze_reentrant_stop_from_on_change(self, ops, tmp_path):
         """02/S14b re-entrancy (codex round-2): if an on_change handler

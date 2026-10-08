@@ -1739,12 +1739,17 @@ class TestCgroupFreezeWriteIsBounded:
         (cg / "cgroup.events").write_text(
             f"populated 1\nfrozen {frozen}\n")
         monkeypatch.setattr(sm, "CGROUP_ROOT", tmp_path)
+        # ClassVar state — drop leftovers from other tests.
+        sm._SystemOps._freeze_unresolved.discard("work")
+        # Capture the real write_text BEFORE any per-test patching, so a
+        # fake installed after a wedge still writes through.
+        self._real_write = sm.Path.write_text
         return cg
 
     def _kernel_fake(self, monkeypatch):
         """write_text that behaves like the kernel: records the value and
         flips cgroup.events `frozen` to match."""
-        real = sm.Path.write_text
+        real = self._real_write
         seen = []
 
         def fake(self_p, data, *a, **kw):
@@ -1812,7 +1817,7 @@ class TestCgroupFreezeWriteIsBounded:
         cannot survive the write-back."""
         self._pin(monkeypatch, tmp_path)
         seen = []
-        real = sm.Path.write_text
+        real = self._real_write
 
         def write_only(self_p, data, *a, **kw):
             # Accepts the write but never flips cgroup.events — the kernel
@@ -1836,7 +1841,7 @@ class TestCgroupFreezeWriteIsBounded:
         (still) frozen — already consistent."""
         self._pin(monkeypatch, tmp_path, frozen=1)
         seen = []
-        real = sm.Path.write_text
+        real = self._real_write
 
         def write_only(self_p, data, *a, **kw):
             seen.append(data)
@@ -1847,3 +1852,40 @@ class TestCgroupFreezeWriteIsBounded:
         with pytest.raises(TimeoutError, match="frozen=0"):
             sm._SystemOps().cgroup_freeze("work", False)
         assert seen == ["0\n"]  # no write-back
+
+    def test_timed_out_write_marks_unresolved_until_thawed(
+            self, monkeypatch, tmp_path):
+        """astra r2 reproduction: the freeze WRITE itself times out with
+        the writer still inside the kernel — the cgroup is marked
+        unresolved so a later thaw reconciles the late-applied freeze
+        (and while the writer is outstanding a thaw is REFUSED, never
+        reordered against it)."""
+        self._pin(monkeypatch, tmp_path)
+        release = threading.Event()
+
+        def wedge(self_p, *a, **kw):
+            release.wait()
+        monkeypatch.setattr(sm.Path, "write_text", wedge)
+        monkeypatch.setattr(sm, "_T_CGROUP_WRITE", 0.25)
+        ops = sm._SystemOps()
+
+        with pytest.raises(TimeoutError):
+            ops.cgroup_freeze("work", True)
+        assert ops.freeze_unresolved("work")
+
+        # While the abandoned writer is still inside the kernel call, a
+        # thaw cannot be issued against it.
+        with pytest.raises(RuntimeError, match="still pending"):
+            ops.cgroup_freeze("work", False)
+
+        release.set()
+        deadline = time.monotonic() + 5
+        while sm._SystemOps._freeze_writers["work"].is_alive():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        # With the writer retired, a real thaw reconciles and clears the
+        # marker (kernel-simulating fake flips cgroup.events).
+        self._kernel_fake(monkeypatch)
+        ops.cgroup_freeze("work", False)
+        assert not ops.freeze_unresolved("work")
