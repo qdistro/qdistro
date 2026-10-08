@@ -3659,8 +3659,10 @@ class _SiloStore:
         # Serializes a watcher's whole pop → terminate → join so the shutdown
         # reap cannot slip between the pop and the terminate and return while
         # an `ip monitor` child is still alive (astra r1 P2: daemon watcher-
-        # stop threads do not block process exit). Leaf lock: the locked body
-        # calls only ops.stop_link_watcher and acquires no other lock.
+        # stop threads do not block process exit). Lock order is _lock →
+        # _watchers_lock (start/delete legitimately hold _lock here); the
+        # locked body calls only ops.stop_link_watcher and must never
+        # acquire _lock — no reverse acquisition, no deadlock.
         self._watchers_lock = threading.Lock()
         # Durable forensic sink. None disables auditing (e.g. tests that
         # don't care). Audit writes never raise into the lifecycle path.
