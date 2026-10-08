@@ -2198,15 +2198,18 @@ class _SystemOps:
         showing the unit inactive and its container absent, because a start job
         waiting on a dependency reads exactly like a clean stop and runs later.
 
-        So True requires rc == 0. There is deliberately NO exception for
-        "unit not loaded": that diagnostic is not tied to the requested unit or
-        to a particular manager error, and the same stderr text
-        ("no such file or directory") is produced by a failure to reach the bus
-        AT ALL — which says nothing about PID 1's existing jobs. StopUnit also
-        LOADS the unit it is given, so a merely-never-loaded launcher stops
-        normally and needs no exception. A genuinely missing or broken launcher
-        unit is therefore the one case this refuses to resolve; see
-        todo/open-followups.md.
+        So True requires rc == 0, or the one unit-specific negative the
+        manager can prove: on a failed stop, a LoadState query that itself
+        succeeds and answers not-found means PID 1 has no record of this
+        unit at all — nothing under it to cancel. There is deliberately NO
+        exception from stderr text alone: "unit not loaded" is not tied to
+        the requested unit or to a particular manager error, and the same
+        text ("no such file or directory") is produced by a failure to
+        reach the bus AT ALL — which says nothing about PID 1's existing
+        jobs. StopUnit also LOADS the unit it is given, so a merely-
+        never-loaded launcher stops normally and needs no exception; only
+        a unit the manager has genuinely lost (uninstalled, renamed, a
+        botched upgrade) resolves through the LoadState probe.
 
         False means "unknown, assume the worst". Callers that consume it must
         combine it with their own liveness check; `systemctl_start`'s
@@ -2231,6 +2234,30 @@ class _SystemOps:
             return False
         if r.returncode == 0:
             return True
+        # rc != 0 is "unknown" — EXCEPT the one unit-specific negative the
+        # manager can prove: a LoadState query that itself succeeds and
+        # answers not-found means PID 1 has no record of this unit at all —
+        # no fragment, no loaded record, no queued job — so there is nothing
+        # under it to cancel. That is what a successful reply to `show` for
+        # THIS unit establishes, which is why stderr text cannot: a missing
+        # unit and a bus failure both print "no such file or directory". Only
+        # not-found resolves it; stub/masked/error/loaded all keep False (a
+        # masked or broken unit can still own jobs and running processes).
+        try:
+            show = subprocess.run(
+                ["systemctl", "show", unit, "--property=LoadState"],
+                capture_output=True, text=True, timeout=3)
+            if show.returncode == 0:
+                props = dict(
+                    line.split("=", 1)
+                    for line in show.stdout.splitlines() if "=" in line)
+                if props.get("LoadState") == "not-found":
+                    log.info("systemctl stop %s failed but LoadState is "
+                             "not-found: PID 1 has no record of the unit — "
+                             "nothing to cancel", unit)
+                    return True
+        except subprocess.TimeoutExpired:
+            pass
         log.warning("systemctl stop %s exited %d (%s); acceptance is UNKNOWN — "
                     "the stop transaction may never have been enqueued",
                     unit, r.returncode, (r.stderr or "").strip()[:200])

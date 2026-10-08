@@ -3675,3 +3675,100 @@ class TestLeaseSweepScheduler:
                 break
             time.sleep(0.01)
         assert len(ran) == 2
+
+
+class TestSystemctlStopMissingUnit:
+    """The real _SystemOps.systemctl_stop() verdict: rc != 0 is 'unknown'
+    EXCEPT when a successful LoadState probe proves the unit is not-found —
+    PID 1 has no record of it, so there is nothing to cancel. Stubbed via
+    a fake subprocess.run keyed on argv."""
+
+    def _ops(self, monkeypatch, handler):
+        ops = sm._SystemOps()
+
+        def fake_run(argv, **kw):
+            return handler(argv)
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        return ops
+
+    @staticmethod
+    def _cp(rc, out="", err=""):
+        return types.SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+
+    def test_clean_stop_is_established(self, monkeypatch):
+        calls = []
+
+        def handler(argv):
+            calls.append(argv[1])
+            return self._cp(0)
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is True
+        assert calls == ["stop"]  # no probe needed on success
+
+    def test_not_found_unit_resolves_as_nothing_to_cancel(self, monkeypatch):
+        calls = []
+
+        def handler(argv):
+            calls.append(argv[1])
+            if argv[1] == "stop":
+                return self._cp(5, err="Unit qdistro-silo-a@1000.service not loaded.")
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=not-found\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is True
+        assert calls == ["stop", "show"]
+
+    def test_failed_stop_with_live_unit_stays_unknown(self, monkeypatch):
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(1, err="Failed to stop: some manager error")
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=loaded\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_masked_unit_stays_unknown(self, monkeypatch):
+        # A masked unit can still own jobs and running processes — only
+        # not-found is nothing-to-cancel.
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(1)
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=masked\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_failed_probe_keeps_unknown(self, monkeypatch):
+        # The same failure signature a dead bus produces: the probe itself
+        # cannot answer, so the stop verdict stays unknown.
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(1, err="no such file or directory")
+            if argv[1] == "show":
+                return self._cp(1, err="Failed to connect to bus")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_probe_timeout_keeps_unknown(self, monkeypatch):
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(1)
+            if argv[1] == "show":
+                raise sm.subprocess.TimeoutExpired(argv, 3)
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_stop_timeout_never_probes(self, monkeypatch):
+        calls = []
+
+        def handler(argv):
+            calls.append(argv[1])
+            raise sm.subprocess.TimeoutExpired(argv, 30)
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+        assert calls == ["stop"]
