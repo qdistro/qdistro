@@ -44,4 +44,3 @@ rsync
 zstd
 podman
 socat
-noctalia-qs

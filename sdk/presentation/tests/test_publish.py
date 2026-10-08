@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import sys
 from dataclasses import replace
@@ -118,3 +119,95 @@ def test_disabled_envelope_changes_generation(tmp_path: Path):
     disabled = write_disabled_envelope(str(tmp_path), snap, require_unwritable_dirs=False)
     assert disabled.wrote is True
     assert disabled.generation != snap.generation
+
+
+def test_standalone_write_does_not_load_deployment_metadata(tmp_path: Path, monkeypatch):
+    def boom() -> None:
+        raise AssertionError("standalone write must not load deployment metadata")
+
+    monkeypatch.setattr("qdistro_presentation.publish.load_deployment_meta", boom)
+    result = write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    assert result.wrote is True
+
+
+def test_managed_write_requires_trusted_metadata(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("qdistro_presentation.publish.MANAGED_DIR", str(tmp_path))
+    monkeypatch.setattr("qdistro_presentation.publish.load_deployment_meta", lambda: None)
+    with pytest.raises(SnapshotPathError, match="trusted deployment metadata"):
+        write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    assert not (tmp_path / "current.json").exists()
+
+
+def test_managed_write_uses_metadata_admin_uid(tmp_path: Path, monkeypatch):
+    from qdistro_presentation.paths import DeploymentMeta
+
+    uid = os.getuid()
+    monkeypatch.setattr("qdistro_presentation.publish.MANAGED_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "qdistro_presentation.publish.load_deployment_meta",
+        lambda: DeploymentMeta(version=1, admin_uid=uid),
+    )
+    result = write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    assert result.wrote is True
+    assert (tmp_path / "current.json").is_file()
+
+
+def test_managed_write_replaces_matching_generation_with_wrong_owner(
+    tmp_path: Path, monkeypatch
+):
+    from qdistro_presentation.paths import DeploymentMeta
+
+    uid = os.getuid()
+    monkeypatch.setattr("qdistro_presentation.publish.MANAGED_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "qdistro_presentation.publish.load_deployment_meta",
+        lambda: DeploymentMeta(version=1, admin_uid=uid),
+    )
+    snap = example_snapshot()
+    first = write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    assert first.wrote is True
+
+    real_fstat = os.fstat
+
+    def fake_fstat(fd: int) -> os.stat_result:
+        info = real_fstat(fd)
+        if stat.S_ISREG(info.st_mode):
+            return os.stat_result(
+                (
+                    info.st_mode,
+                    info.st_ino,
+                    info.st_dev,
+                    info.st_nlink,
+                    uid + 1,
+                    info.st_gid,
+                    info.st_size,
+                    info.st_atime,
+                    info.st_mtime,
+                    info.st_ctime,
+                )
+            )
+        return info
+
+    monkeypatch.setattr(os, "fstat", fake_fstat)
+    again = write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    assert again.wrote is True
+    assert again.reason == "replaced"
+
+
+def test_managed_write_rejects_mismatched_owner_uid(tmp_path: Path, monkeypatch):
+    from qdistro_presentation.paths import DeploymentMeta
+
+    uid = os.getuid()
+    monkeypatch.setattr("qdistro_presentation.publish.MANAGED_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "qdistro_presentation.publish.load_deployment_meta",
+        lambda: DeploymentMeta(version=1, admin_uid=uid),
+    )
+    with pytest.raises(SnapshotPathError, match="does not match trusted"):
+        write_snapshot(
+            str(tmp_path),
+            example_snapshot(),
+            owner_uid=uid + 1,
+            require_unwritable_dirs=False,
+        )
+    assert not (tmp_path / "current.json").exists()

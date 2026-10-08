@@ -46,8 +46,9 @@ if ! declare -f qci_view_raw_dims >/dev/null 2>&1; then
     qci_view_raw_dims() { identify -format '%w %h\n' "$1" 2>/dev/null; }
 fi
 export QDWIN_VM_EXEC
-: "${QDWIN_HTTP_DIR:=${QDWIN_REPO}/extra}"
-: "${QDWIN_HTTP_URL:=http://10.0.2.2:8765/extra}"
+# No QDWIN_HTTP_DIR/QDWIN_HTTP_URL defaults: nothing in this helper consumes
+# them, and the fixed :8765 default was a cross-user collision hazard (the
+# demos lane runs its own kernel-assigned-port server per scenario).
 : "${QDWIN_BYSTANDER_FIFO:=/run/user/1000/qdwin-cmd.fifo}"
 : "${QDWIN_BYSTANDER_LOG:=/tmp/bystander.log}"
 

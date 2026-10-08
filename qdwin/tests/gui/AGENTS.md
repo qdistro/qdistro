@@ -110,15 +110,15 @@ qdwin_chord alt -- tab tab      # cycle twice while Alt is held
 
 For non-chord key tests (typing into a focused toplevel, sending Enter, etc.) `qdwin_send_key` is faster and fine.
 
-The helper pushes ctrl-socket payloads through the same host:8765
-HTTP server `fresh-vm-bootstrap.sh` uses (so `vm-exec`'s JSON quoting
-never sees embedded quotes). Make sure the HTTP server is running
-under `compositor/`:
-
-```
-cd ${QDWIN_REPO} && \
-  python3 -m http.server 8765 --bind 127.0.0.1 &
-```
+The helper pushes ctrl-socket payloads through a host-side HTTP
+staging server (so `vm-exec`'s JSON quoting never sees embedded
+quotes). You no longer start it yourself: `qdwin_ctrl` calls
+`qdwin_http_ensure`, which launches a per-user `http.server` rooted at
+`${QDWIN_REPO}` on a kernel-assigned port and reuses it across calls via
+`${XDG_RUNTIME_DIR:-/tmp}/qdwin-http-$(id -u).env`. There is no fixed
+port — the old host:8765 default collided across test users. To point
+at a server you started yourself, export `QDWIN_HTTP_URL`
+(e.g. `http://10.0.2.2:<port>/extra`) before sourcing the helper.
 
 ## Reading screenshots
 

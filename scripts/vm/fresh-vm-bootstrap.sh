@@ -1,6 +1,6 @@
 #!/bin/bash
 # fresh-vm-bootstrap.sh — run inside a freshly-cloned baseweed VM to:
-#   1. Fetch the qdistro monorepo as one tarball from host:8765.
+#   1. Fetch the qdistro monorepo as one tarball from the host staging server.
 #   2. Install Podman-built native components, or build them on a developer VM.
 #   3. Load SELinux modules built against the pinned snapshot.
 #   4. Install the Python broker / polkit-agent / pwd / etc. services.
@@ -15,15 +15,20 @@
 #   - quickshell + qt6-* for qdshell
 #   - bats for in-VM integration tests
 #
-# Host must be serving the monorepo tarball at http://10.0.2.2:8765/:
+# Host must be serving the monorepo tarball at $QDISTRO_HTTP_HOST (required;
+# a http://10.0.2.2:<port> URL — the port is whatever the host-side server
+# bound, callers pick a free one):
 #   /qdistro.tar.gz   (repo root: qdistro content + qdwin/, qdshell/, ... in-tree)
 #
-# spin-test-vm.sh handles the host-side staging. To bootstrap manually:
+# spin-test-vm.sh handles the host-side staging and passes QDISTRO_HTTP_HOST.
+# To bootstrap manually (pick any free port — a fixed one collides when
+# several test users share the host):
 #   STAGE=$(mktemp -d)
 #   tar czf $STAGE/qdistro.tar.gz --exclude=.git -C ~/path/to/qdistro .
 #   cp ~/path/to/qdistro/scripts/vm/fresh-vm-bootstrap.sh $STAGE/
-#   (cd $STAGE && python3 -m http.server 8765 --bind 127.0.0.1) &
-#   vm-exec <vm> "wget -O- http://10.0.2.2:8765/fresh-vm-bootstrap.sh | bash"
+#   P=8765   # or any port you bound the server to
+#   (cd $STAGE && python3 -m http.server $P --bind 127.0.0.1) &
+#   vm-exec <vm> "wget -O- http://10.0.2.2:$P/fresh-vm-bootstrap.sh | QDISTRO_HTTP_HOST=http://10.0.2.2:$P bash"
 
 set -eo pipefail
 
@@ -47,7 +52,10 @@ case "$QDISTRO_PROFILE" in
     *) echo "[bootstrap] invalid QDISTRO_PROFILE=$QDISTRO_PROFILE" >&2; exit 2 ;;
 esac
 
-HOST="${QDISTRO_HTTP_HOST:-http://10.0.2.2:8765}"
+# Required, no default: a baked-in host port (the old 10.0.2.2:8765) silently
+# fetches from whichever user's staging server holds that port on a shared
+# host. The fetch that delivered THIS script already used the right URL.
+HOST="${QDISTRO_HTTP_HOST:?QDISTRO_HTTP_HOST is required (e.g. http://10.0.2.2:<port>)}"
 SRC=/root/qdistro-src
 
 log() { echo "[bootstrap] $*"; }
@@ -175,6 +183,18 @@ done
 if [ "$_net_ok" != 1 ]; then
     log "  WARN: download.opensuse.org did not resolve in 60s; zypper will fail closed if the snapshot repos are unreachable"
 fi
+
+# qdshell's runtime is the vendored upstream Quickshell build; the archived
+# noctalia-qs fork was never a real dep. Bases baked before this change had
+# it installed and locked-in supplements can pull it — remove it if present,
+# then lock it before ANY zypper transaction below can resolve it back in.
+if rpm -q noctalia-qs >/dev/null 2>&1; then
+    log "removing noctalia-qs (superseded by vendored Quickshell)..."
+    zypper -n rm noctalia-qs >/dev/null 2>&1 \
+        || { log "  ERROR: zypper rm noctalia-qs failed"; exit 3; }
+fi
+zypper -n addlock noctalia-qs >/dev/null 2>&1 \
+    || { log "  ERROR: zypper addlock noctalia-qs failed"; exit 3; }
 
 # The admin TUI (installed below by install-admin-cli-for-vm.sh) needs
 # Textual. The kiwi image carries it (image/config.xml); the baked cloud base
@@ -638,6 +658,12 @@ if [ "$QCI_NATIVE_STAGE" = 0 ]; then
         || { log "  ERROR: qdshell meson compile failed"; exit 3; }
     meson install -C build \
         || { log "  ERROR: qdshell meson install failed"; exit 3; }
+    # The qdshell runtime itself: upstream Quickshell is vendored
+    # (Tumbleweed's only package was the archived noctalia-qs fork).
+    # Without the native stage nothing else provides /usr/bin/qs.
+    log "building vendored Quickshell (qdshell runtime)..."
+    DESTDIR= bash "$SRC/qdshell/quickshell-vendored/build-quickshell.sh" \
+        || { log "  ERROR: vendored Quickshell build failed"; exit 3; }
 else
     log "checking staged native ELF dependencies..."
     while IFS= read -r elf; do

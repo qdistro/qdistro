@@ -1,0 +1,6 @@
+# Local cmake build output (QDSHELL_QS_BUILD_DIR default).
+/src/build/
+
+# qdshell/.gitignore's blanket `build/` pattern would otherwise drop
+# upstream's src/src/build/ cmake subdir (add_subdirectory(build)).
+!/src/src/build/

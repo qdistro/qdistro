@@ -239,14 +239,13 @@ resources on the strength of the row listen for this and tear down immediately.
 
 ## Admin PyQt polkit agent
 
-> **Status (2026-07-26): the polkit agent is wired in and enforces denials;
-> it cannot grant.** It registers with polkitd on a real greetd login, is
-> consulted for authorizations, and reaches the broker — but no method can
-> deliver a positive decision, so an admin who approves still gets "Not
-> authorized". Everything fails closed. See
-> [password-manager.md § Polkit agent → Status](password-manager.md#status-2026-07-26--the-agent-cannot-yet-authorize-anything)
-> for what is missing and why closing it needs a design decision. Read the
-> rest of this section as the intended design, not as shipped behaviour.
+> **Status (2026-10-07): the polkit agent is wired in and can grant.** It
+> registers with polkitd on a real greetd login, is consulted for
+> authorizations, and files the request with the broker — the uid-0 broker
+> then delivers `AuthenticationAgentResponse2` itself, so an admin who
+> approves gets the grant. See
+> [password-manager.md § Polkit agent → Status](password-manager.md#status-2026-10-07--the-broker-is-the-privileged-responder)
+> for the responder's invariants.
 
 Runs in admin's desktop session. The UI is **not a modal dialog stack** but
 a persistent queue-based app (see [admin-approval](admin-approval.md)).

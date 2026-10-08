@@ -4,7 +4,7 @@
 # onto a fresh-clone VM.
 #
 # Sources come from /root/browser-bridge-src/ (staged by
-# fresh-vm-bootstrap.sh from host:8765/browser_bridge/).
+# fresh-vm-bootstrap.sh from the host staging server).
 #
 # Layout:
 #   /usr/libexec/qdistro/qdistro_browser_bridge.py    # host module

@@ -82,8 +82,86 @@ if ! declare -f qci_view_raw_dims >/dev/null 2>&1; then
     qci_view_raw_dims() { magick identify -quiet -format '%w %h\n' "${1}[0]" 2>/dev/null | head -1; }
     qci_view_raw_extract() { cp -T -- "$1" "$2"; }
 fi
-: "${QDWIN_HTTP_DIR:=${QDWIN_REPO}/extra}"
-: "${QDWIN_HTTP_URL:=http://10.0.2.2:8765/extra}"
+: "${QDWIN_HTTP_DIR:=${QDWIN_REPO:-$QDWIN_WORKSPACE/qdwin}/extra}"
+# QDWIN_HTTP_URL is deliberately NOT defaulted: a fixed port is a
+# cross-user collision (the host port space is shared by every test user,
+# and a stale foreign listener hands the guest someone else's tree).
+# qdwin_http_ensure provisions a per-user kernel-assigned server on demand;
+# an explicit QDWIN_HTTP_URL still wins.
+
+# qdwin_http_ensure — make sure a staging HTTP server for $QDWIN_REPO exists
+# and export QDWIN_HTTP_URL (…/extra). The server binds port 0 (kernel picks
+# a free port — no probe/bind race, no fixed-port collision with other test
+# users) and is reused across calls via a per-user env file under
+# $XDG_RUNTIME_DIR so repeated qdwin_ctrl calls share one server.
+qdwin_http_ensure() {
+    # A caller-provided URL wins unconditionally; a URL WE provisioned is
+    # revalidated every call (the server may have died since).
+    if [ -n "${QDWIN_HTTP_URL:-}" ] && [ -z "${_QDWIN_HTTP_URL_AUTO:-}" ]; then
+        return 0
+    fi
+    # Callers export QDWIN_REPO (the qdwin component dir); the source-time
+    # workspace detection is the fallback so the helper stays self-contained.
+    local srv_root="${QDWIN_REPO:-$QDWIN_WORKSPACE/qdwin}"
+    mkdir -p "$QDWIN_HTTP_DIR" 2>/dev/null || true
+    local envf
+    envf="${XDG_RUNTIME_DIR:-/tmp}/qdwin-http-$(id -u).env"
+    local port="" pid="" root=""
+    # Reuse the cache only if (a) the file is OURS — the /tmp fallback path is
+    # foreign-forgeable, and a forged record would make the guest download and
+    # run another user's content — and (b) the recorded pid still owns the
+    # recorded listener (a live-but-recycled pid or a foreign socket on the
+    # port is rejected; `ss -tlnp` shows our own processes unprivileged).
+    if [ -f "$envf" ] && [ -O "$envf" ] && [ ! -L "$envf" ]; then
+        port=$(sed -n 's/^port=//p' "$envf" 2>/dev/null)
+        pid=$(sed -n 's/^pid=//p' "$envf" 2>/dev/null)
+        root=$(sed -n 's|^root=||p' "$envf" 2>/dev/null)
+        if [ -n "$port" ] && [ -n "$pid" ] && [ "$root" = "$srv_root" ] \
+            && ss -tlnp 2>/dev/null | awk -v p="$port" -v pid="$pid" \
+                '$4 ~ ":"p"$" && index($0, "pid=" pid ",") {ok=1} END{exit !ok}'; then
+            QDWIN_HTTP_URL="http://10.0.2.2:$port/extra"
+            _QDWIN_HTTP_URL_AUTO=1
+            return 0
+        fi
+    fi
+    local portf
+    portf=$(mktemp) || return 1
+    (
+        cd "$srv_root" 2>/dev/null || exit 1
+        exec python3 -c '
+import http.server, socketserver, sys
+socketserver.TCPServer.allow_reuse_address = False
+httpd = socketserver.TCPServer(("0.0.0.0", 0), http.server.SimpleHTTPRequestHandler)
+sys.stdout.write(str(httpd.server_address[1]) + "\n"); sys.stdout.flush()
+httpd.serve_forever()
+' >"$portf" 2>/dev/null
+    ) &
+    pid=$!
+    local i
+    for i in $(seq 1 50); do
+        port=$(head -1 "$portf" 2>/dev/null | tr -dc '0-9')
+        [ -n "$port" ] && break
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    rm -f "$portf"
+    if [ -z "$port" ]; then
+        echo "qdwin-helpers: staging HTTP server failed to bind" >&2
+        return 1
+    fi
+    # Publish the cache atomically. mktemp (O_EXCL, mode 600, unpredictable
+    # suffix) beside the destination — a predictable name in the /tmp
+    # fallback could be pre-planted as a symlink into a victim file.
+    # A foreign-owned placeholder at $envf fails the mv; we run uncached.
+    local tmpf
+    tmpf=$(mktemp "${envf}.XXXXXX" 2>/dev/null) || tmpf=""
+    if [ -n "$tmpf" ] \
+        && printf 'port=%s\npid=%s\nroot=%s\n' "$port" "$pid" "$srv_root" >"$tmpf" 2>/dev/null; then
+        mv -f "$tmpf" "$envf" 2>/dev/null || rm -f "$tmpf"
+    fi
+    QDWIN_HTTP_URL="http://10.0.2.2:$port/extra"
+    _QDWIN_HTTP_URL_AUTO=1
+}
 
 qdwin_set_vm() {
     VMNAME="$1"
@@ -422,10 +500,12 @@ qdwin_type_lower() {
 #   list                           (lists toplevels)
 #   tray, panel, locker            (snapshots)
 #
-# Pushing the runner script via the existing host:8765 server is the
-# robust path; vm-exec's JSON quoting trips on embedded `"`.
+# Pushing the runner script via the per-user staging server
+# (qdwin_http_ensure, kernel-assigned port) is the robust path;
+# vm-exec's JSON quoting trips on embedded `"`.
 qdwin_ctrl() {
     qdwin_require_vm
+    qdwin_http_ensure || return 125
     local cmd="$1"
     local script="qdwin-ctrl-$$.sh"
     cat > "$QDWIN_HTTP_DIR/$script" <<EOF

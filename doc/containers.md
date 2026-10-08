@@ -272,7 +272,7 @@ via three driver scripts:
 | `s34-tier2-lifecycle.sh`     | two containers concurrent, stop A leaves B running |
 
 The drivers self-stage from the bats host over the established
-port-8765 http-staging convention (same as `s90-phase5-broker-e2e.sh`).
+per-run http-staging convention (same as `s90-phase5-broker-e2e.sh`).
 `s32` builds `qdistro/tier2-weston-terminal:latest` on first run if
 missing; subsequent runs reuse the cached image.
 

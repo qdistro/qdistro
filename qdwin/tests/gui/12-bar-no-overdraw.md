@@ -15,11 +15,9 @@ at the row immediately below the bar.
 source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh
 qdwin_set_vm "${VMNAME:-$(virsh -c qemu:///session list --name --state-running | head -1)}"
 
-pgrep -f "http.server 8765" >/dev/null || (
-    cd ${QDWIN_REPO} && \
-    python3 -m http.server 8765 --bind 127.0.0.1 >/tmp/qdistro-http.log 2>&1 &
-)
-sleep 1
+# No manual http.server: qdwin_ctrl lazily provisions a per-user staging
+# server on a kernel-assigned port (qdwin_http_ensure). A fixed :8765
+# collides across test users sharing this host.
 qdwin_session_healthy || { echo "FAIL: session not up"; exit 1; }
 
 "$QDWIN_VM_EXEC" "$VMNAME" 'pkill -u admin -x weston-terminal 2>/dev/null; sleep 1' >/dev/null

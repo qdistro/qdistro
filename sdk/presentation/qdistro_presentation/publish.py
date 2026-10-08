@@ -9,7 +9,14 @@ import uuid
 from dataclasses import dataclass
 
 from .model import PresentationSnapshot, SnapshotError, SnapshotPathError, with_generation
-from .paths import _O_NOFOLLOW, _O_NONBLOCK, _close_quietly, walk_open
+from .paths import (
+    _O_NOFOLLOW,
+    _O_NONBLOCK,
+    MANAGED_DIR,
+    _close_quietly,
+    load_deployment_meta,
+    walk_open,
+)
 
 _TEMP_PREFIX = ".qdistro-presentation-"
 _FILE_MODE = 0o644
@@ -66,6 +73,18 @@ def _cleanup_own_temps(dir_fd: int, keep: str | None = None) -> None:
             continue
 
 
+def resolve_write_owner_uid(directory: str, owner_uid: int | None) -> int | None:
+    """Owner for a write. Managed dest uses trusted metadata; standalone keeps ``owner_uid``."""
+    if os.path.abspath(directory) != os.path.abspath(MANAGED_DIR):
+        return owner_uid
+    meta = load_deployment_meta()
+    if meta is None:
+        raise SnapshotPathError("trusted deployment metadata required for managed publication")
+    if owner_uid is not None and owner_uid != meta.admin_uid:
+        raise SnapshotPathError("owner-uid does not match trusted deployment metadata")
+    return meta.admin_uid
+
+
 def write_snapshot(
     directory: str,
     snapshot: PresentationSnapshot,
@@ -82,6 +101,7 @@ def write_snapshot(
     Never deletes an existing valid snapshot on failure. Temp files are
     created exclusive inside ``directory`` and replaced with ``os.rename``.
     """
+    owner_uid = resolve_write_owner_uid(directory, owner_uid)
     snapshot = with_generation(snapshot)
     from .model import parse_snapshot
 
@@ -119,12 +139,17 @@ def write_snapshot(
 
                     existing = parse_snapshot_bytes(read_regular_fd(existing_fd))
                     if existing.generation == snapshot.generation:
-                        return WriteResult(
-                            path=os.path.join(directory, filename),
-                            generation=snapshot.generation,
-                            wrote=False,
-                            reason="unchanged",
-                        )
+                        existing_info = os.fstat(existing_fd)
+                        if owner_uid is None or (
+                            stat.S_ISREG(existing_info.st_mode)
+                            and existing_info.st_uid == owner_uid
+                        ):
+                            return WriteResult(
+                                path=os.path.join(directory, filename),
+                                generation=snapshot.generation,
+                                wrote=False,
+                                reason="unchanged",
+                            )
                 except (SnapshotError, SnapshotPathError, OSError):
                     pass
                 finally:

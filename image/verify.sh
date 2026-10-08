@@ -34,7 +34,11 @@ STAMP="$(date +%y%m%d-%H%M)"
 VERIFY_DIR="$HERE/logs/verify-${STAMP}$(date +%S)"
 # AGENTS.md requires VM names end in YYMMDD-HHMM so parallel runs don't collide.
 VM="${QDISTRO_VERIFY_VM:-qdistro-verify-${STAMP}}"
-SSH_PORT="${QDISTRO_VERIFY_PORT:-2299}"
+# shellcheck source=../scripts/vm/lib/host-port.sh
+. "$HERE/../scripts/vm/lib/host-port.sh"
+# Ports are host-global: under several test users a fixed 2299 collides, so the
+# default is a probed free port; QDISTRO_VERIFY_PORT pins it when needed.
+SSH_PORT="${QDISTRO_VERIFY_PORT:-$(qdistro_pick_free_port)}"
 SSH_USER="admin"
 SSH_PASS="${QDISTRO_IMAGE_PASSWORD:-qdistro}"
 URI="qemu:///session"
@@ -834,9 +838,12 @@ if [ "$STICK" = 1 ] && [ "${QDISTRO_VERIFY_PARENT:-}" != 1 ] && [ "$KEEP" != 1 ]
         # child reopens that xz; the other children boot its raw bytes.
         [ "$name" != dd ] || child_digest="${QDISTRO_IMAGE_SHA256:-}"
         extra_n=$((extra_n + 1))
-        log "stick extra: $name $* (port=$((SSH_PORT + extra_n)))"
+        # Fresh probe per child: extras run serially, and with a random base
+        # port "base+n" could land on another user's listener.
+        extra_port=$(qdistro_pick_free_port) || exit 1
+        log "stick extra: $name $* (port=$extra_port)"
         if QDISTRO_VERIFY_VM="${VM}-${name}" \
-           QDISTRO_VERIFY_PORT=$((SSH_PORT + extra_n)) \
+           QDISTRO_VERIFY_PORT="$extra_port" \
            QDISTRO_VERIFY_LOGIN=0 QDISTRO_VERIFY_PERSIST=0 \
            QDISTRO_IMAGE_SHA256="$child_digest" \
            bash "$HERE/verify.sh" "$@"; then

@@ -50,6 +50,14 @@ else
 fi
 echo "[qdistro-image] ============================================================"
 
+# qdshell's runtime is vendored Quickshell (built in-chroot below);
+# noctalia-qs was never a legitimate qdistro dep — qdshell forked Noctalia
+# before that fork existed. Lock it before any in-chroot zypper call and
+# ship the lock in the image, so no recommends/supplements can pull the
+# archived fork in later — at build time or on the installed system.
+zypper -n addlock noctalia-qs \
+    || { echo "[qdistro-image] FATAL: zypper addlock noctalia-qs failed. Aborting build." >&2; exit 1; }
+
 if [ -f /etc/os-release.qdistro ]; then
     rm -f /etc/os-release
     mv /etc/os-release.qdistro /etc/os-release
@@ -160,6 +168,13 @@ echo "[qdistro-image] building qdshell qml-plugin..."
 cd "$SRC/qdshell"
 meson setup build --wipe --prefix=/usr
 meson compile -C build
+
+# qdshell's runtime is the vendored upstream Quickshell build — Tumbleweed's
+# only prebuilt runtime was the archived noctalia-qs fork. Installs
+# /usr/bin/quickshell + the /usr/bin/qs symlink into the image.
+echo "[qdistro-image] building vendored quickshell..."
+DESTDIR= QDSHELL_QS_BUILD_DIR=/tmp/qdistro-quickshell-build \
+    bash "$SRC/qdshell/quickshell-vendored/build-quickshell.sh"
 
 cd "$QD"
 # ---------------------------------------------------------------------------

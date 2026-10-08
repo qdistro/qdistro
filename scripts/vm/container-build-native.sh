@@ -11,6 +11,12 @@ export PKG_CONFIG_PATH="$(bash /src/qdwin/libweston-vendored/pkgconfig-dir.sh):$
 DEST=/out/stage/usr/libexec/qdistro/qdwin-libweston \
     bash /src/scripts/install/install-vendored-libweston.sh /src/qdwin
 
+# qdshell's runtime is the vendored upstream Quickshell build — Tumbleweed
+# ships only the archived noctalia-qs fork, so the stage carries the binary.
+# cmake --install lays out usr/bin/quickshell + the usr/bin/qs symlink.
+DESTDIR=/out/stage \
+    bash /src/qdshell/quickshell-vendored/build-quickshell.sh
+
 for component in qdwin daemons qdshell; do
     opts=()
     if [ "$component" = qdwin ] && [ -n "${QDWIN_EXTRA_MESON_OPTS:-}" ]; then
@@ -58,6 +64,11 @@ bash /src/scripts/vm/container-check-broker-ratchet.sh /src/selinux
 
 test -s /out/stage/usr/lib64/weston/qdwin-shell.so
 test -s /out/stage/usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so
+test -x /out/stage/usr/bin/quickshell
+test -L /out/stage/usr/bin/qs
+# Upstream installs qs -> /usr/bin/quickshell (absolute); either form is
+# correct for a /usr prefix, so pin the target's basename.
+[ "$(basename "$(readlink /out/stage/usr/bin/qs)")" = quickshell ]
 test -s /out/stage/usr/bin/qdistro-secctx-exec
 test -s /out/stage/usr/local/bin/qsu
 test -s /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/drm-backend.so

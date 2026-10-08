@@ -278,6 +278,10 @@ noct_poll_dpms_on_atomic_einval() {
 : "${NOCT_IDLE_POLL_S:=3}"
 : "${NOCT_IDLE_POLL_MAX_S:=180}"
 : "${NOCT_DPMS_SYSFS:=/sys/class/drm/card0-Virtual-1/dpms}"
+# Guest-side scratch root for per-scenario wait records. In the VM this is the
+# harness-created /tmp/qci (root-owned, mode 1777). Host-only bats override it:
+# on a shared host /tmp/qci may belong to another user's run.
+: "${NOCT_QCI_DIR:=/tmp/qci}"
 
 # noct_idle_wait_script <result-path>: the guest script (pure; host-testable).
 noct_idle_wait_script() {
@@ -295,8 +299,8 @@ noct_idle_wait_script() {
 noct_idle_wait_start() {
     local res=$1 b64
     case "$res" in
-        /tmp/qci/*/*) ;;
-        *) echo "FAIL: idle-wait result path must be under the per-scenario /tmp/qci dir, got '$res'"; return 2 ;;
+        "$NOCT_QCI_DIR"/*/*) ;;
+        *) echo "FAIL: idle-wait result path must be under the per-scenario $NOCT_QCI_DIR dir, got '$res'"; return 2 ;;
     esac
     case "$NOCT_IDLE_WAIT_S" in ''|*[!0-9]*) echo "FAIL: bad NOCT_IDLE_WAIT_S '$NOCT_IDLE_WAIT_S'"; return 2 ;; esac
     b64=$(noct_idle_wait_script "$res" | base64 -w0) || return 2

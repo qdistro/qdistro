@@ -59,7 +59,7 @@ GUI automation against the guest's session. Subcommands:
 
 | Subcommand | Purpose |
 |---------------------------|-----------------------------------------------------------|
-| `screenshot [file]` | PNG via `virsh screenshot`. Default `/tmp/vm-screenshot.png`. |
+| `screenshot [file]` | PNG via `virsh screenshot`. Default `$XDG_RUNTIME_DIR/vm-screenshot-<uid>.png` (or `/tmp/…` when unset). |
 | `start <cmd>` | Launch a GUI app backgrounded. |
 | `activate <title>` | Focus window by title wildcard match. |
 | `click <x> <y>` | Left-click at coordinates. |

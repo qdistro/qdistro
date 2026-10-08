@@ -14,7 +14,7 @@ from .model import (
     normalize_producer,
     parse_snapshot,
 )
-from .paths import MANAGED_DIR, developer_state_file, managed_dir_exists
+from .paths import MANAGED_DIR, developer_state_file, load_deployment_meta, managed_dir_exists
 from .publish import write_disabled_envelope, write_snapshot
 
 
@@ -45,7 +45,23 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="required owner of the destination directory and file",
     )
+    parser.add_argument(
+        "--print-owner",
+        action="store_true",
+        help="print the trusted deployment admin uid and exit",
+    )
     args = parser.parse_args(argv)
+
+    if args.print_owner:
+        meta = load_deployment_meta()
+        if meta is None:
+            print(
+                "qdistro-presentation-publish: trusted deployment metadata unavailable",
+                file=sys.stderr,
+            )
+            return 1
+        print(meta.admin_uid)
+        return 0
 
     raw_b = sys.stdin.buffer.read(MAX_BYTES + 1)
     if len(raw_b) > MAX_BYTES:

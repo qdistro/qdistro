@@ -73,7 +73,12 @@ def _unit_files() -> list[Path]:
             # excluded EVERY unit — a vacuous green.
             rel = p.relative_to(_REPO)
             parts = set(rel.parts)
-            if parts & {".git", ".worktrees", "tests", "__pycache__"}:
+            # Any hidden directory (.git, .worktrees, .claude, agent
+            # scratch checkouts, caches, ...) is not product content.
+            # full-20261007T192521Z failed when a stale
+            # .claude/worktrees/<id> copy tripped the scan.
+            if parts & {"tests", "__pycache__"} or any(
+                    part.startswith(".") for part in rel.parts):
                 continue
             # In-tree components (monorepo) ship their own units and are out
             # of scope here, exactly as they were as sibling repos: qdlocker's
@@ -431,17 +436,78 @@ def test_polkit_agent_enable_cannot_fail_silently():
     a ``| tail -5 || true``, and the script printed OK regardless. The agent
     was disabled and had never run — VM-verified 2026-07-26.
 
-    Two properties, both needed: the enable is ``--global`` (no user manager
-    required), and its failure is fatal rather than swallowed.
+    The agent is now a SYSTEM unit (User=admin; sol r169 — a user unit's
+    environment and drop-ins are same-uid writable, so its launch env could
+    not be sealed). Two properties, both needed: the enable goes through the
+    system manager (``systemctl enable`` — a pure symlink write, no running
+    manager required), and its failure is fatal rather than swallowed.
     """
     text = (_INSTALL_DIR / "install-polkit-agent-for-vm.sh").read_text()
-    assert re.search(
-        r"systemctl\s+--global\s+enable[^\n]*qdistro-polkit-agent\.service",
-        text), "the polkit agent is no longer enabled with --global"
     assert not re.search(
         r"systemctl\s+--user\s+enable[^\n]*qdistro-polkit-agent", text), (
         "back to a per-user enable, which cannot work at this chain position")
-    enable_line = next(ln for ln in text.replace("\\\n", " ").splitlines()
-                       if re.search(r"--global\s+enable.*polkit-agent", ln))
+    assert not re.search(
+        r"systemctl\s+--global\s+enable[^\n]*qdistro-polkit-agent", text), (
+        "a --global user-manager enable no longer applies — the agent is "
+        "a system unit now and needs a system-manager enable")
+    enable_line = next((ln for ln in text.replace("\\\n", " ").splitlines()
+                        if re.search(r"systemctl\s+enable[^\n]*"
+                                     r"qdistro-polkit-agent", ln)), "")
+    assert enable_line, "nothing enables qdistro-polkit-agent.service"
     assert "|| true" not in enable_line, (
         "the polkit agent enable swallows its own failure again")
+
+
+def test_polkit_agent_installer_removes_the_old_user_unit():
+    """Upgrades must not leave the pre-systemd-service user unit behind.
+
+    The agent used to be installed at ``/etc/systemd/user/`` and enabled
+    with ``systemctl --global enable``. Leaving either the unit file or the
+    global wants link in place would let the OLD user unit start next to the
+    new system service (sol r170): the old agent could claim the session-bus
+    singleton first and then fail the broker's system-cgroup check.
+    """
+    text = (_INSTALL_DIR / "install-polkit-agent-for-vm.sh").read_text()
+    assert re.search(r"systemctl\s+--global\s+disable[^\n]*"
+                     r"qdistro-polkit-agent", text), (
+        "the installer no longer globally disables the old user unit — "
+        "its wants link would survive upgrades")
+    assert re.search(r"rm[^\n]*-f[^\n]*/etc/systemd/user/"
+                     r"qdistro-polkit-agent\.service", text), (
+        "the installer no longer removes the old user unit file")
+
+
+def test_polkit_agent_unit_is_a_system_service():
+    """The unit must stay a system service — a user unit's environment is
+    same-uid writable and cannot be sealed (sol r169/170)."""
+    unit = _REPO / "polkit" / "qdistro-polkit-agent.service"
+    svc = _section(unit, "Service")
+    assert svc.get("User") == "admin", (
+        "the polkit agent must run as User=admin under the SYSTEM manager")
+    assert _section(unit, "Install").get("WantedBy") == "multi-user.target"
+    # A PartOf=/WantedBy= on the USER session target would signal a
+    # regression to the user-unit form.
+    assert not any(_SESSION_TARGET in v
+                   for v in _values(unit, "Install", "WantedBy")
+                   + _values(unit, "Unit", "PartOf"))
+
+
+def test_polkit_agent_unit_lands_in_the_admin_slice():
+    """The unit must pin ``Slice=user-1000.slice`` — polkitd's
+    caller-session resolution (``sd_pid_get_owner_uid`` →
+    ``sd_uid_get_display``) only works under ``user-<uid>.slice``; a
+    plain ``system.slice`` caller is refused with "Cannot determine
+    session the caller is in" (live-verified 2026-10-07). The unit
+    cgroup stays pid-1-owned there; only the ``user@`` subtree is
+    delegated to uid 1000."""
+    unit = _REPO / "polkit" / "qdistro-polkit-agent.service"
+    svc = _section(unit, "Service")
+    assert svc.get("Slice") == "user-1000.slice", (
+        "without Slice=user-1000.slice polkitd cannot determine the "
+        "caller's session and refuses RegisterAuthenticationAgent")
+    # Keep the slice ordering visible so a future edit cannot drop it
+    # silently — an early boot with no slice yet must still land the
+    # unit at the pinned path, not fail the start.
+    after = " ".join(_values(unit, "Unit", "After")).split()
+    assert "user-1000.slice" in after, (
+        "the unit must start after user-1000.slice exists")

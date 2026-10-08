@@ -34,14 +34,17 @@ set -eo pipefail
 FORCE=0
 KEEP_VM=0
 IMG_DIR_OVERRIDE=""
-HTTP_PORT=8765
+# Empty => kernel-assigned free port at server launch (no probe/bind race);
+# --http-port pins it.
+HTTP_PORT=""
+HTTP_PORT_EXPLICIT=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --force)      FORCE=1; shift ;;
         --keep-vm)    KEEP_VM=1; shift ;;
         --image-dir)  IMG_DIR_OVERRIDE="$2"; shift 2 ;;
-        --http-port)  HTTP_PORT="$2"; shift 2 ;;
+        --http-port)  HTTP_PORT="$2"; HTTP_PORT_EXPLICIT=1; shift 2 ;;
         -h|--help)
             sed -n '2,30p' "$0"; exit 0 ;;
         *)
@@ -116,15 +119,20 @@ trap cleanup EXIT
 #    expects /qdistro.tar.gz (the whole monorepo) at the HTTP root.
 STAGE="$(mktemp -d -t bake-enforcing-stage.XXXXXX)"
 echo "[bake-enforcing] tarballing the qdistro monorepo into $STAGE..."
+# Exclude build *output* dirs by anchored path (./build*, ./*/build*): a bare
+# 'build' basename would also drop source dirs the build requires, e.g.
+# qdshell/quickshell-vendored/src/src/build (add_subdirectory(build)).
 TAR_EXCLUDES=(--exclude='__pycache__' --exclude='*.pyc'
               --exclude='.pytest_cache' --exclude='.git'
-              --exclude='build' --exclude='build-qci'
-              --exclude='build-host*'
               --exclude='node_modules' --exclude='.worktrees'
               --exclude='./ci/runs' --exclude='./image/root/root'
-              --exclude='./image/logs')
-tar "${TAR_EXCLUDES[@]}" --exclude='./qdwin/libweston-vendored/src/build' \
-    -czf "$STAGE/qdistro.tar.gz" -C "$REPO_ROOT" .
+              --exclude='./image/logs'
+              --exclude='./qdwin/libweston-vendored/src/build')
+while IFS= read -r _d; do
+    TAR_EXCLUDES+=("--exclude=$_d")
+done < <(find "$REPO_ROOT" -mindepth 1 -maxdepth 2 -type d -name 'build*' \
+        -printf './%P\n')
+tar "${TAR_EXCLUDES[@]}" -czf "$STAGE/qdistro.tar.gz" -C "$REPO_ROOT" .
 cp "$VM_TOOLS/fresh-vm-bootstrap.sh" "$STAGE/fresh-vm-bootstrap.sh"
 
 # The baked cloud base is runtime-only — no compilers (install-deps.sh's
@@ -136,26 +144,57 @@ NATIVE_ARCHIVE=$(bash "$SCRIPT_DIR/build-native-podman.sh") || exit 3
 NATIVE_SHA256=$(sha256sum "$NATIVE_ARCHIVE" | awk '{print $1}')
 cp --reflink=auto "$NATIVE_ARCHIVE" "$STAGE/native-stage.tar"
 
-# Detect + reclaim port: a stale http.server from a prior run silently
-# steals it and the in-VM wget then 404s against the wrong tree,
-# surfacing as a confusing rc=8 four steps later.
-if ss -tln 2>/dev/null | awk -v p=":$HTTP_PORT" '$4 ~ p {found=1} END {exit !found}'; then
-    echo "[bake-enforcing] port $HTTP_PORT already bound; reclaiming..."
-    PIDS=$(ss -tlnp 2>/dev/null \
-        | awk -v p=":$HTTP_PORT" '$4 ~ p { for(i=1;i<=NF;i++) if (match($i, /pid=([0-9]+)/, m)) print m[1] }' | sort -u)
-    [ -n "$PIDS" ] && kill $PIDS 2>/dev/null || true
-    sleep 0.5
+HTTP_LOG="$STAGE/http-server.log"
+PORT_FILE="$STAGE/http-port"
+: > "$PORT_FILE"
+if [ "$HTTP_PORT_EXPLICIT" -eq 1 ]; then
+    # Explicit port: reclaim a stale SAME-USER listener first (foreign pids are
+    # invisible to `ss -tlnp` unprivileged — PIDS comes out empty and we never
+    # kill). Port match is anchored at the end of the address field so :8765
+    # cannot match :18765-style prefixes.
+    if ss -tln 2>/dev/null | awk -v p="$HTTP_PORT" '$4 ~ ":"p"$" {found=1} END {exit !found}'; then
+        echo "[bake-enforcing] port $HTTP_PORT already bound; reclaiming..."
+        PIDS=$(ss -tlnp 2>/dev/null \
+            | awk -v p="$HTTP_PORT" '$4 ~ ":"p"$" { for(i=1;i<=NF;i++) if (match($i, /pid=([0-9]+)/, m)) print m[1] }' | sort -u)
+        [ -n "$PIDS" ] && kill $PIDS 2>/dev/null || true
+        sleep 0.5
+    fi
+    REQ_PORT="$HTTP_PORT"
+    # Reclaimed sockets linger in TIME_WAIT — SO_REUSEADDR is needed here.
+    REUSE=1
+else
+    # Default: port 0, kernel assigns a free one — no probe-then-bind race
+    # window (same pattern as spin-test-vm.sh). Two concurrent runs on one
+    # host can never collide.
+    REQ_PORT=0
+    REUSE=0
 fi
-HTTP_LOG="/tmp/bake-enforcing-http-$(id -u).log"
-(cd "$STAGE" && nohup python3 -m http.server "$HTTP_PORT" \
-        --bind 0.0.0.0 ) >"$HTTP_LOG" 2>&1 &
+# Bind + readback: python serves from the socket IT bound and prints the real
+# port only after the bind succeeded — a foreign user's listener can never
+# satisfy this (our python would exit, and no port line ever appears).
+(
+    cd "$STAGE" || exit 1
+    exec python3 -c '
+import http.server, socketserver, sys
+socketserver.TCPServer.allow_reuse_address = (sys.argv[2] == "1")
+httpd = socketserver.TCPServer(("0.0.0.0", int(sys.argv[1])), http.server.SimpleHTTPRequestHandler)
+sys.stdout.write(str(httpd.server_address[1]) + "\n"); sys.stdout.flush()
+httpd.serve_forever()
+' "$REQ_PORT" "$REUSE" > "$PORT_FILE" 2>"$HTTP_LOG"
+) &
 HTTP_PID=$!
-sleep 1
-if ! ss -tln 2>/dev/null | awk -v p=":$HTTP_PORT" '$4 ~ p {found=1} END {exit !found}'; then
-    echo "ERROR: http.server failed to bind $HTTP_PORT (log: $HTTP_LOG)" >&2
+for _ in $(seq 1 50); do
+    HTTP_PORT=$(head -1 "$PORT_FILE" 2>/dev/null | tr -dc '0-9')
+    [ -n "$HTTP_PORT" ] && break
+    kill -0 "$HTTP_PID" 2>/dev/null || break
+    sleep 0.2
+done
+if [ -z "$HTTP_PORT" ]; then
+    echo "ERROR: staging HTTP server failed to bind (see $HTTP_LOG)" >&2
     tail -5 "$HTTP_LOG" >&2 || true
     exit 6
 fi
+echo "[bake-enforcing] host HTTP server on 0.0.0.0:$HTTP_PORT (pid $HTTP_PID)"
 
 # 3. Push fresh-vm-bootstrap.sh + run it. Long-running; poll for DONE.
 echo "[bake-enforcing] running fresh-vm-bootstrap.sh inside $VM (this is the slow step)..."

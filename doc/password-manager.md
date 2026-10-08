@@ -228,8 +228,8 @@ below).
 
 ## Polkit agent
 
-A per-user session daemon `qdistro-polkit-agent` registers with polkitd and
-dispatches `BeginAuthentication` to one of three methods:
+A system service `qdistro-polkit-agent` (running as `User=admin`) registers
+with polkitd and dispatches `BeginAuthentication` to one of three methods:
 
 - **PAM** — admin types their password, verified via `python-pam`.
 - **fprintd** — verify via `net.reactivated.Fprint.Device`.
@@ -256,7 +256,9 @@ polkitd directly. The privileged broker (uid 0) delivers the response:
   so denial logging and audit correlation stay unchanged.
 - **pam / fprint methods** — the verdict is verified locally by the
   agent, then relayed: `RespondPolkitAuth(cookie, identities)` asks the
-  broker to make the uid-0 call.
+  broker to make the uid-0 call. Since these paths never file a
+  request, the agent first binds the cookie to its connection via
+  `AnnouncePolkitAuth(cookie)`.
 - **cancellation** — polkitd's `CancelAuthentication` forwards to
   `CancelPolkitAuth(cookie)`, which decides the matching queued request
   deny so a dead prompt does not linger in the admin queue and the
@@ -264,10 +266,12 @@ polkitd directly. The privileged broker (uid 0) delivers the response:
 
 Two invariants make this safe:
 
-- **The cookie is the correlation secret.** Only polkitd's registered
-  agent ever sees it; a response naming a cookie polkitd is not waiting
-  on is a silent no-op, so a stale, cancelled, or attacker-guessed
-  cookie grants nothing.
+- **The cookie is the correlation secret, and it stays secret.** Only
+  polkitd's registered agent ever sees it — the agent does not file it
+  in request details (GetPending renders those to admin-control peers),
+  and it is never logged. A response naming a cookie polkitd is not
+  waiting on is a silent no-op, so a stale, cancelled, or
+  attacker-guessed cookie grants nothing.
 - **The response identity comes from polkit's own list.** On this image
   `/usr/share/polkit-1/rules.d/50-default.rules` sets
   `polkit._suse_admin_groups = []`, so `identities` is
@@ -277,9 +281,85 @@ Two invariants make this safe:
   `unix-user` entry for the requesting uid, else the first `unix-user`,
   else the first entry) rather than asserting one.
 
-All three broker methods are restricted to the admin uid server-side
-and denied to non-admin callers in the `org.qdistro.AdminBroker1`
-system-bus policy.
+The four broker methods are bound server-side to the session agent —
+the caller must be python running the agent's installed script inside
+its `qdistro-polkit-agent.service` **system**-slice cgroup — and denied
+to non-admin callers in the `org.qdistro.AdminBroker1` system-bus
+policy. Because exe, argv, and cgroup membership are all forgeable by a
+sufficiently motivated same-uid process, the relay additionally binds
+each cookie to its declaring connection's **unique D-Bus name**:
+`RespondPolkitAuth` and `CancelPolkitAuth` act only for the sender that
+announced or filed the cookie, a cancel recorded for one sender cannot
+pre-deny another's filing, and the first declaration wins — a foreign
+sender cannot rebind a cookie by filing or announcing it later.
+
+The agent is a **system service** (`User=admin`), not a user unit. A
+user unit cannot seal its own launch environment: every same-uid
+process can push manager variables (`systemctl --user set-environment`
++ restart) or write drop-ins — including an *empty* drop-in
+`UnsetEnvironment=` that resets the denylist outright — so injected
+loader code could run before `python3 -I` took effect and scrub its own
+`/proc/<pid>/environ` entries before the broker ever read them. As a
+system unit the unit file, drop-in dirs, manager environment and the
+unit cgroup's `cgroup.procs` are all root-owned: uid 1000 can neither
+inject into the agent's environment or argv nor migrate a foreign
+process into its cgroup. The unit pins `Slice=user-1000.slice` so
+polkitd can resolve "the session the caller is in" — its
+`sd_pid_get_owner_uid` → `sd_uid_get_display` fallback only resolves
+under `user-<uid>.slice`, and a plain `system.slice` caller is refused
+with "Cannot determine session the caller is in". Only the
+`user@1000.service` subtree is delegated to the user, so the service's
+own cgroup remains root-owned.
+
+The remaining hardenings keep attacker code off the trusted
+connection:
+
+- The unit launches `python3 -I`, ignoring `PYTHONPATH`/
+  `PYTHONHOME`/`sitecustomize`/`usercustomize`, and the broker
+  *requires* `-I` in the peer argv — without it, even
+  `python3 <script>` loads attacker-writable user-site
+  `sitecustomize`/`.pth` code with no env var at all. The password
+  prompt is likewise exec'd through `/usr/bin/python3 -I` (never via
+  its shebang), so admin-writable user-site code cannot run inside the
+  trusted unit cgroup as a child.
+- The peer must **be the unit's main process**: the broker asks pid 1
+  itself for `systemd1.Service.MainPID` of
+  `qdistro-polkit-agent.service` and requires the calling pid to equal
+  it. A descendant can double-fork and reappear inside the genuine
+  cgroup with PPID 1 and a rewritten argv — the only attribute it can
+  never satisfy is being the process systemd spawned. When systemd
+  cannot answer, the check fails closed. `ppid == 1` is kept as a
+  cheap pre-filter.
+- The **connection itself** is bound to that live process: the pid the
+  daemon reports for a connection is fixed at connect time, so a caller
+  could keep its socket alive in another process and let the pid be
+  recycled by an agent restart — /proc and MainPID would then describe
+  the genuine agent while the connection is the attacker's. The broker
+  therefore also fetches the daemon's `ProcessFD` credential (a pidfd
+  for the connection's origin task, via `GetConnectionCredentials`) and
+  requires it to resolve to a *live* task whose pid is the MainPID. A
+  dead origin — the pid-reuse case — fails closed; a live foreign
+  origin carries a different pid.
+- Defence-in-depth (checked anyway): exe resolves to a python under a
+  root-owned system dir (an attacker binary merely *named* `python3`
+  ignores argv), only no-argument isolation flags precede the script,
+  environ is read untruncated and fail-closed against the injection
+  denylist (`LD_*`, `GLIBC_TUNABLES`, `PYTHON*`, `BASH_ENV`,
+  `QDISTRO_POLKIT_*` test seams — now honestly attestable because the
+  system unit's environment is root-fixed), the SELinux type is not
+  hostile, and the cgroup path matches the unit exactly.
+
+Residuals, explicitly narrowed: uid 0 remains able to rewrite or
+restart the system unit — but root needs no relay (it answers polkitd
+itself), so tampering yields at most a denial of service, never a
+forged approval. **Same-uid ptrace injection into the live agent is
+outside the threat model**: a same-uid tracer could attach to the main
+process and run code on the trusted connection regardless of any peer
+check; containing that needs OS-level policy (Yama scope or an
+SELinux domain for the agent), which this slice does not ship.
+TTL'd announcements also mean a cookie can be re-declared once its
+binding expires — safe only because the polkit auth session it names
+is long dead by then.
 
 History: before this responder existed the agent was verified end-to-end
 on a real seat session (registration, dispatch, broker delegation, fail-

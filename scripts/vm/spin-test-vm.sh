@@ -213,12 +213,20 @@ log "stage 4a: tarballing the qdistro monorepo (root + in-tree components)..."
 # extension repos' node_modules.
 # ONE tarball: the guest unpacks it as /root/qdistro-src (fresh-vm-bootstrap.sh),
 # the same layout as the image and a developer checkout.
-tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-    --exclude='.git' --exclude='build' --exclude='build-host*' \
-    --exclude='node_modules' --exclude='.worktrees' \
-    --exclude='./ci/runs' --exclude='./image/root/root' --exclude='./image/logs' \
-    --exclude='./qdwin/libweston-vendored/src/build' \
-    -czf "$STAGE/qdistro.tar.gz" -C "$REPO" .
+# Exclude build *output* dirs by anchored path (./build*, ./*/build*): a bare
+# 'build' basename would also drop source dirs the build requires, e.g.
+# qdshell/quickshell-vendored/src/src/build (add_subdirectory(build)).
+TAR_EXCLUDES=(--exclude='__pycache__' --exclude='*.pyc'
+              --exclude='.pytest_cache' --exclude='.git'
+              --exclude='node_modules' --exclude='.worktrees'
+              --exclude='./ci/runs' --exclude='./image/root/root'
+              --exclude='./image/logs'
+              --exclude='./qdwin/libweston-vendored/src/build')
+while IFS= read -r _d; do
+    TAR_EXCLUDES+=("--exclude=$_d")
+done < <(find "$REPO" -mindepth 1 -maxdepth 2 -type d -name 'build*' \
+        -printf './%P\n')
+tar "${TAR_EXCLUDES[@]}" -czf "$STAGE/qdistro.tar.gz" -C "$REPO" .
 
 # Also stage the bootstrap script next to the tarballs so the VM
 # can fetch it before unpacking anything.
@@ -277,7 +285,8 @@ log "stage 5: running fresh-vm-bootstrap.sh in VM..."
 
 # Bootstrap fetches the monorepo tarball and runs the build. Pass the
 # per-run staging URL so the in-VM bootstrap fetches from THIS run's
-# server (its default is the old fixed http://10.0.2.2:8765).
+# server — fresh-vm-bootstrap.sh requires QDISTRO_HTTP_HOST and has no
+# default port.
 # Normalize the tier-2 image-prebuild flag to a bare 0/1 before embedding it in
 # the guest command string (defensive for manual invocations passing true/yes).
 case "${QDISTRO_BUILD_TIER2_IMAGES:-0}" in 1|true|yes|on) _T2_IMAGES=1 ;; *) _T2_IMAGES=0 ;; esac

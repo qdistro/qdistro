@@ -67,7 +67,17 @@ QDISTRO_PKGS=(
   libguestfs guestfs-tools
   snapper            # btrfs snapshot management
   btrfs-progs        # btrfs subvolume commands
-  quickshell         # qdshell runtime
+  # qdshell runtime is the vendored upstream Quickshell build
+  # (qdshell/quickshell-vendored/, built by the bootstrap's
+  # build_quickshell step). No `quickshell` package exists in Tumbleweed —
+  # the old bare name here could never resolve; the archived noctalia-qs
+  # fork was the only prebuilt provider. First line: the binary's
+  # link-time deps; second/third: what its cmake build needs.
+  libjemalloc2 libcpptrace1 libpolkit-agent-1-0 libpolkit-gobject-1-0
+  cmake spirv-tools vulkan-devel pam-devel polkit-devel jemalloc-devel
+  cpptrace-devel qt6-quick-private-devel qt6-qml-private-devel
+  qt6-shadertools-devel qt6-waylandclient-devel
+  qt6-waylandclient-private-devel
   python314-dbus_next  # qdlocker runtime dep
   # NOTE: python314-PyQt6-WebEngine (qdbrowser WebEngine) is intentionally
   # omitted here because its exact package name is uncertain on Tumbleweed.
@@ -111,6 +121,12 @@ if ! zypper -n "${gpg_flags[@]}" refresh; then
         exit 1
     fi
 fi
+# qdshell's runtime is vendored Quickshell (qdshell/quickshell-vendored).
+# noctalia-qs was never a legitimate qdistro dep — qdshell forked Noctalia
+# before that fork existed — so lock it BEFORE the main transaction: no
+# recommends/supplements may pull the archived fork back onto the system.
+zypper -n addlock noctalia-qs \
+    || { echo "[install-deps] ERROR: zypper addlock noctalia-qs failed" >&2; exit 1; }
 zypper -n install --no-recommends "${QDISTRO_PKGS[@]}" 2>&1 | tail -10
 
 # python3 → 3.14: the snapshot still ships the unversioned symlink from

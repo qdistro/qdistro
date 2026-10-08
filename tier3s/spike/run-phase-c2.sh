@@ -11,7 +11,7 @@ vm=$1 L=$2
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 VMLOG_BIN=$here/vmlog.sh
-PORT="${T3S_C2_PORT:-8765}"
+PORT="${T3S_C2_PORT:-0}"   # 0 = kernel-assigned; a fixed port collides across test users
 FAILS=0
 VMLOG() { "$VMLOG_BIN" "$@" || { echo "STEP FAILED (rc=$?): $1"; FAILS=$((FAILS+1)); }; }
 
@@ -26,9 +26,25 @@ trap 'rm -rf "$STAGE"; kill $SRV_PID 2>/dev/null' EXIT
 mkdir -p "$STAGE/tier3s"
 cp "$here"/../provision-runsc.sh "$here"/../RUNSC_RELEASE "$here"/../tier3s-runsc "$STAGE/tier3s/"
 tar czf "$STAGE/spike.tgz" -C "$here" c2-lib.sh c2-silo-uid.sh smoke.json lib.sh -C "$STAGE" tier3s
-(cd "$STAGE" && exec python3 -m http.server "$PORT" --bind 0.0.0.0 >/dev/null 2>&1) &
+# Bind + readback: the server prints the port it ACTUALLY bound, which is
+# also proof this run (not a foreign listener) owns it — a stale server on
+# the old fixed 8765 would otherwise hand the guest a 404 or wrong tarball.
+PORTF="$STAGE/.http-port"; : > "$PORTF"
+(cd "$STAGE" && exec python3 -c '
+import http.server, socketserver, sys
+socketserver.TCPServer.allow_reuse_address = (sys.argv[2] == "1")
+httpd = socketserver.TCPServer(("0.0.0.0", int(sys.argv[1])), http.server.SimpleHTTPRequestHandler)
+sys.stdout.write(str(httpd.server_address[1]) + "\n"); sys.stdout.flush()
+httpd.serve_forever()
+' "$PORT" "$([ "$PORT" = 0 ] && echo 0 || echo 1)" >"$PORTF" 2>/dev/null) &
 SRV_PID=$!
-sleep 1
+for _ in $(seq 1 50); do
+    PORT=$(head -1 "$PORTF" 2>/dev/null | tr -dc '0-9')
+    [ -n "$PORT" ] && break
+    kill -0 "$SRV_PID" 2>/dev/null || break
+    sleep 0.2
+done
+[ -n "$PORT" ] || { echo "staging HTTP server failed to bind" >&2; exit 3; }
 
 VMLOG "$L/10-stage.log" "$vm" \
   "mkdir -p /root/t3s-c2 && cd /root/t3s-c2 && curl -fsS http://10.0.2.2:$PORT/spike.tgz | tar xzf - --no-same-owner && chown -R root:root /root/t3s-c2 && ls -la tier3s/ && loginctl enable-linger admin && sleep 2 && ls -ld /run/user/1000"
