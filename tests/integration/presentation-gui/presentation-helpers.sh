@@ -9,6 +9,8 @@
 #   pres_snapshot               print "<generation> <mode>" of current.json
 #   pres_wait_mode <mode> [s]   wait until current.json mode == <mode>
 #   pres_launch <tag> <cmd>     start a GUI app detached in the session
+#   pres_prompt_start <tag>     start the polkit prompt detached exactly as
+#                               the agent spawns it; rc -> /tmp/pk-<tag>.rc
 #   pres_app_pids               "name=pid ..." for the four first-party apps
 #   pres_kill_apps              stop every first-party app this file starts
 #   pres_output_scale           integer wl_output scale of Virtual-1
@@ -63,6 +65,19 @@ pres_wait_mode() {
 pres_launch() {
     local tag=$1; shift
     qdwin_vmx_merged "cd / && setsid -f runuser -u admin -- env $PRES_SESSION_ENV $* >/tmp/pres-$tag.log 2>&1 < /dev/null"
+}
+
+# pres_prompt_start <tag> — start the polkit prompt detached exactly as the
+# agent spawns it, with a developer override a polkit-role reader must
+# IGNORE. The wrapper records the exit code in /tmp/pk-<tag>.rc, the
+# password-bearing stdout in .out and stderr in .err.
+# Lives here, not in the scenario file: the inner `echo $?` must reach the
+# guest unexpanded, and a markdown-embedded function body re-emitted by a
+# scenario agent through nested quoting can pre-expand it (observed: $? -> 0
+# produced a constant rc file that had nothing to do with the prompt's exit).
+pres_prompt_start() {
+    local tag=$1
+    pres_admin "rm -f /tmp/pk-$tag.*; setsid sh -c 'QDISTRO_PRESENTATION_FILE=/nonexistent/current.json /usr/local/bin/qdistro-polkit-prompt --mode=pam --action=org.qdistro.presentation.test --message=\"Presentation test prompt\" > /tmp/pk-$tag.out 2>/tmp/pk-$tag.err; echo \$? > /tmp/pk-$tag.rc' >/dev/null 2>&1 </dev/null &"
 }
 
 # Process patterns of the four apps as started by these scenarios.
