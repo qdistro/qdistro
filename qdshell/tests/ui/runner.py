@@ -599,7 +599,12 @@ def guest_cleanup_vm(session: VMSession, script: str, *, timeout: float = 90.0
 
 
 def journal_cursor_vm(session: VMSession, *, timeout: float = 20.0) -> str:
-    """A journalctl cursor for the admin user's journal, or "" on failure."""
+    """A journalctl cursor for the admin user's journal, or "" on failure.
+
+    Tolerant variant for paths that can fall back to a live probe (the
+    bind wait). The crash-attribution path uses journal_checkpoint_vm,
+    which fails closed instead.
+    """
     res = _vm_run_script(
         session,
         f"runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
@@ -610,25 +615,77 @@ def journal_cursor_vm(session: VMSession, *, timeout: float = 20.0) -> str:
     return res.stdout.strip() if res.returncode == 0 else ""
 
 
-def qs_crash_evidence_vm(session: VMSession, cursor: str, *,
-                         timeout: float = 20.0) -> str:
-    """Journal lines since `cursor` evidencing a qdshell worker crash.
+def journal_checkpoint_vm(session: VMSession, *, timeout: float = 20.0
+                          ) -> tuple:
+    """A (journal cursor, guest timestamp) crash-attribution checkpoint.
+
+    FAIL-CLOSED: a test window without a valid starting checkpoint cannot
+    be certified crash-free, so a failed probe raises instead of
+    degrading to an unbounded search that replays unrelated history.
+    """
+    script = (
+        f"CUR=$(runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
+        f"journalctl --user -u {VM_QDSHELL_UNIT} -n0 --show-cursor "
+        "--no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')\n"
+        '[ -n "$CUR" ] || { echo "journal cursor unavailable" >&2; exit 63; }\n'
+        'echo "CUR:$CUR"\n'
+        "date '+%Y-%m-%d %H:%M:%S'\n"
+    )
+    res = _vm_run_script(session, script, timeout=timeout)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"could not capture a journal checkpoint (rc={res.returncode}): "
+            f"{res.stderr.strip()[:200]}"
+        )
+    lines = res.stdout.strip().splitlines()
+    cursor = next((l[4:] for l in lines if l.startswith("CUR:")), "")
+    if not cursor or not lines:
+        raise RuntimeError(f"malformed journal checkpoint: {res.stdout!r}")
+    return (cursor, lines[-1])
+
+
+def qs_crash_evidence_vm(session: VMSession, checkpoint: tuple, *,
+                         timeout: float = 20.0) -> tuple:
+    """Crash evidence since `checkpoint`, plus the NEXT checkpoint.
 
     A Restart=always respawn restores IPC and the qdwin binding, so a
     worker that died mid-test is INVISIBLE in the framebuffer once the
     crash-reporter dialog is reaped — the only faithful evidence is the
-    journal (`code=dumped`, a SEGV status, coredump records). Returns the
-    matching lines (empty when nothing crashed). `cursor` should come
-    from journal_cursor_vm captured before the window under test; the
-    whole user journal is scanned so the dying unit's own lines are
-    caught whichever unit systemd attributes them to.
+    journal. Two identity-correlated channels:
+
+      * the qdshell.service unit journal (the worker's own stderr and
+        systemd's process-exit lines): `code=dumped`, SEGV statuses, the
+        supervisor's crash text;
+      * systemd-coredump records in the system journal since the
+        checkpoint timestamp, filtered to the qs/quickshell executables.
+
+    Scoping to the unit and to qdshell's executables means an unrelated
+    user service crashing cannot be attributed to the shell. Returns
+    (evidence_text, (cursor, timestamp)) where the cursor comes from the
+    SAME journal read (--show-cursor appends it after the last entry), so
+    no line can fall into an unexamined interval between separate probe
+    and checkpoint calls. Any probe failure raises — an unread journal is
+    not an empty journal.
     """
-    bounds = (f"--after-cursor {shlex.quote(cursor)}" if cursor
-              else "--since '-10 minutes'")
+    cursor, since = checkpoint
+    pat = "code=dumped|status=[0-9]+/SEGV|coredump|__QUICKSHELL_CRASH|crash"
     script = (
-        f"runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
-        f"journalctl --user --no-pager {bounds} 2>/dev/null "
-        f"| grep -aE 'code=dumped|SEGV|coredump|__QUICKSHELL_CRASH' || true\n"
+        "set -u\n"
+        f"OUT=$(runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
+        f"journalctl --user -u {VM_QDSHELL_UNIT} --no-pager --show-cursor "
+        f"--after-cursor {shlex.quote(cursor)} 2>/dev/null) || exit 63\n"
+        'NEWCUR=$(printf "%s\\n" "$OUT" | sed -n "s/^-- cursor: //p" | tail -1)\n'
+        '[ -n "$NEWCUR" ] || { echo "journal read returned no cursor" >&2; exit 63; }\n'
+        "echo '@@EVID@@'\n"
+        f'printf "%s\\n" "$OUT" | grep -aiE {shlex.quote(pat)} || true\n'
+        "echo '@@CORE@@'\n"
+        f"journalctl --no-pager --since {shlex.quote(since)} "
+        "-g 'dumped core|coredump' 2>/dev/null "
+        "| grep -aE 'quickshell|\\(qs\\)' || true\n"
+        "echo '@@CUR@@'\n"
+        'echo "$NEWCUR"\n'
+        "echo '@@TS@@'\n"
+        "date '+%Y-%m-%d %H:%M:%S'\n"
     )
     res = _vm_run_script(session, script, timeout=timeout)
     if res.returncode != 0:
@@ -636,7 +693,21 @@ def qs_crash_evidence_vm(session: VMSession, cursor: str, *,
             f"crash-evidence probe failed (rc={res.returncode}): "
             f"{res.stderr.strip()[:200]}"
         )
-    return res.stdout.strip()
+    evid = res.stdout.split("@@EVID@@", 1)[1]
+    core = evid.split("@@CORE@@", 1)[1]
+    unit_lines = evid.split("@@CORE@@", 1)[0].strip()
+    core_lines = core.split("@@CUR@@", 1)[0].strip()
+    tail = core.split("@@CUR@@", 1)[1]
+    new_cursor = tail.split("@@TS@@", 1)[0].strip()
+    new_ts = tail.split("@@TS@@", 1)[1].strip()
+    if not new_cursor or not new_ts:
+        raise RuntimeError("crash-evidence probe returned no cursor")
+    parts = []
+    if unit_lines:
+        parts.append("qdshell.service journal:\n" + unit_lines)
+    if core_lines:
+        parts.append("systemd-coredump:\n" + core_lines)
+    return "\n".join(parts), (new_cursor, new_ts)
 
 
 def ipc_vm(session: VMSession, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
@@ -1615,7 +1686,11 @@ Cover, as bullet points:
   - For editor/list rows: transcribe each visible row's LABEL or identifier
     verbatim (e.g. dotted monospace key paths like `bar.showOutline`), the
     small status markers beside them (colored dots, badges), and the row's
-    buttons/fields — not just the field values.
+    buttons/fields — not just the field values. When a label is truncated
+    with an ellipsis (…), transcribe the visible part plus the ellipsis
+    (e.g. `audio.cava…ate`) and call it elided — that is still a rendered
+    label, not a missing or "unreadable" one. Reserve "unreadable"/absent
+    for text that is genuinely not rendered at all.
   - Notable icons (by their general subject: "battery icon", "wifi icon",
     "warning triangle", "magnifier inside the search field", etc.).
   - Approximate layout: tabs along which side; content arranged in rows/cards/columns.

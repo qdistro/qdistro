@@ -32,7 +32,9 @@ NOTIFY_SEED = (
 )
 
 NOTIFY_CLEAN = (
-    'qs ipc -p /usr/share/quickshell/qdshell call notifications clear || true'
+    # No `|| true`: a failed clear leaves seeded history behind and the
+    # teardown-error check reports it rather than pretending a clean state.
+    'qs ipc -p /usr/share/quickshell/qdshell call notifications clear'
 )
 
 
@@ -43,30 +45,37 @@ NOTIFY_CLEAN = (
 # reload doesn't re-resolve option lists), so fixtures that change persistent
 # state must restart the unit and wait for `qdwin_shell_v1 bound` — otherwise
 # the test races the reconnect gap.
-_RESTART_AND_WAIT = (
-    # A journal cursor captured BEFORE the restart bounds the wait to this
-    # generation's `bound` line — a wall-clock --since is only 1-second
-    # granular, so a bind from the previous generation inside the same
-    # second could satisfy the wait early. Both the restart itself and a
-    # missing bind are explicit failures: falling through to `sleep 2`
-    # would report success while the shell is still down.
+# A journal cursor captured BEFORE the restart bounds the wait to this
+# generation's `bound` line — a wall-clock --since is only 1-second
+# granular, so a bind from the previous generation inside the same second
+# could satisfy the wait early. The stop/start/mutation ordering matters
+# just as much: seeds and teardowns that rewrite on-disk state do so while
+# the shell is DOWN — a live save-timer or async service callback could
+# otherwise overwrite the restored file before the restart. Both halves
+# fail explicitly: falling through to `sleep 2` would report success while
+# the shell is still down, and the 45-iteration wait stays inside
+# guest_sh_vm's 60-second transport deadline.
+_CURSOR_AND_STOP = (
     'CUR=$(journalctl --user -u qdshell.service -n0 --show-cursor --no-pager '
     "2>/dev/null | sed -n 's/^-- cursor: //p')\n"
     '[ -n "$CUR" ] || { echo "qdshell journal cursor unavailable" >&2; exit 64; }\n'
-    'systemctl --user restart qdshell '
-    '|| { echo "systemctl restart qdshell failed" >&2; exit 64; }\n'
+    "systemctl --user stop qdshell "
+    '|| { echo "systemctl stop qdshell failed" >&2; exit 64; }\n'
+)
+_START_AND_WAIT = (
+    "systemctl --user start qdshell "
+    '|| { echo "systemctl start qdshell failed" >&2; exit 64; }\n'
     "ok=\n"
-    "for i in $(seq 1 60); do\n"
+    "for i in $(seq 1 45); do\n"
     '  journalctl --user -u qdshell.service --no-pager -o cat '
     '--after-cursor "$CUR" 2>/dev/null '
     "| grep -q 'qdwin_shell_v1 bound' && { ok=1; break; }\n"
     "  sleep 1\n"
     "done\n"
     '[ -n "$ok" ] || { echo "qdshell did not bind qdwin_shell_v1 within '
-    '60s" >&2; exit 65; }\n'
+    '45s" >&2; exit 65; }\n'
     "sleep 2\n"
 )
-
 
 # --- Weather location seed --------------------------------------------------
 # LocationService geocodes Settings.data.location.name through
@@ -84,9 +93,14 @@ _RESTART_AND_WAIT = (
 # proceeds against a live shell.
 LOCATION_SEED = (
     "mkdir -p /home/admin/.cache/qdshell\n"
+    + _CURSOR_AND_STOP
     # Preserve any pre-existing cache byte-for-byte; teardown restores it
-    # (or restores the file's absence).
-    'if [ -f /home/admin/.cache/qdshell/location.json ]; then\n'
+    # (or restores the file's absence). A stale .qdtest-bak means an
+    # interrupted run already parked the real original — keep IT, do not
+    # re-park the seeded file over it.
+    + 'if [ -f /home/admin/.cache/qdshell/location.json.qdtest-bak ]; then\n'
+    "  :\n"
+    'elif [ -f /home/admin/.cache/qdshell/location.json ]; then\n'
     "  mv /home/admin/.cache/qdshell/location.json "
     "/home/admin/.cache/qdshell/location.json.qdtest-bak\n"
     "fi\n"
@@ -100,22 +114,26 @@ LOCATION_SEED = (
     "QDEOF\n"
     # guest_sh_vm already runs the snippet AS admin with XDG_RUNTIME_DIR set —
     # plain `systemctl --user` reaches the right manager.
-    + _RESTART_AND_WAIT +
+    + _START_AND_WAIT +
     "sleep 5\n"   # qdwin bind + first open-meteo fetch round-trip
 )
 
-# Restore the pre-existing cache (or its absence), then restart so
-# LocationService drops the in-memory seeded coordinates/weather — without
-# the restart the service could persist the seeded state back over the
-# restored file.
+# Restore while the shell is DOWN: LocationService's async weather
+# callbacks and its save timer could rewrite the seeded file over the
+# restore if the unit were still running. Restores the pre-existing cache
+# (or its absence); a missing backup means the seed never parked an
+# original, so the file's absence is the honest end state.
 LOCATION_CLEAN = (
-    'if [ -f /home/admin/.cache/qdshell/location.json.qdtest-bak ]; then\n'
+    _CURSOR_AND_STOP
+    + 'if [ -f /home/admin/.cache/qdshell/location.json.qdtest-bak ]; then\n'
     "  mv -f /home/admin/.cache/qdshell/location.json.qdtest-bak "
-    "/home/admin/.cache/qdshell/location.json\n"
+    "/home/admin/.cache/qdshell/location.json "
+    '|| { echo "location cache restore failed" >&2; '
+    'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
     "else\n"
     "  rm -f /home/admin/.cache/qdshell/location.json\n"
     "fi\n"
-    + _RESTART_AND_WAIT
+    + _START_AND_WAIT
 )
 
 
@@ -276,14 +294,15 @@ MPRIS_STOP = (
 # case and restored immediately after — panel_audio later in the suite still
 # sees real devices.
 AUDIO_DEGRADE = (
-    "systemctl --user stop pipewire.service pipewire.socket wireplumber.service "
-    "2>/dev/null || true\n"
+    # No `|| true`: inducement failure must surface in the setup assert, and
+    # restore failure in the teardown assert — both stop/start calls are
+    # idempotent, so a nonzero rc is a real failure.
+    "systemctl --user stop pipewire.service pipewire.socket wireplumber.service\n"
     "sleep 1\n"
 )
 
 AUDIO_RESTORE = (
-    "systemctl --user start pipewire.socket pipewire.service wireplumber.service "
-    "2>/dev/null || true\n"
+    "systemctl --user start pipewire.socket pipewire.service wireplumber.service\n"
 )
 
 # --- Session menu defaults ----------------------------------------------------
@@ -294,10 +313,15 @@ AUDIO_RESTORE = (
 # configuration the golden describes; FileView watches settings.json so the
 # panel re-reads it live. Teardown restores the file byte-for-byte.
 SESSIONMENU_SEED = (
-    "python3 - <<'QDEOF'\n"
-    "import json, shutil\n"
+    _CURSOR_AND_STOP
+    + "python3 - <<'QDEOF'\n"
+    "import json, os, shutil\n"
     'path = "/home/admin/.config/qdshell/settings.json"\n'
-    'shutil.copy2(path, path + ".qdtest-bak")\n'
+    'bak = path + ".qdtest-bak"\n'
+    "# A stale backup is the real original parked by an interrupted run —\n"
+    "# keep it; re-parking the seeded file would lose the honest state.\n"
+    "if not os.path.exists(bak):\n"
+    "    shutil.copy2(path, bak)\n"
     "d = json.load(open(path))\n"
     'sm = d.setdefault("sessionMenu", {})\n'
     'sm["showKeybinds"] = True\n'
@@ -311,16 +335,26 @@ SESSIONMENU_SEED = (
     'json.dump(d, open(path, "w"), indent=2)\n'
     "QDEOF\n"
     # Settings only load at shell start — restart so the defaults apply.
-    + _RESTART_AND_WAIT
+    + _START_AND_WAIT
 )
 
+# The backup is the ONLY honest end state: if it is missing the seed never
+# parked an original and there is nothing to restore — that is a fixture
+# error, not a quiet pass.
 SESSIONMENU_CLEAN = (
-    'test -f /home/admin/.config/qdshell/settings.json.qdtest-bak && '
-    'mv -f /home/admin/.config/qdshell/settings.json.qdtest-bak '
-    '/home/admin/.config/qdshell/settings.json || true\n'
+    _CURSOR_AND_STOP
+    + 'if [ -f /home/admin/.config/qdshell/settings.json.qdtest-bak ]; then\n'
+    "  mv -f /home/admin/.config/qdshell/settings.json.qdtest-bak "
+    "/home/admin/.config/qdshell/settings.json "
+    '|| { echo "sessionmenu settings restore failed" >&2; '
+    'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
+    "else\n"
+    '  echo "sessionmenu settings backup missing" >&2; '
+    'systemctl --user start qdshell 2>/dev/null || true; exit 64\n'
+    "fi\n"
     # Settings only load at shell start — restart again so later surfaces see
     # the VM's real (restored) configuration.
-    + _RESTART_AND_WAIT
+    + _START_AND_WAIT
 )
 
 
@@ -334,23 +368,35 @@ SESSIONMENU_CLEAN = (
 # makes the affordances deterministically visible. Teardown restores the file
 # byte-for-byte and restarts so later surfaces see the real config.
 ADVANCED_SEED = (
-    "python3 - <<'QDEOF'\n"
-    "import json, shutil\n"
+    _CURSOR_AND_STOP
+    + "python3 - <<'QDEOF'\n"
+    "import json, os, shutil\n"
     'path = "/home/admin/.config/qdshell/settings.json"\n'
-    'shutil.copy2(path, path + ".qdtest-adv-bak")\n'
+    'bak = path + ".qdtest-adv-bak"\n'
+    "# A stale backup is the real original parked by an interrupted run —\n"
+    "# keep it; re-parking the seeded file would lose the honest state.\n"
+    "if not os.path.exists(bak):\n"
+    "    shutil.copy2(path, bak)\n"
     "d = json.load(open(path))\n"
     'd.setdefault("bar", {})["showOutline"] = True\n'
     'json.dump(d, open(path, "w"), indent=2)\n'
     "QDEOF\n"
     # Settings only load at shell start — restart so the value is live.
-    + _RESTART_AND_WAIT
+    + _START_AND_WAIT
 )
 
 ADVANCED_CLEAN = (
-    'test -f /home/admin/.config/qdshell/settings.json.qdtest-adv-bak && '
-    'mv -f /home/admin/.config/qdshell/settings.json.qdtest-adv-bak '
-    '/home/admin/.config/qdshell/settings.json || true\n'
-    + _RESTART_AND_WAIT
+    _CURSOR_AND_STOP
+    + 'if [ -f /home/admin/.config/qdshell/settings.json.qdtest-adv-bak ]; then\n'
+    "  mv -f /home/admin/.config/qdshell/settings.json.qdtest-adv-bak "
+    "/home/admin/.config/qdshell/settings.json "
+    '|| { echo "advanced settings restore failed" >&2; '
+    'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
+    "else\n"
+    '  echo "advanced settings backup missing" >&2; '
+    'systemctl --user start qdshell 2>/dev/null || true; exit 64\n'
+    "fi\n"
+    + _START_AND_WAIT
 )
 
 
@@ -364,29 +410,60 @@ ADVANCED_CLEAN = (
 # no entryPoints targets, so enabling the row loads nothing destructive; the
 # row is never toggled during the capture.
 PLUGIN_SEED = (
-    "mkdir -p /home/admin/.config/qdshell/plugins/qduiplugin\n"
-    'if [ -f /home/admin/.config/qdshell/plugins.json ]; then\n'
-    "  cp /home/admin/.config/qdshell/plugins.json "
-    "/home/admin/.config/qdshell/plugins.json.qdtest-bak\n"
+    _CURSOR_AND_STOP
+    # Fixture ownership marker: a pre-existing qduiplugin dir is stale
+    # fixture residue only when it carries our marker — otherwise it is
+    # unowned state this fixture must not overwrite.
+    + 'P=/home/admin/.config/qdshell/plugins/qduiplugin\n'
+    'if [ -e "$P" ]; then\n'
+    '  if [ -f "$P/.qdtest-owned" ]; then\n'
+    '    rm -rf "$P"\n'
+    "  else\n"
+    '    echo "qduiplugin plugin dir exists and is not fixture-owned" >&2\n'
+    "    systemctl --user start qdshell 2>/dev/null || true; exit 64\n"
+    "  fi\n"
     "fi\n"
-    "cat > /home/admin/.config/qdshell/plugins/qduiplugin/manifest.json "
-    "<<'QDEOF'\n"
+    'mkdir -p "$P" || { echo "plugin dir create failed" >&2; '
+    'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
+    'touch "$P/.qdtest-owned"\n'
+    # Back up plugins.json only when no backup exists yet — a stale one is
+    # the real original parked by an interrupted run.
+    'if [ -f /home/admin/.config/qdshell/plugins.json ] && '
+    '[ ! -f /home/admin/.config/qdshell/plugins.json.qdtest-bak ]; then\n'
+    "  cp /home/admin/.config/qdshell/plugins.json "
+    "/home/admin/.config/qdshell/plugins.json.qdtest-bak "
+    '|| { echo "plugins.json backup failed" >&2; exit 64; }\n'
+    "fi\n"
+    "cat > \"$P/manifest.json\" <<'QDEOF'\n"
     '{"id": "qduiplugin", "name": "UI Fixture Plugin", '
     '"version": "1.0.0", "author": "qdistro ui tests", '
     '"description": "Seeded plugin so the Installed list renders its '
     'per-row controls", "entryPoints": {}}\n'
     "QDEOF\n"
     # scanPluginFolder runs at shell start — restart so the row is live.
-    + _RESTART_AND_WAIT
+    + _START_AND_WAIT
 )
 
 PLUGIN_CLEAN = (
-    "rm -rf /home/admin/.config/qdshell/plugins/qduiplugin\n"
+    _CURSOR_AND_STOP
+    + 'P=/home/admin/.config/qdshell/plugins/qduiplugin\n'
+    'if [ -e "$P" ]; then\n'
+    '  if [ -f "$P/.qdtest-owned" ]; then\n'
+    '    rm -rf "$P" || { echo "seeded plugin removal failed" >&2; '
+    'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
+    "  else\n"
+    '    echo "qduiplugin plugin dir is not fixture-owned; leaving it" >&2\n'
+    "    systemctl --user start qdshell 2>/dev/null || true; exit 64\n"
+    "  fi\n"
+    "fi\n"
     'if [ -f /home/admin/.config/qdshell/plugins.json.qdtest-bak ]; then\n'
     "  mv -f /home/admin/.config/qdshell/plugins.json.qdtest-bak "
-    "/home/admin/.config/qdshell/plugins.json\n"
+    "/home/admin/.config/qdshell/plugins.json "
+    '|| { echo "plugins.json restore failed" >&2; '
+    'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
     "fi\n"
-    # Restart so the seeded row leaves the live registry (and any state the
-    # registry persisted for it is re-read from the restored file).
-    + _RESTART_AND_WAIT
+    # plugins.json is auto-created by the registry at every shell start, so
+    # when no backup exists its presence is normal state, not fixture
+    # residue. Restart so the seeded row leaves the live registry.
+    + _START_AND_WAIT
 )

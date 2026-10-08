@@ -152,8 +152,9 @@ def _vm_session():
     # would contaminate ours. Reap at both boundaries of the session.
     _reap_reporters(session, "session start")
     # Checkpoint the journal so the first test's inter-test crash check can
-    # attribute anything that dies between now and its setup.
-    _journal_checkpoint["cursor"] = runner.journal_cursor_vm(session)
+    # attribute anything that dies between now and its setup. Fail-closed:
+    # no checkpoint means no test window can be certified crash-free.
+    _journal_checkpoint["checkpoint"] = runner.journal_checkpoint_vm(session)
     yield session
     _reap_reporters(session, "session end")
 
@@ -170,10 +171,13 @@ def _reap_reporters(session, when: str) -> int:
     return reaped
 
 
-# Journal cursor of the last per-test checkpoint. A crash in the gap between
-# two tests (teardown of one, setup of the next) belongs to no test's window
-# — the next test's setup check attributes it there rather than losing it.
-_journal_checkpoint = {"cursor": None}
+# Crash-attribution checkpoint of the last per-test boundary: a (journal
+# cursor, guest timestamp) pair from ONE journal read, so the checked
+# interval and the next checkpoint never drift apart. A crash in the gap
+# between two tests (teardown of one, setup of the next) belongs to no
+# test's window — the next test's setup check attributes it there rather
+# than losing it.
+_journal_checkpoint = {"checkpoint": None}
 
 
 @pytest.fixture(autouse=True)
@@ -189,51 +193,71 @@ def _reap_reporters_each_test(_vm_session):
 
     But reaping alone would make a crash disappear: Restart=always brings
     IPC and the qdwin binding back, so a mid-test SEGV is invisible in the
-    framebuffer and a recovered capture looks green. The unit journal is
-    the faithful record — this fixture bounds each test with journal
-    cursors and FAILS on crash evidence (dumped cores, SEGV statuses,
-    crash-reporter residue), including the inter-test gap that no test
-    owns. A clean `systemctl restart` from a fixture leaves no such
+    framebuffer and a recovered capture looks green. The journal is the
+    faithful record — this fixture bounds each test with an atomic
+    (cursor, timestamp) checkpoint and FAILS on crash evidence (dumped
+    cores, SEGV statuses, crash text, reporter residue), including the
+    inter-test gap that no test owns. Every probe fails CLOSED: a
+    journalctl error or a missing cursor is a test failure, not "no
+    crash". A clean `systemctl restart` from a fixture leaves no such
     evidence; only an actual worker death does.
     """
     if _vm_session is None:
         yield
         return
 
-    prev_cursor = _journal_checkpoint["cursor"]
-    gap_evidence = ""
-    if prev_cursor:
+    prev = _journal_checkpoint["checkpoint"]
+    if prev is None:
+        # No verified checkpoint yet — capture one now. A failed capture
+        # must not silently produce an unbounded window.
         try:
-            gap_evidence = runner.qs_crash_evidence_vm(_vm_session,
-                                                     prev_cursor)
-        except Exception as exc:
-            print(f"WARN: inter-test crash-evidence probe failed: {exc}")
+            _journal_checkpoint["checkpoint"] = \
+                runner.journal_checkpoint_vm(_vm_session)
+        except RuntimeError as exc:
+            pytest.fail(str(exc), pytrace=False)
+    else:
+        try:
+            gap_evidence, _journal_checkpoint["checkpoint"] = \
+                runner.qs_crash_evidence_vm(_vm_session, prev)
+        except RuntimeError as exc:
+            pytest.fail(
+                "inter-test crash-evidence probe failed — the gap since "
+                f"the last test cannot be certified crash-free: {exc}",
+                pytrace=False,
+            )
+        if gap_evidence:
+            pytest.fail(
+                "qdshell crashed outside any test's window (between tests "
+                "or during session setup). The crash is attributed here "
+                "because no test owned the interval.\n"
+                f"{gap_evidence}",
+                pytrace=False,
+            )
     reaped_setup = _reap_reporters(_vm_session, "test setup")
-    cursor = runner.journal_cursor_vm(_vm_session)
-    if gap_evidence or reaped_setup:
-        _journal_checkpoint["cursor"] = cursor
+    if reaped_setup:
         pytest.fail(
-            "qdshell crashed outside any test's window (between tests or "
-            "during session setup). The crash is attributed here because no "
-            "test owned the interval.\n"
-            f"  journal evidence:\n{gap_evidence}\n"
-            f"  crash reporters reaped at setup: {reaped_setup}",
+            "orphaned quickshell crash reporter(s) present at test setup — "
+            "a worker crashed unattributed (the reporter outlived the "
+            f"journal evidence window). Reaped: {reaped_setup}",
             pytrace=False,
         )
     yield
-    evidence = ""
     try:
-        evidence = runner.qs_crash_evidence_vm(_vm_session, cursor)
-    except Exception as exc:
-        print(f"WARN: crash-evidence probe failed: {exc}")
-    _journal_checkpoint["cursor"] = runner.journal_cursor_vm(_vm_session)
+        evidence, _journal_checkpoint["checkpoint"] = \
+            runner.qs_crash_evidence_vm(
+                _vm_session, _journal_checkpoint["checkpoint"])
+    except RuntimeError as exc:
+        pytest.fail(
+            f"crash-evidence probe failed at teardown: {exc}",
+            pytrace=False,
+        )
     reaped_end = _reap_reporters(_vm_session, "test end")
     if evidence or reaped_end:
         pytest.fail(
             "a qdshell worker crashed during this test — a Restart=always "
             "respawn is not a pass.\n"
-            f"  journal evidence:\n{evidence}\n"
-            f"  crash reporters reaped at test end: {reaped_end}",
+            f"{evidence}\n"
+            f"crash reporters reaped at test end: {reaped_end}",
             pytrace=False,
         )
 

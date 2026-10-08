@@ -106,12 +106,15 @@ def test_panel_degraded(vm_session, case):
             if res.returncode != 0:
                 teardown_errs.append(
                     f"rc={res.returncode}: {res.stderr.strip()[:200]}")
-    # A failed restore is a failure, not a warning: leftover induced state
-    # silently contaminates every later case.
-    assert not teardown_errs, (
-        f"degraded teardown for '{case.id}' failed: "
-        + "; ".join(teardown_errs)
-    )
+        # A failed restore is a failure, not a warning: leftover induced
+        # state silently contaminates every later case. Raised inside the
+        # finally so a capture failure still chains as __context__ rather
+        # than the restore error being skipped when the body raised.
+        if teardown_errs:
+            raise RuntimeError(
+                f"degraded teardown for '{case.id}' failed: "
+                + "; ".join(teardown_errs)
+            )
 
     assert png.exists()
     if not actual.strip():
