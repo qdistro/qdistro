@@ -286,10 +286,8 @@ Singleton {
     Logger.d("Network", "Wi-Fi scan in progress...");
   }
 
-  // Returns true if we currently have any detectable Ethernet interfaces
-  function hasEthernet() {
-    return root.ethernetInterfaces && root.ethernetInterfaces.length > 0;
-  }
+  // Whether any Ethernet interface is currently detected.
+  readonly property bool hasEthernet: ethernetInterfaces.length > 0
 
   // Refresh only Ethernet state/details
   function refreshEthernet() {
