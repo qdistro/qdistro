@@ -23,6 +23,7 @@ dbus.service.Object subclass is a thin shell over them.
 """
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -1098,17 +1099,17 @@ class _SystemOps:
         # and ancestors above the pinned fd cannot be retargeted at all.
         home_fd = self._pin_home_dir(home)     # raises with the real reason
         complete = True
+        silo_fd = bkp_fd = None
         try:
             try:
-                bkp_fd = self._pin_skel_backup(skel_backup)
+                silo_fd, bkp_fd = self._pin_skel_backup(skel_backup)
             except FileNotFoundError:
-                bkp_fd = None                 # no backup — nothing to merge
+                pass                          # no backup — nothing to merge
             except OSError as e:
                 # A link or non-dir backup (ENOTDIR/ELOOP under the
                 # O_NOFOLLOW|O_DIRECTORY pin), or a refused ancestor: the
                 # backup cannot be positively pinned, so the restore is
                 # incomplete and the backup is kept.
-                bkp_fd = None
                 complete = False
                 log.error("refusing to restore from %s: %s", skel_backup, e)
             if bkp_fd is not None:
@@ -1119,8 +1120,6 @@ class _SystemOps:
                     complete = False
                     log.error("restoring the skeleton into %s failed: %s",
                               home, e)
-                finally:
-                    os.close(bkp_fd)
 
             # Ownership and mode are security-relevant and are applied
             # whatever happened above: a home left root-owned or
@@ -1136,17 +1135,27 @@ class _SystemOps:
                     f"could not harden the recreated home at {home}: {e}") \
                     from e
             self._chown_tree_fd(home_fd, int(uid), str(home))
+
+            if complete and silo_fd is not None:
+                # The delete is descriptor-relative too: removing the backup
+                # by pathname would reopen the ancestor race the pins closed.
+                try:
+                    self._rmtree_fd(silo_fd, skel_backup.name)
+                except OSError as e:
+                    # A leftover backup is harmless, but never silent.
+                    log.warning("could not fully remove the restored "
+                                "skeleton backup %s: %s", skel_backup, e)
+            elif not complete:
+                log.error("the skeleton for %s was only partially restored; "
+                          "the backup at %s is KEPT so nothing is lost — "
+                          "restore it by hand", home, skel_backup)
         finally:
-            os.close(home_fd)
-        if complete:
-            # Pathname delete is the one remaining non-dirfd op: it only ever
-            # removes the backup, never writes into the home, and the backup's
-            # own pin was already established above.
-            shutil.rmtree(skel_backup, ignore_errors=True)
-        else:
-            log.error("the skeleton for %s was only partially restored; the "
-                      "backup at %s is KEPT so nothing is lost — restore it by "
-                      "hand", home, skel_backup)
+            for fd in (bkp_fd, silo_fd, home_fd):
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
 
     # O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC for every pinned root/dir descent in the
     # home-recovery path: the refusal to resolve a link is enforced AT USE
@@ -1189,26 +1198,29 @@ class _SystemOps:
             os.close(parent_fd)
 
     @staticmethod
-    def _pin_skel_backup(skel_backup) -> int | None:
-        """Return a pinned dirfd for the .skel-backup dir, or None if absent.
+    def _pin_skel_backup(skel_backup) -> tuple[int, int]:
+        """Return (silo_fd, backup_fd): the .skel-backup dir pinned, plus its
+        parent — kept open so the post-merge delete is descriptor-relative
+        too rather than a fresh pathname walk.
 
         Both ancestors (/var/lib/qdistro/silos and its <name> child) are
         pinned O_NOFOLLOW — a symlinked PARENT component, which the old
         final-component-only is_symlink() check followed silently, is now
         refused too. Raises the open's OSError (ENOTDIR/ELOOP for a link or
         non-dir under O_NOFOLLOW|O_DIRECTORY, ENOENT for absent) so the
-        caller can classify it."""
+        caller can classify it; never returns a partial tuple."""
         silos_fd = os.open(skel_backup.parent.parent, _SystemOps._DIR_OPEN)
         try:
             silo_fd = os.open(skel_backup.parent.name,
                               _SystemOps._DIR_OPEN, dir_fd=silos_fd)
-            try:
-                return os.open(skel_backup.name, _SystemOps._DIR_OPEN,
-                               dir_fd=silo_fd)
-            finally:
-                os.close(silo_fd)
         finally:
             os.close(silos_fd)
+        try:
+            return silo_fd, os.open(skel_backup.name, _SystemOps._DIR_OPEN,
+                                    dir_fd=silo_fd)
+        except BaseException:
+            os.close(silo_fd)
+            raise
 
     @staticmethod
     def _merge_missing(src, dst) -> bool:
@@ -1333,11 +1345,25 @@ class _SystemOps:
         O_NOFOLLOW on the source open and O_CREAT|O_EXCL|O_NOFOLLOW on the
         destination: a link planted between the caller's lstat and either
         open can never be read or written through — the check/use gap the
-        pathname copy2 had is gone. O_NONBLOCK on the source is inert for
-        regular files and only prevents an exotic special-file hang."""
+        pathname copy2 had is gone. O_NONBLOCK alone would still open a
+        swapped-in FIFO and read EOF, so the opened fd is fstat'd and must
+        be the SAME regular file the caller lstat'd (dev+ino) — a
+        replacement is refused, not copied.
+
+        Mode, timestamps and xattrs are preserved: copy2 runs copystat,
+        and the xattr half is mirrored below (listxattr/getxattr/setxattr
+        on the fds with copy2's suppression list) so a restored file keeps
+        the metadata the backup held."""
         sfd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
                       | os.O_CLOEXEC, dir_fd=src_fd)
         try:
+            st_open = os.fstat(sfd)
+            if (not stat.S_ISREG(st_open.st_mode)
+                    or st_open.st_ino != st_src.st_ino
+                    or st_open.st_dev != st_src.st_dev):
+                raise OSError(
+                    f"source {name!r} changed between lstat and open "
+                    "(refusing to copy a substituted file)")
             dfd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                           | os.O_NOFOLLOW | os.O_CLOEXEC,
                           stat.S_IMODE(st_src.st_mode), dir_fd=dst_fd)
@@ -1345,12 +1371,42 @@ class _SystemOps:
                 with os.fdopen(sfd, "rb", closefd=False) as sf, \
                      os.fdopen(dfd, "wb", closefd=False) as df:
                     shutil.copyfileobj(sf, df)
+                try:
+                    xnames = os.listxattr(sfd)
+                except OSError:
+                    xnames = []
+                for xname in xnames:
+                    try:
+                        os.setxattr(dfd, xname, os.getxattr(sfd, xname))
+                    except OSError as e:
+                        if e.errno not in (errno.EPERM, errno.ENOTSUP,
+                                         errno.ENODATA, errno.EACCES,
+                                         errno.EINVAL):
+                            raise
                 os.chmod(dfd, stat.S_IMODE(st_src.st_mode))
                 os.utime(dfd, ns=(st_src.st_atime_ns, st_src.st_mtime_ns))
             finally:
                 os.close(dfd)
         finally:
             os.close(sfd)
+
+    @staticmethod
+    def _rmtree_fd(parent_fd, name) -> None:
+        """rmtree under a pinned parent fd: descent is O_NOFOLLOW|O_DIRECTORY,
+        every leaf is unlinkat — a name swapped for a link is unlinked as a
+        link, never followed. Used only for the skeleton backup, whose own
+        pin was already established."""
+        sub = os.open(name, _SystemOps._DIR_OPEN, dir_fd=parent_fd)
+        try:
+            for entry in os.listdir(sub):
+                st = os.stat(entry, dir_fd=sub, follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    _SystemOps._rmtree_fd(sub, entry)
+                else:
+                    os.unlink(entry, dir_fd=sub)
+        finally:
+            os.close(sub)
+        os.rmdir(name, dir_fd=parent_fd)
 
     @staticmethod
     def _chown_tree_fd(dir_fd, uid, disp) -> None:
@@ -1381,6 +1437,13 @@ class _SystemOps:
                 try:
                     os.chown(sub, int(uid), int(uid))
                     _SystemOps._chown_tree_fd(sub, uid, child_disp)
+                except OSError as e:
+                    # A failed fchown or unreadable descendant is logged and
+                    # the siblings still processed — the old walk suppressed
+                    # per-entry failures the same way. Only the home root's
+                    # hardening is fatal.
+                    log.warning("could not chown %s to uid %d: %s",
+                                child_disp, uid, e)
                 finally:
                     os.close(sub)
             else:

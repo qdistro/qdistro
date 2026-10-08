@@ -1171,6 +1171,100 @@ class TestHomeRecoveryIsDescriptorRelative:
         assert sm.stat.S_ISFIFO(sm.os.lstat(dst / "f").st_mode), \
             "the FIFO was clobbered"
 
+    def test_a_source_file_swapped_for_a_fifo_is_refused(
+            self, monkeypatch, tmp_path):
+        """O_NONBLOCK opens a swapped-in FIFO and reads EOF.
+
+        Without an fstat revalidation the copy would succeed with an EMPTY
+        file and the backup would be deleted — the source fd must be the
+        same regular file the lstat saw."""
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        (src / "f").write_text("x\n")
+        real_open = sm.os.open
+        swapped = []
+
+        def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+            # Swap at the source-side open of "f" (O_RDONLY, no O_CREAT).
+            if (not swapped and dir_fd is not None and path == "f"
+                    and not flags & sm.os.O_WRONLY):
+                swapped.append(1)
+                (src / "f").unlink()
+                sm.os.mkfifo(src / "f")
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+        monkeypatch.setattr(sm.os, "open", racing_open)
+
+        assert sm._SystemOps._merge_missing(src, dst) is False
+        assert swapped, "the source open was never exercised"
+        assert not (dst / "f").exists(), \
+            "a substituted FIFO was copied as an empty file"
+
+    def test_a_source_file_swapped_for_another_file_is_refused(
+            self, monkeypatch, tmp_path):
+        # Same window, still a regular file: mode alone cannot catch it, so
+        # the open fd's dev+ino must match the lstat observation.
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        (src / "f").write_text("the backup contents\n")
+        real_open = sm.os.open
+        swapped = []
+
+        def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+            if (not swapped and dir_fd is not None and path == "f"
+                    and not flags & sm.os.O_WRONLY):
+                swapped.append(1)
+                # Atomic replacement: still a regular file, different inode.
+                (tmp_path / "replacement").rename(src / "f")
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+        (tmp_path / "replacement").write_text("substituted\n")
+        monkeypatch.setattr(sm.os, "open", racing_open)
+
+        assert sm._SystemOps._merge_missing(src, dst) is False
+        assert swapped, "the source open was never exercised"
+        assert not (dst / "f").exists(), \
+            "a substituted file was copied over the checked one"
+
+    def test_a_descendant_chown_failure_is_logged_not_fatal(
+            self, monkeypatch, tmp_path, caplog):
+        # fchown of a DESCENDANT directory raising must not abort the walk:
+        # the old pathname loop logged and continued, and only the home
+        # root's hardening is allowed to fail the create.
+        dst = tmp_path / "h"
+        (dst / "d").mkdir(parents=True)
+        (dst / "d" / "f").write_text("x\n")
+        (dst / "g").write_text("y\n")
+        real_chown = sm.os.chown
+        chowned = []
+
+        def picky_chown(path, uid, gid, *a, **k):
+            if isinstance(path, int):           # dir fds only; files pass
+                raise PermissionError(13, "nope")
+            chowned.append(path)
+            return real_chown(path, uid, gid, *a, **k)
+        monkeypatch.setattr(sm.os, "chown", picky_chown)
+
+        dir_fd = sm.os.open(dst, sm._SystemOps._DIR_OPEN)
+        try:
+            with caplog.at_level("WARNING"):
+                sm._SystemOps._chown_tree_fd(dir_fd, 2000, str(dst))
+        finally:
+            sm.os.close(dir_fd)
+        assert "could not chown" in caplog.text
+        assert "g" in chowned, "a descendant chown failure stopped siblings"
+
+    def test_regular_file_xattrs_are_preserved(self, tmp_path):
+        # copy2 runs copystat, which carries xattrs; the descriptor-relative
+        # copier must keep them or a complete restore loses metadata.
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        (src / "f").write_text("x\n")
+        try:
+            sm.os.setxattr(src / "f", "user.review", b"keep-me")
+        except OSError:
+            pytest.skip("tmp filesystem does not support user xattrs")
+        assert sm._SystemOps._merge_missing(src, dst) is True
+        assert sm.os.getxattr(dst / "f", "user.review") == b"keep-me"
+
 
 class TestSuccessfulConversionDoesNotChownThroughLinks:
     def test_a_preserved_directory_symlink_is_chowned_no_follow(self, monkeypatch,
