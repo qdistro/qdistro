@@ -1091,61 +1091,144 @@ class _SystemOps:
           skeleton restore failed — the two must not share a fate.
         """
         skel_backup = Path("/var/lib/qdistro/silos") / home.name / ".skel-backup"
+        # Both roots are pinned as O_NOFOLLOW|O_DIRECTORY descriptors and every
+        # descendant operation below is descriptor-relative. There is no
+        # check/use gap: a name swapped for a symlink between an lstat and its
+        # use cannot redirect the open (O_NOFOLLOW fails ELOOP at use time),
+        # and ancestors above the pinned fd cannot be retargeted at all.
+        home_fd = self._pin_home_dir(home)     # raises with the real reason
         complete = True
-        # Both roots are validated as real directories, never links. mkdir's
-        # exist_ok accepts a symlink-to-directory, and is_dir() follows one, so
-        # without these checks a substituted root would have the restore write
-        # outside the home and the chown/chmod below retarget the link.
-        if home.is_symlink():
-            raise OSError(f"refusing to restore into {home}: it is a symlink")
         try:
-            home.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            raise OSError(
-                f"could not recreate a home at {home} after a failed subvolume "
-                f"conversion: {e}") from e
-        try:
-            if skel_backup.is_symlink():
+            try:
+                bkp_fd = self._pin_skel_backup(skel_backup)
+            except FileNotFoundError:
+                bkp_fd = None                 # no backup — nothing to merge
+            except OSError as e:
+                # A link or non-dir backup (ENOTDIR/ELOOP under the
+                # O_NOFOLLOW|O_DIRECTORY pin), or a refused ancestor: the
+                # backup cannot be positively pinned, so the restore is
+                # incomplete and the backup is kept.
+                bkp_fd = None
                 complete = False
-                log.error("refusing to restore from %s: it is a symlink",
-                          skel_backup)
-            elif skel_backup.is_dir():
-                complete = self._merge_missing(skel_backup, home)
-        except OSError as e:
-            complete = False
-            log.error("restoring the skeleton into %s failed: %s", home, e)
-
-        # Ownership and mode are security-relevant and are applied whatever
-        # happened above: a home left root-owned or group/world-readable is a
-        # worse outcome than a missing dotfile, and must never be skipped
-        # because the skeleton copy raised on its way past.
-        try:
-            os.chown(home, int(uid), int(uid))
-            home.chmod(0o700)
-        except OSError as e:
-            raise OSError(
-                f"could not harden the recreated home at {home}: {e}") from e
-        for root, dirs, files in os.walk(home):
-            for entry in dirs + files:
+                log.error("refusing to restore from %s: %s", skel_backup, e)
+            if bkp_fd is not None:
                 try:
-                    os.chown(Path(root) / entry, int(uid), int(uid),
-                             follow_symlinks=False)
+                    complete = self._merge_missing_fd(
+                        bkp_fd, home_fd, str(skel_backup), str(home))
                 except OSError as e:
-                    # Individually suppressed, but NOT silent: a file the silo
-                    # cannot read is a nuisance, not a breach, and failing the
-                    # create over one is the wrong trade.
-                    log.warning("could not chown %s to uid %d: %s",
-                                Path(root) / entry, int(uid), e)
+                    complete = False
+                    log.error("restoring the skeleton into %s failed: %s",
+                              home, e)
+                finally:
+                    os.close(bkp_fd)
+
+            # Ownership and mode are security-relevant and are applied
+            # whatever happened above: a home left root-owned or
+            # group/world-readable is a worse outcome than a missing dotfile,
+            # and must never be skipped because the skeleton copy raised on
+            # its way past. fchown/fchmod on the pinned fd cannot be
+            # retargeted mid-write.
+            try:
+                os.chown(home_fd, int(uid), int(uid))
+                os.chmod(home_fd, 0o700)
+            except OSError as e:
+                raise OSError(
+                    f"could not harden the recreated home at {home}: {e}") \
+                    from e
+            self._chown_tree_fd(home_fd, int(uid), str(home))
+        finally:
+            os.close(home_fd)
         if complete:
+            # Pathname delete is the one remaining non-dirfd op: it only ever
+            # removes the backup, never writes into the home, and the backup's
+            # own pin was already established above.
             shutil.rmtree(skel_backup, ignore_errors=True)
         else:
             log.error("the skeleton for %s was only partially restored; the "
                       "backup at %s is KEPT so nothing is lost — restore it by "
                       "hand", home, skel_backup)
 
+    # O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC for every pinned root/dir descent in the
+    # home-recovery path: the refusal to resolve a link is enforced AT USE
+    # TIME by the kernel, so an lstat-then-use gap cannot redirect a write.
+    _DIR_OPEN = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+    @staticmethod
+    def _pin_home_dir(home) -> int:
+        """mkdir (if absent) and return a pinned dirfd for `home`.
+
+        O_NOFOLLOW on the final open makes the symlink refusal atomic — a
+        name swapped to a link between the lstat and the open fails ELOOP at
+        use time, not as a stale observation. Parent is opened pinned too, so
+        /home's own components are not re-walked by pathname on every op."""
+        parent_fd = os.open(home.parent, _SystemOps._DIR_OPEN)
+        try:
+            try:
+                st = os.stat(home.name, dir_fd=parent_fd,
+                             follow_symlinks=False)
+            except FileNotFoundError:
+                st = None
+            if st is not None and stat.S_ISLNK(st.st_mode):
+                raise OSError(
+                    f"refusing to restore into {home}: it is a symlink")
+            if st is None:
+                try:
+                    os.mkdir(home.name, 0o700, dir_fd=parent_fd)
+                except OSError as e:
+                    raise OSError(
+                        f"could not recreate a home at {home} after a "
+                        f"failed subvolume conversion: {e}") from e
+            try:
+                return os.open(home.name, _SystemOps._DIR_OPEN,
+                               dir_fd=parent_fd)
+            except OSError as e:
+                raise OSError(
+                    f"could not pin the home at {home} for the restore "
+                    f"(a link or non-dir swapped in is refused): {e}") from e
+        finally:
+            os.close(parent_fd)
+
+    @staticmethod
+    def _pin_skel_backup(skel_backup) -> int | None:
+        """Return a pinned dirfd for the .skel-backup dir, or None if absent.
+
+        Both ancestors (/var/lib/qdistro/silos and its <name> child) are
+        pinned O_NOFOLLOW — a symlinked PARENT component, which the old
+        final-component-only is_symlink() check followed silently, is now
+        refused too. Raises the open's OSError (ENOTDIR/ELOOP for a link or
+        non-dir under O_NOFOLLOW|O_DIRECTORY, ENOENT for absent) so the
+        caller can classify it."""
+        silos_fd = os.open(skel_backup.parent.parent, _SystemOps._DIR_OPEN)
+        try:
+            silo_fd = os.open(skel_backup.parent.name,
+                              _SystemOps._DIR_OPEN, dir_fd=silos_fd)
+            try:
+                return os.open(skel_backup.name, _SystemOps._DIR_OPEN,
+                               dir_fd=silo_fd)
+            finally:
+                os.close(silo_fd)
+        finally:
+            os.close(silos_fd)
+
     @staticmethod
     def _merge_missing(src, dst) -> bool:
-        """Copy every descendant of `src` that `dst` does not already have.
+        """Path-level entry: pin both roots, then merge descriptor-relative.
+        See _merge_missing_fd for the contract."""
+        src_fd = os.open(src, _SystemOps._DIR_OPEN)
+        try:
+            dst_fd = os.open(dst, _SystemOps._DIR_OPEN)
+            try:
+                return _SystemOps._merge_missing_fd(
+                    src_fd, dst_fd, str(src), str(dst))
+            finally:
+                os.close(dst_fd)
+        finally:
+            os.close(src_fd)
+
+    @staticmethod
+    def _merge_missing_fd(src_fd, dst_fd, src_disp, dst_disp) -> bool:
+        """Copy every descendant of `src` that `dst` does not already have,
+        entirely descriptor-relative.
 
         Recursive on purpose. A top-level "does the destination exist?" test is
         not a completeness test: the interrupted restore may have created
@@ -1154,71 +1237,159 @@ class _SystemOps:
         they are gone for good.
 
         Never overwrites what the home already has, and never dereferences a
-        link on either side — but these are PATHNAME checks, and the precondition
-        is weaker than it first looks, so be precise about what they buy.
+        link on either side. The only caller is useradd() inside create();
+        the `useradd` child has already COMPLETED, so the uid exists and
+        /home/<name> is user-owned — "no other principal can touch this" was
+        never established by reachability alone, which is why every entry op
+        runs against a pinned dirfd:
 
-        The only caller is useradd() inside create(). The `useradd` child has
-        already COMPLETED by then, so the uid exists and /home/<name> is
-        user-owned, not root-owned: "no other principal can touch this" is NOT
-        established by reachability alone. What is true is that the silo has
-        never been started, so no silo process exists to race us. That is why
-        this is treated as a conditional exposure rather than a closed one:
-        against a concurrent writer the check/use gap is real, and the fix is
-        descriptor-relative, no-follow operations throughout — filed in
-        todo/open-followups.md, not done here.
+        * SOURCE links are recreated as links — readlinkat + symlinkat, never
+          resolved.
+        * DESTINATION links are refused outright: the lstat that finds one
+          marks the entry incomplete, and every create is O_EXCL|O_NOFOLLOW
+          (files) or O_NOFOLLOW|O_DIRECTORY (descent) — a link planted in the
+          lstat→use window fails at use time, it cannot be written through.
+        * Anything that is not a file/dir/link (fifo, socket, device) is not
+          copied — a blocking read on a special file would hang the restore.
+          Marked incomplete so the backup is kept.
 
-        * SOURCE links are recreated as links. `copytree`'s symlinks=True
-          preserves links found INSIDE a tree but still follows the root it is
-          handed, so a directory symlink passed to it would be materialised as a
-          real directory — and then chowned to the silo. Links are therefore
-          classified before directories, with lstat semantics.
-        * DESTINATION links are refused outright. `target.mkdir(exist_ok=True)`
-          accepts a symlink-to-directory and the recursion would then write
-          through it; `target.exists()` is False for a DANGLING link, and
-          copy2's follow_symlinks=False governs the SOURCE, not the destination
-          open, so the copy would follow it. Either way the write lands outside
-          the home.
-
-        Returns True only if every entry was positively established as restored.
-        An entry the home already has is NOT assumed equivalent to the backup's
-        copy — an interrupted copy can leave a truncated file — so its presence
-        makes the result incomplete and keeps the backup alive. It costs nothing
-        in the normal case, where the home was just recreated and is empty."""
+        Returns True only if every entry was positively established as
+        restored. An entry the home already has is NOT assumed equivalent to
+        the backup's copy — an interrupted copy can leave a truncated file —
+        so its presence makes the result incomplete and keeps the backup
+        alive. It costs nothing in the normal case, where the home was just
+        recreated and is empty."""
         complete = True
-        for child in src.iterdir():
-            target = dst / child.name
+        for name in os.listdir(src_fd):
+            src_disp_child = f"{src_disp}/{name}"
+            dst_disp_child = f"{dst_disp}/{name}"
             try:
-                if target.is_symlink():
+                st_src = os.stat(name, dir_fd=src_fd, follow_symlinks=False)
+                try:
+                    st_dst = os.stat(name, dir_fd=dst_fd,
+                                     follow_symlinks=False)
+                except FileNotFoundError:
+                    st_dst = None
+                if st_dst is not None and stat.S_ISLNK(st_dst.st_mode):
                     # Never write through a destination link, and never delete
                     # one to make room: refuse and keep the backup.
                     complete = False
                     log.error("refusing to restore %s: %s is a symlink",
-                              child, target)
+                              src_disp_child, dst_disp_child)
                     continue
-                if child.is_symlink():
-                    if not target.exists():
-                        os.symlink(os.readlink(child), target)
-                    else:
+                if stat.S_ISLNK(st_src.st_mode):
+                    if st_dst is not None:
                         complete = False
-                elif child.is_dir():
-                    if target.exists() and not target.is_dir():
+                        continue
+                    os.symlink(os.readlink(name, dir_fd=src_fd), name,
+                               dir_fd=dst_fd)
+                elif stat.S_ISDIR(st_src.st_mode):
+                    if st_dst is not None and not stat.S_ISDIR(st_dst.st_mode):
                         complete = False
                         log.error("refusing to restore %s: %s exists and is "
-                                  "not a directory", child, target)
+                                  "not a directory", src_disp_child,
+                                  dst_disp_child)
                         continue
-                    target.mkdir(exist_ok=True)
-                    if not _SystemOps._merge_missing(child, target):
+                    if st_dst is None:
+                        os.mkdir(name, stat.S_IMODE(st_src.st_mode),
+                                 dir_fd=dst_fd)
+                    # O_NOFOLLOW|O_DIRECTORY on BOTH descents: a link swapped
+                    # in since the lstat fails the open, it is never entered.
+                    sub_dst = os.open(name, _SystemOps._DIR_OPEN,
+                                      dir_fd=dst_fd)
+                    try:
+                        sub_src = os.open(name, _SystemOps._DIR_OPEN,
+                                          dir_fd=src_fd)
+                        try:
+                            if not _SystemOps._merge_missing_fd(
+                                    sub_src, sub_dst, src_disp_child,
+                                    dst_disp_child):
+                                complete = False
+                        finally:
+                            os.close(sub_src)
+                    finally:
+                        os.close(sub_dst)
+                elif stat.S_ISREG(st_src.st_mode):
+                    if st_dst is not None:
+                        # Present, but we cannot establish it is the whole
+                        # file.
                         complete = False
-                elif not target.exists():
-                    shutil.copy2(child, target, follow_symlinks=False)
+                    else:
+                        _SystemOps._copy_reg_fd(src_fd, dst_fd, name, st_src)
                 else:
-                    # Present, but we cannot establish it is the whole file.
                     complete = False
+                    log.warning("refusing to restore %s: not a file, "
+                                "directory or link", src_disp_child)
             except OSError as e:
                 complete = False
                 log.warning("could not restore %s into %s: %s",
-                            child, target, e)
+                            src_disp_child, dst_disp_child, e)
         return complete
+
+    @staticmethod
+    def _copy_reg_fd(src_fd, dst_fd, name, st_src) -> None:
+        """copy2-equivalent for one regular file, descriptor-relative.
+
+        O_NOFOLLOW on the source open and O_CREAT|O_EXCL|O_NOFOLLOW on the
+        destination: a link planted between the caller's lstat and either
+        open can never be read or written through — the check/use gap the
+        pathname copy2 had is gone. O_NONBLOCK on the source is inert for
+        regular files and only prevents an exotic special-file hang."""
+        sfd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                      | os.O_CLOEXEC, dir_fd=src_fd)
+        try:
+            dfd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                          | os.O_NOFOLLOW | os.O_CLOEXEC,
+                          stat.S_IMODE(st_src.st_mode), dir_fd=dst_fd)
+            try:
+                with os.fdopen(sfd, "rb", closefd=False) as sf, \
+                     os.fdopen(dfd, "wb", closefd=False) as df:
+                    shutil.copyfileobj(sf, df)
+                os.chmod(dfd, stat.S_IMODE(st_src.st_mode))
+                os.utime(dfd, ns=(st_src.st_atime_ns, st_src.st_mtime_ns))
+            finally:
+                os.close(dfd)
+        finally:
+            os.close(sfd)
+
+    @staticmethod
+    def _chown_tree_fd(dir_fd, uid, disp) -> None:
+        """chown every entry under a pinned dirfd, never following links.
+
+        The old os.walk+pathname chown had the same check/use gap the merge
+        did: names enumerated by walk were reopened by path. Here every dir is
+        descended through O_NOFOLLOW|O_DIRECTORY and every leaf is
+        fchownat(AT_SYMLINK_NOFOLLOW)-equivalent — dir_fd + follow_symlinks=
+        False — so a swapped link is skipped, never retargeted. Individually
+        suppressed but NOT silent: a file the silo cannot read is a nuisance,
+        not a breach, and failing the create over one is the wrong trade."""
+        for name in os.listdir(dir_fd):
+            child_disp = f"{disp}/{name}"
+            try:
+                st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            except OSError as e:
+                log.warning("could not chown %s to uid %d: %s",
+                            child_disp, uid, e)
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                try:
+                    sub = os.open(name, _SystemOps._DIR_OPEN, dir_fd=dir_fd)
+                except OSError as e:
+                    log.warning("could not chown %s to uid %d: %s",
+                                child_disp, uid, e)
+                    continue
+                try:
+                    os.chown(sub, int(uid), int(uid))
+                    _SystemOps._chown_tree_fd(sub, uid, child_disp)
+                finally:
+                    os.close(sub)
+            else:
+                try:
+                    os.chown(name, int(uid), int(uid), dir_fd=dir_fd,
+                             follow_symlinks=False)
+                except OSError as e:
+                    log.warning("could not chown %s to uid %d: %s",
+                                child_disp, uid, e)
 
     def userdel(self, name: str) -> None:
         # -r removes home dir + mail spool. -f forces removal even

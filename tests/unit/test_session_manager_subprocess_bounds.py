@@ -837,7 +837,7 @@ class TestHomeRecoveryHardening:
 
         def boom(*a, **k):
             raise PermissionError(13, "nope")
-        monkeypatch.setattr(sm.shutil, "copy2", boom)
+        monkeypatch.setattr(sm._SystemOps, "_copy_reg_fd", boom)
 
         self._ops()._restore_plain_home(home, 2000)
         assert home.stat().st_mode & 0o777 == 0o700, \
@@ -856,7 +856,7 @@ class TestHomeRecoveryHardening:
         monkeypatch.setattr(
             sm, "Path",
             lambda *a: tmp_path / str(__import__("pathlib").Path(*a)).lstrip("/"))
-        monkeypatch.setattr(sm.shutil, "copy2",
+        monkeypatch.setattr(sm._SystemOps, "_copy_reg_fd",
                             lambda *a, **k: (_ for _ in ()).throw(
                                 PermissionError(13, "nope")))
         self._ops()._restore_plain_home(home, 2000)
@@ -996,7 +996,7 @@ class TestMergeMissingIsRecursiveAndDoesNotDereference:
         src, dst = tmp_path / "b", tmp_path / "h"
         src.mkdir(); dst.mkdir()
         (src / "f").write_text("x\n")
-        monkeypatch.setattr(sm.shutil, "copy2",
+        monkeypatch.setattr(sm._SystemOps, "_copy_reg_fd",
                             lambda *a, **k: (_ for _ in ()).throw(OSError(5, "io")))
         assert sm._SystemOps._merge_missing(src, dst) is False
 
@@ -1036,6 +1036,140 @@ class TestMergeMissingIsRecursiveAndDoesNotDereference:
         sm._SystemOps()._restore_plain_home(home, 2000)
         assert not (home / "planted").exists(), "read through a linked backup"
         assert backup.is_symlink(), "an incomplete restore removed the backup"
+
+
+class TestHomeRecoveryIsDescriptorRelative:
+    """The race the pathname checks could not close.
+
+    Every security-sensitive op in the restore runs against a pinned dirfd
+    with O_NOFOLLOW/O_EXCL enforced by the kernel at USE time, so an entry
+    swapped between its lstat and its use fails instead of redirecting the
+    operation. These tests plant that swap — at the root pins, mid-merge —
+    and assert refusal rather than follow.
+    """
+
+    def _reroot(self, monkeypatch, tmp_path):
+        import pathlib as _pl
+        monkeypatch.setattr(
+            sm, "Path",
+            lambda *a: tmp_path / str(_pl.Path(*a)).lstrip("/"))
+
+    def test_a_symlinked_parent_of_home_is_refused(self, tmp_path):
+        # The old code validated only the home itself: a symlinked /home
+        # component would have every "safe" no-follow op below still resolve
+        # through the link. The parent is pinned O_NOFOLLOW now, so the open
+        # of `home`'s parent fails ELOOP before anything touches the target.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (tmp_path / "home").symlink_to(outside)
+        with pytest.raises(OSError):
+            sm._SystemOps()._restore_plain_home(
+                tmp_path / "home" / "work", 2000)
+        assert not (outside / "work").exists(), \
+            "created the home through a linked parent"
+
+    def test_a_symlinked_backup_ancestor_is_refused(self, monkeypatch,
+                                                  tmp_path):
+        # Old code checked `.skel-backup` itself with is_symlink(), which
+        # follows the PARENT chain silently: silos/work -> elsewhere left the
+        # backup reachable and readable through the link.
+        self._reroot(monkeypatch, tmp_path)
+        monkeypatch.setattr(sm.os, "chown", lambda *a, **k: None)
+        home = tmp_path / "home" / "work"
+        home.mkdir(parents=True)
+        silo = tmp_path / "var/lib/qdistro/silos/work"
+        realdir = tmp_path / "realdir"
+        (realdir / ".skel-backup").mkdir(parents=True)
+        (realdir / ".skel-backup" / "planted").write_text("x\n")
+        silo.parent.mkdir(parents=True)
+        silo.symlink_to(realdir)
+        sm._SystemOps()._restore_plain_home(home, 2000)
+        assert not (home / "planted").exists(), \
+            "read the backup through a linked ancestor"
+        assert (realdir / ".skel-backup" / "planted").exists(), \
+            "an incomplete restore removed the backup"
+
+    def test_a_dest_dir_swapped_for_a_link_is_not_written_through(
+            self, monkeypatch, tmp_path):
+        """The deterministic version of the check/use race.
+
+        Between the merge's lstat("d" is a real dir) and its descent open,
+        `d` is swapped for a symlink into `outside`. The pathname code would
+        write the file through it; the O_NOFOLLOW|O_DIRECTORY descent open
+        fails ELOOP instead."""
+        src, dst = tmp_path / "b", tmp_path / "h"
+        (src / "d").mkdir(parents=True)
+        (src / "d" / "x").write_text("x\n")
+        (dst / "d").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        real_open = sm.os.open
+        swapped = []
+
+        def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+            # Swap exactly once: at the dst-side open of the directory "d".
+            if (not swapped and dir_fd is not None and path == "d"
+                    and flags & sm.os.O_DIRECTORY):
+                swapped.append(1)
+                (dst / "d").rmdir()
+                (dst / "d").symlink_to(outside)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+        monkeypatch.setattr(sm.os, "open", racing_open)
+
+        assert sm._SystemOps._merge_missing(src, dst) is False
+        assert swapped, "the descent open was never exercised"
+        assert not (outside / "x").exists(), "wrote through a swapped link"
+
+    def test_a_dest_file_swapped_for_a_link_is_not_written_through(
+            self, monkeypatch, tmp_path):
+        # Same window on the file path: lstat says "f" is absent, then a link
+        # is planted before the create. O_CREAT|O_EXCL|O_NOFOLLOW fails
+        # EEXIST/ELOOP instead of writing through it.
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        (src / "f").write_text("x\n")
+        outside = tmp_path / "outside-target"
+        real_stat = sm.os.stat
+        planted = []
+
+        def racing_stat(path, *a, **k):
+            # Plant right after the merge's dst lstat of "f" reported ENOENT.
+            if (path == "f" and k.get("dir_fd") is not None and not planted):
+                try:
+                    real_stat(path, *a, **k)
+                except FileNotFoundError:
+                    planted.append(1)
+                    (dst / "f").symlink_to(outside)
+                    raise
+            return real_stat(path, *a, **k)
+        monkeypatch.setattr(sm.os, "stat", racing_stat)
+
+        assert sm._SystemOps._merge_missing(src, dst) is False
+        assert planted, "the dst lstat was never exercised"
+        assert not outside.exists(), "created/wrote through a planted link"
+        assert (dst / "f").is_symlink(), "the planted link was clobbered"
+
+    def test_a_fifo_source_is_refused_not_followed(self, tmp_path):
+        # A FIFO in the backup is not a file, dir or link. The pathname code
+        # would have handed it to copy2, whose blocking read hangs the
+        # restore; the mode check refuses it outright and keeps the backup.
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        sm.os.mkfifo(src / "pipe")
+        assert sm._SystemOps._merge_missing(src, dst) is False
+        assert not (dst / "pipe").exists(), "materialised a FIFO in the home"
+
+    def test_a_fifo_destination_is_never_written_into(self, tmp_path):
+        # st_dst exists and is a special file — not a link, not a dir — so
+        # the entry is treated as present-but-unverifiable: refused, backup
+        # kept, the FIFO untouched.
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        (src / "f").write_text("x\n")
+        sm.os.mkfifo(dst / "f")
+        assert sm._SystemOps._merge_missing(src, dst) is False
+        assert sm.stat.S_ISFIFO(sm.os.lstat(dst / "f").st_mode), \
+            "the FIFO was clobbered"
 
 
 class TestSuccessfulConversionDoesNotChownThroughLinks:
