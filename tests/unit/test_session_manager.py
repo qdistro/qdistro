@@ -3969,50 +3969,65 @@ class TestReadExportMetaOpenIsBounded:
         with pytest.raises(BadState, match="no meta.json"):
             store._read_export_meta(staging, "tok1", caller=None)
 
+    def _call_bounded(self, store, staging, token):
+        """Run the read in a thread with a hard join deadline: any variant
+        that opens the FIFO blocking would otherwise hang the suite, not
+        fail the test."""
+        outcome = []
+
+        def attempt():
+            try:
+                store._read_export_meta(staging, token, caller=None)
+            except BadState as e:
+                outcome.append(("badstate", str(e)))
+        t = threading.Thread(target=attempt, daemon=True)
+        t.start()
+        t.join(timeout=10)
+        assert not t.is_alive(), \
+            "_read_export_meta blocked on a special-file meta.json"
+        return outcome
+
     def test_a_fifo_meta_is_refused_without_blocking(self, tmp_path):
         # Pre-planted FIFO: even a lstat-first implementation refuses it —
-        # a baseline check that the "not a regular file" verdict survives.
+        # a baseline that the "not a regular file" verdict survives —
+        # bounded so a blocking-open regression fails instead of hanging.
         store = self._store(tmp_path)
         staging = tmp_path / "stg"
         staging.mkdir()
         sm.os.mkfifo(staging / "meta.json")
-        with pytest.raises(BadState, match="not a regular file"):
-            store._read_export_meta(staging, "tok1", caller=None)
+        outcome = self._call_bounded(store, staging, "tok1")
+        assert outcome and outcome[0][0] == "badstate", outcome
+        assert "not a regular file" in outcome[0][1], outcome
 
     def test_a_fifo_swapped_in_at_open_is_refused_not_blocking(
             self, monkeypatch, tmp_path):
         """The check/use window itself: a regular file at check time, a FIFO
         at open time. A lstat-then-open implementation blocks in open()
         waiting for a writer forever; O_NONBLOCK makes the open complete
-        and the fstat-on-fd refuses. Bounded in a thread so a regression
-        FAILS here instead of hanging the suite."""
+        and the fstat-on-fd refuses. The swap is injected at BOTH opens a
+        variant could use — os.open and builtins open — so it fires
+        whichever the implementation under test reaches for."""
         store = self._store(tmp_path)
         staging = tmp_path / "stg"
         staging.mkdir()
         self._meta(staging, "tok1")
-        real_open = sm.os.open
+        real_os_open = sm.os.open
+        import builtins
+        real_bi_open = builtins.open
         swapped = []
 
-        def racing_open(path, flags, *a, **k):
+        def racing_open(path, *a, **k):
             if not swapped and str(path).endswith("meta.json"):
                 swapped.append(1)
                 (staging / "meta.json").unlink()
                 sm.os.mkfifo(staging / "meta.json")
-            return real_open(path, flags, *a, **k)
+            fn = real_os_open if "dir_fd" in k or (
+                a and isinstance(a[0], int)) else real_bi_open
+            return fn(path, *a, **k)
         monkeypatch.setattr(sm.os, "open", racing_open)
-        outcome = []
+        monkeypatch.setattr(builtins, "open", racing_open)
 
-        def attempt():
-            try:
-                store._read_export_meta(staging, "tok1", caller=None)
-            except BadState as e:
-                outcome.append(("badstate", str(e)))
-
-        t = threading.Thread(target=attempt, daemon=True)
-        t.start()
-        t.join(timeout=10)
-        assert not t.is_alive(), \
-            "_read_export_meta blocked on a swapped-in FIFO meta.json"
+        outcome = self._call_bounded(store, staging, "tok1")
         assert swapped, "the meta open was never exercised"
         assert outcome and outcome[0][0] == "badstate", outcome
         assert "not a regular file" in outcome[0][1], outcome
