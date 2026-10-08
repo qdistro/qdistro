@@ -4141,7 +4141,12 @@ class _SiloStore:
                 status, reason = "unknown", "runtime probe failed or timed out"
             with self._lock:
                 if (self._silos.get(silo.name) is not silo
-                        or silo.operation_generation != generation):
+                        or silo.operation_generation != generation
+                        or silo.name in self._stopping_inflight):
+                    # A claimed in-flight slot is an uncommitted write:
+                    # a probe taken mid-launch can read "stopped" for a
+                    # row whose launcher has not started yet — never
+                    # publish it.
                     continue
                 if silo.start_unresolved:
                     status, reason = "unknown", "start outcome unresolved; stop before retry"
@@ -7362,16 +7367,19 @@ if dbus is not None:
                              connection_keyword="conn")
         def CreateSilo(self, name, uid, _reply, _error,
                        sender=None, conn=None):
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("create", name, caller, e)
-                _error(_to_dbus_exception(e))
-                return
             name_s, uid_i = str(name), int(uid)
 
             def create_on_worker() -> tuple:
+                # Peer resolution and the admin check run here, on the
+                # worker: each is a synchronous D-Bus round trip that must
+                # never park the dispatch thread. A refusal is audited and
+                # propagates as a typed error through _run_offloaded.
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("create", name_s, caller, e)
+                    raise
                 # store.create() is the lifecycle method that audits and then
                 # re-raises the original class (OSError included), so unit
                 # tests still see that class. _run_offloaded's unexpected
@@ -7393,19 +7401,18 @@ if dbus is not None:
             """Create a tier2-template silo (fableplan2 task 04): launch-owner
             is admin, state is the binding's state_path (not a fresh user).
             argv defaults to [workload]; a richer argv is set via silos.yaml."""
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("create", name, caller, e)
-                _error(_to_dbus_exception(e))
-                return
             name_s = str(name)
             launch = {"workload": str(workload),
                       "template_silo": str(template_silo),
                       "network": str(network), "argv": []}
 
             def create_on_worker() -> tuple:
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("create", name_s, caller, e)
+                    raise
                 self.store.create(name_s, TIER2_LAUNCH_OWNER_UID,
                                   kind=KIND_TIER2_TEMPLATE,
                                   launch=launch, caller=caller)
@@ -7427,19 +7434,18 @@ if dbus is not None:
             admin. Its own method so CreateTemplateSilo keeps its tier-2 kind.
             argv defaults per workload (TIER3S_DEFAULT_ARGV); a richer argv is
             set via silos.yaml."""
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("create", name, caller, e)
-                _error(_to_dbus_exception(e))
-                return
             name_s = str(name)
             launch = {"workload": str(workload),
                       "template_silo": str(template_silo),
                       "network": str(network), "argv": []}
 
             def create_on_worker() -> tuple:
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("create", name_s, caller, e)
+                    raise
                 self.store.create(name_s, ADMIN_UID, kind=KIND_TIER3S,
                                   launch=launch, caller=caller)
                 log.info("CreateTier3sSilo name=%s workload=%s binding=%s",
@@ -7454,16 +7460,15 @@ if dbus is not None:
                              sender_keyword="sender",
                              connection_keyword="conn")
         def DeleteSilo(self, name, _reply, _error, sender=None, conn=None):
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("delete", name, caller, e)
-                _error(_to_dbus_exception(e))
-                return
             name_s = str(name)
 
             def delete_on_worker() -> tuple:
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("delete", name_s, caller, e)
+                    raise
                 self.store.delete(name_s, caller=caller)
                 log.info("DeleteSilo name=%s", name_s)
                 return ()
@@ -7481,18 +7486,18 @@ if dbus is not None:
             (task 3). `egress` is "none" | "direct" | "wg:<name>", or the
             empty string to clear it back to legacy host networking (no
             netns). Admin-only; takes effect at the silo's next start."""
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("egress-configure", name, caller, e)
-                _error(_to_dbus_exception(e))
-                return
             name_s = str(name)
             # D-Bus has no null in a string arg; "" clears to legacy.
             policy = None if str(egress) == "" else str(egress)
 
             def set_egress_on_worker() -> tuple:
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("egress-configure", name_s,
+                                        caller, e)
+                    raise
                 self.store.set_egress(name_s, policy, caller=caller)
                 log.info("SetSiloEgress name=%s egress=%s", name_s, egress)
                 return ()
@@ -7505,16 +7510,15 @@ if dbus is not None:
                              sender_keyword="sender",
                              connection_keyword="conn")
         def StartSilo(self, name, _reply, _error, sender=None, conn=None):
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("start", name, caller, e)
-                _error(_to_dbus_exception(e))
-                return
             name_s = str(name)
 
             def start_on_worker() -> tuple:
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("start", name_s, caller, e)
+                    raise
                 self.store.start(name_s, caller=caller)
                 log.info("StartSilo name=%s", name_s)
                 return ()
@@ -7534,16 +7538,16 @@ if dbus is not None:
             placeholder). Admin-gated like every other lifecycle method: this
             starts a User=root unit, so a non-admin caller must never reach it.
             """
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("podapp-launch", container, caller, e)
-                _error(_to_dbus_exception(e))
-                return
             container_s = str(container)
 
             def launch_on_worker() -> tuple:
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("podapp-launch", container_s,
+                                        caller, e)
+                    raise
                 return (self.store.launch_podapp(
                     container_s, str(workload), str(argv_json),
                     caller=caller),)
@@ -7557,18 +7561,16 @@ if dbus is not None:
                              connection_keyword="conn")
         def StopSilo(self, name, grace_s, _reply, _error,
                      sender=None, conn=None):
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("stop", name, caller, e)
-                _error(_to_dbus_exception(e))
-                return
-
             silo_name = str(name)
             grace = int(grace_s)
 
             def stop_on_worker() -> tuple:
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("stop", silo_name, caller, e)
+                    raise
                 self.store.stop(silo_name, grace, caller=caller)
                 log.info("StopSilo name=%s grace_s=%d", silo_name, grace)
                 return ()
@@ -7589,16 +7591,15 @@ if dbus is not None:
                              sender_keyword="sender",
                              connection_keyword="conn")
         def FreezeSilo(self, name, _reply, _error, sender=None, conn=None):
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("freeze", name, caller, e)
-                _error(_to_dbus_exception(e))
-                return
             name_s = str(name)
 
             def freeze_on_worker() -> tuple:
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("freeze", name_s, caller, e)
+                    raise
                 self.store.freeze(name_s, caller=caller)
                 log.info("FreezeSilo name=%s", name_s)
                 return ()
@@ -7611,16 +7612,15 @@ if dbus is not None:
                              sender_keyword="sender",
                              connection_keyword="conn")
         def ResumeSilo(self, name, _reply, _error, sender=None, conn=None):
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("resume", name, caller, e)
-                _error(_to_dbus_exception(e))
-                return
             name_s = str(name)
 
             def resume_on_worker() -> tuple:
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("resume", name_s, caller, e)
+                    raise
                 self.store.resume(name_s, caller=caller)
                 log.info("ResumeSilo name=%s", name_s)
                 return ()
@@ -7638,16 +7638,15 @@ if dbus is not None:
             rejects anything that is not a well-formed disp-* name, so this is a
             lease-teardown surface for disposables only, never a back door to
             remove an admin/native container. Returns True if it is gone."""
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("dispose", name, caller, e)
-                _error(_to_dbus_exception(e))
-                return
             name_s = str(name)
 
             def dispose_on_worker() -> tuple:
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("dispose", name_s, caller, e)
+                    raise
                 ok = bool(self.store.dispose(name_s, caller=caller))
                 log.info("Dispose name=%s -> %s", name_s, ok)
                 return (ok,)
@@ -7667,16 +7666,16 @@ if dbus is not None:
             label). Admin-only and fail-closed: the store rejects a malformed
             token, refuses an ambiguous match, re-validates the resolved name,
             and treats a no-match as already-gone. Returns True if it is gone."""
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("dispose-by-token", token, caller, e)
-                _error(_to_dbus_exception(e))
-                return
             token_s = str(token)
 
             def dispose_on_worker() -> tuple:
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("dispose-by-token", token_s,
+                                        caller, e)
+                    raise
                 ok = bool(self.store.dispose_by_token(token_s, caller=caller))
                 log.info("DisposeByToken token=%s -> %s", token_s, ok)
                 return (ok,)
@@ -7699,16 +7698,16 @@ if dbus is not None:
             name, and — crucially — does NOT report clean success if any matched
             container failed to dispose. Returns the count torn down (0 when none
             carried the id, idempotently)."""
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("dispose-by-workflow", workflow_id, caller, e)
-                _error(_to_dbus_exception(e))
-                return
             wf_s = str(workflow_id)
 
             def dispose_on_worker() -> tuple:
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("dispose-by-workflow", wf_s,
+                                        caller, e)
+                    raise
                 n = int(self.store.dispose_by_workflow(wf_s, caller=caller))
                 log.info("DisposeByWorkflow id=%s -> reaped %d", wf_s, n)
                 return (n,)
@@ -7732,16 +7731,16 @@ if dbus is not None:
             target silo. An absent staging dir is a clean zero-file receipt. The
             promoter is a defensive minimal parser (regular-files-only,
             all-or-nothing, caps, O_NOFOLLOW); staging is removed on success."""
-            caller = self._peer_caller(sender, conn)
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                self._audit_refusal("dispose-export", token, caller, e)
-                _error(_to_dbus_exception(e))
-                return
             token_s = str(token)
 
             def import_on_worker() -> tuple:
+                caller = self._peer_caller(sender, conn)
+                try:
+                    self._require_admin(sender, conn)
+                except SessionError as e:
+                    self._audit_refusal("dispose-export", token_s,
+                                        caller, e)
+                    raise
                 receipt = self.store.import_from_disposable(
                     token_s, caller=caller)
                 log.info("ImportFromDisposable token=%s -> %d file(s)",
@@ -7757,21 +7756,28 @@ if dbus is not None:
             return json.dumps(rows)
 
         @dbus.service.method(BUS_NAME, in_signature="i", out_signature="s",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
-        def ListAuditLog(self, limit, sender=None, conn=None):
+        def ListAuditLog(self, limit, _reply, _error,
+                         sender=None, conn=None):
             # Admin-only read of the durable lifecycle audit log, most
             # recent first. Mirrors the broker's ListHistory / pwd's
             # audit-tail surface so the admin tooling has one query
-            # shape across daemons.
-            try:
-                self._require_admin(sender, conn)
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
-            if self.audit is None:
-                return json.dumps([])
+            # shape across daemons. Offloaded like the mutators: the
+            # admin check is a synchronous D-Bus round trip and the log
+            # read touches disk, neither of which belongs on the
+            # dispatch thread.
             lim = int(limit) if int(limit) > 0 else 100
-            return json.dumps(self.audit.tail(lim))
+
+            def read_on_worker() -> tuple:
+                self._require_admin(sender, conn)
+                if self.audit is None:
+                    return (json.dumps([]),)
+                return (json.dumps(self.audit.tail(lim)),)
+
+            self._run_offloaded(
+                "audit-list", read_on_worker, _reply, _error)
 
 
 # ---------------------------------------------------------------------------

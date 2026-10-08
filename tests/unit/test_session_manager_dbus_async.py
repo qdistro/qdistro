@@ -246,10 +246,12 @@ def test_create_silo_unexpected_error_maps_to_generic(
 
 
 @pytest.mark.skipif(sm.dbus is None, reason="dbus-python unavailable")
-def test_create_silo_auth_refusal_is_synchronous_and_audited(
+def test_create_silo_auth_refusal_is_audited_and_never_reaches_store(
         monkeypatch, tmp_path):
-    """A non-admin caller must get the NotAuthorized error on the dispatch
-    thread — before any worker exists — and leave an audit row."""
+    """A non-admin caller must get the NotAuthorized error and leave an
+    audit row — and the refusal happens on the worker (peer lookup is a
+    D-Bus round trip that must not park the dispatch thread), so the
+    store is never touched."""
     store = sm._SiloStore(
         _FakeOps(), config_path=tmp_path / "silos.yaml")
     records = []
@@ -450,3 +452,76 @@ def test_start_failure_releases_inflight_and_rolls_back(
     assert errors[0].get_dbus_name() == f"{sm.BUS_NAME}.Generic"
     assert store.get("work").state == sm.State.STOPPED
     assert "work" not in store._stopping_inflight
+
+
+@pytest.mark.skipif(sm.dbus is None, reason="dbus-python unavailable")
+def test_peer_lookup_runs_on_the_worker_not_the_dispatch_thread(
+        monkeypatch, tmp_path):
+    """_peer_caller/_require_admin are synchronous D-Bus round trips —
+    they must run inside the worker, or a slow bus stalls dispatch."""
+    store = sm._SiloStore(
+        _FakeOps(), config_path=tmp_path / "silos.yaml")
+    store.create("work", 2000)
+    entered = threading.Event()
+    release = threading.Event()
+    replied = threading.Event()
+    errors: list[BaseException] = []
+
+    mgr = _mgr(store, monkeypatch)
+
+    def blocked_peer(_sender, _conn):
+        entered.set()
+        assert release.wait(5), "test did not release the peer lookup"
+        return {"uid": 1000, "pid": 42, "exe": "/bin/test"}
+
+    mgr._peer_caller = blocked_peer
+
+    mgr.StartSilo("work", replied.set, errors.append,
+                  sender=":1.2", conn=object())
+
+    # The decorated method already returned; the worker is parked in the
+    # peer lookup and the dispatch thread is free.
+    assert entered.wait(2), "worker never reached the peer lookup"
+    assert not replied.is_set()
+    release.set()
+    assert replied.wait(2), "start never replied"
+    assert errors == []
+
+
+@pytest.mark.skipif(sm.dbus is None, reason="dbus-python unavailable")
+def test_observer_does_not_publish_during_an_inflight_start(
+        monkeypatch, tmp_path):
+    """A runtime probe taken while a launch body runs lock-free reads the
+    pre-launch world (unit not started → "stopped"); the commit must treat
+    the in-flight claim as a stale verdict and publish nothing."""
+    store = sm._SiloStore(
+        _FakeOps(), config_path=tmp_path / "silos.yaml")
+    store.create("work", 2000)
+    entered = threading.Event()
+    release = threading.Event()
+    orig_start = store._ops.systemctl_start
+
+    def blocked_start(unit):
+        entered.set()
+        assert release.wait(5), "test did not release the start worker"
+        orig_start(unit)
+
+    store._ops.systemctl_start = blocked_start
+    worker = threading.Thread(
+        target=store.start, args=("work",), daemon=True)
+    worker.start()
+
+    assert entered.wait(2), "launch never reached systemctl_start"
+    assert "work" in store._stopping_inflight
+    store.observe_runtime_once()
+    silo = store.get("work")
+    assert silo.state == sm.State.ACTIVE
+    assert silo.observed_status == "unknown", (
+        "observer published a verdict over a launch still in flight")
+
+    release.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    # After the claim clears, the next pass publishes the real verdict.
+    store.observe_runtime_once()
+    assert store.get("work").observed_status == "launcher-running"
