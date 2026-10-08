@@ -627,13 +627,17 @@ def journal_checkpoint_vm(session: VMSession, *, timeout: float = 20.0
     history.
     """
     script = (
-        f"CUR=$(runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
+        "set -u\n"
+        f"OUT=$(runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
         f"journalctl --user -u {VM_QDSHELL_UNIT} -n0 --show-cursor "
-        "--no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')\n"
+        "--no-pager 2>/dev/null) || { echo 'unit journal read failed' >&2; "
+        "exit 63; }\n"
+        'CUR=$(printf "%s\\n" "$OUT" | sed -n "s/^-- cursor: //p" | tail -1)\n'
         '[ -n "$CUR" ] || { echo "unit journal cursor unavailable" >&2; exit 63; }\n'
-        "SCUR=$(journalctl -n0 --show-cursor --no-pager "
-        "SYSLOG_IDENTIFIER=systemd-coredump 2>/dev/null "
-        "| sed -n 's/^-- cursor: //p')\n"
+        "COUT=$(journalctl -n0 --show-cursor --no-pager "
+        "SYSLOG_IDENTIFIER=systemd-coredump 2>/dev/null) "
+        "|| { echo 'coredump journal read failed' >&2; exit 63; }\n"
+        'SCUR=$(printf "%s\\n" "$COUT" | sed -n "s/^-- cursor: //p" | tail -1)\n'
         '[ -n "$SCUR" ] || { echo "coredump journal cursor unavailable" >&2; '
         "exit 63; }\n"
         'echo "CUR:$CUR"\n'
