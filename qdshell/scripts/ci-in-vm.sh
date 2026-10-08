@@ -20,7 +20,8 @@ cd "$(dirname "$0")/.."
 VM="${QDISTRO_VM:?set QDISTRO_VM to the libvirt domain name}"
 QDISTRO_DIR="${QDISTRO_DIR:-..}"   # monorepo root (qdshell/ is in-tree)
 VME="$QDISTRO_DIR/scripts/vm/vm-exec"
-HTTP_PORT="${HTTP_PORT:-8765}"
+# HTTP_PORT may request an explicit staging port; default is 0 = kernel
+# assigns a free one (fixed host ports collide across test users).
 
 if [ ! -x "$VME" ]; then
     echo "vm-exec not found at $VME" >&2
@@ -39,18 +40,54 @@ done
 TMPTAR="$(mktemp -t qdshell-tests.XXXXXX.tar)"
 tar -cf "$TMPTAR" Tests/ Helpers/
 
-# Stage on the http-server qdistro uses for in-VM file pickup; if it's
-# not running, start it pointed at a scratch dir the VM bootstrap knows
-# to fetch from.
-STAGE_DIR="${QDSHELL_HTTP_STAGE:-/tmp/qdshell-stage}"
-mkdir -p "$STAGE_DIR"
+# Stage into a private, unpredictable dir served by OUR OWN http.server bound
+# to a kernel-assigned port. Do NOT reuse a fixed port or an already-running
+# listener: host ports are shared by every test user on this machine, so a
+# stale foreign server on :8765 would hand the guest another user's stage
+# dir (404s or wrong content). Binding port 0 removes the probe->bind race.
+# A predictable /tmp stage dir is equally unsafe — a foreign user could
+# pre-create it and swap content after we copy, so the default is mktemp.
+if [ -n "${QDSHELL_HTTP_STAGE:-}" ]; then
+    STAGE_DIR="$QDSHELL_HTTP_STAGE"
+    mkdir -p "$STAGE_DIR"
+    CLEAN_STAGE=0
+else
+    STAGE_DIR="$(mktemp -d -t qdshell-stage.XXXXXX)"
+    CLEAN_STAGE=1
+fi
 cp "$TMPTAR" "$STAGE_DIR/qdshell-tests.tar"
 
-if ! ss -tln 2>/dev/null | grep -q ":$HTTP_PORT "; then
-    (cd "$STAGE_DIR" && nohup python3 -m http.server "$HTTP_PORT" \
-        >/tmp/qdshell-http.log 2>&1 &)
-    sleep 1
+HTTP_LOG="$(mktemp -t qdshell-http.XXXXXX.log)"
+PORT_FILE="$(mktemp -t qdshell-http-port.XXXXXX)"
+: > "$PORT_FILE"
+# An explicit HTTP_PORT env still works; the server prints the port it
+# ACTUALLY bound, which doubles as proof we (not a foreign listener) own it.
+REQ_PORT="${HTTP_PORT:-0}"
+(
+    cd "$STAGE_DIR" || exit 1
+    exec python3 -c '
+import http.server, socketserver, sys
+socketserver.TCPServer.allow_reuse_address = (sys.argv[2] == "1")
+httpd = socketserver.TCPServer(("0.0.0.0", int(sys.argv[1])), http.server.SimpleHTTPRequestHandler)
+sys.stdout.write(str(httpd.server_address[1]) + "\n"); sys.stdout.flush()
+httpd.serve_forever()
+' "$REQ_PORT" "$([ "$REQ_PORT" = 0 ] && echo 0 || echo 1)" >"$PORT_FILE" 2>"$HTTP_LOG"
+) &
+HTTP_PID=$!
+trap 'kill "$HTTP_PID" 2>/dev/null || true; [ "$CLEAN_STAGE" = 1 ] && rm -rf "$STAGE_DIR"' EXIT
+for _ in $(seq 1 50); do
+    HTTP_PORT=$(head -1 "$PORT_FILE" 2>/dev/null | tr -dc '0-9')
+    [ -n "$HTTP_PORT" ] && break
+    kill -0 "$HTTP_PID" 2>/dev/null || break
+    sleep 0.2
+done
+if [ -z "$HTTP_PORT" ]; then
+    echo "staging HTTP server failed to bind (see $HTTP_LOG)" >&2
+    tail -5 "$HTTP_LOG" >&2 || true
+    exit 2
 fi
+STAGE_URL="http://10.0.2.2:$HTTP_PORT"
+echo "==> staging server: $STAGE_URL (dir $STAGE_DIR, pid $HTTP_PID)"
 
 # 2. Push runner script.
 RUNNER="$(mktemp -t in-vm-runner.XXXXXX.sh)"
@@ -59,7 +96,7 @@ cat > "$RUNNER" <<'EOF'
 set -e
 mkdir -p /tmp/qdshell-tests
 cd /tmp/qdshell-tests
-curl -s -o tests.tar http://10.0.2.2:8765/qdshell-tests.tar
+curl -sf -o tests.tar "$QDSHELL_STAGE_URL/qdshell-tests.tar"
 tar -xf tests.tar
 
 QMLTEST_BIN=${QMLTESTRUNNER:-/usr/bin/qmltestrunner6}
@@ -124,7 +161,7 @@ cp "$RUNNER" "$STAGE_DIR/qdshell-test-runner.sh"
 
 # 3. Run inside VM.
 echo "==> running qmltests inside $VM"
-"$VME" "$VM" 'curl -s -o /tmp/r.sh http://10.0.2.2:8765/qdshell-test-runner.sh && chmod +x /tmp/r.sh && /tmp/r.sh'
+"$VME" "$VM" "curl -sf -o /tmp/r.sh '$STAGE_URL/qdshell-test-runner.sh' && chmod +x /tmp/r.sh && QDSHELL_STAGE_URL='$STAGE_URL' /tmp/r.sh"
 RC=$?
 
 # 4. Optional bats run.

@@ -322,6 +322,82 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+@test "ci-in-vm.sh: staging server binds a kernel-assigned port, URL passed to guest" {
+    local f="$REPO_ROOT/qdshell/scripts/ci-in-vm.sh"
+    run grep -n 'HTTP_PORT:-8765\|:8765/' "$f"
+    [ "$status" -ne 0 ]
+    # Own server, kernel-assigned port, port echoed back by the process that
+    # bound it (proof we — not a foreign listener — own it).
+    run grep -n 'server_address\[1\]' "$f"
+    [ "$status" -eq 0 ]
+    # The guest runner is told the real URL, never a baked-in host port.
+    run grep -n 'QDSHELL_STAGE_URL' "$f"
+    [ "$status" -eq 0 ]
+    # A foreign listener must never be silently reused.
+    run grep -n 'ss -tln.*grep.*HTTP_PORT' "$f"
+    [ "$status" -ne 0 ]
+}
+
+@test "qdwin-helpers: no fixed QDWIN_HTTP_URL; lazy kernel-assigned staging" {
+    local f="$REPO_ROOT/qdwin/tests/gui/qdwin-helpers.sh"
+    run grep -nF '10.0.2.2:8765' "$f"
+    [ "$status" -ne 0 ]
+    run grep -n 'qdwin_http_ensure' "$f"
+    [ "$status" -eq 0 ]
+    # Functional: ensure binds a real port, reuses it while alive, and after
+    # the server dies a re-provision happens instead of trusting the stale
+    # URL. The reuse check must also refuse a forged/dead-pid record.
+    run bash -c "
+        . '$f'
+        export XDG_RUNTIME_DIR='$TDIR/xrt'
+        mkdir -p \"\$XDG_RUNTIME_DIR\"
+        unset QDWIN_HTTP_URL
+        qdwin_http_ensure || exit 2
+        echo \"\$QDWIN_HTTP_URL\" | grep -qE 'http://10\.0\.2\.2:[0-9]+/extra' || exit 3
+        u=\$QDWIN_HTTP_URL
+        qdwin_http_ensure || exit 4                  # URL kept populated:
+        [ \"\$QDWIN_HTTP_URL\" = \"\$u\" ] || exit 5   # live server reused, not re-bound
+        envf='$TDIR/xrt/qdwin-http-'\$(id -u)'.env'
+        pid=\$(sed -n 's/^pid=//p' \"\$envf\")
+        kill \"\$pid\" 2>/dev/null; sleep 0.3
+        # Keep the STALE generated URL in place — ensure must detect the dead
+        # listener through revalidation, not just a missing variable.
+        qdwin_http_ensure || exit 6                  # dead server respawned
+        [ \"\$QDWIN_HTTP_URL\" != \"\$u\" ] || exit 7  # new port, not the stale one
+        hp=\${QDWIN_HTTP_URL#http://10.0.2.2:}; hp=\${hp%%/*}
+        echo marker-\$\$ >\"\$QDWIN_HTTP_DIR/xuser-marker\"
+        got=\$(curl -sf \"http://127.0.0.1:\$hp/extra/xuser-marker\")
+        rm -f \"\$QDWIN_HTTP_DIR/xuser-marker\"
+        [ \"\$got\" = \"marker-\$\$\" ] || exit 8      # serves OUR tree, not a foreign one
+        pid=\$(sed -n 's/^pid=//p' \"\$envf\"); kill \"\$pid\" 2>/dev/null
+    "
+    [ "$status" -eq 0 ]
+    # The generated URL is revalidated, not treated as a permanent override.
+    run grep -n '_QDWIN_HTTP_URL_AUTO' "$f"
+    [ "$status" -eq 0 ]
+    # Cache reuse requires OUR file AND the recorded pid owning the listener.
+    run grep -nF -- '[ -O "$envf" ]' "$f"
+    [ "$status" -eq 0 ]
+    run grep -n 'ss -tlnp' "$f"
+    [ "$status" -eq 0 ]
+}
+
+@test "qdwin-apps-helpers: dead fixed-port defaults removed" {
+    local f="$REPO_ROOT/qdwin/tests/apps/qdwin-apps-helpers.sh"
+    run grep -n 'QDWIN_HTTP_URL:=.*8765\|QDWIN_HTTP_DIR:=' "$f"
+    [ "$status" -ne 0 ]
+    run grep -nF 'QDWIN_HTTP_URL:=' "$f"
+    [ "$status" -ne 0 ]
+}
+
+@test "run-phase-c2.sh: kernel-assigned staging port" {
+    local f="$REPO_ROOT/tier3s/spike/run-phase-c2.sh"
+    run grep -n 'T3S_C2_PORT:-8765' "$f"
+    [ "$status" -ne 0 ]
+    run grep -n 'server_address\[1\]' "$f"
+    [ "$status" -eq 0 ]
+}
+
 @test "test-vm-{consumer-check,suites}.sh: no fixed SSH hostfwd ports" {
     run grep -nE '(SSH_)?PORT=.*:-222[34]' "$VM/test-vm-consumer-check.sh" "$VM/test-vm-suites.sh"
     [ "$status" -ne 0 ]

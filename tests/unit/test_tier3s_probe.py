@@ -766,3 +766,42 @@ def test_the_nss_budget_is_shared_across_lookup_sites(tmp_path):
     assert 1 <= n <= 2, calls.read_text()
     assert took < 40, f"NSS lookups were paid a fresh budget per site ({took:.0f} s)"
     assert "FAIL nss:" in r.stdout and "(getent passwd rc=124; " in r.stdout, r.stdout
+
+
+# --- ptrace_scope precondition (doc 11 P2) -----------------------------------
+# QDISTRO_PROBE_PTRACE_SCOPE stands in for the sysctl (test root only, like
+# the other QDISTRO_PROBE_* hooks): every arm of the case is exercised —
+# non-permissive AND systrap-compatible is the only pass.
+
+@pytest.mark.parametrize("scope", ["1", "2"])
+def test_ptrace_scope_non_permissive_passes(tmp_path, scope):
+    inst = Install(tmp_path)
+    r = inst.probe(extra_env={"QDISTRO_PROBE_PTRACE_SCOPE": scope})
+    assert f"PASS ptrace_scope: {scope} " in r.stdout, r.stdout
+    assert lines(r, "FAIL") == [], r.stdout
+    assert r.returncode == 3, r.stdout   # TEST-PASS, never a host verdict
+
+
+@pytest.mark.parametrize("scope,why", [
+    ("0", "unrestricted same-uid ptrace"),
+    ("absent", "unrestricted same-uid ptrace"),
+    ("3", "unsupported value"),
+    ("", "unsupported value"),
+    ("garbage", "unsupported value"),
+    ("1 ", "unsupported value"),   # trailing whitespace is not a clean "1"
+    ("-1", "unsupported value"),
+])
+def test_ptrace_scope_permissive_or_invalid_refuses(tmp_path, scope, why):
+    inst = Install(tmp_path)
+    r = inst.probe(extra_env={"QDISTRO_PROBE_PTRACE_SCOPE": scope})
+    assert f"FAIL ptrace_scope: {scope}: {why}" in r.stdout, r.stdout
+    assert "PASS ptrace_scope" not in r.stdout
+    assert r.returncode == 1, r.stdout
+
+
+def test_ptrace_scope_hook_refused_without_test_root(tmp_path):
+    env = {k: v for k, v in os.environ.items() if k != "QDISTRO_PROBE_ROOT"}
+    env["QDISTRO_PROBE_PTRACE_SCOPE"] = "1"
+    r = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True)
+    assert r.returncode == 2
+    assert "QDISTRO_PROBE_PTRACE_SCOPE is a unit-test hook" in r.stderr

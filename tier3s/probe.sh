@@ -41,7 +41,7 @@ if [ -n "$ROOT" ]; then
     printf 'TEST MODE: QDISTRO_PROBE_ROOT=%s (not a host verdict)\n' "$ROOT"
     [ -z "${QDISTRO_PROBE_PIN:-}" ] || PIN="$QDISTRO_PROBE_PIN"
 else
-    for h in QDISTRO_PROBE_PIN QDISTRO_PROBE_PAUSE_AT QDISTRO_PROBE_PAUSE_DIR; do
+    for h in QDISTRO_PROBE_PIN QDISTRO_PROBE_PAUSE_AT QDISTRO_PROBE_PAUSE_DIR QDISTRO_PROBE_PTRACE_SCOPE; do
         if [ -n "${!h:-}" ]; then
             echo "probe: $h is a unit-test hook and needs QDISTRO_PROBE_ROOT" >&2
             exit 2
@@ -237,9 +237,28 @@ mun="$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)"
 if [ "$mun" -ge 2 ]; then pass userns "max_user_namespaces=$mun (minimum, not capacity)"
 else fail userns "max_user_namespaces=$mun < 2"; fi
 
-ps_scope="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"
-if [ "$ps_scope" = absent ] || [ "$ps_scope" -le 2 ]; then pass ptrace_scope "$ps_scope (<= 2)"
-else fail ptrace_scope "$ps_scope > 2 (systrap needs ptrace)"; fi
+# ptrace must be non-permissive BOTH ways (doc 11 precondition 2). Under
+# model A the in-container workload and the runsc Sentry share the
+# qt3s-<silo> host uid, so scope 0 or a kernel without yama (absent) —
+# the classic unrestricted same-uid ptrace — leaves the Sentry open to the
+# workload. Scope 1 allows only ancestor attach: the Sentry may
+# PTRACE_ATTACH its own systrap stub descendants while the workload, a
+# descendant and never an ancestor, cannot attach to the Sentry. Scope 2
+# (admin-only) requires CAP_SYS_PTRACE in the tracee's user namespace:
+# systrap grants the Sentry that capability and its stubs share the
+# Sentry's userns, so the attach is allowed, while the workload's
+# in-container capability does not reach the Sentry in the parent
+# namespace. Scope 3 blocks every attach, systrap's
+# included, and anything unrecognized fails closed.
+# QDISTRO_PROBE_PTRACE_SCOPE is a unit-test hook (test root only, guarded
+# above): it stands in for the sysctl so the case arms can be exercised.
+if [ "${QDISTRO_PROBE_PTRACE_SCOPE+x}" = x ]; then ps_scope="$QDISTRO_PROBE_PTRACE_SCOPE"
+else ps_scope="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"; fi
+case "$ps_scope" in
+    1|2) pass ptrace_scope "$ps_scope (non-permissive; systrap's own-subprocess attach still allowed)" ;;
+    0|absent) fail ptrace_scope "$ps_scope: unrestricted same-uid ptrace (non-permissive required)" ;;
+    *) fail ptrace_scope "$ps_scope: unsupported value (need 1 or 2)" ;;
+esac
 
 # --- launching user's id mapping ------------------------------------------
 # bounded like every foreign-user NSS lookup below (fable A r3 P3-2; nss_q)

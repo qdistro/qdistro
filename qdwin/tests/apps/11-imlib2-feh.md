@@ -57,8 +57,8 @@ centered natural-size image is therefore the correct result; the
 failure signatures are an image scaled up to the window, an image
 still drawn at the old (pre-maximise) window size/position with
 unpainted or black area around it, or the window not filling the
-screen (its frame not reaching the edges of the 1280×800 screen area —
-see the 32 px band under Known failure modes). The test verifies
+screen (the frame must touch all four edges of the 1280×800 screen
+area). The test verifies
 qdwin's configure-event handling (feh received the maximised size and
 re-rendered), not feh's UX.
 
@@ -89,12 +89,10 @@ qdwin_apps_kill_all
 - **feh shows only the chrome with empty window content** —
   Imlib2's XComposite flow hit a qdwin path. File a regression and
   pin which qdwin commit broke it.
-- **Maximised window leaves a ~32 px black band on every edge** (frame
-  at roughly 32..1248 × 32..768 while the bystander reports
-  `toplevel_geometry ... x=0 y=0 w=1280 h=800`) — open qdwin defect,
-  first diagnosed 2026-10-01: weston's XWM frame keeps its invisible
-  32 px shadow margin because libweston-desktop's XWayland surface has no
-  `set_maximized` hook (the XWM never learns the shell maximised it),
-  and qdwin places/sizes the XWayland wl_surface extent, margin
-  included, at the work area. This is a FAIL of 2.1, not a pass with a
-  note; cite it as this defect.
+- **Maximised frame stops ~32 px short of every edge** (frame at
+  roughly 32..1248 × 32..768 while the bystander reports
+  `toplevel_geometry ... x=0 y=0 w=1280 h=800`) — regression of the
+  XWM shadow-margin fix (qdwin d8a729fcb, visible-window placement:
+  weston's XWM keeps an invisible 32 px shadow margin around X11 frames
+  and qdwin must place maximised windows by their visible window, not
+  the surface extent). FAIL 2.1 and cite it.
