@@ -409,8 +409,12 @@ SESSIONMENU_SEED = (
     'bak = path + ".qdtest-bak"\n'
     "# A stale backup is the real original parked by an interrupted run —\n"
     "# keep it; re-parking the seeded file would lose the honest state.\n"
+    "# The copy publishes by rename so a partial .tmp can never be\n"
+    "# mistaken for a completed backup.\n"
     "if not os.path.exists(bak):\n"
-    "    shutil.copy2(path, bak)\n"
+    "    tmp = bak + \".tmp\"\n"
+    "    shutil.copy2(path, tmp)\n"
+    "    os.replace(tmp, bak)\n"
     "d = json.load(open(path))\n"
     'sm = d.setdefault("sessionMenu", {})\n'
     'sm["showKeybinds"] = True\n'
@@ -435,6 +439,9 @@ SESSIONMENU_SEED = (
 # error, not a quiet pass.
 SESSIONMENU_CLEAN = (
     _CURSOR_AND_STOP
+    # A .tmp staging file is residue of an interrupted copy, never a
+    # completed backup — discard it and restore only the published file.
+    + 'rm -f /home/admin/.config/qdshell/settings.json.qdtest-bak.tmp\n'
     + 'if [ -f /home/admin/.config/qdshell/settings.json.qdtest-bak ]; then\n'
     "  mv -f /home/admin/.config/qdshell/settings.json.qdtest-bak "
     "/home/admin/.config/qdshell/settings.json "
@@ -467,8 +474,12 @@ ADVANCED_SEED = (
     'bak = path + ".qdtest-adv-bak"\n'
     "# A stale backup is the real original parked by an interrupted run —\n"
     "# keep it; re-parking the seeded file would lose the honest state.\n"
+    "# The copy publishes by rename so a partial .tmp can never be\n"
+    "# mistaken for a completed backup.\n"
     "if not os.path.exists(bak):\n"
-    "    shutil.copy2(path, bak)\n"
+    "    tmp = bak + \".tmp\"\n"
+    "    shutil.copy2(path, tmp)\n"
+    "    os.replace(tmp, bak)\n"
     "d = json.load(open(path))\n"
     'd.setdefault("bar", {})["showOutline"] = True\n'
     'json.dump(d, open(path, "w"), indent=2)\n'
@@ -482,6 +493,7 @@ ADVANCED_SEED = (
 
 ADVANCED_CLEAN = (
     _CURSOR_AND_STOP
+    + 'rm -f /home/admin/.config/qdshell/settings.json.qdtest-adv-bak.tmp\n'
     + 'if [ -f /home/admin/.config/qdshell/settings.json.qdtest-adv-bak ]; then\n'
     "  mv -f /home/admin/.config/qdshell/settings.json.qdtest-adv-bak "
     "/home/admin/.config/qdshell/settings.json "
