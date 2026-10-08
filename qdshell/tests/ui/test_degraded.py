@@ -89,9 +89,11 @@ def test_panel_degraded(vm_session, case):
             )
         runner.ipc_vm(s, *case.open_cmd)
         # Panels that auto-close on empty (TrayDrawerPanel) animate shut; the
-        # capture must outlast the transition or it judges a half-rendered frame.
-        time.sleep(2.5)
-        runner.screenshot_vm(s, png)
+        # capture must outlast the transition or it judges a half-rendered
+        # frame. Settle by pixel-stability, not a fixed sleep — the
+        # transition length is host-load-dependent (observed >2.5s under
+        # nested-KVM load on 2026-10-08).
+        runner.settle_frame_vm(s, png)
         actual = runner.describe(png)
         # Shell still alive (a panel that crashed the process fails this).
         runner.ipc_vm(s, "bar", "showBar")

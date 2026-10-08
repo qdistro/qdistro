@@ -132,11 +132,18 @@ def test_sequential_panel_opens(vm_session, capture):
         runner.ipc_vm(s, *close_cmd)
         time.sleep(0.6)
 
-    # End state must be a clean idle bar, not a stuck panel. Reuse the bar_idle
-    # golden via the capture fixture + judge.
+    # End state must be a clean idle bar, not a stuck panel. Reuse the
+    # bar_idle golden. The bar surface has no open_cmd, so the capture
+    # fixture applies no settle — and the last panel's close + bar-widget
+    # restore is host-load-dependent (observed >1.8s under nested-KVM load
+    # on 2026-10-08, leaving the right-end cluster out of the frame).
+    # Wait for a pixel-stable frame instead of a fixed delay; a panel that
+    # never closes still leaves an unstable/non-idle frame to judge.
     from .manifests import BAR_SURFACES
     bar = BAR_SURFACES[0]
-    png, actual = capture(bar)
+    png = runner.ARTIFACTS_DIR / f"{bar.id}.png"
+    runner.settle_frame_vm(s, png, first_delay=0.6)
+    actual = runner.describe(png)
     assert png.exists()
     reference = (runner.EXPECTATIONS_DIR / bar.expectation).read_text()
     verdict = runner.judge(reference, actual)
