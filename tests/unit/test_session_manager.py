@@ -3970,13 +3970,36 @@ class TestReadExportMetaOpenIsBounded:
             store._read_export_meta(staging, "tok1", caller=None)
 
     def test_a_fifo_meta_is_refused_without_blocking(self, tmp_path):
-        # The regression this closes: a FIFO named meta.json made open()
-        # wait for a writer forever. Bound the call in a thread so a
-        # regression FAILS the test instead of hanging the suite.
+        # Pre-planted FIFO: even a lstat-first implementation refuses it —
+        # a baseline check that the "not a regular file" verdict survives.
         store = self._store(tmp_path)
         staging = tmp_path / "stg"
         staging.mkdir()
         sm.os.mkfifo(staging / "meta.json")
+        with pytest.raises(BadState, match="not a regular file"):
+            store._read_export_meta(staging, "tok1", caller=None)
+
+    def test_a_fifo_swapped_in_at_open_is_refused_not_blocking(
+            self, monkeypatch, tmp_path):
+        """The check/use window itself: a regular file at check time, a FIFO
+        at open time. A lstat-then-open implementation blocks in open()
+        waiting for a writer forever; O_NONBLOCK makes the open complete
+        and the fstat-on-fd refuses. Bounded in a thread so a regression
+        FAILS here instead of hanging the suite."""
+        store = self._store(tmp_path)
+        staging = tmp_path / "stg"
+        staging.mkdir()
+        self._meta(staging, "tok1")
+        real_open = sm.os.open
+        swapped = []
+
+        def racing_open(path, flags, *a, **k):
+            if not swapped and str(path).endswith("meta.json"):
+                swapped.append(1)
+                (staging / "meta.json").unlink()
+                sm.os.mkfifo(staging / "meta.json")
+            return real_open(path, flags, *a, **k)
+        monkeypatch.setattr(sm.os, "open", racing_open)
         outcome = []
 
         def attempt():
@@ -3989,21 +4012,28 @@ class TestReadExportMetaOpenIsBounded:
         t.start()
         t.join(timeout=10)
         assert not t.is_alive(), \
-            "_read_export_meta blocked on a FIFO meta.json"
+            "_read_export_meta blocked on a swapped-in FIFO meta.json"
+        assert swapped, "the meta open was never exercised"
         assert outcome and outcome[0][0] == "badstate", outcome
         assert "not a regular file" in outcome[0][1], outcome
 
     def test_a_symlink_meta_is_refused_without_following(self, tmp_path):
-        # A link whose target is a real meta-shaped file must never be
-        # followed — the staging dir is launcher-adjacent.
+        # The target holds a VALID, matching-token meta — if the link were
+        # followed, the read would SUCCEED, so refusal proves O_NOFOLLOW
+        # rather than a parse error on a missing file.
         store = self._store(tmp_path)
         staging = tmp_path / "stg"
         staging.mkdir()
-        self._meta(staging, "tok1")
-        (staging / "meta.json").unlink()
-        (staging / "meta.json").symlink_to(tmp_path / "planted")
+        planted = tmp_path / "planted"
+        planted.write_text(json.dumps({
+            "launch_token": "tok1",
+            "request_silo": "work",
+            "open_class": "pod",
+        }))
+        (staging / "meta.json").symlink_to(planted)
         with pytest.raises(BadState):
             store._read_export_meta(staging, "tok1", caller=None)
+        assert (staging / "meta.json").is_symlink()
 
     def test_token_mismatch_is_badstate(self, tmp_path):
         store = self._store(tmp_path)
