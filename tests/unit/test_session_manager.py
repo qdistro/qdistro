@@ -3931,3 +3931,84 @@ class TestSystemctlStopMissingUnit:
         ops = self._ops(monkeypatch, handler)
         assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
         assert calls == ["stop"]
+
+
+# ---------------------------------------------------------------------------
+# _read_export_meta — the meta.json open must never block the D-Bus loop
+# ---------------------------------------------------------------------------
+
+class TestReadExportMetaOpenIsBounded:
+    """lstat-then-open left a window where a FIFO swapped in between turned
+    the open into an unbounded block — on the daemon's D-Bus main loop.
+    The open is O_NOFOLLOW|O_NONBLOCK now and validation is fstat on the fd,
+    so a substituted special file or link is refused, never waited on."""
+
+    def _store(self, tmp_path):
+        return _SiloStore(_FakeOps(), config_path=tmp_path / "silos.yaml")
+
+    def _meta(self, staging, token):
+        (staging / "meta.json").write_text(json.dumps({
+            "launch_token": token,
+            "request_silo": "work",
+            "open_class": "pod",
+        }))
+
+    def test_valid_meta_round_trips(self, tmp_path):
+        store = self._store(tmp_path)
+        staging = tmp_path / "stg"
+        staging.mkdir()
+        self._meta(staging, "tok1")
+        meta = store._read_export_meta(staging, "tok1", caller=None)
+        assert meta["launch_token"] == "tok1"
+        assert meta["request_silo"] == "work"
+
+    def test_missing_meta_is_badstate(self, tmp_path):
+        store = self._store(tmp_path)
+        staging = tmp_path / "stg"
+        staging.mkdir()
+        with pytest.raises(BadState, match="no meta.json"):
+            store._read_export_meta(staging, "tok1", caller=None)
+
+    def test_a_fifo_meta_is_refused_without_blocking(self, tmp_path):
+        # The regression this closes: a FIFO named meta.json made open()
+        # wait for a writer forever. Bound the call in a thread so a
+        # regression FAILS the test instead of hanging the suite.
+        store = self._store(tmp_path)
+        staging = tmp_path / "stg"
+        staging.mkdir()
+        sm.os.mkfifo(staging / "meta.json")
+        outcome = []
+
+        def attempt():
+            try:
+                store._read_export_meta(staging, "tok1", caller=None)
+            except BadState as e:
+                outcome.append(("badstate", str(e)))
+
+        t = threading.Thread(target=attempt, daemon=True)
+        t.start()
+        t.join(timeout=10)
+        assert not t.is_alive(), \
+            "_read_export_meta blocked on a FIFO meta.json"
+        assert outcome and outcome[0][0] == "badstate", outcome
+        assert "not a regular file" in outcome[0][1], outcome
+
+    def test_a_symlink_meta_is_refused_without_following(self, tmp_path):
+        # A link whose target is a real meta-shaped file must never be
+        # followed — the staging dir is launcher-adjacent.
+        store = self._store(tmp_path)
+        staging = tmp_path / "stg"
+        staging.mkdir()
+        self._meta(staging, "tok1")
+        (staging / "meta.json").unlink()
+        (staging / "meta.json").symlink_to(tmp_path / "planted")
+        with pytest.raises(BadState):
+            store._read_export_meta(staging, "tok1", caller=None)
+
+    def test_token_mismatch_is_badstate(self, tmp_path):
+        store = self._store(tmp_path)
+        staging = tmp_path / "stg"
+        staging.mkdir()
+        self._meta(staging, "other-token")
+        with pytest.raises(BadState, match="token mismatch"):
+            store._read_export_meta(staging, "tok1", caller=None)

@@ -6484,8 +6484,15 @@ class _SiloStore:
         launch_token does not match, is BadState — present staging with bad meta is
         corruption, never 'nothing to import'."""
         meta_path = staging / "meta.json"
+        # Open first, validate the fd: an lstat-then-open window lets a FIFO
+        # (or link) swapped in between turn this open into an unbounded block
+        # on the D-Bus loop. O_NONBLOCK opens a FIFO without hanging and
+        # O_NOFOLLOW refuses a link; fstat on the fd then does the
+        # "is a regular file" check against what was ACTUALLY opened.
         try:
-            mst = os.lstat(meta_path)
+            mfd = os.open(meta_path,
+                          os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                          | os.O_CLOEXEC)
         except FileNotFoundError as e:
             self._audit_record("dispose-export", str(token), decision="error",
                                reason="staging present but meta.json missing",
@@ -6494,20 +6501,30 @@ class _SiloStore:
                 f"export staging {token!r} has no meta.json (corrupt)") from e
         except OSError as e:
             self._audit_record("dispose-export", str(token), decision="error",
-                               reason=f"meta lstat failed: {e}", caller=caller)
+                               reason=f"meta open failed: {e}", caller=caller)
             raise BadState(f"export meta for {token!r} unreadable: {e}") from e
-        if not stat.S_ISREG(mst.st_mode):
-            self._audit_record("dispose-export", str(token), decision="error",
-                               reason="meta.json is not a regular file",
-                               caller=caller)
-            raise BadState(f"export meta for {token!r} is not a regular file")
         try:
-            with open(meta_path, "rb") as f:
-                meta = json.loads(f.read())
-        except (OSError, ValueError) as e:
-            self._audit_record("dispose-export", str(token), decision="error",
-                               reason=f"meta.json unparseable: {e}", caller=caller)
-            raise BadState(f"export meta for {token!r} unparseable: {e}") from e
+            if not stat.S_ISREG(os.fstat(mfd).st_mode):
+                self._audit_record("dispose-export", str(token),
+                                   decision="error",
+                                   reason="meta.json is not a regular file",
+                                   caller=caller)
+                raise BadState(
+                    f"export meta for {token!r} is not a regular file")
+            try:
+                with os.fdopen(mfd, "rb") as f:
+                    mfd = -1                        # f owns the descriptor now
+                    meta = json.loads(f.read())
+            except (OSError, ValueError) as e:
+                self._audit_record("dispose-export", str(token),
+                                   decision="error",
+                                   reason=f"meta.json unparseable: {e}",
+                                   caller=caller)
+                raise BadState(
+                    f"export meta for {token!r} unparseable: {e}") from e
+        finally:
+            if mfd >= 0:
+                os.close(mfd)
         if not isinstance(meta, dict):
             raise BadState(f"export meta for {token!r} is not an object")
         if meta.get("launch_token") != token:
