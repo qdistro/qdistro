@@ -7750,10 +7750,19 @@ if dbus is not None:
             self._run_offloaded(
                 f"import-disp-{token_s}", import_on_worker, _reply, _error)
 
-        @dbus.service.method(BUS_NAME, in_signature="", out_signature="s")
-        def ListSilos(self):
-            rows = [s.to_dict() for s in self.store.list_silos()]
-            return json.dumps(rows)
+        @dbus.service.method(BUS_NAME, in_signature="", out_signature="s",
+                             async_callbacks=("_reply", "_error"))
+        def ListSilos(self, _reply, _error):
+            # Read-only, but still offloaded: the store lock it takes can
+            # be held by a worker across save()'s fdatasync, and a parked
+            # reader on the dispatch thread stalls every later call.
+
+            def list_on_worker() -> tuple:
+                rows = [s.to_dict() for s in self.store.list_silos()]
+                return (json.dumps(rows),)
+
+            self._run_offloaded("list-silos", list_on_worker,
+                                _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="i", out_signature="s",
                              async_callbacks=("_reply", "_error"),
@@ -7878,6 +7887,10 @@ def main():  # pragma: no cover - exercised in the VM
     # Fail closed before serving if the host lacks the admin/uid-1000 account.
     _require_admin_account()
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    # Workers make D-Bus calls on the shared connection (peer lookup,
+    # admin check, broker/pwd proxies); dbus-python requires this before
+    # a second thread touches the bus.
+    dbus.mainloop.glib.threads_init()
     bus = dbus.SystemBus()
     name = dbus.service.BusName(BUS_NAME, bus, do_not_queue=True)
     mgr = SessionManager(name)
