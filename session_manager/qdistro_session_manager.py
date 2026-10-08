@@ -4005,6 +4005,17 @@ class _SiloStore:
         except Exception as e:  # noqa: BLE001
             log.warning("stopping link watcher for %r failed: %s", name, e)
 
+    def stop_all_egress_watchers(self) -> None:
+        """Daemon-shutdown hook: reap every live `ip monitor link` watcher so
+        a direct SIGTERM/KeyboardInterrupt does not leave the children running
+        (previously only systemd's cgroup cleanup reached them). Iterates a
+        snapshot; each _stop_egress_watcher pops its entry and bumps the
+        generation so a callback still in flight self-cancels. Best-effort:
+        a watcher that refuses to die is logged, never raised — shutdown must
+        finish."""
+        for name in list(self._watchers):
+            self._stop_egress_watcher(name)
+
     def _teardown_egress_devices(self, ns: str, uid: int,
                                  policy: EgressPolicy) -> None:
         # Best-effort device teardown (no netns removal) for the dark-fallback
@@ -7300,12 +7311,22 @@ def main():  # pragma: no cover - exercised in the VM
     threading.Thread(target=observe_runtime, name="silo-runtime-observer",
                      daemon=True).start()
     loop = GLib.MainLoop()
+
+    def _on_term(*_args):
+        # A Python-level signal handler would not run while loop.run() sits in
+        # C; this GLib source does, and quitting reaches the finally below.
+        loop.quit()
+        return False
+
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, _on_term, None)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, _on_term, None)
     try:
         loop.run()
     except KeyboardInterrupt:
         pass
     finally:
         observer_stop.set()
+        mgr.store.stop_all_egress_watchers()
 
 
 if __name__ == "__main__":

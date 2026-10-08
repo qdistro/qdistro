@@ -2279,6 +2279,56 @@ class TestSetEgress:
         assert ops.egress_calls[n:] == []          # self-cancelled, no reattach
 
 
+class TestShutdownWatcherReap:
+    """stop_all_egress_watchers: the shutdown hook main()'s finally calls —
+    reaps every live `ip monitor link` child so a direct SIGTERM or
+    KeyboardInterrupt doesn't strand them (previously only systemd's cgroup
+    cleanup reached them)."""
+
+    def test_reaps_every_live_watcher(self, egress_store, ops):
+        egress_store.create("work", 2000, egress="wg:work")
+        egress_store.create("dev", 2001, egress="wg:dev")
+        egress_store.start("work")
+        egress_store.start("dev")
+        assert len(ops.watchers) == 2
+        egress_store.stop_all_egress_watchers()
+        assert ops.watchers == []
+        assert ops.egress_calls.count(("stop_link_watcher",)) == 2
+
+    def test_no_watchers_is_noop(self, egress_store, ops):
+        egress_store.stop_all_egress_watchers()
+        assert ("stop_link_watcher",) not in ops.egress_calls
+
+    def test_late_callback_still_self_cancels(self, egress_store, ops):
+        # The reap bumps each generation; a callback already in flight past
+        # the join must not re-attach onto a torn-down netns.
+        egress_store.create("work", 2000, egress="wg:work")
+        egress_store.start("work")
+        _tag, _ns, _ifn, on_up = ops.watchers[-1]
+        egress_store.stop_all_egress_watchers()
+        n = len(ops.egress_calls)
+        on_up()
+        assert ops.egress_calls[n:] == []
+
+    def test_failing_stop_still_drains_rest(self, egress_store, ops,
+                                            monkeypatch):
+        # A watcher that refuses to die (or whose terminate raises) must not
+        # abort the reap or the daemon's shutdown.
+        egress_store.create("work", 2000, egress="wg:work")
+        egress_store.create("dev", 2001, egress="wg:dev")
+        egress_store.start("work")
+        egress_store.start("dev")
+        calls = []
+
+        def boom(handle):
+            calls.append(handle)
+            ops.watchers.remove(handle)
+            raise RuntimeError("terminate refused")
+        monkeypatch.setattr(ops, "stop_link_watcher", boom)
+        egress_store.stop_all_egress_watchers()
+        assert len(calls) == 2
+
+
 class TestEgressReviewFixes:
     """Regression tests for the dual-review fixes (Fable B1/B2 + should-fixes)."""
 
