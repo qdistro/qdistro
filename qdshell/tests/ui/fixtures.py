@@ -120,8 +120,29 @@ LOCATION_SEED = (
     # and just record that state. Otherwise park any real original and
     # record which honest end state cleanup must reach, BEFORE writing
     # fixture content.
+    # A leftover marker must be VALIDATED against the backup before any
+    # write: marker=bak with no backup but a live location.json means an
+    # interrupted cleanup already restored the original — repark it rather
+    # than overwriting it as "residue". marker=absent means location.json
+    # is fixture residue and may be overwritten. Anything else is corrupt.
     + 'if [ -f "$S" ]; then\n'
-    "  :\n"
+    '  if grep -q "^bak$" "$S"; then\n'
+    '    if [ -f "$B" ]; then\n'
+    "      :\n"
+    '    elif [ -f "$L" ]; then\n'
+    '      mv "$L" "$B" || { echo "location original re-park failed" >&2; '
+    'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
+    "    else\n"
+    '      echo "location state inconsistent: bak marker, no backup or '
+    'file" >&2; systemctl --user start qdshell 2>/dev/null || true; '
+    "      exit 64\n"
+    "    fi\n"
+    '  elif grep -q "^absent$" "$S"; then\n'
+    "    :\n"
+    "  else\n"
+    '    echo "location state marker invalid" >&2; '
+    'systemctl --user start qdshell 2>/dev/null || true; exit 64\n'
+    "  fi\n"
     'elif [ -f "$B" ]; then\n'
     '  echo bak > "$S" || { echo "location state marker write failed" >&2; '
     'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
@@ -161,21 +182,36 @@ LOCATION_CLEAN = (
     "B=$L.qdtest-bak\n"
     "S=$L.qdtest-state\n"
     + _CURSOR_AND_STOP
+    # Marker removal comes BEFORE the destructive step in each branch, so
+    # an interruption leaves a state the seed's validation can recover
+    # (stale $B with no marker is still a parked original) — never
+    # marker=bak with the original already back in place, which a seed
+    # could mistake for residue.
     + 'if [ -f "$S" ]; then\n'
     '  if grep -q "^bak$" "$S"; then\n'
-    '    [ -f "$B" ] || { echo "location backup missing" >&2; '
+    '    if [ -f "$B" ]; then\n'
+    '      rm -f "$S" || { echo "location state marker removal failed" >&2; '
     'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
-    '    mv -f "$B" "$L" || { echo "location cache restore failed" >&2; '
+    '      mv -f "$B" "$L" || { echo "location cache restore failed" >&2; '
     'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
+    "    else\n"
+    # marker=bak but no backup: the restore may already have happened —
+    # preserve location.json as the potential original (do NOT delete it)
+    # and clear the stale marker rather than deleting anything.
+    '      rm -f "$S" || { echo "location state marker removal failed" >&2; '
+    'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
+    '      echo "location backup missing; preserved location.json" >&2\n'
+    '      systemctl --user start qdshell 2>/dev/null || true; exit 64\n'
+    "    fi\n"
     '  elif grep -q "^absent$" "$S"; then\n'
     '    rm -f "$L" || { echo "location cache removal failed" >&2; '
+    'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
+    '    rm -f "$S" || { echo "location state marker removal failed" >&2; '
     'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
     "  else\n"
     '    echo "location state marker invalid" >&2; '
     'systemctl --user start qdshell 2>/dev/null || true; exit 64\n'
     "  fi\n"
-    '  rm -f "$S" || { echo "location state marker removal failed" >&2; '
-    'systemctl --user start qdshell 2>/dev/null || true; exit 64; }\n'
     # No marker: the fixture never owned this file. A stale .qdtest-bak is
     # a parked original from an interrupted seed — restore it over any
     # seeded residue so the honest state survives.
