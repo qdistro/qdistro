@@ -7,7 +7,7 @@ What must be visible when this panel is open:
 - A CPU card: usage percentage, current frequency (GHz), and CPU temperature (°C), with a live sparkline/graph.
 - A Memory card: usage percentage and the used amount in GB (the product
   renders `NN% (X.X GB)` — used only, no total — by design; see
-  SystemStatsPanel.qml).
+  SystemStatsPanel.qml), with a live usage graph/sparkline.
 - A Network card: RX and TX rates with units, with a graph.
 - A detailed-stats card showing load average (1/5/15 minute), GPU
   temperature (if available), disk usage %, and — only when swap is

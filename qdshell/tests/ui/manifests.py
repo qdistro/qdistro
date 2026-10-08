@@ -32,7 +32,8 @@ class Surface:
     expectation: str           # filename under tests/ui/expectations/
     # Optional fixtures: bash snippets run inside the guest as admin, on
     # qdshell's own session bus (see runner.guest_sh_vm), before the surface
-    # opens (setup_guest) and after it closes (teardown_guest, best-effort).
+    # opens (setup_guest) and after it closes (teardown_guest — a failed
+    # restore is a test error, not a warning; see runner.guest_cleanup_vm).
     setup_guest: tuple = ()
     teardown_guest: tuple = ()
     # Optional extra described pages: each (x_frac, y_frac) is a real QMP
@@ -94,6 +95,9 @@ _SETTINGS_GUEST_FIXTURES = {
     # "changed from default" marker dots + enabled reset buttons only render
     # when a live value differs from its default; seed one.
     "advanced": (fixtures.ADVANCED_SEED, fixtures.ADVANCED_CLEAN),
+    # The installed-plugin row's toggle/uninstall affordances only render for
+    # an actually-installed plugin; seed one so the populated state is judged.
+    "plugins": (fixtures.PLUGIN_SEED, fixtures.PLUGIN_CLEAN),
 }
 
 SETTINGS_SURFACES = [

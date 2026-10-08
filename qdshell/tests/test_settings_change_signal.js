@@ -41,9 +41,91 @@ assert.match(observable, /var changed = newValue !== old/,
 assert.match(observable, /!root\.loadingSettingsData/,
     "loading must not emit");
 // ensures: Object.defineProperty never returns to the settings write
-// path — it is what SEGV'd the shell under QV4 finalize/incubation
-assert.ok(!/Object\.defineProperty/.test(observable),
-    "observable settings must not use Object.defineProperty (QV4 SEGV)");
+// path — it is what SEGV'd the shell under QV4 finalize/incubation.
+// Scan ALL executable code in the file (comment lines stripped): a helper
+// called from the proxy path would hit the same engine bug, so scoping the
+// ban to the observable block alone would leave the hole open.
+const settingsCode = settings.split("\n")
+    .filter((l) => !/^\s*\/\//.test(l)).join("\n");
+assert.ok(!/Object\.defineProperty/.test(settingsCode),
+    "Settings.qml must not use Object.defineProperty anywhere (QV4 SEGV)");
+
+// --- Executable coverage of the real observable machinery ------------------
+// The functions are plain JS embedded in the QML file; extract them by
+// brace matching and run them in Node against a stub root, so the contract
+// below is exercised on the SAME source QV4 executes — not on a re-written
+// copy that could drift.
+function extractFunction(src, name) {
+    const start = src.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `${name} must exist in Settings.qml`);
+    const braceStart = src.indexOf("{", start);
+    let depth = 0;
+    for (let i = braceStart; i < src.length; i++) {
+        if (src[i] === "{") depth++;
+        else if (src[i] === "}") {
+            depth--;
+            if (depth === 0) return src.slice(start, i + 1);
+        }
+    }
+    assert.fail(`${name}: unbalanced braces in Settings.qml`);
+}
+const stubRoot = {
+    emitted: [],
+    saved: 0,
+    settingChanged(owner, key, value) { this.emitted.push({ owner, key, value }); },
+    queueSettingsSave() { this.saved++; },
+    loadingSettingsData: false,
+    _settingsProxies: null,
+};
+const makeObservableSettings = new Function(
+    "root",
+    `${extractFunction(settings, "isPlainObject")}\n` +
+    `${extractFunction(settings, "makeObservableSettings")}\n` +
+    `return makeObservableSettings;`
+)(stubRoot);
+{
+    const section = { darkMode: false, nested: { depth: 1 }, list: [1, 2] };
+    const data = makeObservableSettings({ colorSchemes: section });
+
+    // Write path: a changed scalar persists, queues a save, and emits.
+    stubRoot.emitted.length = 0; stubRoot.saved = 0;
+    data.colorSchemes.darkMode = true;
+    assert.strictEqual(section.darkMode, true, "write must reach the raw object");
+    assert.strictEqual(stubRoot.saved, 1, "write must queue a save");
+    assert.strictEqual(stubRoot.emitted.length, 1, "changed scalar must emit");
+    assert.strictEqual(stubRoot.emitted[0].key, "darkMode");
+    assert.strictEqual(stubRoot.emitted[0].value, true);
+    // Identity stays stable: the emitted owner IS Settings.data.colorSchemes.
+    assert.strictEqual(stubRoot.emitted[0].owner, data.colorSchemes,
+        "emitted owner must be the cached section proxy");
+
+    // Unchanged scalar and load-time writes are suppressed.
+    stubRoot.emitted.length = 0;
+    data.colorSchemes.darkMode = true;
+    assert.strictEqual(stubRoot.emitted.length, 0, "unchanged scalar must not emit");
+    stubRoot.loadingSettingsData = true;
+    data.colorSchemes.darkMode = false;
+    assert.strictEqual(stubRoot.emitted.length, 0, "loading must not emit");
+    stubRoot.loadingSettingsData = false;
+
+    // Children wrap lazily and re-wrapping is a no-op (WeakMap identity).
+    const nested = data.colorSchemes.nested;
+    assert.strictEqual(nested.__qdshellObservable, true,
+        "plain-object children must be observable proxies");
+    assert.strictEqual(data.colorSchemes.nested, nested,
+        "repeated reads must return the same proxy");
+    assert.strictEqual(makeObservableSettings(data.colorSchemes), data.colorSchemes,
+        "re-wrapping an observable section must be a no-op");
+    stubRoot.emitted.length = 0;
+    nested.depth = 2;
+    assert.strictEqual(stubRoot.emitted.length, 1, "nested writes must emit");
+    assert.strictEqual(stubRoot.emitted[0].owner, nested);
+
+    // The proxy must serialize exactly like the raw tree it wraps.
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(data)),
+        { colorSchemes: { darkMode: false, nested: { depth: 2 }, list: [1, 2] } },
+        "proxy serialization must match the raw settings tree");
+}
 
 const consumers = {
     "Services/Theming/AppThemeService.qml": ["darkMode", "monitorForColors", "generationMethod"],
