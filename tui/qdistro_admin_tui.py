@@ -93,6 +93,28 @@ def _split_argv_from_details(
     return (_shlex.join(argv_list), other)
 
 
+def _decide_outcome_label(result, scope: str) -> str | None:
+    """Short label for DecideRequest's atomic result. None means plain
+    success ("applied"); anything else is text the caller should show —
+    "applied-uncached" is a success with a caveat, the rest mean this
+    call decided nothing."""
+    result = str(result or "")
+    if result == "applied":
+        return None
+    if result == "applied-uncached":
+        return (f"applied, but the {scope!r} cache row could not be "
+                "stored — later identical requests will prompt again")
+    if result in ("already-allow", "already-deny"):
+        return (f"already decided ({result.split('-', 1)[1]}) by another "
+                "approver — this call changed nothing")
+    if result == "deciding":
+        return "another decision is still being finalized by the broker"
+    if result == "instance-changed":
+        return ("the broker restarted since this queue was loaded — "
+                "refresh before deciding")
+    return f"outcome unconfirmed (broker answered {result!r})"
+
+
 class HelpScreen(ModalScreen):
     """Press ? to bring this up; any key dismisses."""
 
@@ -601,11 +623,21 @@ class AdminTuiApp(App):
             failures: list[tuple[int, str]] = []
             for req in pending:
                 try:
-                    self._broker.decide_request(req.id, "allow", "once")
-                    ok_count += 1
+                    result = self._broker.decide_request(
+                        req.id, "allow", "once", req.owner)
                 except Exception as e:  # noqa: BLE001
                     log_broker_error(f"approve_all/decide rid={req.id}", e)
                     failures.append((req.id, broker_error_label(e)))
+                else:
+                    label = _decide_outcome_label(result, "once")
+                    if result in ("applied", "applied-uncached"):
+                        ok_count += 1
+                        if label is not None:
+                            print(f"[admin_tui] decide rid={req.id}: "
+                                  f"{label}", file=sys.stderr)
+                    else:
+                        failures.append(
+                            (req.id, label or "unconfirmed outcome"))
             if failures:
                 self.notify(
                     f"Approved {ok_count} of {n}; "
@@ -647,11 +679,21 @@ class AdminTuiApp(App):
             failures: list[tuple[int, str]] = []
             for req in pending:
                 try:
-                    self._broker.decide_request(req.id, "deny", "once")
-                    ok_count += 1
+                    result = self._broker.decide_request(
+                        req.id, "deny", "once", req.owner)
                 except Exception as e:  # noqa: BLE001
                     log_broker_error(f"deny_all/decide rid={req.id}", e)
                     failures.append((req.id, broker_error_label(e)))
+                else:
+                    label = _decide_outcome_label(result, "once")
+                    if result in ("applied", "applied-uncached"):
+                        ok_count += 1
+                        if label is not None:
+                            print(f"[admin_tui] decide rid={req.id}: "
+                                  f"{label}", file=sys.stderr)
+                    else:
+                        failures.append(
+                            (req.id, label or "unconfirmed outcome"))
             if failures:
                 self.notify(
                     f"Denied {ok_count} of {n}; "
@@ -676,11 +718,20 @@ class AdminTuiApp(App):
             self.notify("no request selected", severity="warning", timeout=3)
             return
         try:
-            self._broker.decide_request(req.id, decision, self._scope)
+            result = self._broker.decide_request(req.id, decision,
+                                                 self._scope, req.owner)
         except Exception as e:  # noqa: BLE001
             log_broker_error(f"decide rid={req.id}", e)
             self.notify(f"decide failed — {broker_error_label(e)}",
                         severity="error", timeout=8)
+            return
+        label = _decide_outcome_label(result, self._scope)
+        if result not in ("applied", "applied-uncached"):
+            # Atomic non-applied answer: a concurrent approver won, a
+            # decision is still finalizing, or the id is unknown to this
+            # broker instance. Say so instead of claiming success.
+            self.notify(f"rid={req.id}: {label or 'unconfirmed outcome'}",
+                        severity="warning", timeout=6)
             return
         # Confirm the action explicitly. Row vanishing is implicit
         # feedback but easy to miss when the queue had only one entry
@@ -694,6 +745,10 @@ class AdminTuiApp(App):
             severity="information",
             timeout=4,
         )
+        if label is not None:
+            # "applied-uncached": decided, but warn the scope won't stick.
+            self.notify(f"rid={req.id}: {label}",
+                        severity="warning", timeout=6)
         # Don't double-refresh — the broker's RequestDecided signal will
         # arrive shortly and trigger _on_decided which updates the table.
         # This was the source of triple-refresh storms in the prior code.

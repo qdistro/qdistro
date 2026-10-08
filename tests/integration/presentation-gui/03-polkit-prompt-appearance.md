@@ -34,11 +34,8 @@ qdwin_session_healthy || { echo "FAIL: qdwin session not healthy"; exit 2; }
 pres_kill_apps
 qdwin_vmx_merged "test -x /usr/local/bin/qdistro-polkit-prompt && echo prompt-installed"
 
-# pres_prompt_start <tag>: start the prompt detached exactly as the agent
-# does, with a developer override that a polkit-role reader must IGNORE.
-pres_prompt_start() {
-    pres_admin "rm -f /tmp/pk-$1.*; setsid sh -c 'QDISTRO_PRESENTATION_FILE=/nonexistent/current.json /usr/local/bin/qdistro-polkit-prompt --mode=pam --action=org.qdistro.presentation.test --message=\"Presentation test prompt\" > /tmp/pk-$1.out 2>/tmp/pk-$1.err; echo \$? > /tmp/pk-$1.rc' >/dev/null 2>&1 </dev/null &"
-}
+# pres_prompt_start <tag> is defined in presentation-helpers.sh — call it,
+# do not redefine it here (the body carries quoting-sensitive `$?`).
 ```
 
 **Assert (0.1):** the setup printed `prompt-installed`.
