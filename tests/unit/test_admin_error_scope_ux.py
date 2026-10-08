@@ -67,6 +67,9 @@ def _make_stub_broker():
     broker.list_rules.return_value = []
     broker.list_history.return_value = []
     broker.list_cache.return_value = []
+    # The app now consumes DecideRequest's atomic result; a bare
+    # MagicMock return reads as "unconfirmed" to the new path.
+    broker.decide.return_value = "applied"
     broker.rulesReloaded = MagicMock()
     broker.rulesReloaded.connect = MagicMock()
     broker.requestPending = MagicMock()

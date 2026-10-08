@@ -134,6 +134,10 @@ class Request:
     exe: str
     action: str
     details: dict[str, str] = field(default_factory=dict)
+    # Unique bus name (":1.NN") of the broker INSTANCE that reported this
+    # row — request ids restart at 1 per instance, so the row is only
+    # decidable against the instance that supplied it.
+    owner: str = ""
 
 
 # Callback signatures used to bridge broker signals -> Textual app
@@ -146,7 +150,8 @@ class BrokerClient(Protocol):
 
     def get_pending(self) -> list[Request]: ...
 
-    def decide_request(self, rid: int, decision: str, scope: str) -> None: ...
+    def decide_request(self, rid: int, decision: str, scope: str,
+                       owner: str = "") -> str: ...
 
     def save_rule(self, filename: str, yaml_body: str) -> str: ...
 
@@ -182,14 +187,17 @@ class FakeBrokerClient:
     def get_pending(self) -> list[Request]:
         return list(self._pending.values())
 
-    def decide_request(self, rid: int, decision: str, scope: str) -> None:
-        # Fire-and-forget: record the call and return. The real broker
-        # commits + emits RequestDecided; we mirror that when auto.
+    def decide_request(self, rid: int, decision: str, scope: str,
+                       owner: str = "") -> str:
+        # Fire-and-forget: record the call and return the broker's
+        # atomic outcome string. The real broker commits + emits
+        # RequestDecided; we mirror that when auto.
         self.decided.append((rid, decision, scope))
         if self._auto_emit:
             self._pending.pop(rid, None)
             if self._on_decided is not None:
                 self._on_decided(rid, decision)
+        return "applied"
 
     def save_rule(self, filename: str, yaml_body: str) -> str:
         """Record the save_rule call; return the would-be path."""
@@ -291,9 +299,42 @@ class DBusBrokerClient:
             method = getattr(self._proxy, name)
             return method(*args, dbus_interface=BUS_NAME)
 
+    def _current_owner(self) -> str:
+        """The unique bus name of BUS_NAME's current owner (":1.NN") —
+        the identity of this broker INSTANCE. Empty string when the name
+        is unowned or the lookup itself fails."""
+        if self._bus is None:
+            return ""
+        try:
+            return str(self._bus.get_name_owner(BUS_NAME))
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _owner_proxy(self, owner: str):
+        """Proxy bound to a UNIQUE bus name (":1.NN") — the broker
+        instance that answered, not whatever currently owns the
+        well-known name. Unique names are never reused by the bus, so a
+        call on this proxy cannot land on a different broker instance;
+        if that instance is gone the call raises NameHasNoOwner."""
+        return self._bus.get_object(owner, OBJ_PATH)
+
     # -- BrokerClient protocol --
     def get_pending(self) -> list[Request]:
-        raw = self._call("GetPending")
+        if self._bus is None:
+            raise RuntimeError(
+                "DBusBrokerClient.get_pending called before start()")
+        # Resolve the owner FIRST and call GetPending on a proxy bound
+        # to that unique name — the returned rows are then provably from
+        # this instance. Tagging after a _call could mislabel rows if
+        # the broker restarted between the call and the owner lookup.
+        # No _call retry here: a retried call could land on a different
+        # instance and would be mis-tagged by the pre-resolved owner.
+        import dbus  # module-local import convention; see start()
+        owner = self._current_owner()
+        if not owner:
+            raise dbus.DBusException(f"{BUS_NAME} has no owner")
+        raw = self._owner_proxy(owner).GetPending(
+            dbus_interface=BUS_NAME)
         out: list[Request] = []
         for r in raw:
             out.append(Request(
@@ -303,11 +344,31 @@ class DBusBrokerClient:
                 exe=str(r["exe"]),
                 action=str(r["action"]),
                 details={str(k): str(v) for k, v in dict(r["details"]).items()},
+                owner=owner,
             ))
         return out
 
-    def decide_request(self, rid: int, decision: str, scope: str) -> None:
-        self._call("DecideRequest", int(rid), str(decision), str(scope))
+    def decide_request(self, rid: int, decision: str, scope: str,
+                       owner: str = "") -> str:
+        """DecideRequest on the broker. Returns its atomic outcome string
+        ("applied", "applied-uncached", "already-allow", "already-deny",
+        "deciding" or "unknown"); callers must check it — a non-applied
+        result means this call decided nothing.
+
+        `owner` must be the unique name that supplied this request's
+        pending row (req.owner from get_pending). The decision goes to a
+        proxy bound to that unique name — NEVER to a reconnect-retried
+        _call that could land on a new instance, where the same rid may
+        name an unrelated request. An empty or stale owner is refused as
+        "instance-changed" before anything is sent."""
+        if self._bus is None:
+            raise RuntimeError(
+                "DBusBrokerClient.decide_request called before start()")
+        if not owner or self._current_owner() != owner:
+            return "instance-changed"
+        return str(self._owner_proxy(owner).DecideRequest(
+            int(rid), str(decision), str(scope),
+            dbus_interface=BUS_NAME))
 
     def save_rule(self, filename: str, yaml_body: str) -> str:
         """SaveRule on the broker. Returns the absolute path of the

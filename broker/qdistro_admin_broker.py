@@ -4598,13 +4598,17 @@ class Broker(dbus.service.Object):
                     "request vanished before waiter registration",
                     name=BUS_NAME + ".Internal"))
                 return
-            if req.decision is not None:
+            if req.decision is not None and not req.finalizing:
                 # one_shot skips rules/cache, so this branch should
                 # only fire on a fast-path deny via some future
                 # mechanism. Handle it symmetrically.
                 decided = bool(req.decision)
                 dispatch = lambda: relay_reply(decided)  # noqa: E731
             else:
+                # Undecided, or a DecideRequest is mid-finalization:
+                # park on the waiters list the finalizer drains with
+                # the durable outcome — a provisional allow must never
+                # forward a payload.
                 req.waiters.append((relay_reply, _error))
                 dispatch = None
         if dispatch is not None:
@@ -5214,9 +5218,15 @@ class Broker(dbus.service.Object):
                     name=BUS_NAME + ".AccessDenied",
                 ))
                 return
-            if req.decision is not None:
+            if req.decision is not None and not req.finalizing:
                 _reply(bool(req.decision))
                 return
+            # Not yet decided, OR a DecideRequest is between recording
+            # its decision and committing the audit row: the recorded
+            # decision is provisional and may still be rolled back to
+            # deny. Park the waiter on the same list the finalizer
+            # drains with the durable outcome — it must never observe
+            # the provisional value.
             req.waiters.append((_reply, _error))
 
     @dbus.service.method(BUS_NAME, in_signature="", out_signature="aa{sv}",
@@ -5388,11 +5398,16 @@ class Broker(dbus.service.Object):
             if AUDIT_REQUIRED:
                 # Downgrade to deny — waiters get False, cache is not
                 # written, admin sees the failure as a DBusException.
+                # Waiters that parked during the finalization window
+                # are folded in so they too see the durable deny, never
+                # the provisional allow.
                 with self._lock:
                     req2 = self._pending.get(int(request_id))
                     if req2 is not None:
                         req2.decision = False
                         req2.finalizing = False
+                    waiters.extend(req.waiters)
+                    req.waiters.clear()
                 for reply_cb, _err in waiters:
                     try:
                         reply_cb(False)
@@ -5405,8 +5420,6 @@ class Broker(dbus.service.Object):
                     name=BUS_NAME + ".AuditUnavailable",
                 ) from e
 
-        with self._lock:
-            req.finalizing = False
         # (A non-AUDIT_REQUIRED audit failure falls through to here too:
         # the decision stands, as before.)
 
@@ -5435,6 +5448,14 @@ class Broker(dbus.service.Object):
         # cookie ("No session for cookie").
         if allowed and req.polkit_cookie:
             self._respond_polkit(req)
+        with self._lock:
+            req.finalizing = False
+            # Waiters that parked while finalization was in flight
+            # (audit, cache write, polkit response) are answered with
+            # the durable outcome alongside the snapshot taken at
+            # decision time — still strictly after the polkit response.
+            waiters.extend(req.waiters)
+            req.waiters.clear()
         for reply_cb, _err in waiters:
             try:
                 reply_cb(bool(allowed))
