@@ -1449,9 +1449,10 @@ def settle_frame_vm(session: VMSession, out_path: Path, *,
     host-load-dependent — a fixed sleep is neither sufficient under load
     nor necessary when the frame settles early. Keep `first_delay` as the
     minimum settle (same value the callers used before), then capture
-    until two consecutive frames are pixel-identical below the bar — the
-    same fixed-point check the scroll-stitcher uses — or the deadline
-    passes. The judged frame is always the LAST capture, so a defect that
+    until two consecutive frames compare equal under the same
+    jitter-tolerant check the scroll-stitcher uses (`_frames_identical`
+    with crop_top=0, so the bar counts) — or the deadline passes. The
+    judged frame is always the LAST capture, so a defect that
     persists is still judged: this only ever waits longer for a real
     transition to finish, it can never excuse one that did not.
     """
@@ -1494,8 +1495,9 @@ def _describe_scrolled_vm(session: VMSession, surface, first_png: Path,
     Each page is a separate shell capture + describe; the judge gets the
     concatenation, so "what must be visible when this tab is open" now means
     "present in the tab's scrollable content" — MORE of the surface is
-    asserted, not less. Bottom-of-scroll is detected by pixel-identical
-    consecutive frames (wheel events at the bottom change nothing); the
+    asserted, not less. Bottom-of-scroll is detected by consecutive
+    frames comparing equal (wheel events at the bottom change nothing,
+    modulo `_frames_identical`'s small-jitter tolerance); the
     duplicate bottom frame is not described. Bounded by max_pages.
     """
     pages: list[tuple[Path, str]] = [(first_png, first_desc)]
