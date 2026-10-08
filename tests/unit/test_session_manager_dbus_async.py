@@ -525,3 +525,20 @@ def test_observer_does_not_publish_during_an_inflight_start(
     # After the claim clears, the next pass publishes the real verdict.
     store.observe_runtime_once()
     assert store.get("work").observed_status == "launcher-running"
+
+
+@pytest.mark.skipif(sm.dbus is None, reason="dbus-python unavailable")
+def test_inflight_clear_only_releases_its_own_claim(tmp_path):
+    """A clear that cannot prove ownership must be a no-op: between an
+    early clear and a finally backstop a woken waiter can re-claim the
+    slot, and the backstop must not drop THAT claim."""
+    store = sm._SiloStore(
+        _FakeOps(), config_path=tmp_path / "silos.yaml")
+    store.create("work", 2000)
+    with store._lock:
+        mine = store._claim_stop_inflight("work")
+        foreign = object()
+        store._clear_stop_inflight("work", foreign)
+        assert "work" in store._stopping_inflight
+        store._clear_stop_inflight("work", mine)
+        assert "work" not in store._stopping_inflight

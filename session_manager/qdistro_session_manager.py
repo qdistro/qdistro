@@ -3947,15 +3947,19 @@ class _SiloStore:
         # to erase on the next save. Today this is used for tier2-template
         # rows whose owner uid belongs to a previous admin account.
         self._quarantined_silo_rows: list[dict[str, Any]] = []
-        # Names with a lock-free lifecycle write currently in flight: a stop()
-        # in its phase-2 teardown, or a freeze()/resume() doing its blocking
-        # cgroup.freeze write outside the store lock (02/S14b). Any conflicting
-        # lifecycle mutation for the same silo waits on _stop_cv until the
-        # in-flight one finishes, then re-checks state — so freeze/resume/stop
+        # Names with a lock-free lifecycle write currently in flight: a
+        # stop() in its phase-2 teardown, a freeze()/resume() doing its
+        # blocking cgroup.freeze write outside the store lock, or a start()
+        # in its lock-free launch body (02/S14b). Any conflicting lifecycle
+        # mutation for the same silo waits on _stop_cv until the in-flight
+        # one finishes, then re-checks state — so freeze/resume/stop/start
         # for one silo are serialized even though none of them holds _lock
-        # across its kernel write. Guarded by _lock. (Named *_stopping_* for
-        # history; it now covers freeze/resume too.)
-        self._stopping_inflight: set[str] = set()
+        # across its kernel write. Guarded by _lock. Each entry maps to a
+        # claim token: a clear only releases the claim it owns, so the
+        # backstop clears in finally-blocks can never drop a NEWER claim a
+        # woken waiter acquired between an early clear and the backstop
+        # (named *_stopping_* for history; it covers all lifecycle writes).
+        self._stopping_inflight: dict[str, object] = {}
         self._stop_cv = threading.Condition(self._lock)
         self.load()
 
@@ -4183,14 +4187,24 @@ class _SiloStore:
                 "audit record failed (action=%s silo=%s decision=%s)",
                 action, silo, decision)
 
-    def _clear_stop_inflight(self, name: str) -> None:
-        # Release the in-flight stop marker for *name* and wake any
-        # concurrent stop() callers waiting on it. Idempotent. Must be
-        # called with self._lock held, BEFORE any on_change emission, so a
-        # re-entrant stop() from the callback doesn't block on a marker
-        # only the current thread can clear.
-        if name in self._stopping_inflight:
-            self._stopping_inflight.discard(name)
+    def _claim_stop_inflight(self, name: str):
+        """Claim *name*'s lock-free-write slot; caller holds _lock.
+        Returns the claim token that _clear_stop_inflight requires — a
+        clear that cannot prove ownership of THIS claim is a no-op, so a
+        backstop clear in a finally can never release a newer claim a
+        woken waiter acquired after an earlier clear dropped _lock."""
+        claim = object()
+        self._stopping_inflight[name] = claim
+        return claim
+
+    def _clear_stop_inflight(self, name: str, claim) -> None:
+        # Release the in-flight marker for *name* IF it is still owned by
+        # *claim* and wake any waiters on it. Must be called with _lock
+        # held, BEFORE any on_change emission, so a re-entrant stop() from
+        # the callback doesn't block on a marker only this thread can
+        # clear.
+        if self._stopping_inflight.get(name) is claim:
+            del self._stopping_inflight[name]
             self._stop_cv.notify_all()
 
     # ---- per-silo netns egress (task 3) ---------------------------------
@@ -4845,7 +4859,8 @@ class _SiloStore:
         self._ops.write_tier3s_launch_env(silo.name, "\n".join(lines))
         return token
 
-    def _fail_tier3s_start(self, silo: Silo, err: BaseException) -> None:
+    def _fail_tier3s_start(self, silo: Silo, err: BaseException,
+                           claim) -> None:
         """A tier3s start that FAILED (not timed out): the spawn refused or
         the launch died before READY=1. Clear the Active intent only once the
         launch is verified gone (unit inactive/failed, no container, no
@@ -4865,7 +4880,7 @@ class _SiloStore:
             survived = True
         if survived:
             with self._lock:
-                self._clear_stop_inflight(silo.name)
+                self._clear_stop_inflight(silo.name, claim)
                 self._force_state(silo, State.ACTIVE)
                 silo.start_unresolved = True
                 silo.observed_reason = "start failed, teardown unverified; stop before retry"
@@ -4880,7 +4895,7 @@ class _SiloStore:
         except Exception:  # noqa: BLE001
             refusal = ""
         with self._lock:
-            self._clear_stop_inflight(silo.name)
+            self._clear_stop_inflight(silo.name, claim)
             self._force_state(silo, State.STOPPED)
             silo.observed_status = "failed"
             silo.observed_reason = (refusal or "launch refused or failed before it ran")[:200]
@@ -5038,6 +5053,7 @@ class _SiloStore:
     def start(self, name: str, caller: dict[str, Any] | None = None) -> None:
         reason = "started"
         body = None
+        claim = None
         try:
             # An ACTIVE silo is not proof the workload is running — the
             # launcher can die, or an app-initiated exit can tear the
@@ -5056,7 +5072,7 @@ class _SiloStore:
                     # mid-write cannot be told apart from a settled one.
                     silo = self._await_inflight_locked(name)
                     if silo.state != State.ACTIVE:
-                        body = self._claim_start_locked(silo)
+                        body, claim = self._claim_start_locked(silo)
                         break
                     p_silo, generation = silo, silo.operation_generation
                 try:
@@ -5098,7 +5114,7 @@ class _SiloStore:
                         # invalidates the stale observation — then take
                         # the ordinary launch path under the same hold.
                         self._force_state(silo, State.STOPPED)
-                        body = self._claim_start_locked(silo)
+                        body, claim = self._claim_start_locked(silo)
                         break
                     raise SessionError(
                         f"cannot verify whether silo {name!r} is still "
@@ -5110,7 +5126,7 @@ class _SiloStore:
                     f"start of silo {name!r} could not settle: its state "
                     f"changed during every liveness check; retry")
             if body is not None:
-                reason = self._run_start_body(silo, body)
+                reason = self._run_start_body(silo, body, claim)
         except SessionError as e:
             decision = "deny" if isinstance(
                 e, (UnknownSilo, BadState)) else "error"
@@ -5122,9 +5138,10 @@ class _SiloStore:
 
     def _claim_start_locked(self, silo: Silo):
         """Validate, mark ACTIVE, and claim the lock-free-write slot for a
-        start; caller holds _lock. Returns the launch body — a zero-arg
-        callable that performs the blocking cgroup/egress/systemctl work
-        WITHOUT _lock (see _run_start_body).
+        start; caller holds _lock. Returns (body, claim): the launch body —
+        a zero-arg callable that performs the blocking
+        cgroup/egress/systemctl work WITHOUT _lock (see _run_start_body) —
+        and the claim token the release sites pass to _clear_stop_inflight.
 
         The in-flight claim is what closes the lifecycle race window the
         old all-under-_lock shape covered by accident: while the launch
@@ -5137,30 +5154,33 @@ class _SiloStore:
             # before any state change (paravirt O4)
             self._require_tier3s_profile()
         self._transition(silo, State.ACTIVE)
-        self._stopping_inflight.add(silo.name)
-        return lambda: self._launch_silo_body(silo)
+        claim = self._claim_stop_inflight(silo.name)
+        return lambda: self._launch_silo_body(silo), claim
 
-    def _run_start_body(self, silo: Silo, body) -> str:
+    def _run_start_body(self, silo: Silo, body, claim) -> str:
         """Run the lock-free launch body for a silo whose start claimed the
         in-flight slot and committed ACTIVE, then release the claim and
         commit the outcome. Returns the body's audit reason."""
         try:
             reason = body()
         except Exception as e:  # noqa: BLE001
-            self._handle_start_failure(silo, e)   # always raises
+            self._handle_start_failure(silo, e, claim)   # always raises
             raise AssertionError("unreachable")
         with self._lock:
-            self._clear_stop_inflight(silo.name)
+            self._clear_stop_inflight(silo.name, claim)
         return reason
 
-    def _handle_start_failure(self, silo: Silo, e: Exception) -> None:
+    def _handle_start_failure(self, silo: Silo, e: Exception,
+                              claim) -> None:
         """Rollback for a failed lock-free launch; always raises.
 
         The in-flight claim is released in the finally so even a failure
         INSIDE the rollback cannot wedge the slot. _clear_stop_inflight
         runs before _force_state inside the same _lock hold, preserving
         the store's clear-before-emit ordering so a signal re-entering a
-        lifecycle op never waits on a marker this thread still holds."""
+        lifecycle op never waits on a marker this thread still holds.
+        The clears are token-checked, so the backstop cannot drop a newer
+        claim a woken waiter took between an early clear and the finally."""
         try:
             # Roll back state on failure. _force_state emits
             # SiloChanged so the admin UI / PodApps don't stick
@@ -5181,7 +5201,7 @@ class _SiloStore:
             # workload on a half-removed netns.
             if isinstance(e, StartNotCancelled):
                 with self._lock:
-                    self._clear_stop_inflight(silo.name)
+                    self._clear_stop_inflight(silo.name, claim)
                     self._force_state(silo, State.ACTIVE)
                     silo.start_unresolved = True
                     silo.observed_reason = (
@@ -5202,12 +5222,12 @@ class _SiloStore:
                     f"workload"
                 ) from e
             if silo.kind == KIND_TIER3S:
-                self._fail_tier3s_start(silo, e)    # raises; see below
+                self._fail_tier3s_start(silo, e, claim)  # raises; below
             if self._is_netns_backed(silo):
                 self._teardown_egress(silo.name, silo.uid,
                                       silo.egress)
             with self._lock:
-                self._clear_stop_inflight(silo.name)
+                self._clear_stop_inflight(silo.name, claim)
                 self._force_state(silo, State.STOPPED)
                 silo.observed_status = "failed"
                 silo.observed_reason = "launcher start failed"
@@ -5217,7 +5237,7 @@ class _SiloStore:
                 f"start of silo {silo.name!r} failed: {e}") from e
         finally:
             with self._lock:
-                self._clear_stop_inflight(silo.name)
+                self._clear_stop_inflight(silo.name, claim)
 
     def _launch_silo_body(self, silo: Silo) -> str:
         """The blocking half of a start: launch-env exports, cgroup +
@@ -5368,7 +5388,7 @@ class _SiloStore:
             silo_uid = silo.uid
             silo_kind = silo.kind
             silo_egress = silo.egress
-            self._stopping_inflight.add(silo_name)
+            claim = self._claim_stop_inflight(silo_name)
 
         # Phase 2: grace-period polling WITHOUT holding the store lock.
         # Other callers (ListSilos, signal handlers) can proceed while we
@@ -5394,7 +5414,7 @@ class _SiloStore:
                                 "stop pre-thaw: %s — continuing",
                                 silo_name, e)
             if silo_kind == KIND_TIER3S:
-                self._stop_tier3s(silo, silo_name)
+                self._stop_tier3s(silo, silo_name, claim)
                 return
             if silo_kind == KIND_TIER2_TEMPLATE:
                 # Tier-2 templated silo: stopping its unit (whose ExecStop runs
@@ -5413,7 +5433,7 @@ class _SiloStore:
                     # may still be running, so force ACTIVE (honest, retryable)
                     # and surface the error — do NOT report STOPPED.
                     with self._lock:
-                        self._clear_stop_inflight(silo_name)
+                        self._clear_stop_inflight(silo_name, claim)
                         self._force_state(silo, State.ACTIVE)
                     raise SessionError(
                         f"stop of tier-2 silo {silo_name!r} failed: {e}") from e
@@ -5439,7 +5459,7 @@ class _SiloStore:
                 # inactive AND the container is gone.
                 if survived or not stop_done:
                     with self._lock:
-                        self._clear_stop_inflight(silo_name)
+                        self._clear_stop_inflight(silo_name, claim)
                         self._force_state(silo, State.ACTIVE)
                     if survived:
                         raise SessionError(
@@ -5465,7 +5485,7 @@ class _SiloStore:
                                 "verified stop: %s — leaving the stale env",
                                 silo_name, e)
                 with self._lock:
-                    self._clear_stop_inflight(silo_name)
+                    self._clear_stop_inflight(silo_name, claim)
                     self._transition(silo, State.STOPPED)
                 return
             # Conservative default: until systemctl_stop says otherwise, the
@@ -5556,7 +5576,7 @@ class _SiloStore:
                 # fail-closed on its own: the PERSISTED state is what gates
                 # DeleteSilo, so the uncertainty has to survive these handlers.
                 with self._lock:
-                    self._clear_stop_inflight(silo_name)
+                    self._clear_stop_inflight(silo_name, claim)
                     self._force_state(
                         silo, State.STOPPED if stop_done else State.ACTIVE)
                 raise
@@ -5566,7 +5586,7 @@ class _SiloStore:
                           "STOPPED" if stop_done else
                           "ACTIVE (the stop was never acknowledged)")
                 with self._lock:
-                    self._clear_stop_inflight(silo_name)
+                    self._clear_stop_inflight(silo_name, claim)
                     self._force_state(
                         silo, State.STOPPED if stop_done else State.ACTIVE)
                 raise SessionError(
@@ -5590,7 +5610,7 @@ class _SiloStore:
             # that is right either way; only the VERDICT is withheld.
             if not stop_done:
                 with self._lock:
-                    self._clear_stop_inflight(silo_name)
+                    self._clear_stop_inflight(silo_name, claim)
                     self._force_state(silo, State.ACTIVE)
                 raise SessionError(
                     f"stop of silo {silo_name!r} was not acknowledged "
@@ -5603,16 +5623,17 @@ class _SiloStore:
             # thread (Stopped signal), and it must not block waiting on a
             # marker only this thread can clear (re-entrant deadlock).
             with self._lock:
-                self._clear_stop_inflight(silo_name)
+                self._clear_stop_inflight(silo_name, claim)
                 self._transition(silo, State.STOPPED)
         finally:
             # Safety net: guarantee the in-flight slot is released and
             # waiters woken on every exit path (idempotent — the success
             # and error paths above already cleared it).
             with self._lock:
-                self._clear_stop_inflight(silo_name)
+                self._clear_stop_inflight(silo_name, claim)
 
-    def _stop_tier3s(self, silo: Silo, silo_name: str) -> None:
+    def _stop_tier3s(self, silo: Silo, silo_name: str,
+                      claim) -> None:
         """Phase 2 of a tier3s stop (tier3s/CONTRACT.md §6), lock-free like
         the tier-2 branch and with the same fail-closed verdict: STOPPED only
         when the stop completed, the unit is inactive, admin's podman has no
@@ -5635,13 +5656,13 @@ class _SiloStore:
                 survived = self._ops.tier3s_silo_running(silo_name)
         except Exception as e:  # noqa: BLE001
             with self._lock:
-                self._clear_stop_inflight(silo_name)
+                self._clear_stop_inflight(silo_name, claim)
                 self._force_state(silo, State.ACTIVE)
             raise SessionError(
                 f"stop of tier3s silo {silo_name!r} failed: {e}") from e
         if survived or not stop_done:
             with self._lock:
-                self._clear_stop_inflight(silo_name)
+                self._clear_stop_inflight(silo_name, claim)
                 self._force_state(silo, State.ACTIVE)
             if survived:
                 raise SessionError(
@@ -5661,7 +5682,7 @@ class _SiloStore:
                         "verified stop: %s — leaving the stale env",
                         silo_name, e)
         with self._lock:
-            self._clear_stop_inflight(silo_name)
+            self._clear_stop_inflight(silo_name, claim)
             self._transition(silo, State.STOPPED)
 
     def _await_inflight_locked(self, name: str) -> Silo:
@@ -5738,7 +5759,7 @@ class _SiloStore:
                         f"cannot freeze silo {silo.name!r} in state "
                         f"{silo.state}")
                 else:
-                    self._stopping_inflight.add(silo.name)
+                    claim = self._claim_stop_inflight(silo.name)
                     target = silo
             if target is not None:
                 ok = False
@@ -5750,7 +5771,7 @@ class _SiloStore:
                         # Clear the claim + notify BEFORE _transition emits, so
                         # a re-entrant stop() from on_change can't deadlock on a
                         # marker only this thread can clear (stop()'s rule).
-                        self._clear_stop_inflight(name)
+                        self._clear_stop_inflight(name, claim)
                         cur = self._silos.get(name)
                         if ok and cur is target and cur.state == State.ACTIVE:
                             self._transition(cur, State.FROZEN)
@@ -5783,7 +5804,7 @@ class _SiloStore:
                         f"cannot resume silo {silo.name!r} in state "
                         f"{silo.state}")
                 else:
-                    self._stopping_inflight.add(silo.name)
+                    claim = self._claim_stop_inflight(silo.name)
                     target = silo
             if target is not None:
                 ok = False
@@ -5792,7 +5813,7 @@ class _SiloStore:
                     ok = True
                 finally:
                     with self._lock:
-                        self._clear_stop_inflight(name)
+                        self._clear_stop_inflight(name, claim)
                         cur = self._silos.get(name)
                         if ok and cur is target and cur.state == State.FROZEN:
                             self._transition(cur, State.ACTIVE)
