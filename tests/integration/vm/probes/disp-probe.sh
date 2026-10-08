@@ -96,6 +96,45 @@ clean_disp() {
     done
 }
 
+# Stop the LIVE daemon's periodic sweeps for a probe that drives the SAME
+# sweep machinery in-process. The daemon's lease tick fires every 60s
+# (DISPOSABLE_LEASE_INTERVAL_DEFAULT) and a fixture minted here as "expired"
+# (created in the past, or a PID1-only tree past grace) is a legitimate reap
+# target for the daemon too — its tick can land between fixture creation and
+# the probe's own enumeration (observed live: the daemon reaped disp-lexp-*
+# before disp_lease_candidates ran, full-20261007T192521Z). A clean stop stays
+# stopped: there is no dbus activation .service file for the bus name and
+# Restart=on-failure does not fire on an explicit stop, so the probe owns the
+# sweep exclusively. The sweeps under test run against the installed modules
+# in-process, so the daemon contributes nothing while stopped.
+#
+# Caveats: the EXIT trap cannot run under SIGKILL, stopping the manager also
+# stops its owned silo/session units (restarting the manager alone does not
+# restore those), and neither failure mode is hidden here — a failed stop
+# fails the probe loudly (the precondition is unmet and the race would stay
+# live), and a failed restart turns even a passing probe into a failure so a
+# stopped manager never masquerades as green.
+quiesce_daemon_sweeps() {  # <probe-tag>
+    _QDS_TAG="$1"
+    # Trap FIRST so a half-failed stop still attempts the restart.
+    # shellcheck disable=SC2317
+    _restore_daemon_sweeps() {
+        local rc=$?
+        if ! systemctl start qdistro-session-manager.service; then
+            printf 'FAIL: %s — qdistro-session-manager.service did not restart after the probe\n' \
+                "$_QDS_TAG" >&2
+            rc=1
+        fi
+        exit "$rc"
+    }
+    trap _restore_daemon_sweeps EXIT
+    systemctl stop qdistro-session-manager.service \
+        || fail "$_QDS_TAG" "could not stop qdistro-session-manager.service — the live sweep would still race the fixtures"
+    systemctl is-active --quiet qdistro-session-manager.service \
+        && fail "$_QDS_TAG" "qdistro-session-manager.service still active after systemctl stop"
+    return 0
+}
+
 cmd_setup() {
     command -v podman >/dev/null 2>&1 || fail setup "podman not installed in this VM"
     command -v dbus-send >/dev/null 2>&1 || fail setup "dbus-send absent (broker gate cannot be queried)"
@@ -508,6 +547,7 @@ cmd_lease_sweep() {
     # + _SiloStore.sweep_expired_leases -> dispose() -> real `podman rm -f`. The
     # host fake-ops cannot prove the podman label parsing or the real rm.
     clean_disp
+    quiesce_daemon_sweeps lease-sweep
     local ts now past tok_exp tok_fresh tok_nolease tok_forged
     ts=$(date +%Y%m%d-%H%M%S)
     now=$(date +%s); past=$(( now - 100 ))
@@ -675,6 +715,7 @@ cmd_proctree_sweep() {
     #   noopt   = empty tree but no proctree label  -> keep (not opted in)
     #   notok   = empty tree, opted in, NO token    -> keep (token guard)
     clean_disp
+    quiesce_daemon_sweeps proctree-sweep
     local ts now past tok_e tok_b tok_f tok_n
     ts=$(date +%Y%m%d-%H%M%S)
     now=$(date +%s); past=$(( now - 1000 ))

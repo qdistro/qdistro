@@ -10,9 +10,9 @@ from dataclasses import dataclass
 
 from .model import PresentationSnapshot, SnapshotError, SnapshotPathError, with_generation
 from .paths import (
-    MANAGED_DIR,
     _O_NOFOLLOW,
     _O_NONBLOCK,
+    MANAGED_DIR,
     _close_quietly,
     load_deployment_meta,
     walk_open,

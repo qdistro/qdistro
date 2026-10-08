@@ -73,7 +73,12 @@ def _unit_files() -> list[Path]:
             # excluded EVERY unit — a vacuous green.
             rel = p.relative_to(_REPO)
             parts = set(rel.parts)
-            if parts & {".git", ".worktrees", "tests", "__pycache__"}:
+            # Any hidden directory (.git, .worktrees, .claude, agent
+            # scratch checkouts, caches, ...) is not product content.
+            # full-20261007T192521Z failed when a stale
+            # .claude/worktrees/<id> copy tripped the scan.
+            if parts & {"tests", "__pycache__"} or any(
+                    part.startswith(".") for part in rel.parts):
                 continue
             # In-tree components (monorepo) ship their own units and are out
             # of scope here, exactly as they were as sibling repos: qdlocker's
