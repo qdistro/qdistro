@@ -285,7 +285,8 @@ log "stage 5: running fresh-vm-bootstrap.sh in VM..."
 
 # Bootstrap fetches the monorepo tarball and runs the build. Pass the
 # per-run staging URL so the in-VM bootstrap fetches from THIS run's
-# server (its default is the old fixed http://10.0.2.2:8765).
+# server — fresh-vm-bootstrap.sh requires QDISTRO_HTTP_HOST and has no
+# default port.
 # Normalize the tier-2 image-prebuild flag to a bare 0/1 before embedding it in
 # the guest command string (defensive for manual invocations passing true/yes).
 case "${QDISTRO_BUILD_TIER2_IMAGES:-0}" in 1|true|yes|on) _T2_IMAGES=1 ;; *) _T2_IMAGES=0 ;; esac
