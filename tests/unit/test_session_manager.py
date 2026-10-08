@@ -880,7 +880,10 @@ class TestLifecycle:
         let_freeze_commit = threading.Event()
         probe_entered = threading.Event()
         let_probe_finish = threading.Event()
+        starter_waiting = threading.Event()
         orig_freeze = ops.cgroup_freeze
+        orig_await = store._await_inflight_locked
+        awaits = []
 
         def gated_freeze(n, flag):
             orig_freeze(n, flag)
@@ -888,7 +891,17 @@ class TestLifecycle:
                 freeze_wrote.set()
                 let_freeze_commit.wait(10)
 
+        def spy_await(n):
+            awaits.append(n)
+            if len(awaits) == 2:
+                # The stale verdict was discarded while the slot was
+                # still claimed (generation untouched at that point) —
+                # only the in-flight recheck could have caught it.
+                starter_waiting.set()
+            return orig_await(n)
+
         ops.cgroup_freeze = gated_freeze
+        store._await_inflight_locked = spy_await
 
         def dead_probe(*a):
             probe_entered.set()
@@ -907,6 +920,7 @@ class TestLifecycle:
         freezer.start()
         assert freeze_wrote.wait(10)   # claimed the slot + wrote, gated
         let_probe_finish.set()         # verdict arrives mid-freeze
+        assert starter_waiting.wait(10)  # recheck saw the claimed slot
         let_freeze_commit.set()
         starter.join(10)
         freezer.join(10)
