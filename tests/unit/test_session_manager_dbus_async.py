@@ -536,9 +536,76 @@ def test_inflight_clear_only_releases_its_own_claim(tmp_path):
         _FakeOps(), config_path=tmp_path / "silos.yaml")
     store.create("work", 2000)
     with store._lock:
-        mine = store._claim_stop_inflight("work")
-        foreign = object()
-        store._clear_stop_inflight("work", foreign)
-        assert "work" in store._stopping_inflight
-        store._clear_stop_inflight("work", mine)
+        # Replay the bug: A claims, clears early, a woken waiter B
+        # re-claims — then A's finally backstop runs with the stale
+        # token and must leave B's claim alone.
+        old = store._claim_stop_inflight("work")
+        store._clear_stop_inflight("work", old)
+        new = store._claim_stop_inflight("work")
+        store._clear_stop_inflight("work", old)
+        assert store._stopping_inflight.get("work") is new
+        store._clear_stop_inflight("work", new)
         assert "work" not in store._stopping_inflight
+
+
+@pytest.mark.skipif(sm.dbus is None, reason="dbus-python unavailable")
+def test_completed_start_invalidates_a_probe_taken_mid_launch(tmp_path):
+    """A probe that snapshotted generation N while the launch body ran
+    lock-free reads the pre-start world ("stopped"). If its result lands
+    after the launcher reports success, the commit must be dropped:
+    _run_start_body bumps operation_generation under _lock before
+    releasing the claim, so the late verdict is stale by generation."""
+    store = sm._SiloStore(
+        _FakeOps(), config_path=tmp_path / "silos.yaml")
+    store.create("work", 2000)
+
+    start_entered = threading.Event()
+    start_release = threading.Event()
+    orig_start = store._ops.systemctl_start
+
+    def blocked_start(unit):
+        start_entered.set()
+        assert start_release.wait(5), "test did not release the start"
+        orig_start(unit)
+
+    store._ops.systemctl_start = blocked_start
+    worker = threading.Thread(
+        target=store.start, args=("work",), daemon=True)
+    worker.start()
+    assert start_entered.wait(2), "launch never reached systemctl_start"
+    assert "work" in store._stopping_inflight
+
+    # The observer snapshots the post-claim generation and probes while
+    # the launcher is still parked — capture that stale verdict, then
+    # hold its return until the launch has fully completed.
+    probe_captured = threading.Event()
+    probe_release = threading.Event()
+    orig_probe = store._ops.observe_silo
+
+    def mid_launch_probe(name, uid, kind):
+        verdict = orig_probe(name, uid, kind)
+        probe_captured.set()
+        assert probe_release.wait(5), "test did not release the probe"
+        return verdict
+
+    store._ops.observe_silo = mid_launch_probe
+    observer = threading.Thread(
+        target=store.observe_runtime_once, daemon=True)
+    observer.start()
+    assert probe_captured.wait(2), "observer never probed"
+
+    start_release.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert "work" not in store._stopping_inflight
+
+    probe_release.set()
+    observer.join(5)
+    assert not observer.is_alive()
+
+    silo = store.get("work")
+    assert silo.observed_status == "unknown", (
+        "a probe taken mid-launch committed its stale 'stopped' verdict "
+        "after the launch had already succeeded")
+    store.observe_runtime_once()
+    assert store.get("work").observed_status == "launcher-running"

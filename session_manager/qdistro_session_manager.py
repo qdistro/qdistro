@@ -3938,6 +3938,16 @@ class _SiloStore:
         # SiloExists) instead of parking on _accounts_lock for the whole
         # useradd, and delete() answers SiloBusy rather than UnknownSilo.
         self._creating_inflight: dict[str, int] = {}
+        # Serializes import_from_disposable's whole transaction (staging
+        # lstat → dispose → meta → gates → promote → staging removal).
+        # The synchronous D-Bus dispatch thread used to provide this; with
+        # the handler offloaded, two workers could import the same token
+        # concurrently — double-promoting a one-shot staging or unlinking
+        # it under the other reader. Never held with _lock. A second
+        # caller simply waits, then sees the removed staging and returns
+        # the clean zero-file receipt — the same answer the serialized
+        # dispatch thread produced.
+        self._import_lock = threading.Lock()
         # Durable forensic sink. None disables auditing (e.g. tests that
         # don't care). Audit writes never raise into the lifecycle path.
         self._audit = audit
@@ -5165,8 +5175,13 @@ class _SiloStore:
             reason = body()
         except Exception as e:  # noqa: BLE001
             self._handle_start_failure(silo, e, claim)   # always raises
-            raise AssertionError("unreachable")
+            raise AssertionError("unreachable") from e
         with self._lock:
+            # Invalidate BEFORE the claim clears: a probe that snapshotted
+            # mid-launch (generation current, verdict "stopped" because the
+            # unit had not started yet) must become stale here, not commit
+            # after the launch completes.
+            self._invalidate_observation(silo)
             self._clear_stop_inflight(silo.name, claim)
         return reason
 
@@ -6445,205 +6460,210 @@ class _SiloStore:
         7. The promoter is all-or-nothing + defensive; a policy/IO failure leaves
            the silo untouched. On success the staging is removed (one-shot).
         Every outcome is audited under action ``dispose-export``."""
-        now = time.time() if now is None else now
-        if not _disp.is_disposable_token(token):
-            self._audit_record("dispose-export", str(token), decision="deny",
-                               reason="malformed launch token", caller=caller)
-            raise BadArgument(f"malformed disposable token: {token!r}")
+        # Serialize the whole transaction: two concurrent imports of
+        # the same token could both validate staging and promote,
+        # or unlink it under the other reader (previously the
+        # synchronous dispatch thread serialized this).
+        with self._import_lock:
+            now = time.time() if now is None else now
+            if not _disp.is_disposable_token(token):
+                self._audit_record("dispose-export", str(token), decision="deny",
+                                   reason="malformed launch token", caller=caller)
+                raise BadArgument(f"malformed disposable token: {token!r}")
 
-        staging = self._export_staging_dir(token)
-        # (2) Absent staging dir: a clean no-op. lstat (no symlink follow): a
-        # symlink at the staging path is suspicious -> treat as corrupt (BadState).
-        try:
-            st = os.lstat(staging)
-        except FileNotFoundError:
-            self._audit_record("dispose-export", str(token), decision="allow",
-                               reason="no export staging (nothing to import)",
-                               caller=caller)
-            log.info("import_from_disposable %r -> no staging (0 files)", token)
-            return {"version": _dispexport.RECEIPT_VERSION, "launch_token": token,
-                    "files": [], "request_silo": None, "open_class": None,
-                    "dest": None}
-        except OSError as e:
-            self._audit_record("dispose-export", str(token), decision="error",
-                               reason=f"staging lstat failed: {e}", caller=caller)
-            raise BadState(f"export staging for {token!r} unreadable: {e}") from e
-        if not stat.S_ISDIR(st.st_mode):
-            self._audit_record("dispose-export", str(token), decision="error",
-                               reason="staging path is not a directory",
-                               caller=caller)
-            raise BadState(f"export staging for {token!r} is not a directory")
-
-        # (3) Finalize the throwaway BEFORE reading its output, so it cannot race
-        # the copy. dispose_by_token is idempotent + fail-closed; then confirm no
-        # live container backs the token.
-        self.dispose_by_token(token, caller=caller)
-        try:
-            still = self._ops.disp_containers_by_token(token)
-        except OSError as e:
-            self._audit_record("dispose-export", str(token), decision="error",
-                               reason=f"post-dispose lookup failed: {e}",
-                               caller=caller)
-            raise BadState(
-                f"could not confirm disposable {token!r} is gone: {e}") from e
-        if still:
-            self._audit_record("dispose-export", str(token), decision="error",
-                               reason=f"disposable still live: {still}",
-                               caller=caller)
-            raise BadState(
-                f"disposable {token!r} still live after dispose; refusing import")
-
-        # (4) Read + validate the launcher-written meta. A present staging dir with
-        # missing/corrupt/non-regular meta is BadState (the container can't touch
-        # meta — it is outside the bind — so a bad meta means real corruption).
-        meta = self._read_export_meta(staging, token, caller)
-
-        open_class = meta["open_class"]
-        request_silo = meta["request_silo"]
-
-        # (5) Re-validate export is still allowed: registry export-capability AND
-        # the rules-only broker export gate (import is the real crossing).
-        try:
-            cls = _dispclasses.resolve_from_registry(open_class)
-        except _dispclasses.RegistryError as e:
-            self._audit_record("dispose-export", request_silo, decision="error",
-                               reason=f"registry malformed: {e}", caller=caller)
-            raise BadState(f"disposable-class registry unreadable: {e}") from e
-        except (_dispclasses.UnknownClass, _dispclasses.ClassDisabled) as e:
-            self._audit_record("dispose-export", request_silo, decision="deny",
-                               reason=f"class {open_class!r} not importable: {e}",
-                               caller=caller)
-            raise BadState(
-                f"open class {open_class!r} is not importable: {e}") from e
-        if not cls.export:
-            self._audit_record("dispose-export", request_silo, decision="deny",
-                               reason=f"class {open_class!r} export=false",
-                               caller=caller)
-            raise BadState(f"open class {open_class!r} is not export-capable")
-        # Edit-round-trip is a refinement of export. If the launcher marked this
-        # staging edit_mode, the class must STILL be edit-capable in the current
-        # registry (re-checked here at the crossing, never trusted from the
-        # spawn-time stamp alone) — a registry that dropped `edit` since spawn
-        # refuses the beside-source landing fail-closed.
-        edit_mode = bool(meta.get("edit_mode"))
-        if edit_mode and not cls.edit:
-            self._audit_record(
-                "dispose-export", request_silo, decision="deny",
-                reason=f"class {open_class!r} edit=false but edit_mode requested",
-                caller=caller)
-            raise BadState(
-                f"open class {open_class!r} is not edit-capable "
-                f"(edit-round-trip refused)")
-        try:
-            gate = _dispclasses.export_action(open_class)
-        except _dispclasses.RegistryError as e:
-            raise BadState(f"invalid open class {open_class!r}: {e}") from e
-        verdict = self._ops.broker_check_permission(gate)
-        if verdict != "allow":
-            self._audit_record("dispose-export", request_silo, decision="deny",
-                               reason=f"broker export gate {gate}={verdict or 'unknown'}",
-                               caller=caller)
-            raise BadState(
-                f"broker did not allow {gate} (verdict={verdict or 'unknown'})")
-
-        # (6) Resolve the requesting silo's state_path READ-ONLY; refuse an
-        # untemplated/unknown target (no durable home) — the routing trust anchor.
-        try:
-            state_path = self._ops.export_resolve_state_path(request_silo)
-        except OSError as e:
-            self._audit_record("dispose-export", request_silo, decision="error",
-                               reason=f"state-path resolve failed: {e}",
-                               caller=caller)
-            raise BadState(
-                f"could not resolve export target silo {request_silo!r}: {e}") from e
-        if not state_path:
-            self._audit_record("dispose-export", request_silo, decision="deny",
-                               reason="requesting silo is untemplated (no state)",
-                               caller=caller)
-            raise BadState(
-                f"export target silo {request_silo!r} is untemplated — refusing "
-                f"(no durable home to land artifacts in)")
-        try:
-            dst = os.stat(state_path)
-        except OSError as e:
-            self._audit_record("dispose-export", request_silo, decision="error",
-                               reason=f"state_path stat failed: {e}", caller=caller)
-            raise BadState(
-                f"export target state_path {state_path!r} unusable: {e}") from e
-        if not stat.S_ISDIR(dst.st_mode):
-            self._audit_record("dispose-export", request_silo, decision="error",
-                               reason="state_path is not a directory", caller=caller)
-            raise BadState(f"export target state_path {state_path!r} not a dir")
-
-        # (7) Promote (all-or-nothing, atomic). Land files owned by the silo owner.
-        # Two landing modes: edit-round-trip lands the SINGLE edited file beside
-        # its source as <name>.disp-edited; plain export-back lands into Incoming/.
-        # BOTH modes also emit chain-anchored lineage receipt surfaces INTO the
-        # same atomic landing (export: per-file sidecar + batch manifest; edit: one
-        # sidecar, no manifest), plus a best-effort xattr pointer. The broker
-        # provides the receipt context before landing and seals the rows after the
-        # durable landing. Lineage is best-effort: its unavailability never blocks
-        # the import.
-        payload = str(staging / "payload")
-        receipt_ctx = None
-        try:
-            receipt_ctx = self._ops.broker_lineage_receipt_context()
-        except Exception as e:  # noqa: BLE001 - degrade, never block export
-            log.warning("import_from_disposable: broker lineage context unavailable, "
-                        "no receipts emitted: %s", e)
-        try:
-            if edit_mode:
-                source_rel = self._edit_source_rel(
-                    meta, state_path, request_silo, caller)
-                receipt = _dispexport.promote_edit(
-                    payload, state_path, source_rel=source_rel, meta=meta,
-                    now_epoch=now, owner_uid=dst.st_uid, owner_gid=dst.st_gid,
-                    receipt_ctx=receipt_ctx)
-            else:
-                receipt = _dispexport.promote_export(
-                    payload, state_path, meta=meta, now_epoch=now,
-                    owner_uid=dst.st_uid, owner_gid=dst.st_gid,
-                    receipt_ctx=receipt_ctx)
-        except _dispexport.ExportError as e:
-            self._audit_record("dispose-export", request_silo, decision="error",
-                               reason=f"promotion failed: {e}", caller=caller)
-            raise BadState(
-                f"{'edit-round-trip' if edit_mode else 'export-back'} "
-                f"promotion failed: {e}") from e
-
-        # Seal the now-durable receipt surfaces through the broker (after the
-        # atomic rename: a row is never recorded for a non-durable artifact).
-        if receipt_ctx is not None:
+            staging = self._export_staging_dir(token)
+            # (2) Absent staging dir: a clean no-op. lstat (no symlink follow): a
+            # symlink at the staging path is suspicious -> treat as corrupt (BadState).
             try:
-                desc = self._build_export_lineage_descriptor(
-                    token=token,
-                    meta=meta,
-                    mode="edit" if edit_mode else "export",
-                    state_path=state_path,
-                    receipt=receipt,
-                )
-                result = self._ops.broker_record_export_lineage(desc)
-                receipt["lineage_sealed"] = bool(result.get("lineage_sealed"))
-            except Exception as e:  # noqa: BLE001 - data durable; never fail import
-                receipt["lineage_sealed"] = False
-                log.warning(
-                    "import_from_disposable: broker lineage seal failed "
-                    "(artifacts landed; lineage degraded/unverified): %s", e)
-            finally:
-                self._drop_lineage_envelopes(receipt)
+                st = os.lstat(staging)
+            except FileNotFoundError:
+                self._audit_record("dispose-export", str(token), decision="allow",
+                                   reason="no export staging (nothing to import)",
+                                   caller=caller)
+                log.info("import_from_disposable %r -> no staging (0 files)", token)
+                return {"version": _dispexport.RECEIPT_VERSION, "launch_token": token,
+                        "files": [], "request_silo": None, "open_class": None,
+                        "dest": None}
+            except OSError as e:
+                self._audit_record("dispose-export", str(token), decision="error",
+                                   reason=f"staging lstat failed: {e}", caller=caller)
+                raise BadState(f"export staging for {token!r} unreadable: {e}") from e
+            if not stat.S_ISDIR(st.st_mode):
+                self._audit_record("dispose-export", str(token), decision="error",
+                                   reason="staging path is not a directory",
+                                   caller=caller)
+                raise BadState(f"export staging for {token!r} is not a directory")
 
-        # One-shot: remove the staging now the import is durable.
-        self._remove_export_staging(token)
-        self._audit_record(
-            "dispose-export", request_silo, decision="allow",
-            reason=(f"{'edited' if edit_mode else 'imported'} "
-                    f"{len(receipt.get('files', []))} file(s) from "
-                    f"{open_class} -> {receipt.get('dest')}"),
-            caller=caller)
-        log.info("import_from_disposable %r -> %s %d file(s) into %s",
-                 token, "edit" if edit_mode else "export",
-                 len(receipt.get("files", [])), receipt.get("dest"))
-        return receipt
+            # (3) Finalize the throwaway BEFORE reading its output, so it cannot race
+            # the copy. dispose_by_token is idempotent + fail-closed; then confirm no
+            # live container backs the token.
+            self.dispose_by_token(token, caller=caller)
+            try:
+                still = self._ops.disp_containers_by_token(token)
+            except OSError as e:
+                self._audit_record("dispose-export", str(token), decision="error",
+                                   reason=f"post-dispose lookup failed: {e}",
+                                   caller=caller)
+                raise BadState(
+                    f"could not confirm disposable {token!r} is gone: {e}") from e
+            if still:
+                self._audit_record("dispose-export", str(token), decision="error",
+                                   reason=f"disposable still live: {still}",
+                                   caller=caller)
+                raise BadState(
+                    f"disposable {token!r} still live after dispose; refusing import")
+
+            # (4) Read + validate the launcher-written meta. A present staging dir with
+            # missing/corrupt/non-regular meta is BadState (the container can't touch
+            # meta — it is outside the bind — so a bad meta means real corruption).
+            meta = self._read_export_meta(staging, token, caller)
+
+            open_class = meta["open_class"]
+            request_silo = meta["request_silo"]
+
+            # (5) Re-validate export is still allowed: registry export-capability AND
+            # the rules-only broker export gate (import is the real crossing).
+            try:
+                cls = _dispclasses.resolve_from_registry(open_class)
+            except _dispclasses.RegistryError as e:
+                self._audit_record("dispose-export", request_silo, decision="error",
+                                   reason=f"registry malformed: {e}", caller=caller)
+                raise BadState(f"disposable-class registry unreadable: {e}") from e
+            except (_dispclasses.UnknownClass, _dispclasses.ClassDisabled) as e:
+                self._audit_record("dispose-export", request_silo, decision="deny",
+                                   reason=f"class {open_class!r} not importable: {e}",
+                                   caller=caller)
+                raise BadState(
+                    f"open class {open_class!r} is not importable: {e}") from e
+            if not cls.export:
+                self._audit_record("dispose-export", request_silo, decision="deny",
+                                   reason=f"class {open_class!r} export=false",
+                                   caller=caller)
+                raise BadState(f"open class {open_class!r} is not export-capable")
+            # Edit-round-trip is a refinement of export. If the launcher marked this
+            # staging edit_mode, the class must STILL be edit-capable in the current
+            # registry (re-checked here at the crossing, never trusted from the
+            # spawn-time stamp alone) — a registry that dropped `edit` since spawn
+            # refuses the beside-source landing fail-closed.
+            edit_mode = bool(meta.get("edit_mode"))
+            if edit_mode and not cls.edit:
+                self._audit_record(
+                    "dispose-export", request_silo, decision="deny",
+                    reason=f"class {open_class!r} edit=false but edit_mode requested",
+                    caller=caller)
+                raise BadState(
+                    f"open class {open_class!r} is not edit-capable "
+                    f"(edit-round-trip refused)")
+            try:
+                gate = _dispclasses.export_action(open_class)
+            except _dispclasses.RegistryError as e:
+                raise BadState(f"invalid open class {open_class!r}: {e}") from e
+            verdict = self._ops.broker_check_permission(gate)
+            if verdict != "allow":
+                self._audit_record("dispose-export", request_silo, decision="deny",
+                                   reason=f"broker export gate {gate}={verdict or 'unknown'}",
+                                   caller=caller)
+                raise BadState(
+                    f"broker did not allow {gate} (verdict={verdict or 'unknown'})")
+
+            # (6) Resolve the requesting silo's state_path READ-ONLY; refuse an
+            # untemplated/unknown target (no durable home) — the routing trust anchor.
+            try:
+                state_path = self._ops.export_resolve_state_path(request_silo)
+            except OSError as e:
+                self._audit_record("dispose-export", request_silo, decision="error",
+                                   reason=f"state-path resolve failed: {e}",
+                                   caller=caller)
+                raise BadState(
+                    f"could not resolve export target silo {request_silo!r}: {e}") from e
+            if not state_path:
+                self._audit_record("dispose-export", request_silo, decision="deny",
+                                   reason="requesting silo is untemplated (no state)",
+                                   caller=caller)
+                raise BadState(
+                    f"export target silo {request_silo!r} is untemplated — refusing "
+                    f"(no durable home to land artifacts in)")
+            try:
+                dst = os.stat(state_path)
+            except OSError as e:
+                self._audit_record("dispose-export", request_silo, decision="error",
+                                   reason=f"state_path stat failed: {e}", caller=caller)
+                raise BadState(
+                    f"export target state_path {state_path!r} unusable: {e}") from e
+            if not stat.S_ISDIR(dst.st_mode):
+                self._audit_record("dispose-export", request_silo, decision="error",
+                                   reason="state_path is not a directory", caller=caller)
+                raise BadState(f"export target state_path {state_path!r} not a dir")
+
+            # (7) Promote (all-or-nothing, atomic). Land files owned by the silo owner.
+            # Two landing modes: edit-round-trip lands the SINGLE edited file beside
+            # its source as <name>.disp-edited; plain export-back lands into Incoming/.
+            # BOTH modes also emit chain-anchored lineage receipt surfaces INTO the
+            # same atomic landing (export: per-file sidecar + batch manifest; edit: one
+            # sidecar, no manifest), plus a best-effort xattr pointer. The broker
+            # provides the receipt context before landing and seals the rows after the
+            # durable landing. Lineage is best-effort: its unavailability never blocks
+            # the import.
+            payload = str(staging / "payload")
+            receipt_ctx = None
+            try:
+                receipt_ctx = self._ops.broker_lineage_receipt_context()
+            except Exception as e:  # noqa: BLE001 - degrade, never block export
+                log.warning("import_from_disposable: broker lineage context unavailable, "
+                            "no receipts emitted: %s", e)
+            try:
+                if edit_mode:
+                    source_rel = self._edit_source_rel(
+                        meta, state_path, request_silo, caller)
+                    receipt = _dispexport.promote_edit(
+                        payload, state_path, source_rel=source_rel, meta=meta,
+                        now_epoch=now, owner_uid=dst.st_uid, owner_gid=dst.st_gid,
+                        receipt_ctx=receipt_ctx)
+                else:
+                    receipt = _dispexport.promote_export(
+                        payload, state_path, meta=meta, now_epoch=now,
+                        owner_uid=dst.st_uid, owner_gid=dst.st_gid,
+                        receipt_ctx=receipt_ctx)
+            except _dispexport.ExportError as e:
+                self._audit_record("dispose-export", request_silo, decision="error",
+                                   reason=f"promotion failed: {e}", caller=caller)
+                raise BadState(
+                    f"{'edit-round-trip' if edit_mode else 'export-back'} "
+                    f"promotion failed: {e}") from e
+
+            # Seal the now-durable receipt surfaces through the broker (after the
+            # atomic rename: a row is never recorded for a non-durable artifact).
+            if receipt_ctx is not None:
+                try:
+                    desc = self._build_export_lineage_descriptor(
+                        token=token,
+                        meta=meta,
+                        mode="edit" if edit_mode else "export",
+                        state_path=state_path,
+                        receipt=receipt,
+                    )
+                    result = self._ops.broker_record_export_lineage(desc)
+                    receipt["lineage_sealed"] = bool(result.get("lineage_sealed"))
+                except Exception as e:  # noqa: BLE001 - data durable; never fail import
+                    receipt["lineage_sealed"] = False
+                    log.warning(
+                        "import_from_disposable: broker lineage seal failed "
+                        "(artifacts landed; lineage degraded/unverified): %s", e)
+                finally:
+                    self._drop_lineage_envelopes(receipt)
+
+            # One-shot: remove the staging now the import is durable.
+            self._remove_export_staging(token)
+            self._audit_record(
+                "dispose-export", request_silo, decision="allow",
+                reason=(f"{'edited' if edit_mode else 'imported'} "
+                        f"{len(receipt.get('files', []))} file(s) from "
+                        f"{open_class} -> {receipt.get('dest')}"),
+                caller=caller)
+            log.info("import_from_disposable %r -> %s %d file(s) into %s",
+                     token, "edit" if edit_mode else "export",
+                     len(receipt.get("files", [])), receipt.get("dest"))
+            return receipt
 
     def _edit_source_rel(self, meta: dict, state_path: str, request_silo: str,
                          caller: dict[str, Any] | None) -> str:
