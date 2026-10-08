@@ -41,7 +41,7 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 # Per-silo netns egress backend (interim per-silo VPN; todo/fable-networking
 # task 3). Pure module: the side-effecting ip/wg/nft/veth ops live on _SystemOps
@@ -407,12 +407,11 @@ DEFAULT_STOP_GRACE_S = 5
 # never clears the slot.
 _T_INFLIGHT_WAIT = 120
 
-# Bound on a single cgroup.freeze write. The write synchronously waits for
-# the kernel to reach the (un)frozen state, and a task stuck in D state can
-# park it indefinitely on the calling thread — which for freeze()/resume()
-# is a session-manager D-Bus worker. 30s is far beyond any healthy freeze
-# (subsecond); on expiry the op fails fast rather than stalling the store.
-# The write is NOT cancelled — the kernel may still complete it later.
+# Bound on a single cgroup.freeze exchange: the write (which under cgroup
+# v2 only INITIATES the transition) plus the settle wait on cgroup.events.
+# A healthy freeze is subsecond; 30s gives a slow-but-live cgroup room
+# without letting a wedged one stall the session-manager worker holding
+# the silo's in-flight slot.
 _T_CGROUP_WRITE = 30
 
 log = logging.getLogger("qdistro_session_manager")
@@ -1719,33 +1718,81 @@ class _SystemOps:
             return []
         return [p.name for p in CGROUP_ROOT.iterdir() if p.is_dir()]
 
-    def cgroup_freeze(self, name: str, frozen: bool) -> None:
-        # cgroupfs has no nonblocking/pollable write: the freeze write
-        # synchronously waits for the kernel to settle the cgroup, and a
-        # task in uninterruptible sleep can hold it forever. Bound it in a
-        # helper thread and join with _T_CGROUP_WRITE; on timeout raise —
-        # the abandoned writer is a daemon thread and the kernel may still
-        # apply the (uncancellable) write later, which the next
-        # freeze/resume reconciles.
-        p = CGROUP_ROOT / name / "cgroup.freeze"
+    # At most one in-flight cgroup.freeze write per cgroup, so an abandoned
+    # (timed-out) write can never be reordered against a later request:
+    # while a writer thread is still inside the kernel call, a second write
+    # is REFUSED rather than queued. {cgroup_name: Thread}
+    _freeze_writers_lock = threading.Lock()
+    _freeze_writers: ClassVar[dict[str, threading.Thread]] = {}
+
+    @classmethod
+    def _bounded_freeze_write(cls, p: Path, name: str, val: str) -> None:
         err: list[BaseException] = []
+        done = threading.Event()
 
         def _w():
             try:
-                p.write_text("1\n" if frozen else "0\n")
+                p.write_text(val)
             except BaseException as e:  # noqa: BLE001 - relay verbatim
                 err.append(e)
+            finally:
+                done.set()
 
-        t = threading.Thread(target=_w, daemon=True,
-                             name=f"cgroup-freeze-{name}")
-        t.start()
-        t.join(_T_CGROUP_WRITE)
-        if t.is_alive():
+        with cls._freeze_writers_lock:
+            prev = cls._freeze_writers.get(name)
+            if prev is not None and prev.is_alive():
+                raise RuntimeError(
+                    f"cgroup.freeze write for {name!r} still pending; "
+                    "refusing to reorder")
+            t = threading.Thread(target=_w, daemon=True,
+                                 name=f"cgroup-freeze-{name}")
+            cls._freeze_writers[name] = t
+            t.start()
+        if not done.wait(_T_CGROUP_WRITE):
             raise TimeoutError(
                 f"cgroup.freeze write for {name!r} still pending after "
                 f"{_T_CGROUP_WRITE}s")
         if err:
             raise err[0]
+
+    def cgroup_freeze(self, name: str, frozen: bool) -> None:
+        # cgroup v2 freeze is ASYNCHRONOUS: writing cgroup.freeze=1 initiates
+        # freezing and returns; completion is reported via the `frozen` key
+        # in cgroup.events. So the bound covers two halves: the write itself
+        # (helper thread — a pathological kernel call cannot stall the
+        # worker holding the in-flight slot) and a bounded settle-poll on
+        # cgroup.events so the caller only sees FROZEN once the kernel
+        # reports frozen=1.
+        root = CGROUP_ROOT / name
+        self._bounded_freeze_write(root / "cgroup.freeze", name,
+                                   "1\n" if frozen else "0\n")
+        want = "frozen 1" if frozen else "frozen 0"
+        events = root / "cgroup.events"
+        deadline = time.monotonic() + _T_CGROUP_WRITE
+        while True:
+            try:
+                if want in events.read_text():
+                    return
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        if frozen:
+            # The freeze was initiated and may still complete; the store
+            # will keep the silo ACTIVE, so write the thaw back to keep the
+            # physical cgroup consistent with the logical state. Kernel
+            # serializes the writes in issue order, so this cannot be
+            # overtaken by the earlier freeze. Best-effort.
+            try:
+                self._bounded_freeze_write(root / "cgroup.freeze", name,
+                                           "0\n")
+            except Exception as e:  # noqa: BLE001
+                log.warning("thaw write-back for %r after freeze-settle "
+                            "timeout failed: %s", name, e)
+        raise TimeoutError(
+            f"cgroup {name!r} did not reach frozen={int(frozen)} within "
+            f"{_T_CGROUP_WRITE}s")
 
     def cgroup_pids(self, name: str) -> list[int]:
         p = CGROUP_ROOT / name / "cgroup.procs"

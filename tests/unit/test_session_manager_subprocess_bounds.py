@@ -1725,28 +1725,48 @@ class TestLivenessEvidenceIsBoundToTheSiloAsked_About:
         sm._SystemOps().tier2_silo_running("work")
         assert asked == [sm.TIER2_CONTAINER_FMT.format(name="work")], asked
 
-
-
 class TestCgroupFreezeWriteIsBounded:
-    """The cgroup.freeze write synchronously waits for the kernel to settle
-    the cgroup; a task in uninterruptible sleep can park it forever. The
-    write must therefore be bounded so a wedged freeze cannot stall the
-    session-manager worker holding the silo's in-flight slot."""
+    """cgroup v2 freeze is async: the write only initiates the transition,
+    completion is read from cgroup.events `frozen=`. The exchange must be
+    bounded (write + settle) so a wedged cgroup cannot stall the
+    session-manager worker holding the silo's in-flight slot, and a
+    timed-out writer must never be reordered against a later request."""
 
-    def _pin(self, monkeypatch, tmp_path):
-        (tmp_path / "work").mkdir()
-        (tmp_path / "work" / "cgroup.freeze").write_text("0\n")
+    def _pin(self, monkeypatch, tmp_path, frozen=0):
+        cg = tmp_path / "work"
+        cg.mkdir()
+        (cg / "cgroup.freeze").write_text("")
+        (cg / "cgroup.events").write_text(
+            f"populated 1\nfrozen {frozen}\n")
         monkeypatch.setattr(sm, "CGROUP_ROOT", tmp_path)
+        return cg
 
-    def test_freeze_writes_the_value(self, monkeypatch, tmp_path):
+    def _kernel_fake(self, monkeypatch):
+        """write_text that behaves like the kernel: records the value and
+        flips cgroup.events `frozen` to match."""
+        real = sm.Path.write_text
+        seen = []
+
+        def fake(self_p, data, *a, **kw):
+            seen.append(data)
+            real(self_p, data)
+            if self_p.name == "cgroup.freeze":
+                ev = self_p.parent / "cgroup.events"
+                real(ev, f"populated 1\nfrozen {data.strip()}\n")
+        monkeypatch.setattr(sm.Path, "write_text", fake)
+        return seen
+
+    def test_freeze_writes_and_settles(self, monkeypatch, tmp_path):
         self._pin(monkeypatch, tmp_path)
+        seen = self._kernel_fake(monkeypatch)
         sm._SystemOps().cgroup_freeze("work", True)
-        assert (tmp_path / "work" / "cgroup.freeze").read_text() == "1\n"
+        assert seen == ["1\n"]
 
-    def test_unfreeze_writes_the_value(self, monkeypatch, tmp_path):
-        self._pin(monkeypatch, tmp_path)
+    def test_unfreeze_writes_and_settles(self, monkeypatch, tmp_path):
+        self._pin(monkeypatch, tmp_path, frozen=1)
+        seen = self._kernel_fake(monkeypatch)
         sm._SystemOps().cgroup_freeze("work", False)
-        assert (tmp_path / "work" / "cgroup.freeze").read_text() == "0\n"
+        assert seen == ["0\n"]
 
     def test_write_error_propagates(self, monkeypatch, tmp_path):
         self._pin(monkeypatch, tmp_path)
@@ -1758,13 +1778,17 @@ class TestCgroupFreezeWriteIsBounded:
         with pytest.raises(OSError):
             sm._SystemOps().cgroup_freeze("work", True)
 
-    def test_wedged_write_fails_fast(self, monkeypatch, tmp_path):
-        """A write the kernel never completes must raise TimeoutError after
-        _T_CGROUP_WRITE — not block the caller indefinitely."""
+    def test_wedged_write_fails_fast_and_refuses_reorder(
+            self, monkeypatch, tmp_path):
+        """A write stuck inside the kernel raises TimeoutError in bounded
+        time; while that writer is still outstanding a second write is
+        REFUSED (never reordered against it)."""
         self._pin(monkeypatch, tmp_path)
         release = threading.Event()
+        entered = threading.Event()
 
         def wedge(self_p, *a, **kw):
+            entered.set()
             release.wait()
         monkeypatch.setattr(sm.Path, "write_text", wedge)
         monkeypatch.setattr(sm, "_T_CGROUP_WRITE", 0.25)
@@ -1773,4 +1797,53 @@ class TestCgroupFreezeWriteIsBounded:
         with pytest.raises(TimeoutError):
             sm._SystemOps().cgroup_freeze("work", True)
         assert time.monotonic() - t0 < 5
+        assert entered.is_set()  # writer is genuinely outstanding
+
+        with pytest.raises(RuntimeError, match="still pending"):
+            sm._SystemOps().cgroup_freeze("work", False)
         release.set()  # let the abandoned writer exit
+
+    def test_unsettled_freeze_times_out_and_thaws_back(
+            self, monkeypatch, tmp_path):
+        """Freeze write accepted but `frozen` never reports 1: bounded
+        settle raises TimeoutError and a best-effort thaw write-back
+        restores physical consistency with the (still ACTIVE) silo —
+        the kernel applies writes in issue order, so the late freeze
+        cannot survive the write-back."""
+        self._pin(monkeypatch, tmp_path)
+        seen = []
+        real = sm.Path.write_text
+
+        def write_only(self_p, data, *a, **kw):
+            # Accepts the write but never flips cgroup.events — the kernel
+            # initiated the freeze without completing it.
+            seen.append(data)
+            real(self_p, data)
+        monkeypatch.setattr(sm.Path, "write_text", write_only)
+        monkeypatch.setattr(sm, "_T_CGROUP_WRITE", 0.25)
+
+        t0 = time.monotonic()
+        with pytest.raises(TimeoutError, match="frozen=1"):
+            sm._SystemOps().cgroup_freeze("work", True)
+        assert time.monotonic() - t0 < 5
+        assert seen == ["1\n", "0\n"]  # freeze, then thaw write-back
+        assert (tmp_path / "work" / "cgroup.freeze").read_text() == "0\n"
+
+    def test_unsettled_thaw_times_out_without_writeback(
+            self, monkeypatch, tmp_path):
+        """A thaw that never settles raises TimeoutError with NO corrective
+        write-back: store keeps the silo FROZEN and the physical cgroup is
+        (still) frozen — already consistent."""
+        self._pin(monkeypatch, tmp_path, frozen=1)
+        seen = []
+        real = sm.Path.write_text
+
+        def write_only(self_p, data, *a, **kw):
+            seen.append(data)
+            real(self_p, data)
+        monkeypatch.setattr(sm.Path, "write_text", write_only)
+        monkeypatch.setattr(sm, "_T_CGROUP_WRITE", 0.25)
+
+        with pytest.raises(TimeoutError, match="frozen=0"):
+            sm._SystemOps().cgroup_freeze("work", False)
+        assert seen == ["0\n"]  # no write-back
