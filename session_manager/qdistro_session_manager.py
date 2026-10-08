@@ -1710,6 +1710,7 @@ class _SystemOps:
             # swallowing leaks the cgroup directory.
             p.rmdir()
             self._freeze_unresolved.discard(name)
+            self._thaw_unresolved.discard(name)
 
     def cgroup_list(self) -> list[str]:
         # Names of the per-silo cgroup dirs that currently exist under the
@@ -1725,11 +1726,13 @@ class _SystemOps:
     # is REFUSED rather than queued. {cgroup_name: Thread}
     _freeze_writers_lock = threading.Lock()
     _freeze_writers: ClassVar[dict[str, threading.Thread]] = {}
-    # Cgroups where a freeze was ISSUED but its outcome never confirmed —
-    # the write may still apply late. Store state can say ACTIVE while the
-    # physical cgroup ends frozen, so resume() must consult this before the
-    # idempotent early return and thaw anyway.
+    # Cgroups where a freeze (resp. thaw) was ISSUED but its outcome never
+    # confirmed — the write may still apply late. Store state can diverge
+    # from the physical cgroup (ACTIVE + frozen, or FROZEN + thawed), so
+    # resume()/freeze() must consult the matching set before their
+    # idempotent early returns.
     _freeze_unresolved: ClassVar[set[str]] = set()
+    _thaw_unresolved: ClassVar[set[str]] = set()
 
     @classmethod
     def _bounded_freeze_write(cls, p: Path, name: str, val: str) -> None:
@@ -1756,18 +1759,16 @@ class _SystemOps:
             t.start()
         if not done.wait(_T_CGROUP_WRITE):
             # The write never returned — it may still apply val late.
-            # Mark the cgroup unresolved only if val was a freeze; a late
-            # THAW converges to thawed on its own.
-            if val.startswith("1"):
-                cls._freeze_unresolved.add(name)
+            (cls._freeze_unresolved if val.startswith("1")
+             else cls._thaw_unresolved).add(name)
             raise TimeoutError(
                 f"cgroup.freeze write for {name!r} still pending after "
                 f"{_T_CGROUP_WRITE}s")
         if err:
-            if val.startswith("1"):
-                # The kernel may have received the write before the error
-                # surfaced — same late-apply hazard.
-                cls._freeze_unresolved.add(name)
+            # The kernel may have received the write before the error
+            # surfaced — same late-apply hazard.
+            (cls._freeze_unresolved if val.startswith("1")
+             else cls._thaw_unresolved).add(name)
             raise err[0]
 
     def freeze_unresolved(self, name: str) -> bool:
@@ -1775,6 +1776,12 @@ class _SystemOps:
         never confirmed — the kernel may still apply it late, so the physical
         cgroup can be frozen while the store calls the silo ACTIVE."""
         return name in self._freeze_unresolved
+
+    def thaw_unresolved(self, name: str) -> bool:
+        """Mirror image: a thaw was issued but never confirmed — the
+        physical cgroup can be thawed while the store calls the silo
+        FROZEN."""
+        return name in self._thaw_unresolved
 
     def cgroup_freeze(self, name: str, frozen: bool) -> None:
         # cgroup v2 freeze is ASYNCHRONOUS: writing cgroup.freeze=1 initiates
@@ -1794,6 +1801,7 @@ class _SystemOps:
             try:
                 if want in events.read_text():
                     self._freeze_unresolved.discard(name)
+                    self._thaw_unresolved.discard(name)
                     return
             except OSError:
                 pass
@@ -1814,9 +1822,11 @@ class _SystemOps:
                 self._freeze_unresolved.add(name)
                 log.warning("thaw write-back for %r after freeze-settle "
                             "timeout failed: %s", name, e)
-        # An unsettled THAW needs no marker: physical stays frozen and the
-        # store keeps the silo FROZEN — already consistent, and a late
-        # thaw converges to thawed on its own.
+        else:
+            # The thaw was issued but never settled — it may still apply
+            # late, leaving the physical cgroup thawed under a FROZEN
+            # store state; freeze() must not take the idempotent return.
+            self._thaw_unresolved.add(name)
         raise TimeoutError(
             f"cgroup {name!r} did not reach frozen={int(frozen)} within "
             f"{_T_CGROUP_WRITE}s")
@@ -5658,9 +5668,17 @@ class _SiloStore:
                     # pause is not wired. Refused before any cgroup is touched.
                     raise BadArgument(
                         "freeze/resume is unsupported for tier3s silos")
-                if silo.state == State.FROZEN:
+                if silo.state == State.FROZEN and not \
+                        self._ops.thaw_unresolved(name):
                     reason = "already frozen (idempotent)"
                     target = None
+                elif silo.state == State.FROZEN:
+                    # Store says FROZEN but a thaw write timed out and may
+                    # still apply late — refreeze for real so the physical
+                    # cgroup is reconciled before we report success
+                    # (mirror of resume()'s freeze-unresolved path).
+                    self._stopping_inflight.add(silo.name)
+                    target = silo
                 elif silo.state != State.ACTIVE:
                     raise BadState(
                         f"cannot freeze silo {silo.name!r} in state "

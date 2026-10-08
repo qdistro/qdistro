@@ -1741,6 +1741,7 @@ class TestCgroupFreezeWriteIsBounded:
         monkeypatch.setattr(sm, "CGROUP_ROOT", tmp_path)
         # ClassVar state — drop leftovers from other tests.
         sm._SystemOps._freeze_unresolved.discard("work")
+        sm._SystemOps._thaw_unresolved.discard("work")
         # Capture the real write_text BEFORE any per-test patching, so a
         # fake installed after a wedge still writes through.
         self._real_write = sm.Path.write_text
@@ -1837,8 +1838,9 @@ class TestCgroupFreezeWriteIsBounded:
     def test_unsettled_thaw_times_out_without_writeback(
             self, monkeypatch, tmp_path):
         """A thaw that never settles raises TimeoutError with NO corrective
-        write-back: store keeps the silo FROZEN and the physical cgroup is
-        (still) frozen — already consistent."""
+        write-back — but marks the cgroup thaw-unresolved: the thaw may
+        still apply late, leaving a store-FROZEN silo physically thawed,
+        which freeze() must reconcile rather than claim idempotence."""
         self._pin(monkeypatch, tmp_path, frozen=1)
         seen = []
         real = self._real_write
@@ -1852,6 +1854,8 @@ class TestCgroupFreezeWriteIsBounded:
         with pytest.raises(TimeoutError, match="frozen=0"):
             sm._SystemOps().cgroup_freeze("work", False)
         assert seen == ["0\n"]  # no write-back
+        assert sm._SystemOps().thaw_unresolved("work")
+        assert not sm._SystemOps().freeze_unresolved("work")
 
     def test_timed_out_write_marks_unresolved_until_thawed(
             self, monkeypatch, tmp_path):
@@ -1888,4 +1892,38 @@ class TestCgroupFreezeWriteIsBounded:
         # marker (kernel-simulating fake flips cgroup.events).
         self._kernel_fake(monkeypatch)
         ops.cgroup_freeze("work", False)
+        assert not ops.freeze_unresolved("work")
+
+    def test_timed_out_thaw_marks_unresolved_until_refrozen(
+            self, monkeypatch, tmp_path):
+        """Mirror image of the freeze case: a thaw WRITE stuck in the
+        kernel times out, marks thaw-unresolved, refuses a reordered
+        freeze while the writer lives, and a real freeze reconciles once
+        the writer retires."""
+        self._pin(monkeypatch, tmp_path, frozen=1)
+        release = threading.Event()
+
+        def wedge(self_p, *a, **kw):
+            release.wait()
+        monkeypatch.setattr(sm.Path, "write_text", wedge)
+        monkeypatch.setattr(sm, "_T_CGROUP_WRITE", 0.25)
+        ops = sm._SystemOps()
+
+        with pytest.raises(TimeoutError):
+            ops.cgroup_freeze("work", False)
+        assert ops.thaw_unresolved("work")
+        assert not ops.freeze_unresolved("work")
+
+        with pytest.raises(RuntimeError, match="still pending"):
+            ops.cgroup_freeze("work", True)
+
+        release.set()
+        deadline = time.monotonic() + 5
+        while sm._SystemOps._freeze_writers["work"].is_alive():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        self._kernel_fake(monkeypatch)
+        ops.cgroup_freeze("work", True)
+        assert not ops.thaw_unresolved("work")
         assert not ops.freeze_unresolved("work")

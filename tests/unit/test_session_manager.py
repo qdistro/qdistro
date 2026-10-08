@@ -51,9 +51,11 @@ class _FakeOps:
         self.cgroup_remove_ebusy: set[str] = set()
         # When True, cgroup_freeze raises (simulates a wedged kernel write).
         self.cgroup_freeze_should_fail = False
-        # Names where a freeze write timed out in _SystemOps and may still
-        # apply late — resume() must not take the idempotent ACTIVE return.
+        # Names where a freeze (resp. thaw) write timed out in _SystemOps
+        # and may still apply late — resume()/freeze() must not take their
+        # idempotent early returns while the direction is unresolved.
         self.freeze_unresolved_set: set[str] = set()
+        self.thaw_unresolved_set: set[str] = set()
         self.systemctl_calls: list[tuple[str, str]] = []
         self.launch_envs: dict[str, str] = {}   # name → env file content
         # tier3s stanzas live in their own dir (paravirt ΔB5) — a separate
@@ -393,6 +395,9 @@ class _FakeOps:
 
     def freeze_unresolved(self, name: str) -> bool:
         return name in self.freeze_unresolved_set
+
+    def thaw_unresolved(self, name: str) -> bool:
+        return name in self.thaw_unresolved_set
 
     def cgroup_pids(self, name: str) -> list[int]:
         return list(self.cgroup_pids_map.get(name, []))
@@ -1109,6 +1114,33 @@ class TestS14FreezeLockScope:
         store.resume("work")
         assert calls == []
         assert store.get("work").state == State.ACTIVE
+
+    def test_freeze_frozen_with_unresolved_thaw_refreezes(self, store, ops):
+        """Mirror of the resume case: a thaw write that timed out in
+        _SystemOps may still apply late, leaving a store-FROZEN silo
+        physically thawed. freeze() must take the real write path, not
+        the idempotent 'already frozen' return."""
+        store.create("work", 2000)
+        store.start("work")
+        store.freeze("work")
+        ops.cgroup_frozen["work"] = False   # late thaw applied physically
+        ops.thaw_unresolved_set.add("work")
+        store.freeze("work")
+        assert ops.cgroup_frozen["work"] is True
+        assert store.get("work").state == State.FROZEN
+
+    def test_freeze_frozen_without_pending_stays_idempotent(
+            self, store, ops):
+        """Converse: FROZEN with no unresolved thaw issues no write."""
+        store.create("work", 2000)
+        store.start("work")
+        store.freeze("work")
+        calls = []
+        orig = ops.cgroup_freeze
+        ops.cgroup_freeze = lambda n, f: (calls.append((n, f)), orig(n, f))
+        store.freeze("work")
+        assert calls == []
+        assert store.get("work").state == State.FROZEN
 
     def test_freeze_reentrant_stop_from_on_change(self, ops, tmp_path):
         """02/S14b re-entrancy (codex round-2): if an on_change handler
