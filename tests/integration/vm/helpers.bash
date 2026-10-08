@@ -616,7 +616,13 @@ wait_for_journal_line() {
 
     local i
     for ((i=0; i<timeout; i++)); do
-        "$runner" "journalctl ${userflag}--no-pager --since='$esc_since' 2>/dev/null | grep -E -- '$esc_pattern'"
+        # Exclude the qemu-ga exec-audit line ('guest-exec called: "..."'):
+        # it echoes this command's own text — including the pattern — into
+        # the system journal, and an unfiltered grep would match it and
+        # pass on a line that never existed (qdwin-noctalia/06 flake,
+        # 2026-09-22). The --user path reads the user journal and never
+        # sees the system-unit audit line; the filter is harmless there.
+        "$runner" "journalctl ${userflag}--no-pager --since='$esc_since' 2>/dev/null | grep -vF 'guest-exec called:' | grep -E -- '$esc_pattern'"
         [[ "$status" -eq 0 ]] && return 0
         sleep 1
     done

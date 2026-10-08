@@ -81,10 +81,13 @@ setup_file() {
     # Wait for qdwin to commit the secctx app_id and stash the line for test 1.
     # Escape the dots in app_id so the grep matches them literally (the token's
     # 32-hex instance_id on the same line is the real discriminator).
+    # Read ONLY qdwin's own unit: qemu-ga logs every guest-exec command line,
+    # so a whole-journal grep would match this poll's own text (the launch
+    # token need never have existed).
     local appid_esc=${app_id//./\\.}
     vm_run "
       for i in \$(seq 1 60); do
-        line=\$(journalctl 2>/dev/null | grep -m1 -E \"qdwin/secctx: committed engine=qdistro\\.tier2 app_id=${appid_esc} instance_id=${launch_token}\")
+        line=\$(journalctl -b _SYSTEMD_USER_UNIT=qdwin-compositor.service 2>/dev/null | grep -m1 -E \"qdwin/secctx: committed engine=qdistro\\.tier2 app_id=${appid_esc} instance_id=${launch_token}\")
         [ -n \"\$line\" ] && { echo \"\$line\"; exit 0; }
         sleep 0.5
       done
