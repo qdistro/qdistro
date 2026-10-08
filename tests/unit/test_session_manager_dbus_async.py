@@ -377,3 +377,76 @@ def test_creating_inflight_cleared_when_account_setup_raises(
     assert len(errors) == 1
     assert store._creating_inflight == {}
     assert "work" not in store._silos
+
+
+@pytest.mark.skipif(sm.dbus is None, reason="dbus-python unavailable")
+def test_start_body_does_not_hold_store_lock(monkeypatch, tmp_path):
+    """A launch parked inside systemctl_start must not wedge _lock: a
+    concurrent ListSilos (which needs _lock) has to dispatch while the
+    launch body runs on its worker."""
+    store = sm._SiloStore(
+        _FakeOps(), config_path=tmp_path / "silos.yaml")
+    store.create("work", 2000)
+    entered = threading.Event()
+    release = threading.Event()
+
+    orig_start = store._ops.systemctl_start
+
+    def blocked_start(unit):
+        entered.set()
+        assert release.wait(5), "test did not release the start worker"
+        orig_start(unit)
+
+    store._ops.systemctl_start = blocked_start
+    mgr = _mgr(store, monkeypatch)
+    replied = threading.Event()
+    errored = threading.Event()
+    errors: list[BaseException] = []
+
+    def on_error(exc):
+        errors.append(exc)
+        errored.set()
+
+    mgr.StartSilo("work", replied.set, on_error,
+                  sender=":1.2", conn=object())
+
+    assert entered.wait(2), "launch worker never reached systemctl_start"
+    # _lock is free: a listing from another dispatch answers while the
+    # start is still parked.
+    assert [s.name for s in store.list_silos()] == ["work"]
+    assert not replied.is_set()
+    release.set()
+    assert replied.wait(2), "start never replied"
+    assert errors == []
+    assert store.get("work").state == sm.State.ACTIVE
+
+
+@pytest.mark.skipif(sm.dbus is None, reason="dbus-python unavailable")
+def test_start_failure_releases_inflight_and_rolls_back(
+        monkeypatch, tmp_path):
+    """A failed launch must drop the in-flight claim and leave the row
+    STOPPED — a stuck claim would wedge every later lifecycle op."""
+    store = sm._SiloStore(
+        _FakeOps(), config_path=tmp_path / "silos.yaml")
+    store.create("work", 2000)
+
+    def fail_start(unit):
+        raise OSError("unit failed")
+
+    store._ops.systemctl_start = fail_start
+    mgr = _mgr(store, monkeypatch)
+    errored = threading.Event()
+    errors: list[BaseException] = []
+
+    def on_error(exc):
+        errors.append(exc)
+        errored.set()
+
+    mgr.StartSilo("work", threading.Event().set, on_error,
+                  sender=":1.2", conn=object())
+
+    assert errored.wait(2), "failed start never errored"
+    assert len(errors) == 1
+    assert errors[0].get_dbus_name() == f"{sm.BUS_NAME}.Generic"
+    assert store.get("work").state == sm.State.STOPPED
+    assert "work" not in store._stopping_inflight

@@ -4848,7 +4848,9 @@ class _SiloStore:
         STOPPED/failed and raise the refusal to the caller, so a retry after
         the cause is fixed is a real start. If the launch cannot be verified
         gone, keep the conservative unresolved-start answer: Active, not
-        deletable, stop before retrying. Called with the store lock held."""
+        deletable, stop before retrying. Called WITHOUT the store lock (from
+        _handle_start_failure): the verification subprocesses run lock-free
+        and the state commits take _lock internally."""
         unit = TIER3S_SILO_LAUNCHER_FMT.format(name=silo.name)
         try:
             survived = self._ops.tier3s_silo_running(silo.name)
@@ -4857,9 +4859,11 @@ class _SiloStore:
                       "be verified: %s", silo.name, check_err)
             survived = True
         if survived:
-            self._force_state(silo, State.ACTIVE)
-            silo.start_unresolved = True
-            silo.observed_reason = "start failed, teardown unverified; stop before retry"
+            with self._lock:
+                self._clear_stop_inflight(silo.name)
+                self._force_state(silo, State.ACTIVE)
+                silo.start_unresolved = True
+                silo.observed_reason = "start failed, teardown unverified; stop before retry"
             raise StartNotCancelled(
                 f"start of tier3s silo {silo.name!r} failed ({err}) and its "
                 f"launch could not be verified gone; it is left Active. Stop "
@@ -4870,9 +4874,11 @@ class _SiloStore:
             refusal = self._ops.tier3s_start_refusal(unit)
         except Exception:  # noqa: BLE001
             refusal = ""
-        self._force_state(silo, State.STOPPED)
-        silo.observed_status = "failed"
-        silo.observed_reason = (refusal or "launch refused or failed before it ran")[:200]
+        with self._lock:
+            self._clear_stop_inflight(silo.name)
+            self._force_state(silo, State.STOPPED)
+            silo.observed_status = "failed"
+            silo.observed_reason = (refusal or "launch refused or failed before it ran")[:200]
         raise SessionError(
             f"start of tier3s silo {silo.name!r} failed: the launch was "
             f"refused or failed before it ran"
@@ -5026,6 +5032,7 @@ class _SiloStore:
 
     def start(self, name: str, caller: dict[str, Any] | None = None) -> None:
         reason = "started"
+        body = None
         try:
             # An ACTIVE silo is not proof the workload is running — the
             # launcher can die, or an app-initiated exit can tear the
@@ -5044,7 +5051,7 @@ class _SiloStore:
                     # mid-write cannot be told apart from a settled one.
                     silo = self._await_inflight_locked(name)
                     if silo.state != State.ACTIVE:
-                        reason = self._start_locked(silo)
+                        body = self._claim_start_locked(silo)
                         break
                     p_silo, generation = silo, silo.operation_generation
                 try:
@@ -5086,7 +5093,7 @@ class _SiloStore:
                         # invalidates the stale observation — then take
                         # the ordinary launch path under the same hold.
                         self._force_state(silo, State.STOPPED)
-                        reason = self._start_locked(silo)
+                        body = self._claim_start_locked(silo)
                         break
                     raise SessionError(
                         f"cannot verify whether silo {name!r} is still "
@@ -5097,6 +5104,8 @@ class _SiloStore:
                 raise SessionError(
                     f"start of silo {name!r} could not settle: its state "
                     f"changed during every liveness check; retry")
+            if body is not None:
+                reason = self._run_start_body(silo, body)
         except SessionError as e:
             decision = "deny" if isinstance(
                 e, (UnknownSilo, BadState)) else "error"
@@ -5106,86 +5115,48 @@ class _SiloStore:
         self._audit_record("start", str(name), decision="allow",
                            reason=reason, caller=caller)
 
-    def _start_locked(self, silo: Silo) -> str:
-        """Launch path for a non-ACTIVE silo. Caller holds self._lock.
+    def _claim_start_locked(self, silo: Silo):
+        """Validate, mark ACTIVE, and claim the lock-free-write slot for a
+        start; caller holds _lock. Returns the launch body — a zero-arg
+        callable that performs the blocking cgroup/egress/systemctl work
+        WITHOUT _lock (see _run_start_body).
 
-        Returns the audit reason. Raises SessionError after rolling the
-        state back when the unit start fails."""
-        reason = "started"
+        The in-flight claim is what closes the lifecycle race window the
+        old all-under-_lock shape covered by accident: while the launch
+        runs lock-free, stop/freeze/resume/delete find the slot claimed
+        and wait on _stop_cv, and start()/observe_runtime_once() treat a
+        claim as an uncommitted write and re-evaluate. ACTIVE is committed
+        before the claim so a watcher never sees "starting work" on a row
+        that still says Stopped."""
         if silo.kind == KIND_TIER3S:
             # before any state change (paravirt O4)
             self._require_tier3s_profile()
         self._transition(silo, State.ACTIVE)
-        start_unit = self._ops.systemctl_start
+        self._stopping_inflight.add(silo.name)
+        return lambda: self._launch_silo_body(silo)
+
+    def _run_start_body(self, silo: Silo, body) -> str:
+        """Run the lock-free launch body for a silo whose start claimed the
+        in-flight slot and committed ACTIVE, then release the claim and
+        commit the outcome. Returns the body's audit reason."""
         try:
-            if silo.kind == KIND_TIER3S:
-                # Tier 3s: its own unit only. No per-silo cgroup
-                # (the spawn creates the owning scope) and no
-                # fallback: a failed start rolls back below and
-                # launches nothing else (paravirt O6). The unit is
-                # Type=notify, so a launch the spawn refuses fails
-                # this start (astra/fable A r1).
-                token = self._export_tier3s_launch_env(silo)
-                unit = TIER3S_SILO_LAUNCHER_FMT.format(name=silo.name)
-                reason = f"started (tier3s token {token})"
-                start_unit = self._ops.tier3s_systemctl_start
-            elif silo.kind == KIND_TIER2_TEMPLATE:
-                # Tier-2 templated silo: launch through its unit,
-                # which runs spawn-tier2 as admin (rootless podman
-                # manages its own cgroup, so no per-silo cgroup
-                # here). The unit reads the launch stanza the
-                # daemon exported (see _export_tier2_launch_env).
-                self._export_tier2_launch_env(silo)
-                unit = TIER2_SILO_LAUNCHER_FMT.format(name=silo.name)
-            else:
-                self._ops.cgroup_create(silo.name)
-                # cgroup_create reuses an existing dir (exist_ok).
-                # A crash between resume()'s ACTIVE transition and
-                # its unfreeze write (02/S14b), or between freeze
-                # and a stop, can leave that reused cgroup frozen —
-                # which would silently freeze every process we are
-                # about to start. Thaw defensively on (re)start.
-                # Best-effort: a fresh cgroup is already thawed.
-                try:
-                    self._ops.cgroup_freeze(silo.name, False)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("cgroup thaw on start of %r "
-                                "failed: %s — continuing",
-                                silo.name, e)
-                # Bring up the per-silo netns egress BEFORE the
-                # launcher, so the silo's processes (which enter the
-                # netns) get the right route + resolver immediately.
-                # No-op for legacy (egress=None) silos.
-                if self._is_netns_backed(silo):
-                    self._apply_egress(silo)
-                else:
-                    # Legacy silo (egress=None): if a netns lingers
-                    # from a prior policy / crash-mid-stop, FULLY
-                    # clear it — devices, the per-netns resolver,
-                    # AND the nft skuid backstop. A leftover backstop
-                    # element would drop this silo's traffic in the
-                    # init netns, leaving a legacy silo permanently
-                    # dark on host networking (codex #2); a leftover
-                    # netns would make spawn-tier3 run it in a stale
-                    # dark netns (Fable S5).
-                    #
-                    # Always clear a possibly-orphaned backstop
-                    # element for this uid — cheap and never creates
-                    # the nft table, so a pristine legacy silo still
-                    # touches nothing, but an orphaned blocked_uids
-                    # entry (crash after netns_remove, before the
-                    # element delete) can't keep this silo dark
-                    # (codex #3).
-                    self._ops.nft_skuid_drop(silo.uid, False)
-                    # Full clear (devices + resolver + netns) only
-                    # when a stale netns actually lingers.
-                    if self._ops.netns_exists(
-                            _egress.netns_name(silo.name)):
-                        self._force_clear_egress(silo.name, silo.uid)
-                unit = SILO_LAUNCHER_FMT.format(name=silo.name,
-                                                uid=silo.uid)
-            start_unit(unit)
+            reason = body()
         except Exception as e:  # noqa: BLE001
+            self._handle_start_failure(silo, e)   # always raises
+            raise AssertionError("unreachable")
+        with self._lock:
+            self._clear_stop_inflight(silo.name)
+        return reason
+
+    def _handle_start_failure(self, silo: Silo, e: Exception) -> None:
+        """Rollback for a failed lock-free launch; always raises.
+
+        The in-flight claim is released in the finally so even a failure
+        INSIDE the rollback cannot wedge the slot. _clear_stop_inflight
+        runs before _force_state inside the same _lock hold, preserving
+        the store's clear-before-emit ordering so a signal re-entering a
+        lifecycle op never waits on a marker this thread still holds."""
+        try:
             # Roll back state on failure. _force_state emits
             # SiloChanged so the admin UI / PodApps don't stick
             # on "Active" after a failed launch. Tear down any
@@ -5204,9 +5175,12 @@ class _SiloStore:
             # with it: tearing it down would strand a still-running
             # workload on a half-removed netns.
             if isinstance(e, StartNotCancelled):
-                self._force_state(silo, State.ACTIVE)
-                silo.start_unresolved = True
-                silo.observed_reason = "start outcome unresolved; stop before retry"
+                with self._lock:
+                    self._clear_stop_inflight(silo.name)
+                    self._force_state(silo, State.ACTIVE)
+                    silo.start_unresolved = True
+                    silo.observed_reason = (
+                        "start outcome unresolved; stop before retry")
                 # A retry does verify liveness now (see start()), but the
                 # probe answers "unknown" precisely while the old request
                 # could still be in flight — so stop-then-start remains
@@ -5223,17 +5197,98 @@ class _SiloStore:
                     f"workload"
                 ) from e
             if silo.kind == KIND_TIER3S:
-                self._fail_tier3s_start(silo, e)
+                self._fail_tier3s_start(silo, e)    # raises; see below
             if self._is_netns_backed(silo):
                 self._teardown_egress(silo.name, silo.uid,
                                       silo.egress)
-            self._force_state(silo, State.STOPPED)
-            silo.observed_status = "failed"
-            silo.observed_reason = "launcher start failed"
+            with self._lock:
+                self._clear_stop_inflight(silo.name)
+                self._force_state(silo, State.STOPPED)
+                silo.observed_status = "failed"
+                silo.observed_reason = "launcher start failed"
             if isinstance(e, SessionError):
                 raise
             raise SessionError(
                 f"start of silo {silo.name!r} failed: {e}") from e
+        finally:
+            with self._lock:
+                self._clear_stop_inflight(silo.name)
+
+    def _launch_silo_body(self, silo: Silo) -> str:
+        """The blocking half of a start: launch-env exports, cgroup +
+        egress setup, and the bounded systemctl start. Runs WITHOUT
+        _lock — the row is already ACTIVE with its in-flight slot
+        claimed, so every other lifecycle op serializes behind this.
+        Returns the audit reason."""
+        reason = "started"
+        start_unit = self._ops.systemctl_start
+        if silo.kind == KIND_TIER3S:
+            # Tier 3s: its own unit only. No per-silo cgroup
+            # (the spawn creates the owning scope) and no
+            # fallback: a failed start rolls back below and
+            # launches nothing else (paravirt O6). The unit is
+            # Type=notify, so a launch the spawn refuses fails
+            # this start (astra/fable A r1).
+            token = self._export_tier3s_launch_env(silo)
+            unit = TIER3S_SILO_LAUNCHER_FMT.format(name=silo.name)
+            reason = f"started (tier3s token {token})"
+            start_unit = self._ops.tier3s_systemctl_start
+        elif silo.kind == KIND_TIER2_TEMPLATE:
+            # Tier-2 templated silo: launch through its unit,
+            # which runs spawn-tier2 as admin (rootless podman
+            # manages its own cgroup, so no per-silo cgroup
+            # here). The unit reads the launch stanza the
+            # daemon exported (see _export_tier2_launch_env).
+            self._export_tier2_launch_env(silo)
+            unit = TIER2_SILO_LAUNCHER_FMT.format(name=silo.name)
+        else:
+            self._ops.cgroup_create(silo.name)
+            # cgroup_create reuses an existing dir (exist_ok).
+            # A crash between resume()'s ACTIVE transition and
+            # its unfreeze write (02/S14b), or between freeze
+            # and a stop, can leave that reused cgroup frozen —
+            # which would silently freeze every process we are
+            # about to start. Thaw defensively on (re)start.
+            # Best-effort: a fresh cgroup is already thawed.
+            try:
+                self._ops.cgroup_freeze(silo.name, False)
+            except Exception as e:  # noqa: BLE001
+                log.warning("cgroup thaw on start of %r "
+                            "failed: %s — continuing",
+                            silo.name, e)
+            # Bring up the per-silo netns egress BEFORE the
+            # launcher, so the silo's processes (which enter the
+            # netns) get the right route + resolver immediately.
+            # No-op for legacy (egress=None) silos.
+            if self._is_netns_backed(silo):
+                self._apply_egress(silo)
+            else:
+                # Legacy silo (egress=None): if a netns lingers
+                # from a prior policy / crash-mid-stop, FULLY
+                # clear it — devices, the per-netns resolver,
+                # AND the nft skuid backstop. A leftover backstop
+                # element would drop this silo's traffic in the
+                # init netns, leaving a legacy silo permanently
+                # dark on host networking (codex #2); a leftover
+                # netns would make spawn-tier3 run it in a stale
+                # dark netns (Fable S5).
+                #
+                # Always clear a possibly-orphaned backstop
+                # element for this uid — cheap and never creates
+                # the nft table, so a pristine legacy silo still
+                # touches nothing, but an orphaned blocked_uids
+                # entry (crash after netns_remove, before the
+                # element delete) can't keep this silo dark
+                # (codex #3).
+                self._ops.nft_skuid_drop(silo.uid, False)
+                # Full clear (devices + resolver + netns) only
+                # when a stale netns actually lingers.
+                if self._ops.netns_exists(
+                        _egress.netns_name(silo.name)):
+                    self._force_clear_egress(silo.name, silo.uid)
+            unit = SILO_LAUNCHER_FMT.format(name=silo.name,
+                                            uid=silo.uid)
+        start_unit(unit)
         return reason
 
     def _dead_confirmed(self, silo: Silo, observed: str) -> tuple[bool, str]:
