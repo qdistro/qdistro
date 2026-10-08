@@ -3679,14 +3679,20 @@ class TestLeaseSweepScheduler:
 
 class TestSystemctlStopMissingUnit:
     """The real _SystemOps.systemctl_stop() verdict: rc != 0 is 'unknown'
-    EXCEPT when a successful LoadState probe proves the unit is not-found —
-    PID 1 has no record of it, so there is nothing to cancel. Stubbed via
-    a fake subprocess.run keyed on argv."""
+    EXCEPT when a successful `show` probe proves the unit is not-found,
+    at rest, and jobless — PID 1 holds nothing under it to cancel.
+    Stubbed via a fake subprocess.run keyed on argv; the fake also
+    requires `show` to request the full property triple so a dropped
+    --property flag cannot slip past these tests."""
 
     def _ops(self, monkeypatch, handler):
         ops = sm._SystemOps()
 
         def fake_run(argv, **kw):
+            if argv[1] == "show":
+                for prop in ("--property=LoadState",
+                             "--property=ActiveState", "--property=Job"):
+                    assert prop in argv, f"show must query {prop}: {argv}"
             return handler(argv)
         monkeypatch.setattr(sm.subprocess, "run", fake_run)
         return ops
@@ -3719,6 +3725,19 @@ class TestSystemctlStopMissingUnit:
         ops = self._ops(monkeypatch, handler)
         assert ops.systemctl_stop("qdistro-silo-a@1000.service") is True
         assert calls == ["stop", "show"]
+
+    def test_not_found_failed_jobless_also_resolves(self, monkeypatch):
+        # The two accepted alternative values: failed state and a numeric
+        # empty Job field.
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(5)
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=not-found\n"
+                                     "ActiveState=failed\nJob=0\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is True
 
     def test_not_found_with_pending_job_stays_unknown(self, monkeypatch):
         # systemd serializes jobs across reloads: a queued start can survive
