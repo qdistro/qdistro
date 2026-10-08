@@ -823,6 +823,49 @@ class TestLifecycle:
         starts = [c for c in ops.systemctl_calls if c[0] == "start"]
         assert len(starts) == 2
 
+    def test_start_from_active_dead_verdict_needs_no_extra_round(
+            self, store, ops):
+        # Stale verdicts are retried, but a confirmed "dead" verdict must
+        # launch in the SAME round — it does not spend a re-evaluation.
+        # Three stale probes then a valid dead verdict on the last round
+        # must still relaunch.
+        store.create("work", 2000)
+        store.start("work")
+        probes = []
+
+        def racing_probe(*a):
+            probes.append(1)
+            if len(probes) <= 3:
+                # A lifecycle op landing mid-probe bumps the generation.
+                store.get("work").operation_generation += 1
+                return ("launcher-running", "fake: stale verdict")
+            return ("stopped", "launcher inactive and workload absent")
+
+        ops.observe_silo = racing_probe
+        store.start("work")
+        assert len(probes) == 4
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+        assert store.get("work").state == State.ACTIVE
+
+    def test_start_from_active_stale_probes_exhaust_and_refuse(
+            self, store, ops):
+        # If every probe is invalidated by a racing lifecycle op, start()
+        # gives up with an error rather than spinning or guessing.
+        store.create("work", 2000)
+        store.start("work")
+
+        def always_raced(*a):
+            store.get("work").operation_generation += 1
+            return ("launcher-running", "fake: stale verdict")
+
+        ops.observe_silo = always_raced
+        with pytest.raises(sm.SessionError, match="could not settle"):
+            store.start("work")
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 1
+        assert store.get("work").state == State.ACTIVE
+
     def test_freeze_then_resume(self, store, ops):
         store.create("work", 2000)
         store.start("work")
@@ -1722,6 +1765,30 @@ class TestTier2TemplateKind:
         ops.tier2_stop_fails = False
         store.stop("browser1")
         assert store.get("browser1").state == State.STOPPED
+
+    def test_start_from_active_tier2_confirms_death_with_the_stop_verifier(
+            self, store, ops):
+        # The observation's "stopped" covers the unit, but the dead
+        # verdict is confirmed by the same fail-closed verifier the stop
+        # path uses — a possibly-surviving container refuses the relaunch
+        # rather than launching a second workload over it.
+        store.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
+                     kind="tier2-template", launch=dict(_LAUNCH))
+        store.start("browser1")
+        ops.observe_silo = lambda *a: (
+            "stopped", "launcher inactive and workload absent")
+        ops.tier2_stop_fails = True
+        with pytest.raises(sm.SessionError, match="cannot verify"):
+            store.start("browser1")
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 1
+        assert store.get("browser1").state == State.ACTIVE
+        # Once the verifier reports genuinely gone, the retry relaunches.
+        ops.tier2_stop_fails = False
+        store.start("browser1")
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+        assert store.get("browser1").state == State.ACTIVE
 
 
 def _source_env_via_bash(env_text: str) -> dict:

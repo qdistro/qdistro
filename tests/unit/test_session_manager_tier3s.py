@@ -346,6 +346,31 @@ def test_start_from_active_unknown_probe_fails_closed(store, ops):
     assert store.get("smoke").state == State.ACTIVE
 
 
+def test_start_from_active_refuses_while_teardown_evidence_survives(store, ops):
+    # observe_silo's "stopped"/"failed" verdict covers the unit and the
+    # container only — it cannot see a surviving control record. The stop
+    # path treats a record (or an unreadable record dir) as unresolved
+    # teardown and re-runs `cleanup --unit`; a relaunch must confirm
+    # death through that same tier3s_silo_running verifier rather than
+    # launching a fresh token over un-reaped launch state.
+    make(store)
+    store.start("smoke")
+    ops.observe_silo = lambda *a: (
+        "stopped", "launcher inactive and workload absent")
+    ops.t3s_running = True     # a control record of the unit survives
+    with pytest.raises(SessionError, match="cannot verify"):
+        store.start("smoke")
+    assert [e for e in ops.events if e[0] == "start"] == [("start", UNIT)]
+    assert store.get("smoke").state == State.ACTIVE
+    # Once the verifier reports the launch genuinely gone — unit down,
+    # container absent, no record — the same retry relaunches.
+    ops.t3s_running = False
+    store.start("smoke")
+    assert [e for e in ops.events if e[0] == "start"] == [
+        ("start", UNIT), ("start", UNIT)]
+    assert store.get("smoke").state == State.ACTIVE
+
+
 def test_template_silo_reaches_the_stanza_as_the_binding(store, ops):
     make(store, "smoke2", template_silo="browser1")
     store.start("smoke2")

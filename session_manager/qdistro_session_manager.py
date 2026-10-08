@@ -4604,16 +4604,12 @@ class _SiloStore:
             # runs outside _lock; a lifecycle op racing it bumps
             # operation_generation and the round is re-evaluated.
             for _round in range(4):
-                probe = None
                 with self._lock:
                     silo = self.get(name)
-                    if silo.state == State.ACTIVE:
-                        probe = (silo, silo.operation_generation)
-                    else:
+                    if silo.state != State.ACTIVE:
                         reason = self._start_locked(silo)
-                if probe is None:
-                    break
-                p_silo, generation = probe
+                        break
+                    p_silo, generation = silo, silo.operation_generation
                 try:
                     status, probe_reason = self._ops.observe_silo(
                         p_silo.name, p_silo.uid, p_silo.kind)
@@ -4622,6 +4618,13 @@ class _SiloStore:
                     # proof of absence.
                     status, probe_reason = (
                         "unknown", f"runtime probe failed: {e!r}")
+                dead = False
+                if status in ("stopped", "failed"):
+                    # "Stopped"/"failed" covers the unit and the workload
+                    # boundary, not every teardown artifact — confirm the
+                    # dead verdict with the stop path's own verifier.
+                    dead, probe_reason = self._dead_confirmed(
+                        p_silo, probe_reason)
                 with self._lock:
                     silo = self._silos.get(name)
                     if (silo is not p_silo
@@ -4636,14 +4639,15 @@ class _SiloStore:
                         # never happens while the store lock is held.
                         reason = "already active (idempotent)"
                         break
-                    if status in ("stopped", "failed"):
-                        # The store said Active but nothing is running.
-                        # Record the honest resting state — _force_state
-                        # also clears start_unresolved and invalidates the
-                        # stale observation — then loop into the ordinary
-                        # launch path.
+                    if dead:
+                        # The store said Active but the silo is verifiably
+                        # dead. Record the honest resting state —
+                        # _force_state clears start_unresolved and
+                        # invalidates the stale observation — then take
+                        # the ordinary launch path under the same hold.
                         self._force_state(silo, State.STOPPED)
-                        continue
+                        reason = self._start_locked(silo)
+                        break
                     raise SessionError(
                         f"cannot verify whether silo {name!r} is still "
                         f"running (probe: {probe_reason}); refusing to "
@@ -4791,6 +4795,37 @@ class _SiloStore:
             raise SessionError(
                 f"start of silo {silo.name!r} failed: {e}") from e
         return reason
+
+    def _dead_confirmed(self, silo: Silo, observed: str) -> tuple[bool, str]:
+        """Confirm a `stopped`/`failed` observation strongly enough to
+        re-launch over it. Runs outside the store lock.
+
+        The observation covers the launcher unit and the workload
+        boundary, not every teardown artifact: a tier3s control record
+        can survive a failed ExecStop cleanup, and the stop path counts
+        a surviving record — or an unreadable record dir — as unresolved
+        teardown that `cleanup --unit` retries before declaring STOPPED.
+        So where the stop path has a dedicated fail-closed verifier, the
+        dead verdict comes from THAT check; where it does not, the
+        observation is already the strongest evidence. Anything
+        undecidable answers False — the caller refuses rather than
+        re-launching on a guess."""
+        try:
+            if silo.kind == KIND_TIER3S:
+                if self._ops.tier3s_silo_running(silo.name):
+                    return (False, "launcher is down but teardown "
+                            "evidence survives — a container or a "
+                            "control record")
+            elif silo.kind == KIND_TIER2_TEMPLATE:
+                if self._ops.tier2_silo_running(silo.name):
+                    return (False, "launcher is down but the container "
+                            "may still exist")
+            else:
+                return True, observed
+        except Exception as e:  # noqa: BLE001 — an unanswerable verifier
+            # is not death; same rule as the probe itself.
+            return False, f"liveness verifier failed: {e!r}"
+        return True, observed
 
     def stop(self, name: str, grace_s: int = DEFAULT_STOP_GRACE_S,
              caller: dict[str, Any] | None = None) -> None:

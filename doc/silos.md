@@ -691,6 +691,10 @@ latch; anything the probe cannot decide reports an error and asks for
 stop-then-start rather than reporting success or launching a second workload.
 
 Launcher activation and container existence do not establish application
-health. Observations never authorize deletion, relaunch, or broker transfers;
-they do not replace the lifecycle safeguards. Probe snapshots may become stale
-between reads, so a stopped observation is evidence about that sample only.
+health. The stored observation rows never authorize deletion or broker
+transfers and do not replace the lifecycle safeguards; the only decision a
+probe feeds is StartSilo's own synchronous liveness check, which confirms a
+`stopped`/`failed` verdict against the same fail-closed verifier the stop
+path uses (for tier-3s this includes surviving control records) before
+relaunching. Probe snapshots may become stale between reads, so a stopped
+observation is evidence about that sample only.
