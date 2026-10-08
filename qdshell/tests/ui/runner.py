@@ -617,19 +617,27 @@ def journal_cursor_vm(session: VMSession, *, timeout: float = 20.0) -> str:
 
 def journal_checkpoint_vm(session: VMSession, *, timeout: float = 20.0
                           ) -> tuple:
-    """A (journal cursor, guest timestamp) crash-attribution checkpoint.
+    """A (unit cursor, coredump cursor) crash-attribution checkpoint.
 
-    FAIL-CLOSED: a test window without a valid starting checkpoint cannot
-    be certified crash-free, so a failed probe raises instead of
-    degrading to an unbounded search that replays unrelated history.
+    Two journal positions, one per evidence channel: the admin user's
+    qdshell.service journal and the system journal's systemd-coredump
+    records. FAIL-CLOSED: a test window without a valid starting
+    checkpoint cannot be certified crash-free, so a failed probe raises
+    instead of degrading to an unbounded search that replays unrelated
+    history.
     """
     script = (
         f"CUR=$(runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
         f"journalctl --user -u {VM_QDSHELL_UNIT} -n0 --show-cursor "
         "--no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')\n"
-        '[ -n "$CUR" ] || { echo "journal cursor unavailable" >&2; exit 63; }\n'
+        '[ -n "$CUR" ] || { echo "unit journal cursor unavailable" >&2; exit 63; }\n'
+        "SCUR=$(journalctl -n0 --show-cursor --no-pager "
+        "SYSLOG_IDENTIFIER=systemd-coredump 2>/dev/null "
+        "| sed -n 's/^-- cursor: //p')\n"
+        '[ -n "$SCUR" ] || { echo "coredump journal cursor unavailable" >&2; '
+        "exit 63; }\n"
         'echo "CUR:$CUR"\n'
-        "date '+%Y-%m-%d %H:%M:%S'\n"
+        'echo "SCUR:$SCUR"\n'
     )
     res = _vm_run_script(session, script, timeout=timeout)
     if res.returncode != 0:
@@ -638,10 +646,11 @@ def journal_checkpoint_vm(session: VMSession, *, timeout: float = 20.0
             f"{res.stderr.strip()[:200]}"
         )
     lines = res.stdout.strip().splitlines()
-    cursor = next((l[4:] for l in lines if l.startswith("CUR:")), "")
-    if not cursor or not lines:
+    cur = next((l[4:] for l in lines if l.startswith("CUR:")), "")
+    scur = next((l[5:] for l in lines if l.startswith("SCUR:")), "")
+    if not cur or not scur:
         raise RuntimeError(f"malformed journal checkpoint: {res.stdout!r}")
-    return (cursor, lines[-1])
+    return (cur, scur)
 
 
 def qs_crash_evidence_vm(session: VMSession, checkpoint: tuple, *,
@@ -651,41 +660,51 @@ def qs_crash_evidence_vm(session: VMSession, checkpoint: tuple, *,
     A Restart=always respawn restores IPC and the qdwin binding, so a
     worker that died mid-test is INVISIBLE in the framebuffer once the
     crash-reporter dialog is reaped — the only faithful evidence is the
-    journal. Two identity-correlated channels:
+    journal. Two identity-correlated channels, each checkpointed by the
+    SAME --show-cursor read that supplies its records:
 
       * the qdshell.service unit journal (the worker's own stderr and
         systemd's process-exit lines): `code=dumped`, SEGV statuses, the
         supervisor's crash text;
-      * systemd-coredump records in the system journal since the
-        checkpoint timestamp, filtered to the qs/quickshell executables.
+      * systemd-coredump records in the system journal
+        (SYSLOG_IDENTIFIER selects only genuine coredump entries),
+        correlated to qdshell's executable and the admin UID so another
+        user's Quickshell or an unrelated service cannot be attributed
+        to this shell.
 
-    Scoping to the unit and to qdshell's executables means an unrelated
-    user service crashing cannot be attributed to the shell. Returns
-    (evidence_text, (cursor, timestamp)) where the cursor comes from the
-    SAME journal read (--show-cursor appends it after the last entry), so
-    no line can fall into an unexamined interval between separate probe
-    and checkpoint calls. Any probe failure raises — an unread journal is
-    not an empty journal.
+    Returns (evidence_text, (unit_cursor, core_cursor)). Any journalctl
+    failure or missing cursor raises — an unread journal is not an empty
+    journal — and the caller keeps the previous checkpoint, so the
+    interval is re-examined rather than lost.
     """
-    cursor, since = checkpoint
+    cursor, scursor = checkpoint
     pat = "code=dumped|status=[0-9]+/SEGV|coredump|__QUICKSHELL_CRASH|crash"
     script = (
         "set -u\n"
         f"OUT=$(runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
         f"journalctl --user -u {VM_QDSHELL_UNIT} --no-pager --show-cursor "
-        f"--after-cursor {shlex.quote(cursor)} 2>/dev/null) || exit 63\n"
+        f"--after-cursor {shlex.quote(cursor)} 2>/dev/null) "
+        "|| { echo 'unit journal read failed' >&2; exit 63; }\n"
         'NEWCUR=$(printf "%s\\n" "$OUT" | sed -n "s/^-- cursor: //p" | tail -1)\n'
-        '[ -n "$NEWCUR" ] || { echo "journal read returned no cursor" >&2; exit 63; }\n'
+        '[ -n "$NEWCUR" ] || { echo "unit journal read returned no cursor" '
+        ">&2; exit 63; }\n"
+        "COUT=$(journalctl --no-pager --show-cursor "
+        f"--after-cursor {shlex.quote(scursor)} "
+        "SYSLOG_IDENTIFIER=systemd-coredump 2>/dev/null) "
+        "|| { echo 'coredump journal read failed' >&2; exit 63; }\n"
+        'NEWSCUR=$(printf "%s\\n" "$COUT" | sed -n "s/^-- cursor: //p" '
+        "| tail -1)\n"
+        '[ -n "$NEWSCUR" ] || { echo "coredump journal read returned no '
+        'cursor" >&2; exit 63; }\n'
         "echo '@@EVID@@'\n"
         f'printf "%s\\n" "$OUT" | grep -aiE {shlex.quote(pat)} || true\n'
         "echo '@@CORE@@'\n"
-        f"journalctl --no-pager --since {shlex.quote(since)} "
-        "-g 'dumped core|coredump' 2>/dev/null "
-        "| grep -aE 'quickshell|\\(qs\\)' || true\n"
+        'printf "%s\\n" "$COUT" | grep -aE '
+        r"'Process [0-9]+ \((qs|quickshell)\) of user 1000' || true" "\n"
         "echo '@@CUR@@'\n"
         'echo "$NEWCUR"\n'
-        "echo '@@TS@@'\n"
-        "date '+%Y-%m-%d %H:%M:%S'\n"
+        "echo '@@SCUR@@'\n"
+        'echo "$NEWSCUR"\n'
     )
     res = _vm_run_script(session, script, timeout=timeout)
     if res.returncode != 0:
@@ -693,21 +712,25 @@ def qs_crash_evidence_vm(session: VMSession, checkpoint: tuple, *,
             f"crash-evidence probe failed (rc={res.returncode}): "
             f"{res.stderr.strip()[:200]}"
         )
+    for marker in ("@@EVID@@", "@@CORE@@", "@@CUR@@", "@@SCUR@@"):
+        if marker not in res.stdout:
+            raise RuntimeError(
+                f"malformed crash-evidence output: {res.stdout!r}")
     evid = res.stdout.split("@@EVID@@", 1)[1]
     core = evid.split("@@CORE@@", 1)[1]
     unit_lines = evid.split("@@CORE@@", 1)[0].strip()
     core_lines = core.split("@@CUR@@", 1)[0].strip()
     tail = core.split("@@CUR@@", 1)[1]
-    new_cursor = tail.split("@@TS@@", 1)[0].strip()
-    new_ts = tail.split("@@TS@@", 1)[1].strip()
-    if not new_cursor or not new_ts:
+    new_cursor = tail.split("@@SCUR@@", 1)[0].strip()
+    new_scursor = tail.split("@@SCUR@@", 1)[1].strip()
+    if not new_cursor or not new_scursor:
         raise RuntimeError("crash-evidence probe returned no cursor")
     parts = []
     if unit_lines:
         parts.append("qdshell.service journal:\n" + unit_lines)
     if core_lines:
         parts.append("systemd-coredump:\n" + core_lines)
-    return "\n".join(parts), (new_cursor, new_ts)
+    return "\n".join(parts), (new_cursor, new_scursor)
 
 
 def ipc_vm(session: VMSession, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
