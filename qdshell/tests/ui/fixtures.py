@@ -44,13 +44,26 @@ NOTIFY_CLEAN = (
 # state must restart the unit and wait for `qdwin_shell_v1 bound` — otherwise
 # the test races the reconnect gap.
 _RESTART_AND_WAIT = (
-    'TS=$(date "+%Y-%m-%d %H:%M:%S")\n'
-    "systemctl --user restart qdshell\n"
-    "for i in $(seq 1 45); do\n"
-    '  journalctl --user _COMM=quickshell --since "$TS" 2>/dev/null '
-    "| grep -q 'bound v' && break\n"
+    # A journal cursor captured BEFORE the restart bounds the wait to this
+    # generation's `bound` line — a wall-clock --since is only 1-second
+    # granular, so a bind from the previous generation inside the same
+    # second could satisfy the wait early. Both the restart itself and a
+    # missing bind are explicit failures: falling through to `sleep 2`
+    # would report success while the shell is still down.
+    'CUR=$(journalctl --user -u qdshell.service -n0 --show-cursor --no-pager '
+    "2>/dev/null | sed -n 's/^-- cursor: //p')\n"
+    '[ -n "$CUR" ] || { echo "qdshell journal cursor unavailable" >&2; exit 64; }\n'
+    'systemctl --user restart qdshell '
+    '|| { echo "systemctl restart qdshell failed" >&2; exit 64; }\n'
+    "ok=\n"
+    "for i in $(seq 1 60); do\n"
+    '  journalctl --user -u qdshell.service --no-pager -o cat '
+    '--after-cursor "$CUR" 2>/dev/null '
+    "| grep -q 'qdwin_shell_v1 bound' && { ok=1; break; }\n"
     "  sleep 1\n"
     "done\n"
+    '[ -n "$ok" ] || { echo "qdshell did not bind qdwin_shell_v1 within '
+    '60s" >&2; exit 65; }\n'
     "sleep 2\n"
 )
 
@@ -71,6 +84,12 @@ _RESTART_AND_WAIT = (
 # proceeds against a live shell.
 LOCATION_SEED = (
     "mkdir -p /home/admin/.cache/qdshell\n"
+    # Preserve any pre-existing cache byte-for-byte; teardown restores it
+    # (or restores the file's absence).
+    'if [ -f /home/admin/.cache/qdshell/location.json ]; then\n'
+    "  mv /home/admin/.cache/qdshell/location.json "
+    "/home/admin/.cache/qdshell/location.json.qdtest-bak\n"
+    "fi\n"
     "python3 - <<'QDEOF'\n"
     "import json, time\n"
     "loc = {\"latitude\": \"35.6762\", \"longitude\": \"139.6503\", "
@@ -85,8 +104,18 @@ LOCATION_SEED = (
     "sleep 5\n"   # qdwin bind + first open-meteo fetch round-trip
 )
 
+# Restore the pre-existing cache (or its absence), then restart so
+# LocationService drops the in-memory seeded coordinates/weather — without
+# the restart the service could persist the seeded state back over the
+# restored file.
 LOCATION_CLEAN = (
-    "rm -f /home/admin/.cache/qdshell/location.json\n"
+    'if [ -f /home/admin/.cache/qdshell/location.json.qdtest-bak ]; then\n'
+    "  mv -f /home/admin/.cache/qdshell/location.json.qdtest-bak "
+    "/home/admin/.cache/qdshell/location.json\n"
+    "else\n"
+    "  rm -f /home/admin/.cache/qdshell/location.json\n"
+    "fi\n"
+    + _RESTART_AND_WAIT
 )
 
 
@@ -321,5 +350,43 @@ ADVANCED_CLEAN = (
     'test -f /home/admin/.config/qdshell/settings.json.qdtest-adv-bak && '
     'mv -f /home/admin/.config/qdshell/settings.json.qdtest-adv-bak '
     '/home/admin/.config/qdshell/settings.json || true\n'
+    + _RESTART_AND_WAIT
+)
+
+
+# --- Plugins tab: one real installed plugin ----------------------------------
+# The golden asserts the INSTALLED list's per-row affordances — enable/disable
+# toggle, uninstall button, name/version/author — which only render for an
+# actually-installed plugin (InstalledSubTab.qml's row is model-driven; a VM
+# with no plugins shows the empty state). Seeding a manifest under the
+# registry's scan dir (PluginRegistry.qml: pluginsDir/*/manifest.json) plus a
+# restart exercises the real discovery path — no mocked list. The manifest has
+# no entryPoints targets, so enabling the row loads nothing destructive; the
+# row is never toggled during the capture.
+PLUGIN_SEED = (
+    "mkdir -p /home/admin/.config/qdshell/plugins/qduiplugin\n"
+    'if [ -f /home/admin/.config/qdshell/plugins.json ]; then\n'
+    "  cp /home/admin/.config/qdshell/plugins.json "
+    "/home/admin/.config/qdshell/plugins.json.qdtest-bak\n"
+    "fi\n"
+    "cat > /home/admin/.config/qdshell/plugins/qduiplugin/manifest.json "
+    "<<'QDEOF'\n"
+    '{"id": "qduiplugin", "name": "UI Fixture Plugin", '
+    '"version": "1.0.0", "author": "qdistro ui tests", '
+    '"description": "Seeded plugin so the Installed list renders its '
+    'per-row controls", "entryPoints": {}}\n'
+    "QDEOF\n"
+    # scanPluginFolder runs at shell start — restart so the row is live.
+    + _RESTART_AND_WAIT
+)
+
+PLUGIN_CLEAN = (
+    "rm -rf /home/admin/.config/qdshell/plugins/qduiplugin\n"
+    'if [ -f /home/admin/.config/qdshell/plugins.json.qdtest-bak ]; then\n'
+    "  mv -f /home/admin/.config/qdshell/plugins.json.qdtest-bak "
+    "/home/admin/.config/qdshell/plugins.json\n"
+    "fi\n"
+    # Restart so the seeded row leaves the live registry (and any state the
+    # registry persisted for it is re-read from the restored file).
     + _RESTART_AND_WAIT
 )

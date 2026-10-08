@@ -78,18 +78,19 @@ DEGRADED_CASES = [
 def test_panel_degraded(vm_session, case):
     import time
     s = vm_session
-    for cmd in case.setup_guest:
-        res = runner.guest_sh_vm(s, cmd)
-        assert res.returncode == 0, (
-            f"degraded-state inducement for '{case.id}' failed "
-            f"(rc={res.returncode}): {res.stderr.strip()[:300]}"
-        )
-    runner.ipc_vm(s, *case.open_cmd)
-    # Panels that auto-close on empty (TrayDrawerPanel) animate shut; the
-    # capture must outlast the transition or it judges a half-rendered frame.
-    time.sleep(2.5)
     png = runner.ARTIFACTS_DIR / f"panel_{case.id}_degraded.png"
+    teardown_errs = []
     try:
+        for cmd in case.setup_guest:
+            res = runner.guest_sh_vm(s, cmd)
+            assert res.returncode == 0, (
+                f"degraded-state inducement for '{case.id}' failed "
+                f"(rc={res.returncode}): {res.stderr.strip()[:300]}"
+            )
+        runner.ipc_vm(s, *case.open_cmd)
+        # Panels that auto-close on empty (TrayDrawerPanel) animate shut; the
+        # capture must outlast the transition or it judges a half-rendered frame.
+        time.sleep(2.5)
         runner.screenshot_vm(s, png)
         actual = runner.describe(png)
         # Shell still alive (a panel that crashed the process fails this).
@@ -101,10 +102,16 @@ def test_panel_degraded(vm_session, case):
         except Exception:
             pass
         for cmd in case.teardown_guest:
-            res = runner.guest_sh_vm(s, cmd)
+            res = runner.guest_cleanup_vm(s, cmd)
             if res.returncode != 0:
-                print(f"warning: degraded teardown for '{case.id}' rc="
-                      f"{res.returncode}: {res.stderr.strip()[:200]}")
+                teardown_errs.append(
+                    f"rc={res.returncode}: {res.stderr.strip()[:200]}")
+    # A failed restore is a failure, not a warning: leftover induced state
+    # silently contaminates every later case.
+    assert not teardown_errs, (
+        f"degraded teardown for '{case.id}' failed: "
+        + "; ".join(teardown_errs)
+    )
 
     assert png.exists()
     if not actual.strip():

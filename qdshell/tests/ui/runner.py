@@ -563,6 +563,82 @@ def guest_sh_vm(session: VMSession, script: str, *, timeout: float = 60.0
     return _vm_run_script(session, wrapper, timeout=timeout)
 
 
+def guest_sh_vm_raw(session: VMSession, script: str, *, timeout: float = 60.0
+                    ) -> subprocess.CompletedProcess:
+    """Run a bash snippet in the guest as admin WITHOUT the private bus.
+
+    For cleanup paths that must still run when no qdshell worker exists —
+    a crashed shell takes guest_sh_vm's bus discovery (exit 66) with it,
+    which would strand state-restoring teardowns. No
+    DBUS_SESSION_BUS_ADDRESS is exported; snippets that publish or query
+    the private bus must use guest_sh_vm.
+    """
+    inner_b64 = base64.b64encode(script.encode()).decode("ascii")
+    wrapper = (
+        "set -u\n"
+        f"echo {inner_b64} | base64 -d | runuser -u {VM_USER} -- env "
+        f"XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
+        f"WAYLAND_DISPLAY={VM_WAYLAND_DISPLAY} bash\n"
+    )
+    return _vm_run_script(session, wrapper, timeout=timeout)
+
+
+def guest_cleanup_vm(session: VMSession, script: str, *, timeout: float = 90.0
+                     ) -> subprocess.CompletedProcess:
+    """Run a teardown snippet; fall back to the bus-less path on a dead shell.
+
+    guest_sh_vm exits 66 before executing anything when no qdshell worker
+    exists — precisely when restoration matters most (a crashed test left
+    the shell down). Teardown snippets don't need the private bus, so the
+    retry runs without it.
+    """
+    res = guest_sh_vm(session, script, timeout=timeout)
+    if res.returncode == 66:
+        res = guest_sh_vm_raw(session, script, timeout=timeout)
+    return res
+
+
+def journal_cursor_vm(session: VMSession, *, timeout: float = 20.0) -> str:
+    """A journalctl cursor for the admin user's journal, or "" on failure."""
+    res = _vm_run_script(
+        session,
+        f"runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
+        f"journalctl --user -u {VM_QDSHELL_UNIT} -n0 --show-cursor "
+        f"--no-pager 2>/dev/null | sed -n 's/^-- cursor: //p'\n",
+        timeout=timeout,
+    )
+    return res.stdout.strip() if res.returncode == 0 else ""
+
+
+def qs_crash_evidence_vm(session: VMSession, cursor: str, *,
+                         timeout: float = 20.0) -> str:
+    """Journal lines since `cursor` evidencing a qdshell worker crash.
+
+    A Restart=always respawn restores IPC and the qdwin binding, so a
+    worker that died mid-test is INVISIBLE in the framebuffer once the
+    crash-reporter dialog is reaped — the only faithful evidence is the
+    journal (`code=dumped`, a SEGV status, coredump records). Returns the
+    matching lines (empty when nothing crashed). `cursor` should come
+    from journal_cursor_vm captured before the window under test; the
+    whole user journal is scanned so the dying unit's own lines are
+    caught whichever unit systemd attributes them to.
+    """
+    bounds = (f"--after-cursor {shlex.quote(cursor)}" if cursor
+              else "--since '-10 minutes'")
+    script = (
+        f"runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
+        f"journalctl --user --no-pager {bounds} 2>/dev/null "
+        f"| grep -aE 'code=dumped|SEGV|coredump|__QUICKSHELL_CRASH' || true\n"
+    )
+    res = _vm_run_script(session, script, timeout=timeout)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"crash-evidence probe failed (rc={res.returncode}): "
+            f"{res.stderr.strip()[:200]}"
+        )
+    return res.stdout.strip()
+
+
 def ipc_vm(session: VMSession, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
     """Send a `qs ipc call` to the qdshell instance running inside the VM.
 
@@ -787,14 +863,7 @@ def restart_qdshell_vm(session: VMSession, *, settle: float = 6.0,
     reap any orphaned crash-reporter dialogs left by a worker that died on
     the way down.
     """
-    cur = _vm_run_script(
-        session,
-        f"runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
-        f"journalctl --user -u {VM_QDSHELL_UNIT} -n0 --show-cursor --no-pager "
-        f"2>/dev/null | sed -n 's/^-- cursor: //p'\n",
-        timeout=20.0,
-    )
-    cursor = cur.stdout.strip() if cur.returncode == 0 else ""
+    cursor = journal_cursor_vm(session)
     script = (
         f"set -eu\n"
         f"runuser -u {VM_USER} -- env XDG_RUNTIME_DIR={VM_XDG_RUNTIME_DIR} "
@@ -1327,12 +1396,20 @@ def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
             f"{surface.id} has no IPC handle; cannot drive automatically"
         )
 
-    def _teardown_guest() -> None:
+    def _teardown_guest() -> list:
+        """Run teardown snippets; return error strings (empty on success).
+
+        guest_cleanup_vm survives a dead shell (bus-less fallback). A
+        failed restore is reported as an error, not a warning — leftover
+        fixture state silently contaminates every later test.
+        """
+        errs = []
         for cmd in surface.teardown_guest:
-            res = guest_sh_vm(session, cmd)
+            res = guest_cleanup_vm(session, cmd)
             if res.returncode != 0:
-                print(f"warning: teardown_guest for {surface.id} rc="
-                      f"{res.returncode}: {res.stderr.strip()[:200]}")
+                errs.append(f"rc={res.returncode}: "
+                            f"{res.stderr.strip()[:200]}")
+        return errs
 
     try:
         for cmd in surface.setup_guest:
@@ -1395,7 +1472,15 @@ def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
             with contextlib.suppress(Exception):
                 ipc_vm(session, *surface.close_cmd)
                 time.sleep(0.4)
-        _teardown_guest()
+        _td_errs = _teardown_guest()
+        if _td_errs:
+            # Raised from finally: a capture failure still chains as the
+            # original exception's context, but leftover fixture state can
+            # never be mistaken for a clean teardown.
+            raise RuntimeError(
+                f"teardown_guest for {surface.id} failed: "
+                + "; ".join(_td_errs)
+            )
 
     return png_path, description
 

@@ -151,35 +151,91 @@ def _vm_session():
     # contaminate their frames, and a stale one from a previous suite run
     # would contaminate ours. Reap at both boundaries of the session.
     _reap_reporters(session, "session start")
+    # Checkpoint the journal so the first test's inter-test crash check can
+    # attribute anything that dies between now and its setup.
+    _journal_checkpoint["cursor"] = runner.journal_cursor_vm(session)
     yield session
     _reap_reporters(session, "session end")
 
 
-def _reap_reporters(session, when: str) -> None:
+def _reap_reporters(session, when: str) -> int:
     try:
         reaped = runner.reap_qs_crash_reporters_vm(session)
     except Exception as exc:  # reap must never turn a test run into an error
         print(f"WARN: crash-reporter reap at {when} failed: {exc}")
-        return
+        return 0
     if reaped:
         print(f"INFO: reaped {reaped} orphaned quickshell crash "
               f"reporter(s) at {when}")
+    return reaped
+
+
+# Journal cursor of the last per-test checkpoint. A crash in the gap between
+# two tests (teardown of one, setup of the next) belongs to no test's window
+# — the next test's setup check attributes it there rather than losing it.
+_journal_checkpoint = {"cursor": None}
 
 
 @pytest.fixture(autouse=True)
 def _reap_reporters_each_test(_vm_session):
-    """Clear stale quickshell crash-reporter dialogs before each test.
+    """Reap stale crash-reporter dialogs AND attribute worker crashes.
 
     A worker SEGV leaves a reporter toplevel that can outlive the restart
     that replaces its unit generation; if it lands between two tests the
     NEXT test's capture fails on a dialog that is not its own state. The
     reap only matches bare-argv `quickshell` processes carrying the
     __QUICKSHELL_CRASH_* marker env vars outside the service's own
-    supervisor, so a live healthy shell is never touched — and a crashed
-    one still fails honestly on its missing IPC/socket.
+    supervisor, so a live healthy shell is never touched.
+
+    But reaping alone would make a crash disappear: Restart=always brings
+    IPC and the qdwin binding back, so a mid-test SEGV is invisible in the
+    framebuffer and a recovered capture looks green. The unit journal is
+    the faithful record — this fixture bounds each test with journal
+    cursors and FAILS on crash evidence (dumped cores, SEGV statuses,
+    crash-reporter residue), including the inter-test gap that no test
+    owns. A clean `systemctl restart` from a fixture leaves no such
+    evidence; only an actual worker death does.
     """
-    if _vm_session is not None:
-        _reap_reporters(_vm_session, "test setup")
+    if _vm_session is None:
+        yield
+        return
+
+    prev_cursor = _journal_checkpoint["cursor"]
+    gap_evidence = ""
+    if prev_cursor:
+        try:
+            gap_evidence = runner.qs_crash_evidence_vm(_vm_session,
+                                                     prev_cursor)
+        except Exception as exc:
+            print(f"WARN: inter-test crash-evidence probe failed: {exc}")
+    reaped_setup = _reap_reporters(_vm_session, "test setup")
+    cursor = runner.journal_cursor_vm(_vm_session)
+    if gap_evidence or reaped_setup:
+        _journal_checkpoint["cursor"] = cursor
+        pytest.fail(
+            "qdshell crashed outside any test's window (between tests or "
+            "during session setup). The crash is attributed here because no "
+            "test owned the interval.\n"
+            f"  journal evidence:\n{gap_evidence}\n"
+            f"  crash reporters reaped at setup: {reaped_setup}",
+            pytrace=False,
+        )
+    yield
+    evidence = ""
+    try:
+        evidence = runner.qs_crash_evidence_vm(_vm_session, cursor)
+    except Exception as exc:
+        print(f"WARN: crash-evidence probe failed: {exc}")
+    _journal_checkpoint["cursor"] = runner.journal_cursor_vm(_vm_session)
+    reaped_end = _reap_reporters(_vm_session, "test end")
+    if evidence or reaped_end:
+        pytest.fail(
+            "a qdshell worker crashed during this test — a Restart=always "
+            "respawn is not a pass.\n"
+            f"  journal evidence:\n{evidence}\n"
+            f"  crash reporters reaped at test end: {reaped_end}",
+            pytrace=False,
+        )
 
 
 @pytest.fixture(scope="session")
