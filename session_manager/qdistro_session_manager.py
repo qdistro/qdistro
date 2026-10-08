@@ -4605,7 +4605,12 @@ class _SiloStore:
             # operation_generation and the round is re-evaluated.
             for _round in range(4):
                 with self._lock:
-                    silo = self.get(name)
+                    # Wait out any in-flight lock-free write first:
+                    # freeze/resume/stop claim _stopping_inflight BEFORE
+                    # their cgroup/systemctl work lands and only bump
+                    # operation_generation on commit, so a snapshot taken
+                    # mid-write cannot be told apart from a settled one.
+                    silo = self._await_inflight_locked(name)
                     if silo.state != State.ACTIVE:
                         reason = self._start_locked(silo)
                         break
@@ -4628,10 +4633,13 @@ class _SiloStore:
                 with self._lock:
                     silo = self._silos.get(name)
                     if (silo is not p_silo
-                            or silo.operation_generation != generation):
+                            or silo.operation_generation != generation
+                            or name in self._stopping_inflight):
                         # Raced a lifecycle op — or a delete+create swapped
-                        # the row — mid-probe; the verdict is stale.
-                        # Re-evaluate from scratch.
+                        # the row — mid-probe; the verdict is stale. A
+                        # claimed in-flight slot counts as a race too: the
+                        # op's effects are landing but haven't committed a
+                        # generation bump yet. Re-evaluate from scratch.
                         continue
                     if status in ("launcher-running", "starting"):
                         # idempotent — fall through to the post-lock audit

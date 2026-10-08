@@ -866,6 +866,58 @@ class TestLifecycle:
         assert len(starts) == 1
         assert store.get("work").state == State.ACTIVE
 
+    def test_start_probe_respects_an_inflight_freeze(self, store, ops):
+        # freeze() claims the in-flight slot and writes cgroup.freeze
+        # BEFORE it commits a state/generation change. A start() probe
+        # overlapping that window must not act on its verdict — otherwise
+        # start could thaw + relaunch, then the freeze commits Frozen
+        # over a running workload. start() waits out the claim, sees the
+        # committed FROZEN, and takes the ordinary FROZEN→ACTIVE path.
+        import threading
+        store.create("work", 2000)
+        store.start("work")
+        freeze_wrote = threading.Event()
+        let_freeze_commit = threading.Event()
+        probe_entered = threading.Event()
+        let_probe_finish = threading.Event()
+        orig_freeze = ops.cgroup_freeze
+
+        def gated_freeze(n, flag):
+            orig_freeze(n, flag)
+            if n == "work" and flag:
+                freeze_wrote.set()
+                let_freeze_commit.wait(10)
+
+        ops.cgroup_freeze = gated_freeze
+
+        def dead_probe(*a):
+            probe_entered.set()
+            # Sit inside the probe while the freeze claims its slot and
+            # lands its cgroup write — the verdict is stale by the time
+            # start() sees it.
+            let_probe_finish.wait(10)
+            return ("stopped", "launcher inactive and workload absent")
+
+        ops.observe_silo = dead_probe
+        starter = threading.Thread(target=store.start, args=("work",))
+        starter.start()
+        assert probe_entered.wait(10)  # start() is inside its probe
+
+        freezer = threading.Thread(target=store.freeze, args=("work",))
+        freezer.start()
+        assert freeze_wrote.wait(10)   # claimed the slot + wrote, gated
+        let_probe_finish.set()         # verdict arrives mid-freeze
+        let_freeze_commit.set()
+        starter.join(10)
+        freezer.join(10)
+        assert not starter.is_alive() and not freezer.is_alive()
+        # Serialized outcome: the freeze committed, then start() ran the
+        # thaw + relaunch deliberately — never racing the freeze write.
+        assert store.get("work").state == State.ACTIVE
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+        assert ops.cgroup_frozen["work"] is False
+
     def test_freeze_then_resume(self, store, ops):
         store.create("work", 2000)
         store.start("work")
