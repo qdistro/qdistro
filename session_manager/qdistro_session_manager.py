@@ -125,11 +125,12 @@ _T_SYSTEMCTL = 30     # daemon-reload, reload, start. NB `Type=simple` bounds ho
                       # does not prove the unit did not start, and
                       # systemctl_start() reconciles rather than assuming.
 _T_SYSTEMCTL_CANCEL = 30  # The compensating stop issued after a start TIMED OUT.
-                      # Deliberately short and NOT _T_SYSTEMCTL_STOP: this one
-                      # runs on the MAIN LOOP (StartSilo/LaunchPodApp are
-                      # synchronous), so a 300s allowance there would stack on
-                      # the 30s start bound and hand the loop a 5½-minute
-                      # outage. Cutting it short is only safe because failing to
+                      # Deliberately short and NOT _T_SYSTEMCTL_STOP: it was
+                      # chosen when StartSilo/LaunchPodApp still ran on the
+                      # D-Bus dispatch thread; they are worker-offloaded now,
+                      # but the short bound still keeps the caller-visible
+                      # worst case (start 30 + cancel 30) tight. Cutting it
+                      # short is only safe because failing to
                       # confirm the cancellation is not treated as success — see
                       # systemctl_start(), whose outcome is not consulted at
                       # all: a start timeout always raises StartNotCancelled and
@@ -3496,8 +3497,12 @@ class _SystemOps:
         for attempt in range(1, attempts + 1):
             try:
                 bus = dbus.SystemBus()
+                # introspect=False: proxy construction must not add its own
+                # unbounded Introspect round-trip in front of the bounded
+                # method call (the timeout below only covers the call).
                 proxy = bus.get_object(
-                    ADMIN_BROKER_BUS_NAME, ADMIN_BROKER_OBJ_PATH)
+                    ADMIN_BROKER_BUS_NAME, ADMIN_BROKER_OBJ_PATH,
+                    introspect=False)
                 raw = proxy.GetLineageReceiptContext(
                     dbus_interface=ADMIN_BROKER_BUS_NAME, timeout=5.0)
             except Exception as e:  # noqa: BLE001 - classify D-Bus errors below
@@ -3525,7 +3530,8 @@ class _SystemOps:
         import dbus  # local import: optional dependency in unit tests
 
         bus = dbus.SystemBus()
-        proxy = bus.get_object(ADMIN_BROKER_BUS_NAME, ADMIN_BROKER_OBJ_PATH)
+        proxy = bus.get_object(ADMIN_BROKER_BUS_NAME, ADMIN_BROKER_OBJ_PATH,
+                               introspect=False)
         payload = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
         raw = proxy.RecordExportLineage(
             payload, dbus_interface=ADMIN_BROKER_BUS_NAME, timeout=30.0)
@@ -3812,7 +3818,7 @@ def _pwd_getitem(vault: str, tag: str) -> str:
     lazily so headless unit tests (which inject a fake getter) need no bus."""
     import dbus  # local import: optional dependency
     bus = dbus.SystemBus()
-    proxy = bus.get_object(PWD_BUS_NAME, PWD_OBJ_PATH)
+    proxy = bus.get_object(PWD_BUS_NAME, PWD_OBJ_PATH, introspect=False)
     # Short timeout: this runs under the store lock during start(), so a hung
     # qdistro-pwd must fail fast (-> KeyUnavailable -> dark) rather than stall
     # every session-manager method for the default ~25s D-Bus timeout.
@@ -3911,6 +3917,27 @@ class _SiloStore:
         # locked body calls only ops.stop_link_watcher and must never
         # acquire _lock — no reverse acquisition, no deadlock.
         self._watchers_lock = threading.Lock()
+        # Serializes the account-provisioning transaction bodies of
+        # create()/delete(): useradd/userdel, the relay-policy purge and
+        # fragment writes, launcher links, and state dirs. The transaction
+        # can run for minutes (a big home tree), and it used to run under
+        # _lock — which parked every other store method, so a CreateSilo
+        # froze ListSilos too. Now the account ops run WITHOUT _lock but
+        # under _accounts_lock, preserving the old single-writer discipline
+        # for the shared resources they touch (the /etc/dbus-1/system.d
+        # fragment dir in particular, whose purge-then-write ordering is
+        # what keeps dbus-broker from aborting on a bad file).
+        #
+        # Lock order: _accounts_lock → _lock → _watchers_lock.
+        # _accounts_lock must NEVER be acquired while holding _lock:
+        # a minutes-long mutex must not sit inside the store lock.
+        self._accounts_lock = threading.Lock()
+        # Names with a create() account transaction currently in flight,
+        # before the silo row exists. name -> uid. Guarded by _lock. A
+        # second create() of the same name or uid refuses fast (SiloBusy /
+        # SiloExists) instead of parking on _accounts_lock for the whole
+        # useradd, and delete() answers SiloBusy rather than UnknownSilo.
+        self._creating_inflight: dict[str, int] = {}
         # Durable forensic sink. None disables auditing (e.g. tests that
         # don't care). Audit writes never raise into the lifecycle path.
         self._audit = audit
@@ -4351,154 +4378,27 @@ class _SiloStore:
                     f"(got kind {kind!r})")
             if kind == KIND_TIER3S:
                 self._require_tier3s_profile()
-            with self._lock:
-                if name in self._silos:
-                    raise SiloExists(f"silo {name!r} already exists")
-                if kind == KIND_TIER3_USER:
-                    # A tier-3 silo is a real Linux user: its uid must be
-                    # unique and it gets a home + state dir via useradd.
-                    for existing in self._silos.values():
-                        if existing.uid == uid and existing.kind == KIND_TIER3_USER:
-                            raise SiloExists(
-                                f"uid {uid} already in use by silo "
-                                f"{existing.name!r}")
-                    if self._ops.user_exists(name):
-                        raise SiloExists(f"system user {name!r} already exists")
-                    if self._ops.uid_exists(uid):
-                        raise SiloExists(
-                            f"uid {uid} already in use on this system")
-                    # Before touching /etc/dbus-1/system.d at all: clear any
-                    # fragment that is unsafe to be in there when we write.
-                    # An out-of-band `userdel` since the last reconcile
-                    # leaves one naming an unresolvable uid, and OUR write
-                    # can be what triggers the reload that aborts the bus on
-                    # it. Refuse the create rather than fire the trigger.
-                    _rev, _unpurged = self._purge_unsafe_relay_fragments()
-                    if _unpurged:
-                        raise SessionError(
-                            "cannot create silo "
-                            f"{name!r}: {self._unsafe_fragment_error(_unpurged)}")
-                    self._ops.useradd(name, uid)
-                    # The skill is agent guidance, not a boundary: a failed
-                    # install keeps the silo, and startup reconciliation
-                    # (reconcile_silo_skills) retries it for every registered
-                    # silo. Rolling back the account instead would mean a
-                    # check-then-userdel by name, which can delete an
-                    # account an administrator recreated in between.
-                    try:
-                        self._ops.install_silo_skill(name)
-                    except Exception as e:  # noqa: BLE001
-                        log.warning(
-                            "could not install the silo skill for %r; the "
-                            "next session-manager start retries it: %s",
-                            name, e)
-                    # Issue this silo's user-relay bus-name grant. Without
-                    # it qdistro-user-relay@<uid> is refused the name and
-                    # exits 78, so cross-silo Send-To and the
-                    # Firefox-containers cross-uid opt-in are dead for this
-                    # silo — silently, at first use, long after create()
-                    # reported success. So it is fatal here, and the useradd
-                    # is rolled back rather than leaving a system user whose
-                    # silo row was never saved.
-                    try:
-                        self._ops.write_relay_policy(name, uid)
-                    except Exception as e:  # noqa: BLE001
-                        try:
-                            self._ops.userdel(name)
-                        except Exception as undo:  # noqa: BLE001
-                            log.error(
-                                "rolling back useradd for %r after a relay "
-                                "policy failure also failed: %s", name, undo)
-                        raise SessionError(
-                            f"could not issue the user-relay D-Bus policy "
-                            f"for silo {name!r}: {e}") from e
-                    # Link this silo's launcher unit. Same reasoning as the
-                    # relay grant above, and the same failure shape: without
-                    # it StartSilo has no unit to start, so the silo can never
-                    # reach Active — and the broker refuses a cross-uid relay
-                    # to any REGISTERED target that is not Active, which is a
-                    # harder failure than having no row at all. Roll the
-                    # useradd and the grant back rather than persist a row
-                    # that can never be started.
-                    try:
-                        self._ops.link_silo_launcher(name)
-                    except Exception as e:  # noqa: BLE001
-                        # Roll back in the ONLY safe order: the grant first,
-                        # and the account ONLY if the grant is definitely
-                        # gone. A fragment carries a numeric user="<uid>";
-                        # deleting the account while its fragment survives
-                        # leaves a fragment naming a uid NSS cannot resolve,
-                        # and dbus-broker ABORTS on that at its next reload
-                        # (see write_relay_policy). Killing the system bus is
-                        # far worse than leaking a Linux account, so a failed
-                        # revocation keeps the account — which keeps the uid
-                        # resolvable — and asks for manual cleanup.
-                        #
-                        # The launcher sweep runs on BOTH revocation
-                        # outcomes. link_silo_launcher compensates its own
-                        # partial state, but its compensation tolerates an
-                        # unlink failure — so on a double failure a link can
-                        # still be on disk, and an early `raise` here would
-                        # leave account + fragment + link together.
-                        _link_path = (SILO_LAUNCHER_LINK_DIR /
-                                      SILO_LAUNCHER_LINK_FMT.format(name=name))
-                        _frag_path = RELAY_POLICY_DIR / relay_policy_filename(name)
-                        _link_left = False
-                        try:
-                            self._ops.unlink_silo_launcher(name)
-                        except Exception as undo:  # noqa: BLE001
-                            _link_left = True
-                            log.error(
-                                "could not remove the launcher link for %r "
-                                "while rolling back: %s — remove %s by hand",
-                                name, undo, _link_path)
-                        try:
-                            self._ops.remove_relay_policy(name)
-                        except Exception as undo:  # noqa: BLE001
-                            log.error(
-                                "could not revoke the relay grant for %r "
-                                "while rolling back a launcher-link failure "
-                                "(%s). KEEPING the Linux user: deleting it "
-                                "now would leave a fragment naming an "
-                                "unresolvable uid, which aborts dbus-broker "
-                                "at its next reload. Remove %s%s and the "
-                                "user %r by hand, in that order.",
-                                name, undo, _frag_path,
-                                f" and {_link_path}" if _link_left else "",
-                                name)
-                            raise SessionError(
-                                f"could not link the launcher unit for silo "
-                                f"{name!r} ({e}), and rolling back its relay "
-                                f"grant also failed ({undo}); the Linux user "
-                                f"was kept so the bus stays up — remove "
-                                f"{_frag_path} and the user {name!r} by hand, "
-                                f"in that order") from e
-                        try:
-                            self._ops.userdel(name)
-                        except Exception as undo:  # noqa: BLE001
-                            log.error(
-                                "rolling back the useradd for %r after a "
-                                "launcher-link failure also failed: %s",
-                                name, undo)
-                        raise SessionError(
-                            f"could not link the launcher unit for silo "
-                            f"{name!r}: {e}") from e
-                    self._ops.make_state_dir(name, uid)
-                # else tier2-template: no useradd / no per-uid state dir — the
-                # launch-owner is admin (already exists, shared across template
-                # silos) and the silo's state is the binding's state_path,
-                # created by qdistro-template-promote, not here.
-                silo = Silo(
-                    name=name, uid=int(uid), state=State.CREATED,
-                    autostart=bool(autostart),
-                    created_at=int(time.time()),
-                    last_change=int(time.time()),
-                    kind=kind, launch=launch_norm,
-                    egress=egress_norm,
-                )
-                self._silos[name] = silo
-                self.save()
-                self._emit_change(silo.name, silo.state)
+            if kind != KIND_TIER3_USER:
+                # Fast path: tier2-template/tier3s silos provision no
+                # account, so nothing here outlives a short _lock hold.
+                with self._lock:
+                    if name in self._silos or name in self._creating_inflight:
+                        raise SiloExists(f"silo {name!r} already exists")
+                    silo = Silo(
+                        name=name, uid=int(uid), state=State.CREATED,
+                        autostart=bool(autostart),
+                        created_at=int(time.time()),
+                        last_change=int(time.time()),
+                        kind=kind, launch=launch_norm,
+                        egress=egress_norm,
+                    )
+                    self._silos[name] = silo
+                    self.save()
+                    self._emit_change(silo.name, silo.state)
+            else:
+                silo = self._create_tier3_user(
+                    name, uid, autostart=autostart,
+                    launch_norm=launch_norm, egress_norm=egress_norm)
         except Exception as e:  # noqa: BLE001
             # Refusals (SiloExists/BadArgument) are "deny"; an unexpected
             # side-effect failure (useradd/btrfs/etc.) is "error". Either
@@ -4511,29 +4411,239 @@ class _SiloStore:
                            reason=f"uid={silo.uid}", caller=caller)
         return silo
 
+    def _create_tier3_user(self, name: str, uid: int, *,
+                           autostart: bool, launch_norm: dict,
+                           egress_norm: str | None) -> Silo:
+        """The account-provisioning half of create() for tier3-user silos.
+
+        Phase split, same discipline as stop(): claim under _lock, run the
+        slow OS work (NSS checks, useradd -m + the btrfs home conversion,
+        the relay grant + bus reload, the launcher link, the state dir —
+        minutes on a big home tree) WITHOUT _lock but under _accounts_lock,
+        then commit the row under _lock. Holding _lock across all of it —
+        the old shape — parked every other store method for the duration:
+        ListSilos itself could not answer while a silo was being created.
+
+        _accounts_lock preserves the serialization the work actually needs:
+        the relay-fragment purge→write ordering and one account mutation at
+        a time. The row appears only at commit, so no reader observes a silo
+        whose account is still being built; a concurrent create() of the
+        same name/uid is refused via _creating_inflight instead of parking
+        on _accounts_lock, and delete() answers SiloBusy for it.
+        """
+        with self._lock:
+            if name in self._silos or name in self._creating_inflight:
+                raise SiloExists(f"silo {name!r} already exists")
+            # A tier-3 silo is a real Linux user: its uid must be
+            # unique and it gets a home + state dir via useradd.
+            for existing in self._silos.values():
+                if existing.uid == uid and existing.kind == KIND_TIER3_USER:
+                    raise SiloExists(
+                        f"uid {uid} already in use by silo "
+                        f"{existing.name!r}")
+            if uid in self._creating_inflight.values():
+                raise SiloExists(
+                    f"uid {uid} already claimed by a silo whose account "
+                    f"is still being created")
+            self._creating_inflight[name] = uid
+        try:
+            with self._accounts_lock:
+                # The Linux-account checks are TOCTOU by nature — an
+                # out-of-band useradd can always interpose — so they belong
+                # with the account transaction, not under _lock. useradd
+                # itself failing on a duplicate is the final arbiter.
+                if self._ops.user_exists(name):
+                    raise SiloExists(f"system user {name!r} already exists")
+                if self._ops.uid_exists(uid):
+                    raise SiloExists(
+                        f"uid {uid} already in use on this system")
+                # Before touching /etc/dbus-1/system.d at all: clear any
+                # fragment that is unsafe to be in there when we write.
+                # An out-of-band `userdel` since the last reconcile
+                # leaves one naming an unresolvable uid, and OUR write
+                # can be what triggers the reload that aborts the bus on
+                # it. Refuse the create rather than fire the trigger.
+                _rev, _unpurged = self._purge_unsafe_relay_fragments()
+                if _unpurged:
+                    raise SessionError(
+                        "cannot create silo "
+                        f"{name!r}: {self._unsafe_fragment_error(_unpurged)}")
+                self._ops.useradd(name, uid)
+                # The skill is agent guidance, not a boundary: a failed
+                # install keeps the silo, and startup reconciliation
+                # (reconcile_silo_skills) retries it for every registered
+                # silo. Rolling back the account instead would mean a
+                # check-then-userdel by name, which can delete an
+                # account an administrator recreated in between.
+                try:
+                    self._ops.install_silo_skill(name)
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "could not install the silo skill for %r; the "
+                        "next session-manager start retries it: %s",
+                        name, e)
+                # Issue this silo's user-relay bus-name grant. Without
+                # it qdistro-user-relay@<uid> is refused the name and
+                # exits 78, so cross-silo Send-To and the
+                # Firefox-containers cross-uid opt-in are dead for this
+                # silo — silently, at first use, long after create()
+                # reported success. So it is fatal here, and the useradd
+                # is rolled back rather than leaving a system user whose
+                # silo row was never saved.
+                try:
+                    self._ops.write_relay_policy(name, uid)
+                except Exception as e:  # noqa: BLE001
+                    try:
+                        self._ops.userdel(name)
+                    except Exception as undo:  # noqa: BLE001
+                        log.error(
+                            "rolling back useradd for %r after a relay "
+                            "policy failure also failed: %s", name, undo)
+                    raise SessionError(
+                        f"could not issue the user-relay D-Bus policy "
+                        f"for silo {name!r}: {e}") from e
+                # Link this silo's launcher unit. Same reasoning as the
+                # relay grant above, and the same failure shape: without
+                # it StartSilo has no unit to start, so the silo can never
+                # reach Active — and the broker refuses a cross-uid relay
+                # to any REGISTERED target that is not Active, which is a
+                # harder failure than having no row at all. Roll the
+                # useradd and the grant back rather than persist a row
+                # that can never be started.
+                try:
+                    self._ops.link_silo_launcher(name)
+                except Exception as e:  # noqa: BLE001
+                    # Roll back in the ONLY safe order: the grant first,
+                    # and the account ONLY if the grant is definitely
+                    # gone. A fragment carries a numeric user="<uid>";
+                    # deleting the account while its fragment survives
+                    # leaves a fragment naming a uid NSS cannot resolve,
+                    # and dbus-broker ABORTS on that at its next reload
+                    # (see write_relay_policy). Killing the system bus is
+                    # far worse than leaking a Linux account, so a failed
+                    # revocation keeps the account — which keeps the uid
+                    # resolvable — and asks for manual cleanup.
+                    #
+                    # The launcher sweep runs on BOTH revocation
+                    # outcomes. link_silo_launcher compensates its own
+                    # partial state, but its compensation tolerates an
+                    # unlink failure — so on a double failure a link can
+                    # still be on disk, and an early `raise` here would
+                    # leave account + fragment + link together.
+                    _link_path = (SILO_LAUNCHER_LINK_DIR /
+                                  SILO_LAUNCHER_LINK_FMT.format(name=name))
+                    _frag_path = RELAY_POLICY_DIR / relay_policy_filename(name)
+                    _link_left = False
+                    try:
+                        self._ops.unlink_silo_launcher(name)
+                    except Exception as undo:  # noqa: BLE001
+                        _link_left = True
+                        log.error(
+                            "could not remove the launcher link for %r "
+                            "while rolling back: %s — remove %s by hand",
+                            name, undo, _link_path)
+                    try:
+                        self._ops.remove_relay_policy(name)
+                    except Exception as undo:  # noqa: BLE001
+                        log.error(
+                            "could not revoke the relay grant for %r "
+                            "while rolling back a launcher-link failure "
+                            "(%s). KEEPING the Linux user: deleting it "
+                            "now would leave a fragment naming an "
+                            "unresolvable uid, which aborts dbus-broker "
+                            "at its next reload. Remove %s%s and the "
+                            "user %r by hand, in that order.",
+                            name, undo, _frag_path,
+                            f" and {_link_path}" if _link_left else "",
+                            name)
+                        raise SessionError(
+                            f"could not link the launcher unit for silo "
+                            f"{name!r} ({e}), and rolling back its relay "
+                            f"grant also failed ({undo}); the Linux user "
+                            f"was kept so the bus stays up — remove "
+                            f"{_frag_path} and the user {name!r} by hand, "
+                            f"in that order") from e
+                    try:
+                        self._ops.userdel(name)
+                    except Exception as undo:  # noqa: BLE001
+                        log.error(
+                            "rolling back the useradd for %r after a "
+                            "launcher-link failure also failed: %s",
+                            name, undo)
+                    raise SessionError(
+                        f"could not link the launcher unit for silo "
+                        f"{name!r}: {e}") from e
+                self._ops.make_state_dir(name, uid)
+                # Commit: the row only becomes visible now, so no reader —
+                # and no racing lifecycle op — can observe a silo whose
+                # account provisioning is still in flight.
+                with self._lock:
+                    silo = Silo(
+                        name=name, uid=int(uid), state=State.CREATED,
+                        autostart=bool(autostart),
+                        created_at=int(time.time()),
+                        last_change=int(time.time()),
+                        kind=KIND_TIER3_USER, launch=launch_norm,
+                        egress=egress_norm,
+                    )
+                    self._silos[name] = silo
+                    self.save()
+                    self._emit_change(silo.name, silo.state)
+                    return silo
+        finally:
+            with self._lock:
+                self._creating_inflight.pop(name, None)
+
+    @staticmethod
+    def _refuse_unless_deletable(silo: Silo) -> None:
+        """Refuse while the silo is anything other than Created or
+        Stopped — the admin must explicitly Stop it first."""
+        if silo.state not in (State.CREATED, State.STOPPED):
+            if silo.state in (State.STOPPING,):
+                msg = (f"silo {silo.name!r} is {silo.state}; "
+                       f"wait for it to reach Stopped")
+            elif silo.state == State.DELETING:
+                msg = (f"silo {silo.name!r} is {silo.state}; "
+                       f"the daemon may have crashed mid-delete")
+            else:
+                msg = (f"silo {silo.name!r} is {silo.state}; "
+                       f"stop it first")
+            raise SiloBusy(msg)
+
     def delete(self, name: str, caller: dict[str, Any] | None = None) -> None:
         try:
+            # Fast refusal BEFORE the account mutex: a delete racing a
+            # pending create must answer SiloBusy now, not after the other
+            # silo's minutes-long useradd drains _accounts_lock.
             with self._lock:
-                silo = self.get(name)
-                # Refuse while the silo is anything other than Created or
-                # Stopped — the admin must explicitly Stop it first.
-                if silo.state not in (State.CREATED, State.STOPPED):
-                    if silo.state in (State.STOPPING,):
-                        msg = (f"silo {silo.name!r} is {silo.state}; "
-                               f"wait for it to reach Stopped")
-                    elif silo.state == State.DELETING:
-                        msg = (f"silo {silo.name!r} is {silo.state}; "
-                               f"the daemon may have crashed mid-delete")
-                    else:
-                        msg = (f"silo {silo.name!r} is {silo.state}; "
-                               f"stop it first")
-                    raise SiloBusy(msg)
+                if name in self._creating_inflight:
+                    raise SiloBusy(
+                        f"silo {name!r} is still being created; retry "
+                        f"once its CreateSilo call returns")
+            # The whole teardown runs under _accounts_lock — the account
+            # transaction's single-writer mutex — but NOT under _lock:
+            # userdel -r on a big home tree can run for minutes, and the
+            # old all-under-_lock shape parked every other store method
+            # (including ListSilos answering a D-Bus query) behind it.
+            with self._accounts_lock:
+                with self._lock:
+                    # Recheck under the mutex: a create could have claimed
+                    # the name in the gap above.
+                    if name in self._creating_inflight:
+                        raise SiloBusy(
+                            f"silo {name!r} is still being created; retry "
+                            f"once its CreateSilo call returns")
+                    silo = self.get(name)
+                    self._refuse_unless_deletable(silo)
                 # Same preflight as create(). delete() removes this silo's
                 # fragment and reloads the bus; the reload is exactly what
                 # detonates an unrelated bad fragment. The purge normally
                 # removes the offending file itself — this only refuses when
                 # it could not, which is a filesystem problem the admin has
-                # to fix before any policy write is safe.
+                # to fix before any policy write is safe. Runs lock-free:
+                # its directory scan and NSS checks can stall, and
+                # _accounts_lock already keeps the fragment dir
+                # single-writer.
                 _rev, _unpurged = self._purge_unsafe_relay_fragments()
                 if _unpurged:
                     raise SessionError(
@@ -4548,7 +4658,13 @@ class _SiloStore:
                     # unrelated triggered a reload. Safe to do here: we only
                     # reach this line with nothing unsafe left on disk.
                     self._ops.reload_dbus()
-                self._transition(silo, State.DELETING)
+                with self._lock:
+                    # Re-validate before committing to DELETING: the purge
+                    # and reload above ran without _lock, and a start() or
+                    # in-flight stop could have moved the row meanwhile.
+                    silo = self._await_inflight_locked(name)
+                    self._refuse_unless_deletable(silo)
+                    self._transition(silo, State.DELETING)
                 try:
                     self._ops.cgroup_remove(silo.name)
                     # Idempotent egress/netns cleanup: stop() already tore it
@@ -4606,11 +4722,13 @@ class _SiloStore:
                                 "after a failed delete: %s — this silo cannot "
                                 "be started until it is relinked",
                                 silo.name, reissue)
-                    self._force_state(silo, State.STOPPED)
+                    with self._lock:
+                        self._force_state(silo, State.STOPPED)
                     raise SessionError(f"delete failed: {e}") from e
-                self._silos.pop(name, None)
-                self.save()
-                self._emit_change(silo.name, "Deleted")
+                with self._lock:
+                    self._silos.pop(name, None)
+                    self.save()
+                    self._emit_change(silo.name, "Deleted")
         except SessionError as e:
             decision = "deny" if isinstance(
                 e, (UnknownSilo, SiloBusy)) else "error"
@@ -5735,19 +5853,30 @@ class _SiloStore:
         Best-effort per silo: one unwritable fragment must not stop the
         daemon from starting. Returns (issued, revoked) silo names.
         """
-        # Held for the whole method, not just the snapshot. Today this runs
+        # _accounts_lock alone is held for the whole method. Today this runs
         # from autostart_pass() before the GLib main loop dispatches any
         # D-Bus call, so nothing can race it — but that is an accident of
         # startup ordering, and if it ever stopped being true a CreateSilo
         # landing between the snapshot and the orphan sweep would have its
-        # brand-new fragment deleted as an orphan. create()/delete() already
-        # serialise on this lock, so holding it here costs nothing.
-        with self._lock:
-            return self._reconcile_relay_policies_locked()
+        # brand-new fragment deleted as an orphan. _accounts_lock is the
+        # single-writer mutex every fragment mutation funnels through
+        # (create/delete hold it across their account transaction), so no
+        # tier3-user create/delete can interleave; _lock is only taken for
+        # the _silos snapshot inside the workers, never held across the
+        # directory scan, NSS checks, or the bus reload.
+        with self._accounts_lock:
+            return self._reconcile_relay_policies()
 
     def _purge_unsafe_relay_fragments(self) -> tuple[list[str], list[str]]:
         """Remove every generated policy fragment that is unsafe to leave on
-        disk. Returns (revoked, unpurged). The caller must hold `_lock`.
+        disk. Returns (revoked, unpurged).
+
+        Serialization: the caller must hold `_accounts_lock` (the create /
+        delete account transaction) or be the startup reconcile, so the
+        purge-then-write sequence in this directory is single-writer. The
+        `_silos` snapshot is taken under `_lock` internally — callers do NOT
+        hold `_lock` here, so the directory scan and its NSS lookups run
+        lock-free and cannot park unrelated store methods.
 
         "Unsafe" is not "wrong". A fragment can be out of date and perfectly
         inert; what makes one dangerous is that dbus-broker ABORTS when it
@@ -5762,8 +5891,12 @@ class _SiloStore:
         being non-empty means a dangerous file is still there and the caller
         must not write or reload: doing so is what sets it off.
         """
-        want = {s.name: s.uid for s in self._silos.values()
-                if s.kind == KIND_TIER3_USER}
+        with self._lock:
+            # Rows under a pending create() have no fragment yet — the
+            # account transaction writes it under the same _accounts_lock
+            # the caller holds — so _silos alone is the right `want` set.
+            want = {s.name: s.uid for s in self._silos.values()
+                    if s.kind == KIND_TIER3_USER}
         try:
             have = sorted(self._ops.list_relay_policies())
         except Exception as e:  # noqa: BLE001
@@ -5825,7 +5958,7 @@ class _SiloStore:
             "Remove /etc/dbus-1/system.d/" + RELAY_POLICY_PREFIX +
             "<name>.conf by hand and retry.")
 
-    def _reconcile_relay_policies_locked(self) -> tuple[list[str], list[str]]:
+    def _reconcile_relay_policies(self) -> tuple[list[str], list[str]]:
         """Two passes, in this order, and the order is the whole point.
 
         PASS 1 purges every fragment that is unsafe to leave on disk; PASS 2
@@ -5849,8 +5982,9 @@ class _SiloStore:
                       self._unsafe_fragment_error(unpurged))
             return (issued, revoked)
 
-        want = {s.name: s.uid for s in self._silos.values()
-                if s.kind == KIND_TIER3_USER}
+        with self._lock:
+            want = {s.name: s.uid for s in self._silos.values()
+                    if s.kind == KIND_TIER3_USER}
         try:
             have = set(self._ops.list_relay_policies())
         except Exception as e:  # noqa: BLE001
@@ -7042,10 +7176,16 @@ if dbus is not None:
 
         def _peer_uid(self, sender, conn) -> int:
             try:
+                # introspect=False: proxy construction otherwise round-trips
+                # an Introspect call on the main loop before the method call
+                # is even issued — an unbounded block in front of every
+                # privileged entry point.
                 bus_obj = conn.get_object("org.freedesktop.DBus",
-                                          "/org/freedesktop/DBus")
+                                          "/org/freedesktop/DBus",
+                                          introspect=False)
                 dbus_iface = dbus.Interface(bus_obj, "org.freedesktop.DBus")
-                return int(dbus_iface.GetConnectionUnixUser(sender))
+                return int(dbus_iface.GetConnectionUnixUser(sender,
+                                                          timeout=5.0))
             except Exception as e:  # noqa: BLE001
                 raise NotAuthorized(f"could not resolve caller uid: {e}") from e
 
@@ -7058,10 +7198,13 @@ if dbus is not None:
             caller: dict[str, Any] = {"uid": None, "pid": None, "exe": ""}
             try:
                 bus_obj = conn.get_object("org.freedesktop.DBus",
-                                          "/org/freedesktop/DBus")
+                                          "/org/freedesktop/DBus",
+                                          introspect=False)
                 dbus_iface = dbus.Interface(bus_obj, "org.freedesktop.DBus")
-                caller["uid"] = int(dbus_iface.GetConnectionUnixUser(sender))
-                pid = int(dbus_iface.GetConnectionUnixProcessID(sender))
+                caller["uid"] = int(dbus_iface.GetConnectionUnixUser(
+                    sender, timeout=5.0))
+                pid = int(dbus_iface.GetConnectionUnixProcessID(
+                    sender, timeout=5.0))
                 caller["pid"] = pid
                 try:
                     caller["exe"] = os.readlink(f"/proc/{pid}/exe")
@@ -7085,10 +7228,12 @@ if dbus is not None:
             pass
 
         def _emit_changed(self, name: str, state: str) -> None:
-            # Most store mutations run on the GLib thread. StopSilo teardown
-            # runs on a worker so the main loop can keep answering ListSilos
-            # while the silo is transiently Stopping; marshal its signals back
-            # to the D-Bus thread.
+            # The store calls this from whichever thread is running the
+            # mutation. Read-only methods stay on the GLib thread, but every
+            # mutating op (create/delete/start/stop/freeze/resume/dispose/
+            # import/egress/pod launch) is worker-offloaded, so the signal
+            # must be marshalled back to the D-Bus thread that owns the
+            # connection.
             if threading.current_thread() is threading.main_thread():
                 self.SiloChanged(name, state)
                 return
@@ -7116,33 +7261,80 @@ if dbus is not None:
                 log.exception("audit refusal record failed (action=%s "
                               "silo=%s)", action, name)
 
+        def _run_offloaded(self, op: str, work, reply, error,
+                           unexpected_error=None) -> None:
+            """Run ``work()`` on a daemon worker thread and deliver the
+            method's reply or error via ``GLib.idle_add``, so a slow
+            kernel/subprocess/NSS/fsync call inside the store can never
+            park the D-Bus dispatch thread.
+
+            ``work`` is a zero-arg callable returning the method's
+            out-args as a tuple (``()`` for out_signature=""; only the out
+            values cross threads, never a live object).
+
+            Every exception is answered — the async_callbacks contract: a
+            handler that raised without invoking either callback would
+            strand the client until the D-Bus timeout. SessionError maps
+            to its typed error name; anything else maps through
+            ``unexpected_error`` (default: the same SessionManager1.Generic
+            translation the synchronous handlers used)."""
+
+            map_unexpected = unexpected_error or _to_dbus_exception
+
+            def on_worker() -> None:
+                try:
+                    out = work()
+                except SessionError as exc:
+                    dbus_exc = _to_dbus_exception(exc)
+                    GLib.idle_add(lambda: error(dbus_exc) or False)
+                    return
+                except Exception as exc:  # noqa: BLE001 — persistence and
+                    # OS adapters can still raise unexpected failures (for
+                    # example OSError while saving silos.yaml); log and
+                    # answer rather than stranding the caller.
+                    log.exception("%s failed unexpectedly", op)
+                    dbus_exc = map_unexpected(exc)
+                    GLib.idle_add(lambda: error(dbus_exc) or False)
+                    return
+                GLib.idle_add(lambda: reply(*out) or False)
+
+            threading.Thread(
+                target=on_worker, name=op, daemon=True).start()
+
         @dbus.service.method(BUS_NAME, in_signature="si", out_signature="",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
-        def CreateSilo(self, name, uid, sender=None, conn=None):
+        def CreateSilo(self, name, uid, _reply, _error,
+                       sender=None, conn=None):
             caller = self._peer_caller(sender, conn)
             try:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("create", name, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
-                self.store.create(str(name), int(uid), caller=caller)
-                log.info("CreateSilo name=%s uid=%d", name, int(uid))
-            except Exception as e:  # noqa: BLE001 — raw create() stays raw
+                _error(_to_dbus_exception(e))
+                return
+            name_s, uid_i = str(name), int(uid)
+
+            def create_on_worker() -> tuple:
                 # store.create() is the lifecycle method that audits and then
                 # re-raises the original class (OSError included), so unit
-                # tests still see that class. The bus boundary is what turns
-                # a non-SessionError into SessionManager1.Generic. start()
-                # already wraps into SessionError; delete()'s teardown path
-                # does too. Sibling methods are left on `except SessionError`.
-                raise _to_dbus_exception(e) from e
+                # tests still see that class. _run_offloaded's unexpected
+                # mapper is what turns a non-SessionError into
+                # SessionManager1.Generic at the bus boundary.
+                self.store.create(name_s, uid_i, caller=caller)
+                log.info("CreateSilo name=%s uid=%d", name_s, uid_i)
+                return ()
+
+            self._run_offloaded(
+                f"create-silo-{name_s}", create_on_worker, _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="ssss", out_signature="",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
         def CreateTemplateSilo(self, name, workload, template_silo, network,
-                               sender=None, conn=None):
+                               _reply, _error, sender=None, conn=None):
             """Create a tier2-template silo (fableplan2 task 04): launch-owner
             is admin, state is the binding's state_path (not a fresh user).
             argv defaults to [workload]; a richer argv is set via silos.yaml."""
@@ -7151,24 +7343,30 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("create", name, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
-                self.store.create(
-                    str(name), TIER2_LAUNCH_OWNER_UID, kind=KIND_TIER2_TEMPLATE,
-                    launch={"workload": str(workload),
-                            "template_silo": str(template_silo),
-                            "network": str(network), "argv": []},
-                    caller=caller)
+                _error(_to_dbus_exception(e))
+                return
+            name_s = str(name)
+            launch = {"workload": str(workload),
+                      "template_silo": str(template_silo),
+                      "network": str(network), "argv": []}
+
+            def create_on_worker() -> tuple:
+                self.store.create(name_s, TIER2_LAUNCH_OWNER_UID,
+                                  kind=KIND_TIER2_TEMPLATE,
+                                  launch=launch, caller=caller)
                 log.info("CreateTemplateSilo name=%s workload=%s silo=%s",
-                         name, workload, template_silo)
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
+                         name_s, workload, template_silo)
+                return ()
+
+            self._run_offloaded(
+                f"create-silo-{name_s}", create_on_worker, _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="ssss", out_signature="",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
         def CreateTier3sSilo(self, name, workload, template_silo, network,
-                             sender=None, conn=None):
+                             _reply, _error, sender=None, conn=None):
             """Create a tier3s (gVisor runsc) silo (tier3s/CONTRACT.md §6):
             Experimental, dev profile only, network "none" only, launch-owner
             admin. Its own method so CreateTemplateSilo keeps its tier-2 kind.
@@ -7179,39 +7377,51 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("create", name, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
-                self.store.create(
-                    str(name), ADMIN_UID, kind=KIND_TIER3S,
-                    launch={"workload": str(workload),
-                            "template_silo": str(template_silo),
-                            "network": str(network), "argv": []},
-                    caller=caller)
+                _error(_to_dbus_exception(e))
+                return
+            name_s = str(name)
+            launch = {"workload": str(workload),
+                      "template_silo": str(template_silo),
+                      "network": str(network), "argv": []}
+
+            def create_on_worker() -> tuple:
+                self.store.create(name_s, ADMIN_UID, kind=KIND_TIER3S,
+                                  launch=launch, caller=caller)
                 log.info("CreateTier3sSilo name=%s workload=%s binding=%s",
-                         name, workload, template_silo)
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
+                         name_s, workload, template_silo)
+                return ()
+
+            self._run_offloaded(
+                f"create-silo-{name_s}", create_on_worker, _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
-        def DeleteSilo(self, name, sender=None, conn=None):
+        def DeleteSilo(self, name, _reply, _error, sender=None, conn=None):
             caller = self._peer_caller(sender, conn)
             try:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("delete", name, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
-                self.store.delete(str(name), caller=caller)
-                log.info("DeleteSilo name=%s", name)
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
+                _error(_to_dbus_exception(e))
+                return
+            name_s = str(name)
+
+            def delete_on_worker() -> tuple:
+                self.store.delete(name_s, caller=caller)
+                log.info("DeleteSilo name=%s", name_s)
+                return ()
+
+            self._run_offloaded(
+                f"delete-silo-{name_s}", delete_on_worker, _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="ss", out_signature="",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
-        def SetSiloEgress(self, name, egress, sender=None, conn=None):
+        def SetSiloEgress(self, name, egress, _reply, _error,
+                          sender=None, conn=None):
             """Set a tier3-user silo's per-silo netns egress policy
             (task 3). `egress` is "none" | "direct" | "wg:<name>", or the
             empty string to clear it back to legacy host networking (no
@@ -7221,36 +7431,48 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("egress-configure", name, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
-                # D-Bus has no null in a string arg; "" clears to legacy.
-                policy = None if str(egress) == "" else str(egress)
-                self.store.set_egress(str(name), policy, caller=caller)
-                log.info("SetSiloEgress name=%s egress=%s", name, egress)
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
+                _error(_to_dbus_exception(e))
+                return
+            name_s = str(name)
+            # D-Bus has no null in a string arg; "" clears to legacy.
+            policy = None if str(egress) == "" else str(egress)
+
+            def set_egress_on_worker() -> tuple:
+                self.store.set_egress(name_s, policy, caller=caller)
+                log.info("SetSiloEgress name=%s egress=%s", name_s, egress)
+                return ()
+
+            self._run_offloaded(
+                f"egress-silo-{name_s}", set_egress_on_worker, _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
-        def StartSilo(self, name, sender=None, conn=None):
+        def StartSilo(self, name, _reply, _error, sender=None, conn=None):
             caller = self._peer_caller(sender, conn)
             try:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("start", name, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
-                self.store.start(str(name), caller=caller)
-                log.info("StartSilo name=%s", name)
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
+                _error(_to_dbus_exception(e))
+                return
+            name_s = str(name)
+
+            def start_on_worker() -> tuple:
+                self.store.start(name_s, caller=caller)
+                log.info("StartSilo name=%s", name_s)
+                return ()
+
+            self._run_offloaded(
+                f"start-silo-{name_s}", start_on_worker, _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="sss", out_signature="s",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
         def LaunchPodApp(self, container, workload, argv_json,
-                         sender=None, conn=None):
+                         _reply, _error, sender=None, conn=None):
             """Launch one container app under the root-launcher topology;
             returns the 32-hex launch token (== the secctx instance-id the
             window will carry, which the shell matches to resolve its launch
@@ -7262,13 +7484,17 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("podapp-launch", container, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
-                return self.store.launch_podapp(
-                    str(container), str(workload), str(argv_json),
-                    caller=caller)
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
+                _error(_to_dbus_exception(e))
+                return
+            container_s = str(container)
+
+            def launch_on_worker() -> tuple:
+                return (self.store.launch_podapp(
+                    container_s, str(workload), str(argv_json),
+                    caller=caller),)
+
+            self._run_offloaded(
+                f"podapp-{container_s}", launch_on_worker, _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="si", out_signature="",
                              async_callbacks=("_reply", "_error"),
@@ -7287,81 +7513,71 @@ if dbus is not None:
             silo_name = str(name)
             grace = int(grace_s)
 
-            def reply_on_main() -> bool:
-                _reply()
-                return False
+            def stop_on_worker() -> tuple:
+                self.store.stop(silo_name, grace, caller=caller)
+                log.info("StopSilo name=%s grace_s=%d", silo_name, grace)
+                return ()
 
-            def schedule_error(dbus_exc) -> None:
-                def error_on_main() -> bool:
-                    _error(dbus_exc)
-                    return False
+            def unexpected(exc: Exception) -> dbus.DBusException:
+                # StopSilo predates the shared Generic mapping; keep its
+                # .Failed surface so existing callers/tests are unchanged.
+                return dbus.DBusException(
+                    f"stop of silo {silo_name!r} failed: {exc}",
+                    name=f"{BUS_NAME}.Failed")
 
-                GLib.idle_add(error_on_main)
-
-            def stop_on_worker() -> None:
-                try:
-                    self.store.stop(silo_name, grace, caller=caller)
-                    log.info("StopSilo name=%s grace_s=%d", silo_name, grace)
-                except SessionError as exc:
-                    schedule_error(_to_dbus_exception(exc))
-                    return
-                except Exception as exc:  # noqa: BLE001
-                    # Persistence and OS adapters can still raise unexpected
-                    # failures (for example OSError while saving silos.yaml).
-                    # Never strand the async D-Bus caller without either
-                    # callback; keep typed SessionError names above and map
-                    # everything else to one generic service failure.
-                    log.exception("StopSilo name=%s failed unexpectedly",
-                                  silo_name)
-                    schedule_error(dbus.DBusException(
-                        f"stop of silo {silo_name!r} failed: {exc}",
-                        name=f"{BUS_NAME}.Failed",
-                    ))
-                    return
-                GLib.idle_add(reply_on_main)
-
-            threading.Thread(
-                target=stop_on_worker,
-                name=f"stop-silo-{silo_name}",
-                daemon=True,
-            ).start()
+            self._run_offloaded(
+                f"stop-silo-{silo_name}", stop_on_worker, _reply, _error,
+                unexpected_error=unexpected)
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
-        def FreezeSilo(self, name, sender=None, conn=None):
+        def FreezeSilo(self, name, _reply, _error, sender=None, conn=None):
             caller = self._peer_caller(sender, conn)
             try:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("freeze", name, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
-                self.store.freeze(str(name), caller=caller)
-                log.info("FreezeSilo name=%s", name)
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
+                _error(_to_dbus_exception(e))
+                return
+            name_s = str(name)
+
+            def freeze_on_worker() -> tuple:
+                self.store.freeze(name_s, caller=caller)
+                log.info("FreezeSilo name=%s", name_s)
+                return ()
+
+            self._run_offloaded(
+                f"freeze-silo-{name_s}", freeze_on_worker, _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
-        def ResumeSilo(self, name, sender=None, conn=None):
+        def ResumeSilo(self, name, _reply, _error, sender=None, conn=None):
             caller = self._peer_caller(sender, conn)
             try:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("resume", name, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
-                self.store.resume(str(name), caller=caller)
-                log.info("ResumeSilo name=%s", name)
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
+                _error(_to_dbus_exception(e))
+                return
+            name_s = str(name)
+
+            def resume_on_worker() -> tuple:
+                self.store.resume(name_s, caller=caller)
+                log.info("ResumeSilo name=%s", name_s)
+                return ()
+
+            self._run_offloaded(
+                f"resume-silo-{name_s}", resume_on_worker, _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="b",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
-        def Dispose(self, name, sender=None, conn=None):
+        def Dispose(self, name, _reply, _error, sender=None, conn=None):
             """Explicitly tear down one disposable container by name (the M4
             taskbar 'Dispose' action). Admin-only and name-validated: the store
             rejects anything that is not a well-formed disp-* name, so this is a
@@ -7372,18 +7588,24 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("dispose", name, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
-                ok = bool(self.store.dispose(str(name), caller=caller))
-                log.info("Dispose name=%s -> %s", name, ok)
-                return ok
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
+                _error(_to_dbus_exception(e))
+                return
+            name_s = str(name)
+
+            def dispose_on_worker() -> tuple:
+                ok = bool(self.store.dispose(name_s, caller=caller))
+                log.info("Dispose name=%s -> %s", name_s, ok)
+                return (ok,)
+
+            self._run_offloaded(
+                f"dispose-{name_s}", dispose_on_worker, _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="b",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
-        def DisposeByToken(self, token, sender=None, conn=None):
+        def DisposeByToken(self, token, _reply, _error,
+                           sender=None, conn=None):
             """Tear down a disposable by its per-spawn launch token — the join
             the taskbar uses when it holds a window's ``instanceId`` but not the
             container name (instanceId == the container's qdistro_tier2_token
@@ -7395,18 +7617,24 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("dispose-by-token", token, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
-                ok = bool(self.store.dispose_by_token(str(token), caller=caller))
-                log.info("DisposeByToken token=%s -> %s", token, ok)
-                return ok
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
+                _error(_to_dbus_exception(e))
+                return
+            token_s = str(token)
+
+            def dispose_on_worker() -> tuple:
+                ok = bool(self.store.dispose_by_token(token_s, caller=caller))
+                log.info("DisposeByToken token=%s -> %s", token_s, ok)
+                return (ok,)
+
+            self._run_offloaded(
+                f"dispose-token-{token_s}", dispose_on_worker, _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="u",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
-        def DisposeByWorkflow(self, workflow_id, sender=None, conn=None):
+        def DisposeByWorkflow(self, workflow_id, _reply, _error,
+                              sender=None, conn=None):
             """Tear down EVERY disposable a workflow step spawned, keyed on the
             shared qdistro_lease_workflow=<id> label — the surface a workflow
             runner calls on step completion (07-disposables-plan §Lifecycle
@@ -7421,19 +7649,24 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("dispose-by-workflow", workflow_id, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
-                n = int(self.store.dispose_by_workflow(str(workflow_id),
-                                                       caller=caller))
-                log.info("DisposeByWorkflow id=%s -> reaped %d", workflow_id, n)
-                return n
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
+                _error(_to_dbus_exception(e))
+                return
+            wf_s = str(workflow_id)
+
+            def dispose_on_worker() -> tuple:
+                n = int(self.store.dispose_by_workflow(wf_s, caller=caller))
+                log.info("DisposeByWorkflow id=%s -> reaped %d", wf_s, n)
+                return (n,)
+
+            self._run_offloaded(
+                f"dispose-wf-{wf_s}", dispose_on_worker, _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
-        def ImportFromDisposable(self, token, sender=None, conn=None):
+        def ImportFromDisposable(self, token, _reply, _error,
+                                 sender=None, conn=None):
             """Promote a disposable's staged artifacts back into the requesting
             silo (07-disposables-plan P2, the D7 copy-exception) and return the
             lineage receipt as JSON. Admin-only and fail-closed: the store
@@ -7449,15 +7682,19 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("dispose-export", token, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
+                _error(_to_dbus_exception(e))
+                return
+            token_s = str(token)
+
+            def import_on_worker() -> tuple:
                 receipt = self.store.import_from_disposable(
-                    str(token), caller=caller)
+                    token_s, caller=caller)
                 log.info("ImportFromDisposable token=%s -> %d file(s)",
-                         token, len(receipt.get("files", [])))
-                return json.dumps(receipt)
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
+                         token_s, len(receipt.get("files", [])))
+                return (json.dumps(receipt),)
+
+            self._run_offloaded(
+                f"import-disp-{token_s}", import_on_worker, _reply, _error)
 
         @dbus.service.method(BUS_NAME, in_signature="", out_signature="s")
         def ListSilos(self):
