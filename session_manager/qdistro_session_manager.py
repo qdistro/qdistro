@@ -1373,7 +1373,13 @@ class _SystemOps:
                     shutil.copyfileobj(sf, df)
                 try:
                     xnames = os.listxattr(sfd)
-                except OSError:
+                except OSError as e:
+                    # copystat's suppression list for listxattr: anything
+                    # else (EIO, EACCES) propagates so the copy fails and
+                    # the backup survives unrestored metadata.
+                    if e.errno not in (errno.ENOTSUP, errno.ENODATA,
+                                       errno.EINVAL):
+                        raise
                     xnames = []
                 for xname in xnames:
                     try:
@@ -1436,12 +1442,19 @@ class _SystemOps:
                     continue
                 try:
                     os.chown(sub, int(uid), int(uid))
+                except OSError as e:
+                    # A failed fchown is logged — but the subtree is still
+                    # walked: skipping recursion would leave its children
+                    # unchowned too, which the old walk never did.
+                    log.warning("could not chown %s to uid %d: %s",
+                                child_disp, uid, e)
+                try:
                     _SystemOps._chown_tree_fd(sub, uid, child_disp)
                 except OSError as e:
-                    # A failed fchown or unreadable descendant is logged and
-                    # the siblings still processed — the old walk suppressed
-                    # per-entry failures the same way. Only the home root's
-                    # hardening is fatal.
+                    # An unreadable descendant is logged and the siblings
+                    # still processed — the old walk suppressed per-entry
+                    # failures the same way. Only the home root's hardening
+                    # is fatal.
                     log.warning("could not chown %s to uid %d: %s",
                                 child_disp, uid, e)
                 finally:

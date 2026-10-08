@@ -1251,6 +1251,10 @@ class TestHomeRecoveryIsDescriptorRelative:
             sm.os.close(dir_fd)
         assert "could not chown" in caplog.text
         assert "g" in chowned, "a descendant chown failure stopped siblings"
+        # A failed dir chown must NOT skip its subtree: d/f is inside the
+        # directory whose fchown raised, and the old walk still reached it.
+        assert "f" in chowned, \
+            "a failed directory chown skipped its descendants' chown"
 
     def test_regular_file_xattrs_are_preserved(self, tmp_path):
         # copy2 runs copystat, which carries xattrs; the descriptor-relative
@@ -1264,6 +1268,22 @@ class TestHomeRecoveryIsDescriptorRelative:
             pytest.skip("tmp filesystem does not support user xattrs")
         assert sm._SystemOps._merge_missing(src, dst) is True
         assert sm.os.getxattr(dst / "f", "user.review") == b"keep-me"
+
+    def test_a_xattr_list_failure_is_incomplete_not_silent(
+            self, monkeypatch, tmp_path):
+        # "Cannot read the attribute list" is not "no attributes": treating
+        # an EIO as an empty list would report the copy complete and let the
+        # backup be deleted with metadata unrestored.
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        (src / "f").write_text("x\n")
+
+        def eio_listxattr(*a, **k):
+            raise OSError(5, "I/O error")
+        monkeypatch.setattr(sm.os, "listxattr", eio_listxattr)
+
+        assert sm._SystemOps._merge_missing(src, dst) is False, \
+            "an unreadable xattr list was treated as a complete restore"
 
 
 class TestSuccessfulConversionDoesNotChownThroughLinks:
