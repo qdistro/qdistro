@@ -3656,6 +3656,12 @@ class _SiloStore:
         # times out (or after the same silo restarts under a different tunnel)
         # cannot re-attach stale addr/route onto a torn-down/repurposed netns.
         self._watcher_gen: dict[str, int] = {}
+        # Serializes a watcher's whole pop → terminate → join so the shutdown
+        # reap cannot slip between the pop and the terminate and return while
+        # an `ip monitor` child is still alive (astra r1 P2: daemon watcher-
+        # stop threads do not block process exit). Leaf lock: the locked body
+        # calls only ops.stop_link_watcher and acquires no other lock.
+        self._watchers_lock = threading.Lock()
         # Durable forensic sink. None disables auditing (e.g. tests that
         # don't care). Audit writes never raise into the lifecycle path.
         self._audit = audit
@@ -3993,9 +3999,16 @@ class _SiloStore:
             self._watchers[name] = handle
 
     def _stop_egress_watcher(self, name: str) -> None:
+        with self._watchers_lock:
+            self._stop_egress_watcher_locked(name)
+
+    def _stop_egress_watcher_locked(self, name: str) -> None:
         # Bump the generation FIRST so any callback that fires while we tear the
         # watcher down (or that is already mid-flight past the join timeout)
-        # sees the mismatch and no-ops before touching netns state.
+        # sees the mismatch and no-ops before touching netns state. The whole
+        # pop → terminate → join runs under _watchers_lock: a daemon-thread
+        # stop must finish (or at least deliver terminate) before the shutdown
+        # reap may observe an empty _watchers and let the process exit.
         self._watcher_gen[name] = self._watcher_gen.get(name, 0) + 1
         handle = self._watchers.pop(name, None)
         if handle is None:
@@ -4008,13 +4021,17 @@ class _SiloStore:
     def stop_all_egress_watchers(self) -> None:
         """Daemon-shutdown hook: reap every live `ip monitor link` watcher so
         a direct SIGTERM/KeyboardInterrupt does not leave the children running
-        (previously only systemd's cgroup cleanup reached them). Iterates a
-        snapshot; each _stop_egress_watcher pops its entry and bumps the
+        (previously only systemd's cgroup cleanup reached them). Holds
+        _watchers_lock across the whole drain, so a watcher-stop already in
+        flight on a teardown worker finishes before this returns — daemon
+        threads do not block process exit, so "handle popped, terminate not
+        yet sent" must not be observable here. Each pop also bumps the
         generation so a callback still in flight self-cancels. Best-effort:
         a watcher that refuses to die is logged, never raised — shutdown must
         finish."""
-        for name in list(self._watchers):
-            self._stop_egress_watcher(name)
+        with self._watchers_lock:
+            for name in list(self._watchers):
+                self._stop_egress_watcher_locked(name)
 
     def _teardown_egress_devices(self, ns: str, uid: int,
                                  policy: EgressPolicy) -> None:

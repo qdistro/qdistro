@@ -15,6 +15,7 @@ import json
 import signal
 import subprocess
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -2327,6 +2328,46 @@ class TestShutdownWatcherReap:
         monkeypatch.setattr(ops, "stop_link_watcher", boom)
         egress_store.stop_all_egress_watchers()
         assert len(calls) == 2
+
+    def test_reap_waits_for_inflight_worker_stop(self, egress_store, ops,
+                                                 monkeypatch):
+        # astra r1 P2: _stop_egress_watcher pops the handle before
+        # terminating; a teardown worker paused in between must not let the
+        # shutdown reap observe an empty dict and return with the
+        # `ip monitor` child never terminated (daemon threads don't block
+        # exit). The reap has to wait out the in-flight stop.
+        egress_store.create("work", 2000, egress="wg:work")
+        egress_store.start("work")
+        assert len(ops.watchers) == 1
+        entered = threading.Event()
+        release = threading.Event()
+        terminated = []
+
+        def blocking_stop(handle):
+            entered.set()                    # inside the in-flight stop
+            release.wait(5)
+            terminated.append(handle)
+            ops.watchers.remove(handle)
+        monkeypatch.setattr(ops, "stop_link_watcher", blocking_stop)
+        worker = threading.Thread(
+            target=egress_store._stop_egress_watcher, args=("work",),
+            daemon=True)
+        worker.start()
+        assert entered.wait(5)               # worker holds the stop mid-flight
+        reaped = threading.Event()
+
+        def reap():
+            egress_store.stop_all_egress_watchers()
+            reaped.set()
+        threading.Thread(target=reap, daemon=True).start()
+        assert not reaped.wait(2), \
+            "reap returned while a watcher-stop was still in flight"
+        release.set()
+        assert reaped.wait(5)
+        worker.join(5)
+        assert len(terminated) == 1
+        assert not ops.watchers
+        assert not egress_store._watchers
 
 
 class TestEgressReviewFixes:
