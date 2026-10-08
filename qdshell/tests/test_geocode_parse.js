@@ -47,6 +47,10 @@ const MISS = JSON.stringify({ generationtime_ms: 0.8198023 });
         "empty results array must parse to null");
     assert.strictEqual(parse(JSON.stringify({ results: [{ name: "x" }] })), null,
         "result without latitude must parse to null");
+    assert.strictEqual(parse(JSON.stringify({ results: [{ latitude: 5 }] })), null,
+        "latitude without longitude must parse to null");
+    assert.strictEqual(parse(JSON.stringify({ results: [{ latitude: "x", longitude: 5 }] })), null,
+        "non-numeric latitude must parse to null");
 })();
 
 (function testMalformed() {

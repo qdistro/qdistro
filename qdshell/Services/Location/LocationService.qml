@@ -176,7 +176,7 @@ Singleton {
   function parseGeocodeResponse(responseText) {
     var geoData = JSON.parse(responseText);
     var first = geoData.results && geoData.results[0];
-    if (first && first.latitude != null) {
+    if (first && isFinite(first.latitude) && isFinite(first.longitude)) {
       return {
         latitude: first.latitude,
         longitude: first.longitude,
