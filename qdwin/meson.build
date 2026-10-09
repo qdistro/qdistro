@@ -1408,6 +1408,19 @@ test('idle-inhibit-behaviour',
   ],
 )
 
+# ext-idle-notify secondary timers are one-shot: a deadline that expires
+# under an inhibitor hold is lost until the last-hold-release path
+# redelivers it. Splices the real timer/signal/deactivate bodies from
+# qdwin.c and drives them against real libwayland timers. Skips (77)
+# without cc/wayland-server.
+test('idle-notify-inhibit-release',
+  python3,
+  suite: 'source_invariant',
+  args: [
+    files('qdwin/test_idle_notify_inhibit_release.py'),
+  ],
+)
+
 # iso2/10 E2 toplevel-destroy dependent invariant: BOTH destroy paths (real
 # xdg_toplevel and nested proxy) must release the chrome popup, the move-drag
 # and every exported view_stream through one shared routine, while tl->view is

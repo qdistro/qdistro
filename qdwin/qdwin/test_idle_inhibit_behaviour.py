@@ -109,9 +109,24 @@ struct weston_view { struct wl_list surface_link; };
 struct qdwin {
 	struct weston_compositor *compositor;
 	struct wl_list idle_inhibitors;
+	struct wl_list idle_notifications;
 	struct wl_event_source *idle_inhibit_recheck_timer;
 	bool idle_inhibit_disabled;
 };
+/* deactivate's last-hold-release path walks the notification list. */
+struct qdwin_idle_notification {
+	struct qdwin *qdwin;
+	struct wl_resource *resource;
+	uint32_t timeout_ms;
+	uint64_t last_activity_msec;
+	int is_idle;
+	int ignore_inhibit;
+	int expired_while_inhibited;
+	struct wl_event_source *timer;
+	struct wl_list link;
+};
+static void
+ext_idle_notification_v1_send_idled(struct wl_resource *r) { (void)r; }
 struct qdwin_idle_inhibitor;
 static void qdwin_idle_inhibitor_sync(struct qdwin_idle_inhibitor *inh);
 static void qdwin_idle_inhibitor_deactivate(struct qdwin_idle_inhibitor *inh);
@@ -269,6 +284,7 @@ int main(void)
 	c.idle_time = 300;
 	c.idle_source = fake_idle_source;
 	wl_list_init(&q.idle_inhibitors);
+	wl_list_init(&q.idle_notifications);
 	/* An unrelated owner already holds the counter; none of our
 	 * arithmetic may disturb it (codex r3 #5). */
 	c.idle_inhibit = baseline;
@@ -511,7 +527,8 @@ int main(void)
 
 WESTON_FNS = ["weston_surface_is_mapped", "weston_surface_start_mapping",
               "weston_surface_map", "weston_surface_unmap"]
-QDWIN_FNS = [("void", "qdwin_idle_inhibitor_activate"),
+QDWIN_FNS = [("void", "qdwin_idle_notifications_deliver_expired"),
+             ("void", "qdwin_idle_inhibitor_activate"),
              ("void", "qdwin_idle_inhibitor_deactivate"),
              ("void", "qdwin_idle_inhibitors_release_all"),
              ("bool", "qdwin_idle_inhibit_recheck_schedule"),
