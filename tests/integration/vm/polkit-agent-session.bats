@@ -131,6 +131,16 @@ POL"
     vm_run "systemctl show -p MainPID --value qci-polkit-login.service"
     subject_pid="$(_guest_value)"
     [[ "$subject_pid" =~ ^[1-9][0-9]*$ ]] || fail_loud "no subject pid in the login session (got '$subject_pid')"
+    # pkcheck resolves --process client-side: it reads the subject's uid
+    # from /proc/<pid>/status and submits it inside the unix-process
+    # subject. A systemd-run child stays uid 0 for several ms between the
+    # manager's fork and the exec-context setuid (the PAM login session
+    # registers during that window), and host load stretches it further.
+    # A probe landing inside hands polkitd a uid-0 subject, which is
+    # implicitly authorized — silent instant grant, no agent round trip.
+    # Poll for the settled uid before probing.
+    wait_until_succeeds "awk '/^Uid:/ { exit (\$2 == 1000 ? 0 : 1) }' /proc/$subject_pid/status" 15 \
+        || fail_loud "subject pid $subject_pid never settled to uid 1000"
     vm_run "systemd-run --unit=qci-polkit-subject -p StandardOutput=file:/run/qci-pkcheck.out \
             -p StandardError=file:/run/qci-pkcheck.out /bin/sh -c \
             'pkcheck --action-id org.qdistro.test.agentsession --process $subject_pid --allow-user-interaction; echo PKCHECK_RC=\$?'"
