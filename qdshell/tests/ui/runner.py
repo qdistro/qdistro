@@ -634,8 +634,12 @@ def journal_checkpoint_vm(session: VMSession, *, timeout: float = 20.0
         "exit 63; }\n"
         'CUR=$(printf "%s\\n" "$OUT" | sed -n "s/^-- cursor: //p" | tail -1)\n'
         '[ -n "$CUR" ] || { echo "unit journal cursor unavailable" >&2; exit 63; }\n'
-        "COUT=$(journalctl -n0 --show-cursor --no-pager "
-        "SYSLOG_IDENTIFIER=systemd-coredump 2>/dev/null) "
+        # The coredump cursor is a journal POSITION, not a filtered count:
+        # take it from the unfiltered system journal. A SYSLOG_IDENTIFIER=
+        # systemd-coredump filter that matches zero entries emits
+        # "-- No entries --" and no cursor, which would error every test
+        # on a VM with no prior coredumps.
+        "COUT=$(journalctl -n0 --show-cursor --no-pager 2>/dev/null) "
         "|| { echo 'coredump journal read failed' >&2; exit 63; }\n"
         'SCUR=$(printf "%s\\n" "$COUT" | sed -n "s/^-- cursor: //p" | tail -1)\n'
         '[ -n "$SCUR" ] || { echo "coredump journal cursor unavailable" >&2; '
@@ -690,16 +694,21 @@ def qs_crash_evidence_vm(session: VMSession, checkpoint: tuple, *,
         f"--after-cursor {shlex.quote(cursor)} 2>/dev/null) "
         "|| { echo 'unit journal read failed' >&2; exit 63; }\n"
         'NEWCUR=$(printf "%s\\n" "$OUT" | sed -n "s/^-- cursor: //p" | tail -1)\n'
-        '[ -n "$NEWCUR" ] || { echo "unit journal read returned no cursor" '
-        ">&2; exit 63; }\n"
+        # Same empty-window semantics as NEWSCUR below: no new unit
+        # lines => no cursor => keep the old position. The position is a
+        # PYTHON value — interpolate it (quoted); `$cursor` is not a
+        # shell variable and `set -u` would abort.
+        f'[ -n "$NEWCUR" ] || NEWCUR={shlex.quote(cursor)}\n'
         "COUT=$(journalctl --no-pager --show-cursor "
         f"--after-cursor {shlex.quote(scursor)} "
         "SYSLOG_IDENTIFIER=systemd-coredump 2>/dev/null) "
         "|| { echo 'coredump journal read failed' >&2; exit 63; }\n"
         'NEWSCUR=$(printf "%s\\n" "$COUT" | sed -n "s/^-- cursor: //p" '
         "| tail -1)\n"
-        '[ -n "$NEWSCUR" ] || { echo "coredump journal read returned no '
-        'cursor" >&2; exit 63; }\n'
+        # Zero new coredump entries => journalctl emits no cursor; the
+        # position is unchanged, so keep the OLD cursor (the next probe
+        # rescans the same tail). A failed read still exits 63 above.
+        f'[ -n "$NEWSCUR" ] || NEWSCUR={shlex.quote(scursor)}\n'
         "echo '@@EVID@@'\n"
         f'printf "%s\\n" "$OUT" | grep -aiE {shlex.quote(pat)} || true\n'
         "echo '@@CORE@@'\n"

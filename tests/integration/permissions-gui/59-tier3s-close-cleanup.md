@@ -160,13 +160,15 @@ window is gone from the desktop.
 container in the silo's store, the runsc state tree, the per-launch dir,
 the control record, and both bridge pids — the complete residue list.
 
-### S4 — the silo launches again (via the documented stop-then-start)
+### S4 — a bare `StartSilo` reconciles the dead silo and relaunches
 
-`state=Active` is intent, so a bare `StartSilo` after an app-exit is a
-deliberate idempotent no-op (`session_manager.py` — "reports success
-without launching anything"; relaunch is stop-then-start). Verify that
-contract explicitly — the call succeeds but nothing launches — then take
-the documented path: `StopSilo`, then `StartSilo` for real.
+`state=Active` is intent, not runtime truth. Since `a6642fb46`
+(start-active-liveness) a bare `StartSilo` on an Active-intent silo
+verifies liveness first; a verifiably dead workload is recorded Stopped
+and relaunched in the same call — no `StopSilo` needed. Verify that
+contract explicitly: the call must produce real launch evidence (a
+pid-1 start job and the `spawn-tier3s: running` line since the call's
+cursor), then a fresh token and a fresh toplevel handle.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
@@ -174,34 +176,27 @@ source /var/tmp/t3s-dl/tier3s-guest-lib.sh
 D=/tmp/t3s-59.d
 SILO=t3scls; UNIT=$(unit_of "$SILO")
 TOK1=$(sed -n 's/^TOK=//p' "$D/tok")
-# Contract check: StartSilo while state=Active returns success yet must
-# NOT start the unit (idempotent no-op, not a hidden relaunch). A state
-# poll alone could miss a transient start+finish between samples, so the
-# durable check is journal evidence: zero launcher start jobs since the
-# call (units_started_since counts pid-1 "Starting" lines), alongside a
-# bounded poll for the unit leaving inactive.
+# Contract check: StartSilo while state=Active + observed-dead must
+# RELAUNCH, not return a silent no-op. Durable evidence: pid-1 logged a
+# launcher start job since the call's cursor, then the unit reaching
+# 'spawn-tier3s: running'. A cursor scoped BEFORE the call keeps a stale
+# observation from the first launch out of the waits below.
 cur=$(journal_cursor)
 sm StartSilo s "$SILO" >/dev/null \
-    || { echo "FAIL: StartSilo on Active silo errored"; exit 1; }
-unit_came_up() { [ "$(unit_state "$UNIT")" != inactive ]; }
-wait_for 10 unit_came_up \
-    && { echo "FAIL: bare StartSilo relaunched the unit — the no-op contract changed; update this scenario"; unit_log "$UNIT" "$cur" | tail -10; exit 1; }
-[ "$(units_started_since "$cur" "qdistro-tier3s-silo@$SILO[.]service")" = 0 ] \
-    || { echo "FAIL: a launcher start job ran after bare StartSilo — the no-op contract changed; update this scenario"; unit_log "$UNIT" "$cur" | tail -10; exit 1; }
-obs_stopped() { silo_observed "$1" | grep -q '^stopped'; }
-obs_stopped "$SILO" \
-    || { echo "FAIL: observed status drifted: $(silo_observed "$SILO")"; exit 1; }
-# Documented relaunch: stop the stale intent, then start. A fresh
-# cursor scopes the handle read so a stale qdshell observation from the
-# first launch can't satisfy the wait or be captured as the new handle.
-sm StopSilo si "$SILO" 10 >/dev/null
-[ "$(silo_state "$SILO")" = Stopped ] || { echo "FAIL: not Stopped after StopSilo"; exit 1; }
-cur2=$(journal_cursor)
-TOK2=$(up_gui_silo "$SILO")
-[ -n "$TOK2" ] || { echo "FAIL: relaunch did not come up"; exit 1; }
+    || { echo "FAIL: StartSilo on dead-Active silo errored"; exit 1; }
+started_since() { [ "$(units_started_since "$cur" "qdistro-tier3s-silo@$SILO[.]service")" -ge 1 ]; }
+wait_for 60 started_since \
+    || { echo "FAIL: bare StartSilo did not launch a start job — reconcile-on-start regressed"; exit 1; }
+wait_for 150 bash -c "journalctl -u '$UNIT' --no-pager -o cat --after-cursor='$cur' | grep -q 'spawn-tier3s: running: '" \
+    || { echo "FAIL: relaunch never reached running"; unit_log "$UNIT" "$cur" | tail -20; exit 1; }
+TOK2=$(token_of_unit "$UNIT")
+[ -n "$TOK2" ] || { echo "FAIL: no launch token after relaunch"; exit 1; }
 [ "$TOK2" != "$TOK1" ] || { echo "FAIL: relaunch reused token $TOK1"; exit 1; }
 echo "TOK=$TOK2" > "$D/tok2"
-t3s_window_handle "$SILO" "$cur2" > "$D/handle2"
+snapshot_launch "$TOK2"; snapshot_bridge "$TOK2"
+wait_for 90 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat --after-cursor='$cur' | grep -q '\\[tier3s\\] toplevel observed silo=$SILO '" \
+    || { echo "FAIL: qdshell never observed the relaunched toplevel"; exit 1; }
+t3s_window_handle "$SILO" "$cur" > "$D/handle2"
 H1=$(cat "$D/handle"); H2=$(cat "$D/handle2")
 [ -n "$H2" ] && [ "$H2" != "$H1" ] \
     || { echo "FAIL: relaunch handle $H2 is empty or stale (was $H1)"; exit 1; }
@@ -275,17 +270,12 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
   `observed_status`, refreshed ~every 10 s; it must read `stopped` with
   `launcher inactive and workload boundary observed absent`. Asserting
   `state != Active` here would be wrong.
-- **Relaunch after app-exit needs `StopSilo` first** — `start()` from
-  `Active` is an idempotent no-op that returns success without launching
-  (see the `StartNotCancelled` comment in `session_manager.py`). The
-  scenario pins that no-op in S4 so a future semantic change (e.g.
-  reconcile-on-start) fails loudly instead of passing silently.
-- **Product finding surfaced by this scenario:** a user who closes a
-  tier3s window and relaunches via `StartSilo` alone gets a silent
-  no-op — no window, no error. Whether `StartSilo` should reconcile an
-  `Active`-intent/`stopped`-observed silo is a product question; this
-  test pins today's documented contract and the finding is tracked in
-  `todo/open-followups.md`.
+- **Relaunch after app-exit is `StartSilo` alone** — since
+  `a6642fb46` (start-active-liveness), `start()` from `Active` probes
+  runtime liveness; a verifiably dead silo is recorded Stopped and
+  relaunched in the same call. S4 pins that reconcile-on-start contract
+  (a pid-1 start job and the running line must appear since the call)
+  so a regression back to silent no-op fails loudly.
 - **Silo accounts persist across launches** by design (the store and
   subuid rows are the silo's); `assert_all_clear` does not flag the
   account, only launch residue.
