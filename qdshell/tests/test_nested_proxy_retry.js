@@ -15,11 +15,18 @@ const BrokerGate = require('../Services/Qdshell/BrokerGate.js');
 const qml = fs.readFileSync(
     path.join(__dirname, '../Services/Qdwin/Qdwin.qml'), 'utf8');
 
+const entry = (g, handle) =>
+    g.c._nestedProxyRetries.find(e => e.handle === handle);
+
 function gate({checkPermission, bound = true} = {}) {
     const decisions = [], log = [], timerCalls = [];
+    // Deliberately NO restart(): the product must only start() the shared
+    // timer — a restart on every defer would let new arrivals postpone all
+    // existing retries forever. If the code calls restart(), this stub
+    // throws and the test goes red.
     const timer = {
         running: false,
-        restart() { this.running = true; timerCalls.push('restart'); },
+        start() { this.running = true; timerCalls.push('start'); },
         stop() { this.running = false; timerCalls.push('stop'); },
     };
     const binding = { bound };
@@ -27,19 +34,16 @@ function gate({checkPermission, bound = true} = {}) {
         const script = checkPermission.slice();
         binding.checkPermission = () =>
             script.length > 1 ? script.shift() : script[0];
-        binding.nestedProxyDecision = (handle, decision, reason) =>
-            decisions.push({handle, decision, reason});
-    } else {
-        binding.nestedProxyDecision = (handle, decision, reason) =>
-            decisions.push({handle, decision, reason});
     }
+    binding.nestedProxyDecision = (handle, decision, reason) =>
+        decisions.push({handle, decision, reason});
     const line = (...parts) => log.push(parts.join(' '));
     const ctx = vm.createContext({
         BrokerGate, Date,
         Logger: {i: line, d: line, w: line, e: line},
         qdwinBinding: binding,
         nestedProxyRetryTimer: timer,
-        _nestedProxyRetries: {},
+        _nestedProxyRetries: [],
         _nestedProxyMaxAttempts: 4,
         _nestedProxyRetryIntervalMs: 2000,
     });
@@ -62,7 +66,7 @@ const GARBAGE = {exitCode: 0, stdout: 'not busctl output\n'};
     g.c._decideNestedProxy(7, 'org.qd.app', 1000);
     assert.deepStrictEqual(g.decisions,
         [{handle: 7, decision: 2, reason: 'broker-unavailable'}]);
-    assert.strictEqual(g.c._nestedProxyRetries[7].attempt, 1);
+    assert.strictEqual(entry(g, 7).attempt, 1);
     assert.ok(g.timer.running, 'retry timer must be armed after a defer');
     assert.match(g.gateLines()[0],
         /verdict=defer reason=broker-unavailable attempt=1\/4/);
@@ -73,13 +77,12 @@ const GARBAGE = {exitCode: 0, stdout: 'not busctl output\n'};
 {
     const g = gate({checkPermission: [FAIL, ALLOW]});
     g.c._decideNestedProxy(7, 'org.qd.app', 1000);
-    // Backdate the due time so the entry is eligible on the tick.
-    g.c._nestedProxyRetries[7].due = 0;
+    entry(g, 7).due = 0;  // backdate: entry is eligible on the tick
     g.c._retryNestedProxyDecisions();
     assert.deepStrictEqual(g.decisions,
         [{handle: 7, decision: 2, reason: 'broker-unavailable'},
          {handle: 7, decision: 0, reason: 'broker:allow'}]);
-    assert.deepStrictEqual(Object.keys(g.c._nestedProxyRetries), []);
+    assert.strictEqual(g.c._nestedProxyRetries.length, 0);
     assert.ok(!g.timer.running, 'retry timer must stop once empty');
     assert.match(g.gateLines().pop(), /verdict=allow reason=broker:allow/);
 }
@@ -90,19 +93,18 @@ const GARBAGE = {exitCode: 0, stdout: 'not busctl output\n'};
 {
     const calls = [];
     const g = gate({checkPermission: [FAIL]});
-    const orig = g.binding.checkPermission;
     g.binding.checkPermission = (...a) => { calls.push(a); return FAIL; };
     g.c._decideNestedProxy(9, 'app', 1000);           // attempt 1
     for (let i = 0; i < 3; i++) {                     // attempts 2-4
-        if (g.c._nestedProxyRetries[9])
-            g.c._nestedProxyRetries[9].due = 0;
+        if (entry(g, 9))
+            entry(g, 9).due = 0;
         g.c._retryNestedProxyDecisions();
     }
     assert.strictEqual(calls.length, 4, 'exactly maxAttempts broker calls');
     assert.strictEqual(g.decisions.filter(d => d.decision === 2).length, 3);
     assert.deepStrictEqual(g.decisions[g.decisions.length - 1],
         {handle: 9, decision: 1, reason: 'broker-unavailable'});
-    assert.deepStrictEqual(Object.keys(g.c._nestedProxyRetries), []);
+    assert.strictEqual(g.c._nestedProxyRetries.length, 0);
     assert.match(g.gateLines().pop(),
         /verdict=deny reason=broker-unavailable attempt=4\/4/);
 }
@@ -113,7 +115,7 @@ const GARBAGE = {exitCode: 0, stdout: 'not busctl output\n'};
     g.c._decideNestedProxy(3, 'app', 1000);
     assert.deepStrictEqual(g.decisions,
         [{handle: 3, decision: 1, reason: 'broker:deny'}]);
-    assert.deepStrictEqual(Object.keys(g.c._nestedProxyRetries), []);
+    assert.strictEqual(g.c._nestedProxyRetries.length, 0);
     assert.ok(!g.timer.running);
 }
 
@@ -125,7 +127,7 @@ const GARBAGE = {exitCode: 0, stdout: 'not busctl output\n'};
     g.c._retryNestedProxyDecisions();
     assert.deepStrictEqual(g.decisions,
         [{handle: 4, decision: 1, reason: 'broker-malformed'}]);
-    assert.deepStrictEqual(Object.keys(g.c._nestedProxyRetries), []);
+    assert.strictEqual(g.c._nestedProxyRetries.length, 0);
 }
 
 // ensures: an unknown verdict word from the broker is terminal deny.
@@ -134,7 +136,7 @@ const GARBAGE = {exitCode: 0, stdout: 'not busctl output\n'};
     g.c._decideNestedProxy(5, 'app', 1000);
     assert.deepStrictEqual(g.decisions,
         [{handle: 5, decision: 1, reason: 'broker:pending'}]);
-    assert.deepStrictEqual(Object.keys(g.c._nestedProxyRetries), []);
+    assert.strictEqual(g.c._nestedProxyRetries.length, 0);
 }
 
 // ensures: a missing checkPermission method (permanent condition) is a
@@ -144,32 +146,31 @@ const GARBAGE = {exitCode: 0, stdout: 'not busctl output\n'};
     g.c._decideNestedProxy(6, 'app', 1000);
     assert.deepStrictEqual(g.decisions,
         [{handle: 6, decision: 1, reason: 'broker-unavailable'}]);
-    assert.deepStrictEqual(Object.keys(g.c._nestedProxyRetries), []);
+    assert.strictEqual(g.c._nestedProxyRetries.length, 0);
     assert.ok(!g.timer.running);
 }
 
 // ensures: retries are scoped to the compositor connection — an unbound
-// binding drops the whole map and stops the timer (handles may be reused
+// binding drops the whole list and stops the timer (handles may be reused
 // by a restarted compositor for different proxies).
 {
     const g = gate({checkPermission: [FAIL, ALLOW]});
     g.c._decideNestedProxy(8, 'app', 1000);
-    assert.ok(g.c._nestedProxyRetries[8], 'entry pending');
+    assert.ok(entry(g, 8), 'entry pending');
     g.binding.bound = false;
     g.c._retryNestedProxyDecisions();
-    assert.deepStrictEqual(Object.keys(g.c._nestedProxyRetries), []);
+    assert.strictEqual(g.c._nestedProxyRetries.length, 0);
     assert.ok(!g.timer.running);
     assert.strictEqual(g.decisions.filter(d => d.decision === 0).length, 0,
         'no allow may be sent on a dead connection');
 }
 
 // ensures: forgetting a handle on toplevel removal clears its retry even
-// when the map entry is the only state (no windows row needed), and a
+// when the list entry is the only state (no windows row needed), and a
 // later tick issues no broker call for it.
 {
     let calls = 0;
-    const g = gate({checkPermission: [FAIL, FAIL]});
-    const orig = g.binding.checkPermission;
+    const g = gate({checkPermission: [FAIL]});
     g.binding.checkPermission = (...a) => { calls++; return FAIL; };
     g.c._decideNestedProxy(10, 'app', 1000);
     g.c._forgetNestedProxyRetry(10);
@@ -179,19 +180,47 @@ const GARBAGE = {exitCode: 0, stdout: 'not busctl output\n'};
 }
 
 // ensures: one eligible handle per tick — a second pending proxy waits for
-// the next tick so the synchronous call can't multiply the shell stall.
+// the next tick so the synchronous call can't multiply the shell stall;
+// and the tick round-robins: after a re-defer the entry moves to the back,
+// so the NEXT tick serves the other handle (numeric-key ordering in a map
+// would serve the lower handle every tick instead).
 {
-    let calls = 0;
+    const served = [];
     const g = gate({checkPermission: [FAIL]});
-    g.binding.checkPermission = (...a) => { calls++; return FAIL; };
+    g.binding.checkPermission = () => FAIL;
+    g.binding.nestedProxyDecision = (handle, decision, reason) =>
+        g.decisions.push({handle, decision, reason});
     g.c._decideNestedProxy(11, 'a', 1000);
     g.c._decideNestedProxy(12, 'b', 1000);
-    assert.strictEqual(calls, 2);
-    g.c._nestedProxyRetries[11].due = 0;
-    g.c._nestedProxyRetries[12].due = 0;
+    for (const e of g.c._nestedProxyRetries) e.due = 0;
+    // Wrap _decideNestedProxy to record which handle each retry serves.
+    const orig = g.c._decideNestedProxy;
+    g.c._decideNestedProxy = (h, a, u) => { served.push(h); return orig(h, a, u); };
+    for (let i = 0; i < 4; i++) {
+        for (const e of g.c._nestedProxyRetries) e.due = 0;
+        g.c._retryNestedProxyDecisions();
+    }
+    assert.deepStrictEqual(served, [11, 12, 11, 12],
+        'retries must round-robin, not starve the later handle');
+    assert.strictEqual(g.c._nestedProxyRetries.length, 2);
+}
+
+// ensures: deferring a NEW proxy does not restart the shared timer and
+// postpone already-queued retries — start() is only taken while stopped.
+{
+    const g = gate({checkPermission: [FAIL]});
+    g.c._decideNestedProxy(20, 'a', 1000);   // arms timer
+    g.c._decideNestedProxy(21, 'b', 1000);   // second defer while running
+    g.c._decideNestedProxy(22, 'c', 1000);
+    assert.deepStrictEqual(g.timerCalls, ['start'],
+        'a new defer must not restart/reset the shared retry timer');
+    // ...and the first-queued entry is still served first on the tick.
+    const served = [];
+    const orig = g.c._decideNestedProxy;
+    g.c._decideNestedProxy = (h, a, u) => { served.push(h); return orig(h, a, u); };
+    for (const e of g.c._nestedProxyRetries) e.due = 0;
     g.c._retryNestedProxyDecisions();
-    assert.strictEqual(calls, 3, 'only one handle serviced per tick');
-    assert.ok(g.c._nestedProxyRetries[11] && g.c._nestedProxyRetries[12]);
+    assert.deepStrictEqual(served, [20]);
 }
 
 // --- Source-level wiring the vm extraction cannot cover ----------------
