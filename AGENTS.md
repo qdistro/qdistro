@@ -124,7 +124,7 @@ sanctioned visual driver pinned explicitly in `QCI_AGENT_CMD`; see
 Run **one `qci full` / GUI run at a time per host**. Per-run VM and golden
 names are generated uniquely, but runs share fixed resources: the
 `qdistro-template` domain in the user's libvirt session, the base images in the
-image directory (`baseweed-baked.qcow2`, `baseweed-enforcing-baked.qcow2`), and
+image directory (`baseweed-baked-<…>.qcow2`, `baseweed-enforcing-baked.qcow2`), and
 host CPU/memory. Host ports are probed per run (`scripts/vm/lib/host-port.sh`
 or a kernel-assigned port) so several test users can share one host. Before
 starting one, check what is running:
