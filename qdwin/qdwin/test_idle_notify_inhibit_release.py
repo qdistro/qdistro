@@ -237,7 +237,6 @@ static long pump(struct wl_event_loop *loop, int ms)
 } while (0)
 
 /* idle_time = 1s, so a timeout_ms of 1500 arms a 500 ms secondary. */
-#define SECONDARY(n) ((n).timeout_ms - 1000)
 
 int main(void)
 {
@@ -306,29 +305,36 @@ int main(void)
 	WAKE(&c);
 
 	/* 4. release before the secondary deadline must not fire early.
-	 *    The premise oracle is the marker itself: timers cannot fire
-	 *    early, so an unset expired_while_inhibited here proves the
-	 *    deadline had not lapsed at release — immune to scheduler
-	 *    stalls, which merely make the deadline pass more certainly. */
+	 *    Premise proof needs BOTH oracles (sol r2): the unset marker
+	 *    shows the callback has not dispatched, and the monotonic clock
+	 *    at release must still be short of the deadline — a stall can
+	 *    pass the deadline with the callback still queued. */
 	make_notification(&n3, &q, 3, 2200, 0);   /* secondary ~1200 ms */
-	IDLE(&c);
-	qdwin_idle_inhibitor_activate(&inh);
-	pump(loop, 500);
 	{
-		int not_fired_yet = !n3.expired_while_inhibited &&
-				    stub_idled[3] == 0;
-		qdwin_idle_inhibitor_deactivate(&inh);
-		if (!not_fired_yet || pump_errors > 0) {
-			/* The deadline lapsed under the hold and the
-			 * release delivered it — the case-1 path, not this
-			 * one. Report the case as untested rather than
-			 * letting it pass or fail on a broken premise. */
-			printf("INCONCLUSIVE: case 4's 'not yet' premise was "
-			       "not met this run\n");
-			inconclusive = 1;
-		} else {
-			CHECK(stub_idled[3] == 0,
-			      "case 4: release delivered a notification early");
+		long arm_at = now_ms();
+		IDLE(&c);
+		qdwin_idle_inhibitor_activate(&inh);
+		pump(loop, 500);
+		{
+			int not_fired_yet = !n3.expired_while_inhibited &&
+					    stub_idled[3] == 0;
+			long released_in = now_ms() - arm_at;
+			qdwin_idle_inhibitor_deactivate(&inh);
+			if (!not_fired_yet || released_in >= 1200 ||
+			    pump_errors > 0) {
+				/* The deadline lapsed under the hold (fired
+				 * or merely queued) — the release went down
+				 * the case-1 path; report, don't judge. */
+				printf("INCONCLUSIVE: case 4's 'not yet' "
+				       "premise was not met this run "
+				       "(fired=%d, released_in=%ld ms)\n",
+				       !not_fired_yet, released_in);
+				inconclusive = 1;
+			} else {
+				CHECK(stub_idled[3] == 0,
+				      "case 4: release delivered a "
+				      "notification early");
+			}
 		}
 	}
 	pump(loop, 900);   /* total ~1400 ms, past the 1200 ms deadline */
