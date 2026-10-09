@@ -23,8 +23,8 @@ def main():
     scope = sys.argv[3] if len(sys.argv) > 3 else "once"
     bus = dbus.SystemBus()
     obj = bus.get_object(BUS, PATH)
-    obj.DecideRequest(rid, decision, scope, dbus_interface=BUS)
-    print(f"decided: id={rid} decision={decision} scope={scope}")
+    result = obj.DecideRequest(rid, decision, scope, dbus_interface=BUS)
+    print(f"decided: id={rid} decision={decision} scope={scope} result={result}")
     return 0
 
 

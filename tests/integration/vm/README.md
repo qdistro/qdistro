@@ -116,6 +116,18 @@ for the snapshot and RPM caches.
 
 ## Maintenance
 
+### Driver numbers are not unique — cite by full name
+
+The `sNN-*.sh` driver numbers were allocated per-subsystem and several
+are double-booked today; the number alone does not identify a driver.
+Known collisions (as of 2026-10): `s40` (secctx vs tier2-hardening),
+`s48` (focus-aware-clear vs tier5-close-cleanup), `s49`
+(clipboard-focus-gate-journal vs tier5-graceful-shutdown), `s60`
+(launcher-podapp-click vs removable-media vs tier3-lineage-register),
+`s63` (session-manager-enforcing vs tier5-loopback-lineage-register).
+Reserve and reference drivers by **full filename**, and check
+`ls tests/integration/vm/s<num>-*` before claiming a number.
+
 When a new probe lands in `scripts/vm/`, add a matching
 @test here. The test body should:
 

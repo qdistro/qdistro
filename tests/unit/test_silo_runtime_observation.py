@@ -34,7 +34,13 @@ def test_unresolved_start_remains_unknown_and_undeletable(tmp_path):
     calls = []
     ops.systemctl_start = calls.append
     store.start('work')
-    assert calls == []
+    # The retry probes liveness first: observe_silo above reports
+    # 'stopped' — no pending job, inactive unit, empty workload cgroup —
+    # proof the queued start never materialized, so the retry relaunches
+    # (the old silent no-op was the defect) and the flag clears on the
+    # way through STOPPED.
+    assert calls == ['qdshell-session-work@2000.service']
+    assert store.get('work').start_unresolved is False
 
 
 def test_generation_discards_late_probe_and_list_remains_responsive(tmp_path):

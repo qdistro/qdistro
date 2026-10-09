@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from . import runner
+from . import fixtures, runner
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,11 @@ class DegradedCase:
     close_cmd: list
     expectation: str
     service: str
+    # Guest bash snippets (runner.guest_sh_vm): setup runs before the panel
+    # opens, teardown runs in finally after it closes. Used to INDUCE the
+    # degraded condition on VMs that aren't naturally degraded.
+    setup_guest: tuple = ()
+    teardown_guest: tuple = ()
 
 
 DEGRADED_CASES = [
@@ -37,8 +42,12 @@ DEGRADED_CASES = [
                  "panel_bluetooth_degraded.md", "no Bluetooth adapter / BT off"),
     DegradedCase("network", ["network", "togglePanel"], ["network", "togglePanel"],
                  "panel_network_degraded.md", "offline network"),
+    # qdwin VMs ship an hda codec + PipeWire, so audio is NOT naturally
+    # degraded here — the absence is induced (and restored) per case.
     DegradedCase("audio", ["audio", "togglePanel"], ["audio", "togglePanel"],
-                 "panel_audio_degraded.md", "no PipeWire / no audio devices"),
+                 "panel_audio_degraded.md", "no PipeWire / no audio devices",
+                 setup_guest=(fixtures.AUDIO_DEGRADE,),
+                 teardown_guest=(fixtures.AUDIO_RESTORE,)),
     DegradedCase("battery", ["battery", "togglePanel"], ["battery", "togglePanel"],
                  "panel_battery_degraded.md", "no battery"),
     DegradedCase("media", ["media", "toggle"], ["media", "toggle"],
@@ -69,11 +78,22 @@ DEGRADED_CASES = [
 def test_panel_degraded(vm_session, case):
     import time
     s = vm_session
-    runner.ipc_vm(s, *case.open_cmd)
-    time.sleep(1.2)
     png = runner.ARTIFACTS_DIR / f"panel_{case.id}_degraded.png"
+    teardown_errs = []
     try:
-        runner.screenshot_vm(s, png)
+        for cmd in case.setup_guest:
+            res = runner.guest_sh_vm(s, cmd)
+            assert res.returncode == 0, (
+                f"degraded-state inducement for '{case.id}' failed "
+                f"(rc={res.returncode}): {res.stderr.strip()[:300]}"
+            )
+        runner.ipc_vm(s, *case.open_cmd)
+        # Panels that auto-close on empty (TrayDrawerPanel) animate shut; the
+        # capture must outlast the transition or it judges a half-rendered
+        # frame. Settle by pixel-stability, not a fixed sleep — the
+        # transition length is host-load-dependent (observed >2.5s under
+        # nested-KVM load on 2026-10-08).
+        runner.settle_frame_vm(s, png)
         actual = runner.describe(png)
         # Shell still alive (a panel that crashed the process fails this).
         runner.ipc_vm(s, "bar", "showBar")
@@ -83,6 +103,20 @@ def test_panel_degraded(vm_session, case):
             time.sleep(0.5)
         except Exception:
             pass
+        for cmd in case.teardown_guest:
+            res = runner.guest_cleanup_vm(s, cmd)
+            if res.returncode != 0:
+                teardown_errs.append(
+                    f"rc={res.returncode}: {res.stderr.strip()[:200]}")
+        # A failed restore is a failure, not a warning: leftover induced
+        # state silently contaminates every later case. Raised inside the
+        # finally so a capture failure still chains as __context__ rather
+        # than the restore error being skipped when the body raised.
+        if teardown_errs:
+            raise RuntimeError(
+                f"degraded teardown for '{case.id}' failed: "
+                + "; ".join(teardown_errs)
+            )
 
     assert png.exists()
     if not actual.strip():

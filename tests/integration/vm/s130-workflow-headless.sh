@@ -142,6 +142,8 @@ provision_key() {  # vault $VAULT, tag sign-key, holds a fresh ed25519 key
     d=$(mktemp -d /run/s130-key.XXXXXX)
     ssh-keygen -t ed25519 -N '' -q -C s130-wfhl -f "$d/key" || { fail "ssh-keygen failed"; finish; }
     KEY_FP=$(ssh-keygen -lf "$d/key.pub" | awk '{print $2}')
+    # An empty KEY_FP would make every *"$KEY_FP"* match below vacuous.
+    case "$KEY_FP" in SHA256:*) ;; *) fail "no fingerprint from ssh-keygen: [$KEY_FP]"; finish ;; esac
     KEY_MID=$(sed -n 3p "$d/key")            # a body line of the private key
     runuser -u admin -- qdistro-pwd-admin lock "$VAULT" >/dev/null 2>&1 || true
     rm -f "/var/lib/qdistro/vaults/$VAULT.vault"
@@ -326,7 +328,16 @@ case "$SOCK" in
     "$SECRETS_ROOT"/ssh-*/agent.sock) pass "wf02: per-run agent socket exists while the process lives ($SOCK)" ;;
     *) fail "wf02: no agent.sock under $SECRETS_ROOT: [$SOCK] runs=[$(runs_of wfhl-git-sign)]"; finish ;;
 esac
-FP=$(SSH_AUTH_SOCK="$SOCK" ssh-add -l 2>&1)
+# The agent binds its socket before deliver() loads the key, so sock
+# existence is not key readiness — poll the CONTENT until the fingerprint
+# shows up (bounded; a missing key after the deadline is a real failure,
+# same assertion as before).
+FP=""
+for _ in $(seq 1 40); do
+    FP=$(SSH_AUTH_SOCK="$SOCK" ssh-add -l 2>&1)
+    case "$FP" in *"$KEY_FP"*) break ;; esac
+    sleep 0.25
+done
 case "$FP" in
     *"$KEY_FP"*) pass "wf02: the agent holds the vault key (fingerprint matches)" ;;
     *) fail "wf02: agent key list [$FP] lacks $KEY_FP" ;;

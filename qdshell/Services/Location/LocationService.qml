@@ -12,6 +12,7 @@ Singleton {
   property string locationFile: Quickshell.env("NOCTALIA_WEATHER_FILE") || (Settings.cacheDir + "location.json")
   property int weatherUpdateFrequency: 30 * 60 // 30 minutes expressed in seconds
   property bool isFetchingWeather: false
+  property string lastError: ""
 
   readonly property alias data: adapter
 
@@ -96,6 +97,7 @@ Singleton {
     adapter.name = "";
     adapter.weatherLastFetch = 0;
     adapter.weather = null;
+    root.lastError = "";
     update();
   }
 
@@ -139,6 +141,7 @@ Singleton {
       root.stableLongitude = adapter.longitude;
       root.stableName = `${name}, ${country}`;
       root.coordinatesReady = true;
+      root.lastError = "";
 
       isFetchingWeather = false;
       Logger.i("Location", "Coordinates ready");
@@ -168,18 +171,34 @@ Singleton {
     }
   }
 
+  // Pure parse of a geocoding-api.open-meteo.com /v1/search body into
+  // {latitude, longitude, name, country}; null when no usable result.
+  function parseGeocodeResponse(responseText) {
+    var geoData = JSON.parse(responseText);
+    var first = geoData.results && geoData.results[0];
+    if (first && isFinite(first.latitude) && isFinite(first.longitude)) {
+      return {
+        latitude: first.latitude,
+        longitude: first.longitude,
+        name: first.name,
+        country: first.country
+      };
+    }
+    return null;
+  }
+
   // Query geocoding API to convert location name to coordinates
   function geocodeLocation(locationName, callback, errorCallback) {
     Logger.d("Location", "Geocoding location name");
-    var geoUrl = "https://api.qdshell.dev/geocode?city=" + encodeURIComponent(locationName);
+    var geoUrl = "https://geocoding-api.open-meteo.com/v1/search?name=" + encodeURIComponent(locationName) + "&count=1&language=en&format=json";
     var xhr = new XMLHttpRequest();
     xhr.onreadystatechange = function () {
       if (xhr.readyState === XMLHttpRequest.DONE) {
         if (xhr.status === 200) {
           try {
-            var geoData = JSON.parse(xhr.responseText);
-            if (geoData.lat != null) {
-              callback(geoData.lat, geoData.lng, geoData.name, geoData.country);
+            var loc = parseGeocodeResponse(xhr.responseText);
+            if (loc) {
+              callback(loc.latitude, loc.longitude, loc.name, loc.country);
             } else {
               errorCallback("Location", "could not resolve location name");
             }
@@ -215,6 +234,7 @@ Singleton {
             root.stableLatitude = data.latitude = weatherData.latitude.toString();
             root.stableLongitude = data.longitude = weatherData.longitude.toString();
             root.coordinatesReady = true;
+            root.lastError = "";
 
             isFetchingWeather = false;
             Logger.d("Location", "Cached weather to disk - stable coordinates updated");
@@ -233,6 +253,7 @@ Singleton {
   // --------------------------------
   function errorCallback(module, message) {
     Logger.e(module, message);
+    root.lastError = message;
     isFetchingWeather = false;
   }
 

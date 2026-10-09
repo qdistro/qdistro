@@ -293,9 +293,13 @@ noct_screenshot_awake /tmp/05-step1-awake.png
 ```bash
 # Cursor before the idle wait so Step 4's clean-log + wake-remap checks scope to
 # THIS idle/wake cycle, not a stale line in a --since '1 minute ago' window.
-"$QDWIN_VM_EXEC" "$VMNAME" \
-  "runuser -l admin -c \"journalctl --user -u qdwin-compositor.service -n0 --show-cursor 2>/dev/null\" \
-     | sed -n 's/^-- cursor: //p' > /tmp/05-wake.cur"
+# Base64-wrapped: embedded quotes in a vm-exec payload break qga JSON parsing.
+B64=$(base64 -w0 <<'EOF'
+runuser -l admin -c 'journalctl --user -u qdwin-compositor.service -n0 --show-cursor 2>/dev/null' \
+    | sed -n 's/^-- cursor: //p' > /tmp/05-wake.cur
+EOF
+)
+"$QDWIN_VM_EXEC" "$VMNAME" "echo $B64 | base64 -d | bash"
 # 60s display-off timeout (1-minute minimum) + grace; no input this period.
 # DPMS verdict comes from sysfs, NOT a screenshot: while the output is
 # DPMS-off the compositor suspends repaint, so the shell-capture path
@@ -367,9 +371,14 @@ atomic EINVAL SKIP. On the capable-host path (that record absent), the
 error-line assert below is unchanged.
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" 'cur=$(cat /tmp/05-wake.cur 2>/dev/null)
+# Base64-wrapped: the inner runuser -c quoting would break qga JSON parsing.
+B64=$(base64 -w0 <<'EOF'
+cur=$(cat /tmp/05-wake.cur 2>/dev/null)
 [ -n "$cur" ] || { echo "FAIL: missing pre-idle/wake compositor cursor"; exit 1; }
-runuser -l admin -c "journalctl --user -u qdwin-compositor.service --after-cursor \"$cur\" --no-pager"' \
+runuser -l admin -c "journalctl --user -u qdwin-compositor.service --after-cursor \"$cur\" --no-pager"
+EOF
+)
+"$QDWIN_VM_EXEC" "$VMNAME" "echo $B64 | base64 -d | bash" \
  > "${QCI_SCENARIO_TMPDIR:-/tmp}/05-weston.log"
 ```
 

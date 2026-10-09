@@ -22,7 +22,10 @@ Two layers:
 from __future__ import annotations
 
 import ast
+import errno
 import math
+import threading
+import time
 import types
 
 import pytest
@@ -837,7 +840,7 @@ class TestHomeRecoveryHardening:
 
         def boom(*a, **k):
             raise PermissionError(13, "nope")
-        monkeypatch.setattr(sm.shutil, "copy2", boom)
+        monkeypatch.setattr(sm._SystemOps, "_copy_reg_fd", boom)
 
         self._ops()._restore_plain_home(home, 2000)
         assert home.stat().st_mode & 0o777 == 0o700, \
@@ -856,7 +859,7 @@ class TestHomeRecoveryHardening:
         monkeypatch.setattr(
             sm, "Path",
             lambda *a: tmp_path / str(__import__("pathlib").Path(*a)).lstrip("/"))
-        monkeypatch.setattr(sm.shutil, "copy2",
+        monkeypatch.setattr(sm._SystemOps, "_copy_reg_fd",
                             lambda *a, **k: (_ for _ in ()).throw(
                                 PermissionError(13, "nope")))
         self._ops()._restore_plain_home(home, 2000)
@@ -996,7 +999,7 @@ class TestMergeMissingIsRecursiveAndDoesNotDereference:
         src, dst = tmp_path / "b", tmp_path / "h"
         src.mkdir(); dst.mkdir()
         (src / "f").write_text("x\n")
-        monkeypatch.setattr(sm.shutil, "copy2",
+        monkeypatch.setattr(sm._SystemOps, "_copy_reg_fd",
                             lambda *a, **k: (_ for _ in ()).throw(OSError(5, "io")))
         assert sm._SystemOps._merge_missing(src, dst) is False
 
@@ -1036,6 +1039,254 @@ class TestMergeMissingIsRecursiveAndDoesNotDereference:
         sm._SystemOps()._restore_plain_home(home, 2000)
         assert not (home / "planted").exists(), "read through a linked backup"
         assert backup.is_symlink(), "an incomplete restore removed the backup"
+
+
+class TestHomeRecoveryIsDescriptorRelative:
+    """The race the pathname checks could not close.
+
+    Every security-sensitive op in the restore runs against a pinned dirfd
+    with O_NOFOLLOW/O_EXCL enforced by the kernel at USE time, so an entry
+    swapped between its lstat and its use fails instead of redirecting the
+    operation. These tests plant that swap — at the root pins, mid-merge —
+    and assert refusal rather than follow.
+    """
+
+    def _reroot(self, monkeypatch, tmp_path):
+        import pathlib as _pl
+        monkeypatch.setattr(
+            sm, "Path",
+            lambda *a: tmp_path / str(_pl.Path(*a)).lstrip("/"))
+
+    def test_a_symlinked_parent_of_home_is_refused(self, tmp_path):
+        # The old code validated only the home itself: a symlinked /home
+        # component would have every "safe" no-follow op below still resolve
+        # through the link. The parent is pinned O_NOFOLLOW now, so the open
+        # of `home`'s parent fails ELOOP before anything touches the target.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (tmp_path / "home").symlink_to(outside)
+        with pytest.raises(OSError):
+            sm._SystemOps()._restore_plain_home(
+                tmp_path / "home" / "work", 2000)
+        assert not (outside / "work").exists(), \
+            "created the home through a linked parent"
+
+    def test_a_symlinked_backup_ancestor_is_refused(self, monkeypatch,
+                                                  tmp_path):
+        # Old code checked `.skel-backup` itself with is_symlink(), which
+        # follows the PARENT chain silently: silos/work -> elsewhere left the
+        # backup reachable and readable through the link.
+        self._reroot(monkeypatch, tmp_path)
+        monkeypatch.setattr(sm.os, "chown", lambda *a, **k: None)
+        home = tmp_path / "home" / "work"
+        home.mkdir(parents=True)
+        silo = tmp_path / "var/lib/qdistro/silos/work"
+        realdir = tmp_path / "realdir"
+        (realdir / ".skel-backup").mkdir(parents=True)
+        (realdir / ".skel-backup" / "planted").write_text("x\n")
+        silo.parent.mkdir(parents=True)
+        silo.symlink_to(realdir)
+        sm._SystemOps()._restore_plain_home(home, 2000)
+        assert not (home / "planted").exists(), \
+            "read the backup through a linked ancestor"
+        assert (realdir / ".skel-backup" / "planted").exists(), \
+            "an incomplete restore removed the backup"
+
+    def test_a_dest_dir_swapped_for_a_link_is_not_written_through(
+            self, monkeypatch, tmp_path):
+        """The deterministic version of the check/use race.
+
+        Between the merge's lstat("d" is a real dir) and its descent open,
+        `d` is swapped for a symlink into `outside`. The pathname code would
+        write the file through it; the O_NOFOLLOW|O_DIRECTORY descent open
+        fails ELOOP instead."""
+        src, dst = tmp_path / "b", tmp_path / "h"
+        (src / "d").mkdir(parents=True)
+        (src / "d" / "x").write_text("x\n")
+        (dst / "d").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        real_open = sm.os.open
+        swapped = []
+
+        def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+            # Swap exactly once: at the dst-side open of the directory "d".
+            if (not swapped and dir_fd is not None and path == "d"
+                    and flags & sm.os.O_DIRECTORY):
+                swapped.append(1)
+                (dst / "d").rmdir()
+                (dst / "d").symlink_to(outside)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+        monkeypatch.setattr(sm.os, "open", racing_open)
+
+        assert sm._SystemOps._merge_missing(src, dst) is False
+        assert swapped, "the descent open was never exercised"
+        assert not (outside / "x").exists(), "wrote through a swapped link"
+
+    def test_a_dest_file_swapped_for_a_link_is_not_written_through(
+            self, monkeypatch, tmp_path):
+        # Same window on the file path: lstat says "f" is absent, then a link
+        # is planted before the create. O_CREAT|O_EXCL|O_NOFOLLOW fails
+        # EEXIST/ELOOP instead of writing through it.
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        (src / "f").write_text("x\n")
+        outside = tmp_path / "outside-target"
+        real_stat = sm.os.stat
+        planted = []
+
+        def racing_stat(path, *a, **k):
+            # Plant right after the merge's dst lstat of "f" reported ENOENT.
+            if (path == "f" and k.get("dir_fd") is not None and not planted):
+                try:
+                    real_stat(path, *a, **k)
+                except FileNotFoundError:
+                    planted.append(1)
+                    (dst / "f").symlink_to(outside)
+                    raise
+            return real_stat(path, *a, **k)
+        monkeypatch.setattr(sm.os, "stat", racing_stat)
+
+        assert sm._SystemOps._merge_missing(src, dst) is False
+        assert planted, "the dst lstat was never exercised"
+        assert not outside.exists(), "created/wrote through a planted link"
+        assert (dst / "f").is_symlink(), "the planted link was clobbered"
+
+    def test_a_fifo_source_is_refused_not_followed(self, tmp_path):
+        # A FIFO in the backup is not a file, dir or link. The pathname code
+        # would have handed it to copy2, whose blocking read hangs the
+        # restore; the mode check refuses it outright and keeps the backup.
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        sm.os.mkfifo(src / "pipe")
+        assert sm._SystemOps._merge_missing(src, dst) is False
+        assert not (dst / "pipe").exists(), "materialised a FIFO in the home"
+
+    def test_a_fifo_destination_is_never_written_into(self, tmp_path):
+        # st_dst exists and is a special file — not a link, not a dir — so
+        # the entry is treated as present-but-unverifiable: refused, backup
+        # kept, the FIFO untouched.
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        (src / "f").write_text("x\n")
+        sm.os.mkfifo(dst / "f")
+        assert sm._SystemOps._merge_missing(src, dst) is False
+        assert sm.stat.S_ISFIFO(sm.os.lstat(dst / "f").st_mode), \
+            "the FIFO was clobbered"
+
+    def test_a_source_file_swapped_for_a_fifo_is_refused(
+            self, monkeypatch, tmp_path):
+        """O_NONBLOCK opens a swapped-in FIFO and reads EOF.
+
+        Without an fstat revalidation the copy would succeed with an EMPTY
+        file and the backup would be deleted — the source fd must be the
+        same regular file the lstat saw."""
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        (src / "f").write_text("x\n")
+        real_open = sm.os.open
+        swapped = []
+
+        def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+            # Swap at the source-side open of "f" (O_RDONLY, no O_CREAT).
+            if (not swapped and dir_fd is not None and path == "f"
+                    and not flags & sm.os.O_WRONLY):
+                swapped.append(1)
+                (src / "f").unlink()
+                sm.os.mkfifo(src / "f")
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+        monkeypatch.setattr(sm.os, "open", racing_open)
+
+        assert sm._SystemOps._merge_missing(src, dst) is False
+        assert swapped, "the source open was never exercised"
+        assert not (dst / "f").exists(), \
+            "a substituted FIFO was copied as an empty file"
+
+    def test_a_source_file_swapped_for_another_file_is_refused(
+            self, monkeypatch, tmp_path):
+        # Same window, still a regular file: mode alone cannot catch it, so
+        # the open fd's dev+ino must match the lstat observation.
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        (src / "f").write_text("the backup contents\n")
+        real_open = sm.os.open
+        swapped = []
+
+        def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+            if (not swapped and dir_fd is not None and path == "f"
+                    and not flags & sm.os.O_WRONLY):
+                swapped.append(1)
+                # Atomic replacement: still a regular file, different inode.
+                (tmp_path / "replacement").rename(src / "f")
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+        (tmp_path / "replacement").write_text("substituted\n")
+        monkeypatch.setattr(sm.os, "open", racing_open)
+
+        assert sm._SystemOps._merge_missing(src, dst) is False
+        assert swapped, "the source open was never exercised"
+        assert not (dst / "f").exists(), \
+            "a substituted file was copied over the checked one"
+
+    def test_a_descendant_chown_failure_is_logged_not_fatal(
+            self, monkeypatch, tmp_path, caplog):
+        # fchown of a DESCENDANT directory raising must not abort the walk:
+        # the old pathname loop logged and continued, and only the home
+        # root's hardening is allowed to fail the create.
+        dst = tmp_path / "h"
+        (dst / "d").mkdir(parents=True)
+        (dst / "d" / "f").write_text("x\n")
+        (dst / "g").write_text("y\n")
+        real_chown = sm.os.chown
+        chowned = []
+
+        def picky_chown(path, uid, gid, *a, **k):
+            if isinstance(path, int):           # dir fds only; files pass
+                raise PermissionError(13, "nope")
+            chowned.append(path)
+            return real_chown(path, uid, gid, *a, **k)
+        monkeypatch.setattr(sm.os, "chown", picky_chown)
+
+        dir_fd = sm.os.open(dst, sm._SystemOps._DIR_OPEN)
+        try:
+            with caplog.at_level("WARNING"):
+                sm._SystemOps._chown_tree_fd(dir_fd, 2000, str(dst))
+        finally:
+            sm.os.close(dir_fd)
+        assert "could not chown" in caplog.text
+        assert "g" in chowned, "a descendant chown failure stopped siblings"
+        # A failed dir chown must NOT skip its subtree: d/f is inside the
+        # directory whose fchown raised, and the old walk still reached it.
+        assert "f" in chowned, \
+            "a failed directory chown skipped its descendants' chown"
+
+    def test_regular_file_xattrs_are_preserved(self, tmp_path):
+        # copy2 runs copystat, which carries xattrs; the descriptor-relative
+        # copier must keep them or a complete restore loses metadata.
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        (src / "f").write_text("x\n")
+        try:
+            sm.os.setxattr(src / "f", "user.review", b"keep-me")
+        except OSError:
+            pytest.skip("tmp filesystem does not support user xattrs")
+        assert sm._SystemOps._merge_missing(src, dst) is True
+        assert sm.os.getxattr(dst / "f", "user.review") == b"keep-me"
+
+    def test_a_xattr_list_failure_is_incomplete_not_silent(
+            self, monkeypatch, tmp_path):
+        # "Cannot read the attribute list" is not "no attributes": treating
+        # an EIO as an empty list would report the copy complete and let the
+        # backup be deleted with metadata unrestored.
+        src, dst = tmp_path / "b", tmp_path / "h"
+        src.mkdir(); dst.mkdir()
+        (src / "f").write_text("x\n")
+
+        def eio_listxattr(*a, **k):
+            raise OSError(5, "I/O error")
+        monkeypatch.setattr(sm.os, "listxattr", eio_listxattr)
+
+        assert sm._SystemOps._merge_missing(src, dst) is False, \
+            "an unreadable xattr list was treated as a complete restore"
 
 
 class TestSuccessfulConversionDoesNotChownThroughLinks:
@@ -1474,3 +1725,205 @@ class TestLivenessEvidenceIsBoundToTheSiloAsked_About:
         sm._SystemOps().tier2_silo_running("work")
         assert asked == [sm.TIER2_CONTAINER_FMT.format(name="work")], asked
 
+class TestCgroupFreezeWriteIsBounded:
+    """cgroup v2 freeze is async: the write only initiates the transition,
+    completion is read from cgroup.events `frozen=`. The exchange must be
+    bounded (write + settle) so a wedged cgroup cannot stall the
+    session-manager worker holding the silo's in-flight slot, and a
+    timed-out writer must never be reordered against a later request."""
+
+    def _pin(self, monkeypatch, tmp_path, frozen=0):
+        cg = tmp_path / "work"
+        cg.mkdir()
+        (cg / "cgroup.freeze").write_text("")
+        (cg / "cgroup.events").write_text(
+            f"populated 1\nfrozen {frozen}\n")
+        monkeypatch.setattr(sm, "CGROUP_ROOT", tmp_path)
+        # ClassVar state — drop leftovers from other tests.
+        sm._SystemOps._freeze_unresolved.discard("work")
+        sm._SystemOps._thaw_unresolved.discard("work")
+        # Capture the real write_text BEFORE any per-test patching, so a
+        # fake installed after a wedge still writes through.
+        self._real_write = sm.Path.write_text
+        return cg
+
+    def _kernel_fake(self, monkeypatch):
+        """write_text that behaves like the kernel: records the value and
+        flips cgroup.events `frozen` to match."""
+        real = self._real_write
+        seen = []
+
+        def fake(self_p, data, *a, **kw):
+            seen.append(data)
+            real(self_p, data)
+            if self_p.name == "cgroup.freeze":
+                ev = self_p.parent / "cgroup.events"
+                real(ev, f"populated 1\nfrozen {data.strip()}\n")
+        monkeypatch.setattr(sm.Path, "write_text", fake)
+        return seen
+
+    def test_freeze_writes_and_settles(self, monkeypatch, tmp_path):
+        self._pin(monkeypatch, tmp_path)
+        seen = self._kernel_fake(monkeypatch)
+        sm._SystemOps().cgroup_freeze("work", True)
+        assert seen == ["1\n"]
+
+    def test_unfreeze_writes_and_settles(self, monkeypatch, tmp_path):
+        self._pin(monkeypatch, tmp_path, frozen=1)
+        seen = self._kernel_fake(monkeypatch)
+        sm._SystemOps().cgroup_freeze("work", False)
+        assert seen == ["0\n"]
+
+    def test_write_error_propagates(self, monkeypatch, tmp_path):
+        self._pin(monkeypatch, tmp_path)
+
+        def boom(self_p, *a, **kw):
+            raise OSError(errno.EACCES, "denied")
+        monkeypatch.setattr(sm.Path, "write_text", boom)
+
+        with pytest.raises(OSError):
+            sm._SystemOps().cgroup_freeze("work", True)
+
+    def test_wedged_write_fails_fast_and_refuses_reorder(
+            self, monkeypatch, tmp_path):
+        """A write stuck inside the kernel raises TimeoutError in bounded
+        time; while that writer is still outstanding a second write is
+        REFUSED (never reordered against it)."""
+        self._pin(monkeypatch, tmp_path)
+        release = threading.Event()
+        entered = threading.Event()
+
+        def wedge(self_p, *a, **kw):
+            entered.set()
+            release.wait()
+        monkeypatch.setattr(sm.Path, "write_text", wedge)
+        monkeypatch.setattr(sm, "_T_CGROUP_WRITE", 0.25)
+
+        t0 = time.monotonic()
+        with pytest.raises(TimeoutError):
+            sm._SystemOps().cgroup_freeze("work", True)
+        assert time.monotonic() - t0 < 5
+        assert entered.is_set()  # writer is genuinely outstanding
+
+        with pytest.raises(RuntimeError, match="still pending"):
+            sm._SystemOps().cgroup_freeze("work", False)
+        release.set()  # let the abandoned writer exit
+
+    def test_unsettled_freeze_times_out_and_thaws_back(
+            self, monkeypatch, tmp_path):
+        """Freeze write accepted but `frozen` never reports 1: bounded
+        settle raises TimeoutError and a best-effort thaw write-back
+        restores physical consistency with the (still ACTIVE) silo —
+        the kernel applies writes in issue order, so the late freeze
+        cannot survive the write-back."""
+        self._pin(monkeypatch, tmp_path)
+        seen = []
+        real = self._real_write
+
+        def write_only(self_p, data, *a, **kw):
+            # Accepts the write but never flips cgroup.events — the kernel
+            # initiated the freeze without completing it.
+            seen.append(data)
+            real(self_p, data)
+        monkeypatch.setattr(sm.Path, "write_text", write_only)
+        monkeypatch.setattr(sm, "_T_CGROUP_WRITE", 0.25)
+
+        t0 = time.monotonic()
+        with pytest.raises(TimeoutError, match="frozen=1"):
+            sm._SystemOps().cgroup_freeze("work", True)
+        assert time.monotonic() - t0 < 5
+        assert seen == ["1\n", "0\n"]  # freeze, then thaw write-back
+        assert (tmp_path / "work" / "cgroup.freeze").read_text() == "0\n"
+
+    def test_unsettled_thaw_times_out_without_writeback(
+            self, monkeypatch, tmp_path):
+        """A thaw that never settles raises TimeoutError with NO corrective
+        write-back — but marks the cgroup thaw-unresolved: the thaw may
+        still apply late, leaving a store-FROZEN silo physically thawed,
+        which freeze() must reconcile rather than claim idempotence."""
+        self._pin(monkeypatch, tmp_path, frozen=1)
+        seen = []
+        real = self._real_write
+
+        def write_only(self_p, data, *a, **kw):
+            seen.append(data)
+            real(self_p, data)
+        monkeypatch.setattr(sm.Path, "write_text", write_only)
+        monkeypatch.setattr(sm, "_T_CGROUP_WRITE", 0.25)
+
+        with pytest.raises(TimeoutError, match="frozen=0"):
+            sm._SystemOps().cgroup_freeze("work", False)
+        assert seen == ["0\n"]  # no write-back
+        assert sm._SystemOps().thaw_unresolved("work")
+        assert not sm._SystemOps().freeze_unresolved("work")
+
+    def test_timed_out_write_marks_unresolved_until_thawed(
+            self, monkeypatch, tmp_path):
+        """astra r2 reproduction: the freeze WRITE itself times out with
+        the writer still inside the kernel — the cgroup is marked
+        unresolved so a later thaw reconciles the late-applied freeze
+        (and while the writer is outstanding a thaw is REFUSED, never
+        reordered against it)."""
+        self._pin(monkeypatch, tmp_path)
+        release = threading.Event()
+
+        def wedge(self_p, *a, **kw):
+            release.wait()
+        monkeypatch.setattr(sm.Path, "write_text", wedge)
+        monkeypatch.setattr(sm, "_T_CGROUP_WRITE", 0.25)
+        ops = sm._SystemOps()
+
+        with pytest.raises(TimeoutError):
+            ops.cgroup_freeze("work", True)
+        assert ops.freeze_unresolved("work")
+
+        # While the abandoned writer is still inside the kernel call, a
+        # thaw cannot be issued against it.
+        with pytest.raises(RuntimeError, match="still pending"):
+            ops.cgroup_freeze("work", False)
+
+        release.set()
+        deadline = time.monotonic() + 5
+        while sm._SystemOps._freeze_writers["work"].is_alive():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        # With the writer retired, a real thaw reconciles and clears the
+        # marker (kernel-simulating fake flips cgroup.events).
+        self._kernel_fake(monkeypatch)
+        ops.cgroup_freeze("work", False)
+        assert not ops.freeze_unresolved("work")
+
+    def test_timed_out_thaw_marks_unresolved_until_refrozen(
+            self, monkeypatch, tmp_path):
+        """Mirror image of the freeze case: a thaw WRITE stuck in the
+        kernel times out, marks thaw-unresolved, refuses a reordered
+        freeze while the writer lives, and a real freeze reconciles once
+        the writer retires."""
+        self._pin(monkeypatch, tmp_path, frozen=1)
+        release = threading.Event()
+
+        def wedge(self_p, *a, **kw):
+            release.wait()
+        monkeypatch.setattr(sm.Path, "write_text", wedge)
+        monkeypatch.setattr(sm, "_T_CGROUP_WRITE", 0.25)
+        ops = sm._SystemOps()
+
+        with pytest.raises(TimeoutError):
+            ops.cgroup_freeze("work", False)
+        assert ops.thaw_unresolved("work")
+        assert not ops.freeze_unresolved("work")
+
+        with pytest.raises(RuntimeError, match="still pending"):
+            ops.cgroup_freeze("work", True)
+
+        release.set()
+        deadline = time.monotonic() + 5
+        while sm._SystemOps._freeze_writers["work"].is_alive():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        self._kernel_fake(monkeypatch)
+        ops.cgroup_freeze("work", True)
+        assert not ops.thaw_unresolved("work")
+        assert not ops.freeze_unresolved("work")

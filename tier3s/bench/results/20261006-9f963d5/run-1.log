@@ -1,0 +1,71 @@
+
+## provision silos (broker allow + images)
+silos.yaml: benchhead argv -> ["qdistro-tier3s-smoke", "--hold", "900"]
+silos.yaml: benchflood argv -> ["foot", "-e", "/bin/sh", "-c", "while true; do head -c 2097152 /dev/urandom | base64; done"]
+
+## env
+MEAS kernel 7.2.8-1-default -
+MEAS nproc 4 -
+MEAS mem_total_mb 3913 MB
+MEAS selinux Enforcing -
+MEAS runsc_release 20260928.0 -
+MEAS runsc_version runsc version release-20260928.0 -
+MEAS host_is_vm kvm -
+MEAS commit 9f963d56631dc5e1346192b47e3f7e1eca891a27 -
+MEAS utc 2026-10-06T20:59:35Z -
+
+## cold start to window (tier3s GUI launch)
+MEAS cold_start_to_window_ms_1 3013 ms
+MEAS cold_startsilo_call_ms_1 2993 ms
+MEAS teardown_benchgui_ms 2540 ms
+MEAS cold_start_to_window_ms_2 1332 ms
+MEAS cold_startsilo_call_ms_2 1549 ms
+MEAS teardown_benchgui_ms 2633 ms
+MEAS cold_start_to_window_ms_3 1946 ms
+MEAS cold_startsilo_call_ms_3 2097 ms
+MEAS teardown_benchgui_ms 2601 ms
+MEAS t2_podman_create_start_ms_1 185 ms
+MEAS t2_podman_create_start_ms_2 197 ms
+MEAS t2_podman_create_start_ms_3 244 ms
+
+## idle memory
+MEAS t3s_gui_scope_memory_current_mb 54.6 MB
+MEAS t3s_gui_scope_pss_mb 198.2 MB
+MEAS t3s_gui_bridge_client_pss_mb 7.4 MB
+MEAS t3s_gui_scope_procs 17 count
+MEAS t3s_headless_scope_memory_current_mb 58.0 MB
+MEAS t3s_headless_scope_pss_mb 91.5 MB
+MEAS t3s_headless_scope_procs 23 count
+MEAS t2_idle_memory_current_mb 2.3 MB
+MEAS t2_idle_pss_mb 2.1 MB
+MEAS t3s_gui_idle_cpu_pct 1.87 pct_core
+MEAS t3s_headless_idle_cpu_pct 1.70 pct_core
+MEAS t2_idle_cpu_pct 0.00 pct_core
+MEAS teardown_benchgui_ms 3027 ms
+
+## syscall cost (syscost binary, self-timed)
+MEAS sys_host getpid_ms_per_100k=3.311 openclose_ms_per_20k=8.235 forkexec_ms_per_1k=343.555  -
+MEAS sys_t2_runc getpid_ms_per_100k=3.925 openclose_ms_per_20k=9.468 forkexec_ms_per_1k=337.374  -
+MEAS sys_t3s_systrap getpid_ms_per_100k=82.585 openclose_ms_per_20k=116.998 forkexec_ms_per_1k=3129.649  -
+MEAS sys_t3s_systrap_nofastpath getpid_ms_per_100k=1538.766 openclose_ms_per_20k=918.557 forkexec_ms_per_1k=3571.849  -
+
+## file I/O: tar xf ~200MB into a 1GiB tmpfs
+MEAS io_tree_mb 200 MB
+MEAS io_tar_host_ms 254 ms
+MEAS io_tar_t2_ms_1 890 ms
+MEAS io_tar_t2_ms_2 805 ms
+MEAS io_tar_t3s_ms_1 393 ms
+MEAS io_tar_t3s_ms_2 317 ms
+MEAS io_tar_t3s_directfs_off_ms 256 ms
+
+## waypipe bridge PSS under shm load (foot flood)
+MEAS bridge_client_pss_start_mb 7.3 MB
+MEAS bridge_client_pss_peak_mb 8.8 MB
+MEAS bridge_rchar_delta_kb 49952 KB
+MEAS teardown_benchflood_ms 3039 ms
+
+## per-silo on-disk overhead
+MEAS silo_store_mb 1432 MB
+MEAS silo_runsc_state_mb 0 MB
+MEAS silo_runtime_mb 1 MB
+[bench] 0 passes, 0 failures

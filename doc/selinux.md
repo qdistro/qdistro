@@ -171,8 +171,17 @@ workloads:
  rejects RequestName with a generic policy denial and no AVC is logged.
 - `files_search_var_lib(qdistro_broker_t)` + `files_manage_var_lib_*` for
  `/var/lib/qdistro/{audit,approvals,cache}/*.sqlite`.
-- `etc_t:dir watch + etc_t:file watch` for `/etc/qdistro/rules.d` inotify
- reload.
+- `etc_t:dir watch + etc_t:file watch` for `/etc/qdistro` traversal and
+ the legacy inotify path. The `rules.d` write surface
+ (`SaveRule`/`DeleteRule`) is NOT part of this module — blanket `etc_t`
+ file manage would let a compromised broker overwrite `/etc/shadow`.
+ The companion raw-language module `selinux/broker-rules`
+ (`qdistro_broker_rules`) labels `/etc/qdistro/rules.d` as
+ `qdistro_broker_rules_t` and grants the broker manage on that type
+ only, including a name-pinned `type_transition` so a recreated dir
+ keeps its label. `SaveRule`'s validation tempdir lives inside the
+ rules dir (`dir=target_dir`) so the write path needs no `tmp_t` grant
+ at all.
 - `domain_read_all_domains_state(qdistro_broker_t)` +
  `domain_getattr_all_domains(qdistro_broker_t)` for the broker's
  caller-identity layering (reads `/proc/<pid>/{stat,exe,attr/current,

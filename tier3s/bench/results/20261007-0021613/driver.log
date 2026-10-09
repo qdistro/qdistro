@@ -1,0 +1,15 @@
+archive sha256s match manifest
+== cloning enforcing worker (commit 002161364)
+   VM=t3s-bench-261007-052006-1052594-20856 ssh_port=30131
+   getenforce=Enforcing
+== guest-setup (install HEAD + provision runsc + load images)
+   setup PASS ([t3s-setup] 114 passes)
+== bench pass 1/3
+   done (53 measurements)
+== bench pass 2/3
+   done (53 measurements)
+== bench pass 3/3
+   done (53 measurements)
+== interactive latency (20 samples: send-key -> in-window pixel change)
+   median=212ms (0 misses) — includes screenshot-poll granularity (~200-400ms)
+== DONE: tier3s/bench/runs/261007-final11 (VM removed)

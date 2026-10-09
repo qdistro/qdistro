@@ -1,0 +1,2 @@
+silos.yaml: benchlat argv -> ["foot", "-o", "cursor.blink=no", "-e", "/bin/cat"]
+LATENCY-WINDOW-UP token=43752ff871d487d02435c9b5d0910f8f silo=benchlat

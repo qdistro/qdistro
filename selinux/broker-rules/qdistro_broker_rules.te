@@ -1,0 +1,79 @@
+## <summary>qdistro broker rules.d write surface (companion to qdistro_broker).</summary>
+## <desc>
+##   The admin broker's SaveRule/DeleteRule RPCs write
+##   /etc/qdistro/rules.d — validation tempfile, atomic
+##   NamedTemporaryFile+os.replace, rule unlink, and the inotify
+##   hot-reload watch. The directory itself is created at install time
+##   and read at engine load.
+##
+##   Why a dedicated type: rules.d historically sat on generic etc_t
+##   "so admin can ship rules via config-management" — but the broker's
+##   write side then had NO satisfiable grant at all: blanket
+##   etc_t:file write would let a compromised broker overwrite
+##   /etc/shadow, so the module deliberately never carried it and
+##   SaveRule was silently broken under enforcing (no enforcing lane
+##   exercised it before the tier-3s clipboard/lineage lanes). This
+##   module labels just rules.d as qdistro_broker_rules_t and grants
+##   manage on that type only.
+##
+##   Labelling chain:
+##     - The .fc regex types /etc/qdistro/rules.d and everything under
+##       it. install-policy.sh restorecon's the dir (it already exists
+##       on images where rules were shipped as etc_t).
+##     - A name-pinned type_transition covers recreation: any domain
+##       mkdir'ing "rules.d" under an etc_t parent gets the right label
+##       with no restorecon pass.
+##     - Admin-dropped rule files (cp/install into rules.d) inherit the
+##       dir's type automatically — they remain broker-readable.
+##
+##   SaveRule's validation tempdir is created INSIDE the rules dir
+##   (dir=target_dir in qdistro_admin_broker.py) so the whole write
+##   path needs exactly this one type — no tmp_t grant, nothing the
+##   broker could use to scribble on /tmp or elsewhere in /etc. If
+##   rules.d is absent, os.makedirs is deliberately DENIED (no etc_t
+##   dir-create grant): SaveRule then fails closed with a D-Bus error
+##   rather than minting an unlabelled dir the policy cannot see.
+##
+##   Build note: kernel policy language like tier2/tier3s — compiles
+##   with checkmodule/semodule_package, no selinux-policy-devel needed.
+##   This module is the SINGLE home of qdistro_broker_rules_t: do not
+##   re-declare the type inside selinux/broker/qdistro_broker.te or the
+##   two module declarations will conflict at load.
+## </desc>
+module qdistro_broker_rules 0.1.0;
+
+require {
+	# The broker domain (declared by the qdistro_broker module — this
+	# module is additive, not a re-declaration).
+	type qdistro_broker_t;
+	# The /etc/qdistro parent label — source of the name-pinned dir
+	# transition below.
+	type etc_t;
+
+	attribute domain;
+	attribute file_type;
+
+	class dir { add_name create getattr open read remove_name rmdir search watch write };
+	class file { append create getattr ioctl open read rename setattr unlink write };
+}
+
+# The rules directory itself and its contents.
+type qdistro_broker_rules_t;
+typeattribute qdistro_broker_rules_t file_type;
+
+# Manage surface for SaveRule/DeleteRule and the engine's inotify watch:
+# dir add_name/create/write for mkdtemp + NamedTemporaryFile + os.replace,
+# remove_name/rmdir for validation-tempdir cleanup and rule deletion,
+# watch for the Gio.FileMonitor hot-reload, open/read/search/getattr for
+# listing and engine load. File create/write/append for the rule write,
+# read/open/getattr for engine load + ListRules, setattr for the 0644
+# chmod, rename for the atomic replace, unlink for DeleteRule and the
+# transient tempfile cleanup.
+allow qdistro_broker_t qdistro_broker_rules_t:dir { add_name create getattr open read remove_name rmdir search watch write };
+allow qdistro_broker_t qdistro_broker_rules_t:file { append create getattr ioctl open read rename setattr unlink write };
+
+# Recreate-proofing: any domain mkdir'ing "rules.d" under an etc_t dir
+# lands the dedicated label, so a recreated dir never comes back etc_t
+# (which would silently break the broker again). No etc_t file/dir
+# manage is granted to the broker itself — see the module header.
+type_transition domain etc_t:dir qdistro_broker_rules_t "rules.d";

@@ -36,22 +36,46 @@ _FIRST_RESULT_X = _SEARCH_X
 _FIRST_RESULT_Y = int(os.environ.get("QDSHELL_UI_LAUNCHER_RESULT_Y", "300"))
 
 
+def _launcher_is_open(s) -> bool:
+    """Machine-readable launcher state via the `launcher isOpen` IPC verb
+    (read-only diagnostic; the toggle verb alone cannot reach a known state)."""
+    try:
+        r = runner.ipc_vm(s, "launcher", "isOpen")
+    except Exception:
+        return False
+    return r.stdout.strip().lower() == "true"
+
+
 def _open_launcher(s):
+    # Reach a known CLOSED state first, then toggle open — a blind toggle
+    # closes an already-open launcher (which is how a leaked-open launcher
+    # from a previous test used to blank the next test's capture).
+    if _launcher_is_open(s):
+        runner.ipc_vm(s, "launcher", "toggle")
+        for _ in range(25):
+            time.sleep(0.2)
+            if not _launcher_is_open(s):
+                break
     runner.ipc_vm(s, "launcher", "toggle")
-    time.sleep(1.2)
+    for _ in range(25):
+        time.sleep(0.2)
+        if _launcher_is_open(s):
+            break
+    time.sleep(0.8)
 
 
 def _close_launcher_best_effort(s):
-    # Esc via real key; fall back to IPC toggle if still open.
-    with_suppress = True
+    # Esc via real key; fall back to IPC toggle only if still open — the
+    # toggle alone is not idempotent (it REOPENS a launcher Esc already
+    # closed, leaving it leaked-open for the next test).
     try:
         runner.tap_key(s, "esc")
         time.sleep(0.4)
     except Exception:
         pass
     try:
-        # If a launcher snapshot still reports open, toggle it closed.
-        runner.ipc_vm(s, "launcher", "toggle")
+        if _launcher_is_open(s):
+            runner.ipc_vm(s, "launcher", "toggle")
     except Exception:
         pass
     time.sleep(0.4)

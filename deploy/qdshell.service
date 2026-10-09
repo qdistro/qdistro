@@ -26,6 +26,13 @@ Environment=QML_DISABLE_DISK_CACHE=1
 # /usr/share/qdistro/qml hosts the Qdistro.Qdwin QML plugin
 # (libqdistro-qdwin.so) that binds qdwin_shell_v1 from QML.
 Environment=QML_IMPORT_PATH=/usr/share/qdistro/qml
+# No platform theme plugin runs on this session, so Qt/Quickshell themed-icon
+# lookups default to hicolor — which ships almost nothing — and every themed
+# icon in the shell (e.g. launcher app icons) falls back to the provider's
+# missing-icon checkerboard. Adwaita is the theme the image ships
+# (image/config.xml). Settings appearance.iconTheme only reaches SPAWNED
+# apps via appearance-env.sh; the shell itself needs the env at exec time.
+Environment=QS_ICON_THEME=Adwaita
 # Wait for the compositor's wayland socket. qdwin-compositor.service
 # uses Type=notify so the wayland socket is up by the time this
 # unit starts, but a short guard keeps cold-start ordering stable.

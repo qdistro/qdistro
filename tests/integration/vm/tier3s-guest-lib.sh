@@ -157,6 +157,17 @@ ensure_silo_image() {
     local s="$1" w="${2:-$(silo_workload "$1")}" acct uid gid img arch
     [ -n "$w" ] || { echo "ensure_silo_image: $s: no workload (no silo row?)" >&2; return 1; }
     acct=$(silo_acct "$s")
+    if timeout 5 id "$acct" >/dev/null 2>&1; then
+        # a provisioning launch swept mid-useradd leaves a bare account — no
+        # home, no /etc/sub{u,g}id rows — that podman cannot use and that
+        # spawn refuses to co-opt; drop the fragment and re-provision below
+        local hd
+        hd=$(getent passwd "$acct" | cut -d: -f6)
+        if [ ! -d "$hd" ] || ! grep -q "^$acct:" /etc/subuid \
+                || ! grep -q "^$acct:" /etc/subgid; then
+            userdel -f "$acct" >/dev/null 2>&1 || :
+        fi
+    fi
     if ! timeout 5 id "$acct" >/dev/null 2>&1; then
         # the launch wrapper refuses an empty argv before spawn runs; a real
         # argv reaches 3b (account creation) and is still refused later —
@@ -185,13 +196,19 @@ ensure_silo_image() {
     for d in "$RT_BASE/$uid" "$RUNSC_BASE/$uid"; do
         [ -d "$d" ] || install -d -m 0700 -o "$uid" -g "$gid" "$d" || return 1
     done
+
     img="localhost/qdistro/tier3s-$w:latest"
     pm_s "$s" image exists "$img" 2>/dev/null && return 0
     arch="$IMG_DIR/tier3s-$w.oci.tar"; [ "$w" = headless-smoke ] && arch="$IMG_DIR/image.oci.tar"
     if [ -f "$arch" ]; then
-        pm_s "$s" load -q -i "$arch" > /dev/null 2>&1
+        pm_s "$s" load -q -i "$arch" > /dev/null 2>&1 || {
+            # a pause process minted before the account's subuid rows exist
+            # keeps the broken userns alive; migrate drops it, retry once
+            pm_s "$s" system migrate > /dev/null 2>&1 || :
+            pm_s "$s" load -q -i "$arch" > /dev/null 2>&1 || return 1
+        }
     elif pm image exists "$img" 2>/dev/null; then   # no archive: copy out of admin's store (e.g. wlprobe)
-        pm save "$img" 2>/dev/null | pm_s "$s" load -q > /dev/null 2>&1
+        pm save "$img" 2>/dev/null | pm_s "$s" load -q > /dev/null 2>&1 || return 1
     else
         echo "ensure_silo_image: no archive $arch and admin's store lacks $img" >&2; return 1
     fi
@@ -222,6 +239,22 @@ except Exception:
     print("QUERY-FAILED"); sys.exit(0)
 for s in rows:
     if s["name"] == sys.argv[1]: print(s["state"]); break
+else: print("absent")' "$1"
+}
+# silo_observed <name> -> "<observed_status>\t<observed_reason>" for the row,
+# or "absent" (QUERY-FAILED on a failed call). state is user intent; this is
+# the runtime-observer thread's evidence (refreshed ~every 10 s).
+silo_observed() {
+    as_admin busctl --system --timeout=300 --json=short call org.qdistro.SessionManager1 \
+        /org/qdistro/SessionManager1 org.qdistro.SessionManager1 ListSilos | python3 -c '
+import json, sys
+try:
+    rows = json.loads(json.load(sys.stdin)["data"][0])
+except Exception:
+    print("QUERY-FAILED"); sys.exit(0)
+for s in rows:
+    if s["name"] == sys.argv[1]:
+        print(s["observed_status"], s["observed_reason"], sep="\t"); break
 else: print("absent")' "$1"
 }
 wait_for() {   # wait_for <secs> <cmd...>
@@ -939,8 +972,10 @@ up_gui_silo() {
     snapshot_launch "$tok"; snapshot_bridge "$tok"
     # the compositor + qdshell see the tagged toplevel once the sandboxed app
     # maps through the bridge — wait for qdshell's own observation line so the
-    # caller can grep its handle/compositor evidence deterministically.
-    if ! wait_for 90 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat | grep -q '\\[tier3s\\] toplevel observed silo=$s '"; then
+    # caller can grep its handle/compositor evidence deterministically. Scope
+    # the wait to THIS start's cursor: a stale observation from a previous
+    # launch of the same silo must not satisfy it (astra gui r1).
+    if ! wait_for 90 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat --after-cursor='$cur' | grep -q '\\[tier3s\\] toplevel observed silo=$s '"; then
         echo "up_gui_silo: $s: no '[tier3s] toplevel observed silo=$s' in the qdshell journal" >&2
         echo ""; return 1
     fi

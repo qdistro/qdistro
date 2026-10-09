@@ -148,33 +148,66 @@ if [ -n "$T" ]; then
 else
     timeout 5 getent group "$T3S_GROUP" >/dev/null 2>&1 \
         || refuse "group $T3S_GROUP does not exist (install-session-manager.sh QDISTRO_TIER3S=1)"
-    SILO_PW="$(timeout 5 getent passwd "$SILO_ACCT" 2>/dev/null || true)"
-    if [ -z "$SILO_PW" ]; then
+    provision_silo() {
         useradd -m -s /bin/bash -G "$T3S_GROUP" -c "qdistro tier3s silo $SILO" "$SILO_ACCT" \
             && passwd -l "$SILO_ACCT" >/dev/null \
             || refuse "cannot provision the silo account $SILO_ACCT"
         SILO_PW="$(timeout 5 getent passwd "$SILO_ACCT")" \
             || refuse "silo account $SILO_ACCT was created but does not resolve"
         say "provisioned silo account $SILO_ACCT for silo $SILO"
-    fi
-    [[ "$SILO_PW" != *$'\n'* ]] || refuse "NSS returned several entries for $SILO_ACCT"
-    SILO_UID="$(printf '%s\n' "$SILO_PW" | cut -d: -f3)"
-    SILO_GID="$(printf '%s\n' "$SILO_PW" | cut -d: -f4)"
-    SILO_HOME="$(printf '%s\n' "$SILO_PW" | cut -d: -f6)"
-    SILO_GECOS="$(printf '%s\n' "$SILO_PW" | cut -d: -f5)"
-    [ "$SILO_GECOS" = "qdistro tier3s silo $SILO" ] \
-        || refuse "$SILO_ACCT exists but is not the tier3s silo account for '$SILO' (GECOS: '${SILO_GECOS}'); refusing to co-opt it"
-    [[ "$SILO_UID" =~ ^[0-9]+$ ]] && [ "$SILO_UID" -ge 1000 ] && [ "$SILO_UID" != "$ADMIN_UID" ] \
-        || refuse "silo account $SILO_ACCT has uid '${SILO_UID:-?}'; want a regular uid other than admin's $ADMIN_UID"
-    id -nG "$SILO_ACCT" 2>/dev/null | tr ' ' '\n' | grep -qx "$T3S_GROUP" \
-        || refuse "silo account $SILO_ACCT is not in group $T3S_GROUP"
-    grep -q "^$SILO_ACCT:[0-9]*:[1-9][0-9]*$" /etc/subuid \
-        && grep -q "^$SILO_ACCT:[0-9]*:[1-9][0-9]*$" /etc/subgid \
-        || refuse "silo account $SILO_ACCT has no subuid/subgid rows"
+    }
+    # A launch unit killed mid-useradd (the startup reconcile stops every
+    # tier3s unit; a stop during activation does the same) leaves a fragment:
+    # the passwd row + our GECOS exist, but home and the sub{u,g}id rows were
+    # never written. Refusing it forever wedges the silo, so exactly that
+    # signature — no home at all, no subid rows, and no process running as
+    # the uid — is deleted and re-provisioned once. Anything else (a home
+    # that exists, partial subid rows, a live uid) stays a refusal: it either
+    # holds real state or is ambiguous tampering, never ours to remove.
+    for prov_try in 1 2; do
+        SILO_PW="$(timeout 5 getent passwd "$SILO_ACCT" 2>/dev/null || true)"
+        [ -n "$SILO_PW" ] || provision_silo
+        [[ "$SILO_PW" != *$'\n'* ]] || refuse "NSS returned several entries for $SILO_ACCT"
+        SILO_UID="$(printf '%s\n' "$SILO_PW" | cut -d: -f3)"
+        SILO_GID="$(printf '%s\n' "$SILO_PW" | cut -d: -f4)"
+        SILO_HOME="$(printf '%s\n' "$SILO_PW" | cut -d: -f6)"
+        SILO_GECOS="$(printf '%s\n' "$SILO_PW" | cut -d: -f5)"
+        [ "$SILO_GECOS" = "qdistro tier3s silo $SILO" ] \
+            || refuse "$SILO_ACCT exists but is not the tier3s silo account for '$SILO' (GECOS: '${SILO_GECOS}'); refusing to co-opt it"
+        [[ "$SILO_UID" =~ ^[0-9]+$ ]] && [ "$SILO_UID" -ge 1000 ] && [ "$SILO_UID" != "$ADMIN_UID" ] \
+            || refuse "silo account $SILO_ACCT has uid '${SILO_UID:-?}'; want a regular uid other than admin's $ADMIN_UID"
+        id -nG "$SILO_ACCT" 2>/dev/null | tr ' ' '\n' | grep -qx "$T3S_GROUP" \
+            || refuse "silo account $SILO_ACCT is not in group $T3S_GROUP"
+        home_ok=1; sub_ok=1
+        { [ -d "$SILO_HOME" ] && [ ! -L "$SILO_HOME" ] \
+            && [ "$(stat -c %u -- "$SILO_HOME")" = "$SILO_UID" ]; } || home_ok=0
+        grep -q "^$SILO_ACCT:[0-9]*:[1-9][0-9]*$" /etc/subuid \
+            && grep -q "^$SILO_ACCT:[0-9]*:[1-9][0-9]*$" /etc/subgid \
+            || sub_ok=0
+        [ "$home_ok" -eq 1 ] && [ "$sub_ok" -eq 1 ] && break
+        if [ "$prov_try" -eq 1 ] && [ ! -e "$SILO_HOME" ] && [ ! -L "$SILO_HOME" ]; then
+            grep -q "^$SILO_ACCT:" /etc/subuid 2>/dev/null; su_rc=$?
+            grep -q "^$SILO_ACCT:" /etc/subgid 2>/dev/null; sg_rc=$?
+            # a failed lookup is NOT an absent row: rc >= 2 means the
+            # database could not be read, so nothing is proven
+            [ "$su_rc" -le 1 ] && [ "$sg_rc" -le 1 ] \
+                || refuse "cannot prove $SILO_ACCT has no subid rows (subuid lookup rc=$su_rc, subgid rc=$sg_rc); refusing to touch it"
+            if [ "$su_rc" -eq 1 ] && [ "$sg_rc" -eq 1 ]; then
+                pgrep -u "$SILO_UID" >/dev/null 2>&1; pg_rc=$?
+                [ "$pg_rc" -eq 1 ] \
+                    || refuse "$SILO_ACCT is a provision fragment but uid $SILO_UID has live processes (or pgrep failed, rc=$pg_rc); refusing to delete it"
+                userdel -f "$SILO_ACCT" \
+                    || refuse "cannot delete the provision-fragment account $SILO_ACCT"
+                say "removed a killed-mid-useradd fragment of $SILO_ACCT; re-provisioning"
+                continue
+            fi
+        fi
+        [ "$sub_ok" -eq 1 ] \
+            || refuse "silo account $SILO_ACCT has no subuid/subgid rows"
+        [ "$home_ok" -eq 1 ] \
+            || refuse "silo home $SILO_HOME is missing or not owned by uid $SILO_UID"
+    done
     SILO_USER="$SILO_ACCT"
-    { [ -d "$SILO_HOME" ] && [ ! -L "$SILO_HOME" ] \
-        && [ "$(stat -c %u -- "$SILO_HOME")" = "$SILO_UID" ]; } \
-        || refuse "silo home $SILO_HOME is missing or not owned by uid $SILO_UID"
 fi
 SILO_STATE="$SILO_HOME/tier3s-state"   # per-silo persistent state root (C2)
 # Per-silo runtime dirs (no logind session exists for a silo): the rt dir

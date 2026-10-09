@@ -1,5 +1,11 @@
 # Containers (tier-2 podman) — first-class windowing & launcher
 
+> The OCI runtime is selectable per isolation kind. Tier 2 uses the host's
+> default podman runtime; tier 3s (see
+> [isolation-tiers.md](isolation-tiers.md)) pins every podman call to the
+> `tier3s-runsc` wrapper, which execs gVisor `runsc --platform=systrap` —
+> same podman plumbing, a different kernel boundary behind the container.
+
 Landing page for the tier-2 podman story. Tier 2 is the first
 isolation tier with **first-class qdshell launcher integration**: per
 container, the apps installed inside it appear as badged entries in

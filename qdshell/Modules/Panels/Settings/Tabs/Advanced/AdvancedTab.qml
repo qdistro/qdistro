@@ -211,6 +211,11 @@ ColumnLayout {
       readonly property var defaultValue: Settings.getDefaultValue(path)
       readonly property bool changed: TreeModel.isChanged(liveValue, defaultValue)
       readonly property bool editable: valType === "bool" || valType === "number" || valType === "string"
+      // Editors are capped at editorWidth: NTextInput sets Layout.fillWidth
+      // internally, so without a maximum the field would absorb ~all
+      // leftover row width and squeeze the key-path column to an
+      // unreadable "…".
+      readonly property int editorWidth: Math.round(220 * Style.uiScaleRatio)
 
       RowLayout {
         id: rowLayout
@@ -266,7 +271,8 @@ ColumnLayout {
         NToggle {
           visible: rowItem.valType === "bool"
           Layout.alignment: Qt.AlignVCenter
-          Layout.preferredWidth: Math.round(220 * Style.uiScaleRatio)
+          Layout.preferredWidth: rowItem.editorWidth
+          Layout.maximumWidth: rowItem.editorWidth
           checked: rowItem.valType === "bool" ? (rowItem.liveValue === true) : false
           onToggled: checked => root.writeValue(rowItem.path, checked)
         }
@@ -275,7 +281,8 @@ ColumnLayout {
         NTextInput {
           id: textEditor
           visible: rowItem.valType === "number" || rowItem.valType === "string"
-          Layout.preferredWidth: Math.round(220 * Style.uiScaleRatio)
+          Layout.preferredWidth: rowItem.editorWidth
+          Layout.maximumWidth: rowItem.editorWidth
           Layout.alignment: Qt.AlignVCenter
           inputMethodHints: rowItem.valType === "number" ? Qt.ImhFormattedNumbersOnly : Qt.ImhNone
 
@@ -309,7 +316,8 @@ ColumnLayout {
         // of scope; shown but disabled).
         NTextInput {
           visible: rowItem.valType === "array" || rowItem.valType === "object"
-          Layout.preferredWidth: Math.round(220 * Style.uiScaleRatio)
+          Layout.preferredWidth: rowItem.editorWidth
+          Layout.maximumWidth: rowItem.editorWidth
           Layout.alignment: Qt.AlignVCenter
           readOnly: true
           enabled: false

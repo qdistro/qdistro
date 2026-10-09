@@ -260,7 +260,11 @@ SmartPanel {
               maxWidth: parent.width
               text: {
                 if (root.showArtistFirst) {
-                  return MediaService.trackArtist || (MediaService.trackAlbum || "Unknown Artist");
+                  // "Unknown Artist" is the no-metadata fallback for a REAL
+                  // player — with no player at all it wrongly suggests a
+                  // player-like state, so render nothing.
+                  return MediaService.currentPlayer
+                      ? (MediaService.trackArtist || (MediaService.trackAlbum || "Unknown Artist")) : "";
                 } else {
                   return MediaService.trackTitle || "No Media";
                 }
@@ -293,7 +297,8 @@ SmartPanel {
                 if (root.showArtistFirst) {
                   return MediaService.trackTitle || "No Media";
                 } else {
-                  return MediaService.trackArtist || (MediaService.trackAlbum || "Unknown Artist");
+                  return MediaService.currentPlayer
+                      ? (MediaService.trackArtist || (MediaService.trackAlbum || "Unknown Artist")) : "";
                 }
               }
 
@@ -409,6 +414,11 @@ SmartPanel {
           RowLayout {
             Layout.alignment: Qt.AlignHCenter
             spacing: root.isSideBySide ? Style.marginL : Style.marginXL
+            // Hide transport controls entirely with no MPRIS player: they
+            // would render as live buttons that silently no-op, presenting
+            // a player-like state over the "No Media" empty state (matches
+            // the MediaCard gating on canPlay/canGo*).
+            visible: !!MediaService.currentPlayer
 
             NIconButton {
               icon: "media-prev"

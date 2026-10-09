@@ -15,6 +15,7 @@ import json
 import signal
 import subprocess
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -50,6 +51,11 @@ class _FakeOps:
         self.cgroup_remove_ebusy: set[str] = set()
         # When True, cgroup_freeze raises (simulates a wedged kernel write).
         self.cgroup_freeze_should_fail = False
+        # Names where a freeze (resp. thaw) write timed out in _SystemOps
+        # and may still apply late — resume()/freeze() must not take their
+        # idempotent early returns while the direction is unresolved.
+        self.freeze_unresolved_set: set[str] = set()
+        self.thaw_unresolved_set: set[str] = set()
         self.systemctl_calls: list[tuple[str, str]] = []
         self.launch_envs: dict[str, str] = {}   # name → env file content
         # tier3s stanzas live in their own dir (paravirt ΔB5) — a separate
@@ -387,6 +393,12 @@ class _FakeOps:
             raise OSError("cgroup.freeze write failed (simulated)")
         self.cgroup_frozen[name] = bool(frozen)
 
+    def freeze_unresolved(self, name: str) -> bool:
+        return name in self.freeze_unresolved_set
+
+    def thaw_unresolved(self, name: str) -> bool:
+        return name in self.thaw_unresolved_set
+
     def cgroup_pids(self, name: str) -> list[int]:
         return list(self.cgroup_pids_map.get(name, []))
 
@@ -423,6 +435,27 @@ class _FakeOps:
     # UNACKNOWLEDGED, so a clean-looking snapshot afterwards must not be read
     # as a completed stop (a queued start is indistinguishable from one).
     systemctl_stop_unacknowledged = False
+
+    def observe_silo(self, name: str, uid: int, kind: str):
+        # Model the real probe's verdicts from this fake's call log: a
+        # launcher unit it started and never stopped reports
+        # "launcher-running"; anything else reports "stopped" (unit
+        # inactive AND the workload boundary absent). Tests needing
+        # "unknown"/"failed"/"starting" or a mid-probe mutation
+        # monkeypatch this method.
+        if kind == sm.KIND_TIER3S:
+            unit = f"qdistro-tier3s-silo@{name}.service"
+        elif kind == sm.KIND_TIER2_TEMPLATE:
+            unit = f"qdistro-tier2-silo@{name}.service"
+        else:
+            unit = f"qdshell-session-{name}@{uid}.service"
+        last = None
+        for op, u in self.systemctl_calls:
+            if u == unit:
+                last = op
+        if last == "start":
+            return "launcher-running", "fake: launcher unit active"
+        return "stopped", "fake: launcher inactive and workload absent"
 
     def tier3s_installed(self) -> bool:
         # No tier3s launch path on this fake host: startup reconciliation of
@@ -736,6 +769,181 @@ class TestLifecycle:
         starts = [c for c in ops.systemctl_calls if c[0] == "start"]
         assert len(starts) == 1
 
+    def test_start_from_active_relaunches_when_dead(self, store, ops):
+        # ACTIVE in the store is not proof the workload runs — the
+        # launcher can die (or an app-initiated exit can tear it down)
+        # behind the store's back. A second start must verify liveness
+        # and re-launch, not report a silent no-op success.
+        store.create("work", 2000)
+        store.start("work")
+        ops.observe_silo = lambda *a: (
+            "stopped", "launcher inactive and workload absent")
+        store.start("work")
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+        assert store.get("work").state == State.ACTIVE
+
+    def test_start_from_active_unknown_probe_fails_closed(self, store, ops):
+        # When the probe cannot prove the silo dead, start() must neither
+        # launch a second workload nor report a false success — even on
+        # a silo flagged start_unresolved by a timed-out earlier start.
+        store.create("work", 2000)
+        store.start("work")
+        store.get("work").start_unresolved = True
+        ops.observe_silo = lambda *a: (
+            "unknown", "launcher has a pending or unknown job")
+        with pytest.raises(sm.SessionError, match="cannot verify"):
+            store.start("work")
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 1
+        assert store.get("work").state == State.ACTIVE
+
+    def test_start_from_active_dead_clears_start_unresolved(
+            self, store, ops):
+        # A StartNotCancelled leaves the silo ACTIVE + start_unresolved.
+        # If a later probe proves it dead (no pending job, inactive unit),
+        # a plain retry relaunches — the queued request never
+        # materialized — and clears the flag on the way through STOPPED.
+        store.create("work", 2000)
+        store.start("work")
+        silo = store.get("work")
+        silo.start_unresolved = True
+        ops.observe_silo = lambda *a: (
+            "stopped", "launcher inactive and workload absent")
+        store.start("work")
+        assert silo.start_unresolved is False
+        assert store.get("work").state == State.ACTIVE
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+
+    def test_start_probe_race_relaunches_after_concurrent_stop(
+            self, store, ops):
+        # The probe runs outside the store lock, so a lifecycle op can
+        # land mid-probe; the stale verdict must be discarded via the
+        # operation_generation check, not trusted.
+        store.create("work", 2000)
+        store.start("work")
+
+        def probe_then_stop(*a):
+            store.stop("work", 0)
+            return ("launcher-running",
+                    "fake: stale verdict — silo was live at probe time")
+
+        ops.observe_silo = probe_then_stop
+        store.start("work")
+        assert store.get("work").state == State.ACTIVE
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+
+    def test_start_from_active_dead_verdict_needs_no_extra_round(
+            self, store, ops):
+        # Stale verdicts are retried, but a confirmed "dead" verdict must
+        # launch in the SAME round — it does not spend a re-evaluation.
+        # Three stale probes then a valid dead verdict on the last round
+        # must still relaunch.
+        store.create("work", 2000)
+        store.start("work")
+        probes = []
+
+        def racing_probe(*a):
+            probes.append(1)
+            if len(probes) <= 3:
+                # A lifecycle op landing mid-probe bumps the generation.
+                store.get("work").operation_generation += 1
+                return ("launcher-running", "fake: stale verdict")
+            return ("stopped", "launcher inactive and workload absent")
+
+        ops.observe_silo = racing_probe
+        store.start("work")
+        assert len(probes) == 4
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+        assert store.get("work").state == State.ACTIVE
+
+    def test_start_from_active_stale_probes_exhaust_and_refuse(
+            self, store, ops):
+        # If every probe is invalidated by a racing lifecycle op, start()
+        # gives up with an error rather than spinning or guessing.
+        store.create("work", 2000)
+        store.start("work")
+
+        def always_raced(*a):
+            store.get("work").operation_generation += 1
+            return ("launcher-running", "fake: stale verdict")
+
+        ops.observe_silo = always_raced
+        with pytest.raises(sm.SessionError, match="could not settle"):
+            store.start("work")
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 1
+        assert store.get("work").state == State.ACTIVE
+
+    def test_start_probe_respects_an_inflight_freeze(self, store, ops):
+        # freeze() claims the in-flight slot and writes cgroup.freeze
+        # BEFORE it commits a state/generation change. A start() probe
+        # overlapping that window must not act on its verdict — otherwise
+        # start could thaw + relaunch, then the freeze commits Frozen
+        # over a running workload. start() waits out the claim, sees the
+        # committed FROZEN, and takes the ordinary FROZEN→ACTIVE path.
+        import threading
+        store.create("work", 2000)
+        store.start("work")
+        freeze_wrote = threading.Event()
+        let_freeze_commit = threading.Event()
+        probe_entered = threading.Event()
+        let_probe_finish = threading.Event()
+        starter_waiting = threading.Event()
+        orig_freeze = ops.cgroup_freeze
+        orig_await = store._await_inflight_locked
+        awaits = []
+
+        def gated_freeze(n, flag):
+            orig_freeze(n, flag)
+            if n == "work" and flag:
+                freeze_wrote.set()
+                let_freeze_commit.wait(10)
+
+        def spy_await(n):
+            awaits.append(n)
+            if len(awaits) == 2:
+                # The stale verdict was discarded while the slot was
+                # still claimed (generation untouched at that point) —
+                # only the in-flight recheck could have caught it.
+                starter_waiting.set()
+            return orig_await(n)
+
+        ops.cgroup_freeze = gated_freeze
+        store._await_inflight_locked = spy_await
+
+        def dead_probe(*a):
+            probe_entered.set()
+            # Sit inside the probe while the freeze claims its slot and
+            # lands its cgroup write — the verdict is stale by the time
+            # start() sees it.
+            let_probe_finish.wait(10)
+            return ("stopped", "launcher inactive and workload absent")
+
+        ops.observe_silo = dead_probe
+        starter = threading.Thread(target=store.start, args=("work",))
+        starter.start()
+        assert probe_entered.wait(10)  # start() is inside its probe
+
+        freezer = threading.Thread(target=store.freeze, args=("work",))
+        freezer.start()
+        assert freeze_wrote.wait(10)   # claimed the slot + wrote, gated
+        let_probe_finish.set()         # verdict arrives mid-freeze
+        assert starter_waiting.wait(10)  # recheck saw the claimed slot
+        let_freeze_commit.set()
+        starter.join(10)
+        freezer.join(10)
+        assert not starter.is_alive() and not freezer.is_alive()
+        # Serialized outcome: the freeze committed, then start() ran the
+        # thaw + relaunch deliberately — never racing the freeze write.
+        assert store.get("work").state == State.ACTIVE
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+        assert ops.cgroup_frozen["work"] is False
+
     def test_freeze_then_resume(self, store, ops):
         store.create("work", 2000)
         store.start("work")
@@ -880,6 +1088,59 @@ class TestS14FreezeLockScope:
         # after stop is vacuous — cgroup_remove clears it regardless.
         assert ops.frozen_at_kill.get("work") is False
         assert store.get("work").state == State.STOPPED
+
+    def test_resume_active_with_unresolved_freeze_thaws(self, store, ops):
+        """astra r2: a freeze write that timed out in _SystemOps may still
+        apply late, so a silo reporting ACTIVE can be physically frozen.
+        resume() must take the real thaw path — the idempotent ACTIVE
+        return would leave it frozen forever."""
+        store.create("work", 2000)
+        store.start("work")
+        ops.cgroup_frozen["work"] = True   # late freeze applied physically
+        ops.freeze_unresolved_set.add("work")
+        store.resume("work")
+        assert ops.cgroup_frozen["work"] is False
+        assert store.get("work").state == State.ACTIVE
+
+    def test_resume_active_without_pending_stays_idempotent(
+            self, store, ops):
+        """The converse: ACTIVE with no unresolved freeze must NOT issue
+        any write — the idempotent path remains a no-op."""
+        store.create("work", 2000)
+        store.start("work")
+        calls = []
+        orig = ops.cgroup_freeze
+        ops.cgroup_freeze = lambda n, f: (calls.append((n, f)), orig(n, f))
+        store.resume("work")
+        assert calls == []
+        assert store.get("work").state == State.ACTIVE
+
+    def test_freeze_frozen_with_unresolved_thaw_refreezes(self, store, ops):
+        """Mirror of the resume case: a thaw write that timed out in
+        _SystemOps may still apply late, leaving a store-FROZEN silo
+        physically thawed. freeze() must take the real write path, not
+        the idempotent 'already frozen' return."""
+        store.create("work", 2000)
+        store.start("work")
+        store.freeze("work")
+        ops.cgroup_frozen["work"] = False   # late thaw applied physically
+        ops.thaw_unresolved_set.add("work")
+        store.freeze("work")
+        assert ops.cgroup_frozen["work"] is True
+        assert store.get("work").state == State.FROZEN
+
+    def test_freeze_frozen_without_pending_stays_idempotent(
+            self, store, ops):
+        """Converse: FROZEN with no unresolved thaw issues no write."""
+        store.create("work", 2000)
+        store.start("work")
+        store.freeze("work")
+        calls = []
+        orig = ops.cgroup_freeze
+        ops.cgroup_freeze = lambda n, f: (calls.append((n, f)), orig(n, f))
+        store.freeze("work")
+        assert calls == []
+        assert store.get("work").state == State.FROZEN
 
     def test_freeze_reentrant_stop_from_on_change(self, ops, tmp_path):
         """02/S14b re-entrancy (codex round-2): if an on_change handler
@@ -1057,32 +1318,67 @@ class TestDBusErrorNames:
         assert "disk" in msg
 
     def test_create_silo_translates_any_exception(self):
-        """Supplement: CreateSilo's store handler uses the helper for Exception,
-        not only SessionError. The helper itself is tested above without a bus.
-        """
+        """Supplement: the anything→Generic translation lives in
+        _run_offloaded now that CreateSilo is async. Its unexpected-exception
+        branch must still route through the shared mapper so a
+        non-SessionError is answered as a typed D-Bus error — never a
+        stranded caller. The behavioural pin is in
+        test_session_manager_dbus_async.py."""
         tree = ast.parse(Path(sm.__file__).read_text())
-        create = next(
+        helper = next(
             (n for n in ast.walk(tree)
-             if isinstance(n, ast.FunctionDef) and n.name == "CreateSilo"),
+             if isinstance(n, ast.FunctionDef) and n.name == "_run_offloaded"),
             None)
-        assert create is not None, "CreateSilo not found"
+        assert helper is not None, "_run_offloaded not found"
         matched = False
-        for handler in ast.walk(create):
+        for handler in ast.walk(helper):
             if not isinstance(handler, ast.ExceptHandler):
                 continue
             if not (isinstance(handler.type, ast.Name)
                     and handler.type.id == "Exception"):
                 continue
-            for raised in ast.walk(handler):
-                if not isinstance(raised, ast.Raise):
-                    continue
-                exc = raised.exc
-                if (isinstance(exc, ast.Call)
-                        and isinstance(exc.func, ast.Name)
-                        and exc.func.id == "_to_dbus_exception"):
+            for node in ast.walk(handler):
+                # The unexpected mapper is `unexpected_error or
+                # _to_dbus_exception`, invoked on the raised exception.
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id in (
+                            "map_unexpected", "_to_dbus_exception",
+                            "unexpected_error")):
                     matched = True
         assert matched, (
-            "CreateSilo does not raise _to_dbus_exception from except Exception")
+            "_run_offloaded does not map unexpected exceptions through the "
+            "shared D-Bus error mapper")
+
+    def test_every_mutating_method_runs_offloaded(self):
+        """Every store-mutating D-Bus method must declare async_callbacks and
+        reach the store through _run_offloaded — a synchronous mutator is a
+        minutes-long stall of the whole dispatch loop (useradd -m/userdel -r
+        on a big home tree)."""
+        mutating = {"CreateSilo", "CreateTemplateSilo", "CreateTier3sSilo",
+                    "DeleteSilo", "SetSiloEgress", "StartSilo", "StopSilo",
+                    "FreezeSilo", "ResumeSilo", "LaunchPodApp", "Dispose",
+                    "DisposeByToken", "DisposeByWorkflow",
+                    "ImportFromDisposable"}
+        tree = ast.parse(Path(sm.__file__).read_text())
+        seen: dict[str, bool] = {}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.FunctionDef)
+                    and node.name in mutating):
+                continue
+            is_async = False
+            for dec in node.decorator_list:
+                if not isinstance(dec, ast.Call):
+                    continue
+                for kw in dec.keywords:
+                    if kw.arg == "async_callbacks":
+                        is_async = True
+            seen[node.name] = is_async
+        missing = mutating - seen.keys()
+        assert not missing, f"methods not found: {sorted(missing)}"
+        sync = sorted(n for n, ok in seen.items() if not ok)
+        assert not sync, (
+            f"mutating D-Bus methods missing async_callbacks: {sync}")
 
 
 # ---------------------------------------------------------------------------
@@ -1636,6 +1932,30 @@ class TestTier2TemplateKind:
         store.stop("browser1")
         assert store.get("browser1").state == State.STOPPED
 
+    def test_start_from_active_tier2_confirms_death_with_the_stop_verifier(
+            self, store, ops):
+        # The observation's "stopped" covers the unit, but the dead
+        # verdict is confirmed by the same fail-closed verifier the stop
+        # path uses — a possibly-surviving container refuses the relaunch
+        # rather than launching a second workload over it.
+        store.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
+                     kind="tier2-template", launch=dict(_LAUNCH))
+        store.start("browser1")
+        ops.observe_silo = lambda *a: (
+            "stopped", "launcher inactive and workload absent")
+        ops.tier2_stop_fails = True
+        with pytest.raises(sm.SessionError, match="cannot verify"):
+            store.start("browser1")
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 1
+        assert store.get("browser1").state == State.ACTIVE
+        # Once the verifier reports genuinely gone, the retry relaunches.
+        ops.tier2_stop_fails = False
+        store.start("browser1")
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 2
+        assert store.get("browser1").state == State.ACTIVE
+
 
 def _source_env_via_bash(env_text: str) -> dict:
     import subprocess
@@ -1716,8 +2036,9 @@ def _install_lineage_context_dbus(monkeypatch, outcomes):
     queue = list(outcomes)
     stats = {"system_bus_calls": 0, "get_object_calls": 0, "proxies": []}
 
-    def get_object(bus_name, object_path):
+    def get_object(bus_name, object_path, introspect=True):
         stats["get_object_calls"] += 1
+        stats.setdefault("introspect_flags", []).append(introspect)
         proxy = _LineageContextProxy(queue.pop(0))
         stats["proxies"].append(proxy)
         return proxy
@@ -1745,6 +2066,9 @@ def test_lineage_context_retries_transient_noreply(monkeypatch):
         "chain_head": "head", "issuer": "qdistro-broker", "version": 1}
     assert stats["system_bus_calls"] == 2
     assert stats["get_object_calls"] == 2
+    # introspect=False: proxy construction must not add an unbounded
+    # Introspect round-trip in front of the bounded method call.
+    assert stats["introspect_flags"] == [False, False]
     assert len({id(proxy) for proxy in stats["proxies"]}) == 2
     assert [proxy.calls for proxy in stats["proxies"]] == [1, 1]
     assert sleeps == [0.25]
@@ -2057,6 +2381,96 @@ class TestSetEgress:
         n = len(ops.egress_calls)
         on_up()                                    # a late link-up event
         assert ops.egress_calls[n:] == []          # self-cancelled, no reattach
+
+
+class TestShutdownWatcherReap:
+    """stop_all_egress_watchers: the shutdown hook main()'s finally calls —
+    reaps every live `ip monitor link` child so a direct SIGTERM or
+    KeyboardInterrupt doesn't strand them (previously only systemd's cgroup
+    cleanup reached them)."""
+
+    def test_reaps_every_live_watcher(self, egress_store, ops):
+        egress_store.create("work", 2000, egress="wg:work")
+        egress_store.create("dev", 2001, egress="wg:dev")
+        egress_store.start("work")
+        egress_store.start("dev")
+        assert len(ops.watchers) == 2
+        egress_store.stop_all_egress_watchers()
+        assert ops.watchers == []
+        assert ops.egress_calls.count(("stop_link_watcher",)) == 2
+
+    def test_no_watchers_is_noop(self, egress_store, ops):
+        egress_store.stop_all_egress_watchers()
+        assert ("stop_link_watcher",) not in ops.egress_calls
+
+    def test_late_callback_still_self_cancels(self, egress_store, ops):
+        # The reap bumps each generation; a callback already in flight past
+        # the join must not re-attach onto a torn-down netns.
+        egress_store.create("work", 2000, egress="wg:work")
+        egress_store.start("work")
+        _tag, _ns, _ifn, on_up = ops.watchers[-1]
+        egress_store.stop_all_egress_watchers()
+        n = len(ops.egress_calls)
+        on_up()
+        assert ops.egress_calls[n:] == []
+
+    def test_failing_stop_still_drains_rest(self, egress_store, ops,
+                                            monkeypatch):
+        # A watcher that refuses to die (or whose terminate raises) must not
+        # abort the reap or the daemon's shutdown.
+        egress_store.create("work", 2000, egress="wg:work")
+        egress_store.create("dev", 2001, egress="wg:dev")
+        egress_store.start("work")
+        egress_store.start("dev")
+        calls = []
+
+        def boom(handle):
+            calls.append(handle)
+            ops.watchers.remove(handle)
+            raise RuntimeError("terminate refused")
+        monkeypatch.setattr(ops, "stop_link_watcher", boom)
+        egress_store.stop_all_egress_watchers()
+        assert len(calls) == 2
+
+    def test_reap_waits_for_inflight_worker_stop(self, egress_store, ops,
+                                                 monkeypatch):
+        # astra r1 P2: _stop_egress_watcher pops the handle before
+        # terminating; a teardown worker paused in between must not let the
+        # shutdown reap observe an empty dict and return with the
+        # `ip monitor` child never terminated (daemon threads don't block
+        # exit). The reap has to wait out the in-flight stop.
+        egress_store.create("work", 2000, egress="wg:work")
+        egress_store.start("work")
+        assert len(ops.watchers) == 1
+        entered = threading.Event()
+        release = threading.Event()
+        terminated = []
+
+        def blocking_stop(handle):
+            entered.set()                    # inside the in-flight stop
+            release.wait(5)
+            terminated.append(handle)
+            ops.watchers.remove(handle)
+        monkeypatch.setattr(ops, "stop_link_watcher", blocking_stop)
+        worker = threading.Thread(
+            target=egress_store._stop_egress_watcher, args=("work",),
+            daemon=True)
+        worker.start()
+        assert entered.wait(5)               # worker holds the stop mid-flight
+        reaped = threading.Event()
+
+        def reap():
+            egress_store.stop_all_egress_watchers()
+            reaped.set()
+        threading.Thread(target=reap, daemon=True).start()
+        assert not reaped.wait(2), \
+            "reap returned while a watcher-stop was still in flight"
+        release.set()
+        assert reaped.wait(5)
+        worker.join(5)
+        assert len(terminated) == 1
+        assert not ops.watchers
+        assert not egress_store._watchers
 
 
 class TestEgressReviewFixes:
@@ -3455,3 +3869,294 @@ class TestLeaseSweepScheduler:
                 break
             time.sleep(0.01)
         assert len(ran) == 2
+
+
+class TestSystemctlStopMissingUnit:
+    """The real _SystemOps.systemctl_stop() verdict: rc != 0 is 'unknown'
+    EXCEPT when a successful `show` probe proves the unit is not-found,
+    at rest, and jobless — PID 1 holds nothing under it to cancel.
+    Stubbed via a fake subprocess.run keyed on argv; the fake also
+    requires `show` to request the full property triple so a dropped
+    --property flag cannot slip past these tests."""
+
+    def _ops(self, monkeypatch, handler):
+        ops = sm._SystemOps()
+
+        def fake_run(argv, **kw):
+            if argv[1] == "show":
+                for prop in ("--property=LoadState",
+                             "--property=ActiveState", "--property=Job"):
+                    assert prop in argv, f"show must query {prop}: {argv}"
+            return handler(argv)
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        return ops
+
+    @staticmethod
+    def _cp(rc, out="", err=""):
+        return types.SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+
+    def test_clean_stop_is_established(self, monkeypatch):
+        calls = []
+
+        def handler(argv):
+            calls.append(argv[1])
+            return self._cp(0)
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is True
+        assert calls == ["stop"]  # no probe needed on success
+
+    def test_not_found_unit_resolves_as_nothing_to_cancel(self, monkeypatch):
+        calls = []
+
+        def handler(argv):
+            calls.append(argv[1])
+            if argv[1] == "stop":
+                return self._cp(5, err="Unit qdistro-silo-a@1000.service not loaded.")
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=not-found\n"
+                                     "ActiveState=inactive\nJob=\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is True
+        assert calls == ["stop", "show"]
+
+    def test_not_found_failed_jobless_also_resolves(self, monkeypatch):
+        # The two accepted alternative values: failed state and a numeric
+        # empty Job field.
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(5)
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=not-found\n"
+                                     "ActiveState=failed\nJob=0\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is True
+
+    def test_not_found_with_pending_job_stays_unknown(self, monkeypatch):
+        # systemd serializes jobs across reloads: a queued start can survive
+        # while its unit reads not-found, and a later fragment reappearance
+        # would let it execute — the job row vetoes the exception.
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(5)
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=not-found\n"
+                                     "ActiveState=inactive\nJob=1234\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_not_found_with_active_state_stays_unknown(self, monkeypatch):
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(5)
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=not-found\n"
+                                     "ActiveState=active\nJob=\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_not_found_with_transitional_state_stays_unknown(self, monkeypatch):
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(5)
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=not-found\n"
+                                     "ActiveState=activating\nJob=\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_incomplete_show_reply_stays_unknown(self, monkeypatch):
+        # A not-found reply that does not carry the full triple proves
+        # nothing — missing properties are malformed evidence, not absence.
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(5)
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=not-found\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_failed_stop_with_live_unit_stays_unknown(self, monkeypatch):
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(1, err="Failed to stop: some manager error")
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=loaded\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_masked_unit_stays_unknown(self, monkeypatch):
+        # A masked unit can still own jobs and running processes — only
+        # not-found is nothing-to-cancel.
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(1)
+            if argv[1] == "show":
+                return self._cp(0, out="LoadState=masked\n")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_failed_probe_keeps_unknown(self, monkeypatch):
+        # The same failure signature a dead bus produces: the probe itself
+        # cannot answer, so the stop verdict stays unknown.
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(1, err="no such file or directory")
+            if argv[1] == "show":
+                return self._cp(1, err="Failed to connect to bus")
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_probe_timeout_keeps_unknown(self, monkeypatch):
+        def handler(argv):
+            if argv[1] == "stop":
+                return self._cp(1)
+            if argv[1] == "show":
+                raise sm.subprocess.TimeoutExpired(argv, 3)
+            raise AssertionError(f"unexpected argv {argv}")
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+
+    def test_stop_timeout_never_probes(self, monkeypatch):
+        calls = []
+
+        def handler(argv):
+            calls.append(argv[1])
+            raise sm.subprocess.TimeoutExpired(argv, 30)
+        ops = self._ops(monkeypatch, handler)
+        assert ops.systemctl_stop("qdistro-silo-a@1000.service") is False
+        assert calls == ["stop"]
+
+
+# ---------------------------------------------------------------------------
+# _read_export_meta — the meta.json open must never block the D-Bus loop
+# ---------------------------------------------------------------------------
+
+class TestReadExportMetaOpenIsBounded:
+    """lstat-then-open left a window where a FIFO swapped in between turned
+    the open into an unbounded block — on the daemon's D-Bus main loop.
+    The open is O_NOFOLLOW|O_NONBLOCK now and validation is fstat on the fd,
+    so a substituted special file or link is refused, never waited on."""
+
+    def _store(self, tmp_path):
+        return _SiloStore(_FakeOps(), config_path=tmp_path / "silos.yaml")
+
+    def _meta(self, staging, token):
+        (staging / "meta.json").write_text(json.dumps({
+            "launch_token": token,
+            "request_silo": "work",
+            "open_class": "pod",
+        }))
+
+    def test_valid_meta_round_trips(self, tmp_path):
+        store = self._store(tmp_path)
+        staging = tmp_path / "stg"
+        staging.mkdir()
+        self._meta(staging, "tok1")
+        meta = store._read_export_meta(staging, "tok1", caller=None)
+        assert meta["launch_token"] == "tok1"
+        assert meta["request_silo"] == "work"
+
+    def test_missing_meta_is_badstate(self, tmp_path):
+        store = self._store(tmp_path)
+        staging = tmp_path / "stg"
+        staging.mkdir()
+        with pytest.raises(BadState, match="no meta.json"):
+            store._read_export_meta(staging, "tok1", caller=None)
+
+    def _call_bounded(self, store, staging, token):
+        """Run the read in a thread with a hard join deadline: any variant
+        that opens the FIFO blocking would otherwise hang the suite, not
+        fail the test."""
+        outcome = []
+
+        def attempt():
+            try:
+                store._read_export_meta(staging, token, caller=None)
+            except BadState as e:
+                outcome.append(("badstate", str(e)))
+        t = threading.Thread(target=attempt, daemon=True)
+        t.start()
+        t.join(timeout=10)
+        assert not t.is_alive(), \
+            "_read_export_meta blocked on a special-file meta.json"
+        return outcome
+
+    def test_a_fifo_meta_is_refused_without_blocking(self, tmp_path):
+        # Pre-planted FIFO: even a lstat-first implementation refuses it —
+        # a baseline that the "not a regular file" verdict survives —
+        # bounded so a blocking-open regression fails instead of hanging.
+        store = self._store(tmp_path)
+        staging = tmp_path / "stg"
+        staging.mkdir()
+        sm.os.mkfifo(staging / "meta.json")
+        outcome = self._call_bounded(store, staging, "tok1")
+        assert outcome and outcome[0][0] == "badstate", outcome
+        assert "not a regular file" in outcome[0][1], outcome
+
+    def test_a_fifo_swapped_in_at_open_is_refused_not_blocking(
+            self, monkeypatch, tmp_path):
+        """The check/use window itself: a regular file at check time, a FIFO
+        at open time. A lstat-then-open implementation blocks in open()
+        waiting for a writer forever; O_NONBLOCK makes the open complete
+        and the fstat-on-fd refuses. The swap is injected at BOTH opens a
+        variant could use — os.open and builtins open — so it fires
+        whichever the implementation under test reaches for."""
+        store = self._store(tmp_path)
+        staging = tmp_path / "stg"
+        staging.mkdir()
+        self._meta(staging, "tok1")
+        real_os_open = sm.os.open
+        import builtins
+        real_bi_open = builtins.open
+        swapped = []
+
+        def racing_open(path, *a, **k):
+            if not swapped and str(path).endswith("meta.json"):
+                swapped.append(1)
+                (staging / "meta.json").unlink()
+                sm.os.mkfifo(staging / "meta.json")
+            fn = real_os_open if "dir_fd" in k or (
+                a and isinstance(a[0], int)) else real_bi_open
+            return fn(path, *a, **k)
+        monkeypatch.setattr(sm.os, "open", racing_open)
+        monkeypatch.setattr(builtins, "open", racing_open)
+
+        outcome = self._call_bounded(store, staging, "tok1")
+        assert swapped, "the meta open was never exercised"
+        assert outcome and outcome[0][0] == "badstate", outcome
+        assert "not a regular file" in outcome[0][1], outcome
+
+    def test_a_symlink_meta_is_refused_without_following(self, tmp_path):
+        # The target holds a VALID, matching-token meta — if the link were
+        # followed, the read would SUCCEED, so refusal proves O_NOFOLLOW
+        # rather than a parse error on a missing file.
+        store = self._store(tmp_path)
+        staging = tmp_path / "stg"
+        staging.mkdir()
+        planted = tmp_path / "planted"
+        planted.write_text(json.dumps({
+            "launch_token": "tok1",
+            "request_silo": "work",
+            "open_class": "pod",
+        }))
+        (staging / "meta.json").symlink_to(planted)
+        with pytest.raises(BadState):
+            store._read_export_meta(staging, "tok1", caller=None)
+        assert (staging / "meta.json").is_symlink()
+
+    def test_token_mismatch_is_badstate(self, tmp_path):
+        store = self._store(tmp_path)
+        staging = tmp_path / "stg"
+        staging.mkdir()
+        self._meta(staging, "other-token")
+        with pytest.raises(BadState, match="token mismatch"):
+            store._read_export_meta(staging, "tok1", caller=None)

@@ -304,6 +304,27 @@ def _friendly_broker_error(exc: Exception) -> tuple[str, str]:
     return _FRIENDLY_BROKER_ERRORS.get(name, _GENERIC_BROKER_ERROR)
 
 
+def _decide_result_label(result) -> str:
+    """Short bounded label for DecideRequest's atomic non-applied result.
+
+    "applied" / "applied-uncached" are successes and are handled by the
+    callers before reaching this.
+    """
+    result = str(result or "")
+    if result in ("already-allow", "already-deny"):
+        got = result.split("-", 1)[1]
+        return (f"Request was already decided ({got}) by another "
+                "approver — this click changed nothing.")
+    if result == "deciding":
+        return ("Another decision is still being finalized by the "
+                "broker — refresh and check the outcome.")
+    if result == "instance-changed":
+        return ("The broker restarted since this queue was loaded — "
+                "refresh before deciding.")
+    return (f"Decision outcome unconfirmed — the broker answered "
+            f"{result!r}.")
+
+
 # ---------------------------------------------------------------------------
 # StatusNotifierItem D-Bus interface
 # ---------------------------------------------------------------------------
@@ -865,16 +886,64 @@ class BrokerBridge(QObject):
             method = getattr(self._proxy, name)
             return method(*args, dbus_interface=BUS_NAME)
 
+    def _current_owner(self) -> str:
+        """The unique bus name of BUS_NAME's current owner (":1.NN") —
+        the identity of this broker INSTANCE. Empty string when the name
+        is unowned or the lookup itself fails."""
+        try:
+            return str(self.bus.get_name_owner(BUS_NAME))
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _owner_proxy(self, owner: str):
+        """Proxy bound to a UNIQUE bus name (":1.NN") — the broker
+        instance that answered, not whatever currently owns the
+        well-known name. Unique names are never reused by the bus, so a
+        call on this proxy cannot land on a different broker instance;
+        if that instance is gone the call raises NameHasNoOwner."""
+        return self.bus.get_object(owner, OBJ_PATH)
+
     def get_pending(self) -> list[dict]:
-        raw = self._call("GetPending")
+        # Resolve the owner FIRST and call GetPending on a proxy bound
+        # to that unique name — the returned rows are then provably from
+        # this instance. Tagging after a _call could mislabel rows if
+        # the broker restarted between the call and the owner lookup.
+        # No _call retry here: a retried call could land on a different
+        # instance and would be mis-tagged by the pre-resolved owner.
+        owner = self._current_owner()
+        if not owner:
+            raise dbus.DBusException(f"{BUS_NAME} has no owner")
+        raw = self._owner_proxy(owner).GetPending(
+            dbus_interface=BUS_NAME)
         out = []
         for r in raw:
-            out.append({k: (int(v) if k in ("id", "uid", "pid") else dict(v) if k == "details" else str(v))
-                        for k, v in r.items()})
+            row = {k: (int(v) if k in ("id", "uid", "pid") else dict(v) if k == "details" else str(v))
+                   for k, v in r.items()}
+            # The owning instance travels with the row: request ids are
+            # per-instance and restart at 1, so a row is only decidable
+            # against the instance that reported it.
+            row["_owner"] = owner
+            out.append(row)
         return out
 
-    def decide(self, rid: int, decision: str, scope: str):
-        self._call("DecideRequest", int(rid), str(decision), str(scope))
+    def decide(self, rid: int, decision: str, scope: str,
+               owner: str = "") -> str:
+        """DecideRequest on the broker. Returns its atomic outcome string
+        ("applied", "applied-uncached", "already-allow", "already-deny",
+        "deciding" or "unknown"); callers must check it — a non-applied
+        result means this call decided nothing.
+
+        `owner` must be the unique name that supplied this request's
+        pending row (row["_owner"] from get_pending). The decision goes
+        to a proxy bound to that unique name — NEVER to a reconnect-
+        retried _call that could land on a new instance, where the same
+        rid may name an unrelated request. An empty or stale owner is
+        refused as "instance-changed" before anything is sent."""
+        if not owner or self._current_owner() != owner:
+            return "instance-changed"
+        return str(self._owner_proxy(owner).DecideRequest(
+            int(rid), str(decision), str(scope),
+            dbus_interface=BUS_NAME))
 
     def list_cache(self) -> list[dict]:
         raw = self._call("ListCache")
@@ -1011,7 +1080,7 @@ class BrokerBridge(QObject):
 
 
 class DetailPane(QWidget):
-    decided = pyqtSignal(int, str, str)
+    decided = pyqtSignal(int, str, str, str)
     ruleFromThis = pyqtSignal(dict)
 
     def __init__(self):
@@ -1213,7 +1282,11 @@ class DetailPane(QWidget):
             if rb.isChecked():
                 scope = key
                 break
-        self.decided.emit(self._rid, decision, scope)
+        # The owning broker instance travels with the row the admin is
+        # deciding — a stale row's decision is refused by
+        # BrokerBridge.decide before it can land on a restarted broker.
+        self.decided.emit(self._rid, decision, scope,
+                          str((self._current_req or {}).get("_owner", "")))
         # Reset the picker to "once" immediately so a non-`once` scope
         # never silently persists as the default for the next request,
         # even if the broker refuses and the request stays pending. (item 2)
@@ -2352,9 +2425,10 @@ class MainWindow(QMainWindow):
         req = self.model.itemFromIndex(current).data(Qt.ItemDataRole.UserRole + 1)
         self.detail.show_request(req)
 
-    def _on_decided(self, rid: int, decision: str, scope: str):
+    def _on_decided(self, rid: int, decision: str, scope: str,
+                    owner: str = ""):
         try:
-            self.broker.decide(rid, decision, scope)
+            result = self.broker.decide(rid, decision, scope, owner)
         except dbus.DBusException as e:
             # The broker refused to record this decision. For
             # ScopeNotPermitted the pending request is still retryable;
@@ -2392,8 +2466,26 @@ class MainWindow(QMainWindow):
                 )
             QMessageBox.critical(self, "Decision not recorded", body)
         else:
-            # Decision recorded — clear any stale refusal note for this rid.
-            self.detail.clear_broker_error(rid)
+            if result in ("applied", "applied-uncached"):
+                # Decision recorded — clear any stale refusal note for
+                # this rid.
+                self.detail.clear_broker_error(rid)
+                if result == "applied-uncached":
+                    self.statusBar().showMessage(
+                        f"Request {rid} decided, but the broker could "
+                        f"not store the {scope!r} cache row — later "
+                        "identical requests will prompt again.", 8000)
+            else:
+                # The broker answered atomically that THIS call did not
+                # apply a decision (a concurrent approver won, a
+                # decision is still finalizing, or the id is unknown in
+                # this broker instance — e.g. a restart between the
+                # pending snapshot and the click). Surface it rather
+                # than silently refreshing. (astra r4)
+                label = _decide_result_label(result)
+                self.detail.set_broker_error(
+                    rid, label, f"DecideRequest returned {result!r}")
+                self.statusBar().showMessage(label, 8000)
         self.refresh()
 
     def _ensure_pending_tab(self) -> bool:
@@ -2881,7 +2973,11 @@ class MainWindow(QMainWindow):
         # (single or bulk) decision. (item 2)
         self.detail.reset_scope()
 
-        rids = [int(r["id"]) for r in pending]
+        # Each row's owning instance is bound to the snapshot — a
+        # refresh that reconnects to a restarted broker cannot rebind
+        # this bulk run's ids to the new instance's unrelated requests.
+        rids = [(int(r["id"]), str(r.get("_owner", "")))
+                for r in pending]
         total = len(rids)
         progress: QProgressDialog | None = None
         if total > 10:
@@ -2895,6 +2991,7 @@ class MainWindow(QMainWindow):
             "i": 0,
             "ok": 0,
             "failures": [],   # list of (rid, error_str)
+            "uncached": 0,    # applied, but the scope cache row failed
             "cancelled": False,
         }
 
@@ -2906,10 +3003,9 @@ class MainWindow(QMainWindow):
                 state["cancelled"] = True
                 _finalize()
                 return
-            rid = rids[state["i"]]
+            rid, owner = rids[state["i"]]
             try:
-                self.broker.decide(rid, decision, scope)
-                state["ok"] += 1
+                result = self.broker.decide(rid, decision, scope, owner)
             except dbus.DBusException as e:
                 # Bounded label for the inline summary; raw goes to stderr
                 # (via _friendly_broker_error's WARNING log + the print
@@ -2923,6 +3019,21 @@ class MainWindow(QMainWindow):
                     f"[admin_app] bulk-{decision} rid={rid} failed: {e}",
                     file=sys.stderr,
                 )
+            else:
+                if result in ("applied", "applied-uncached"):
+                    state["ok"] += 1
+                    if result == "applied-uncached":
+                        state["uncached"] += 1
+                        print(f"[admin_app] bulk-{decision} rid={rid}: "
+                              "applied but the cache row could not be "
+                              "stored", file=sys.stderr)
+                else:
+                    # Atomic non-applied answer — count it, don't claim
+                    # the bulk run applied it. (astra r4)
+                    label = _decide_result_label(result)
+                    state["failures"].append((rid, label))
+                    self.detail.set_broker_error(
+                        rid, label, f"DecideRequest returned {result!r}")
             state["i"] += 1
             if progress is not None:
                 progress.setValue(state["i"])
@@ -2939,6 +3050,10 @@ class MainWindow(QMainWindow):
             else:
                 title = f"{verb} all"
             msg = f"{verb}ed {ok} of {total} requests."
+            if state["uncached"]:
+                msg += (f"\n{state['uncached']} decision(s) applied but "
+                        "the broker could not store the cache row — "
+                        "later identical requests will prompt again.")
             if fail:
                 # Summarize first few failures inline; full detail goes
                 # to stderr above.

@@ -170,12 +170,14 @@ files_search_var_lib(qdistro_broker_t)
 files_manage_var_lib_files(qdistro_broker_t)
 files_manage_var_lib_dirs(qdistro_broker_t)
 
-# Inotify on /etc/qdistro/rules.d/*.yaml. The dir itself is etc_t
-# (the broker creates it via os.makedirs but the .fc doesn't
-# label it — kept generic so admin can ship rules.d/ entries via
-# normal config-management tooling without re-labelling). The watch
-# permission is a single allow line; no upstream interface covers
-# "watch a generic etc dir".
+# Inotify on /etc/qdistro/rules.d/*.yaml. The dir's WRITE surface
+# (SaveRule/DeleteRule) is deliberately NOT granted here — blanket
+# etc_t file manage would let the broker overwrite /etc/shadow. The
+# companion raw-language module selinux/broker-rules declares
+# qdistro_broker_rules_t, labels rules.d with it, and grants manage
+# on that type only (single home: do not re-declare the type here).
+# The grants below still cover /etc/qdistro traversal and the generic
+# etc_t read/watch of pre-relabel and non-rules.d content.
 files_search_etc(qdistro_broker_t)
 files_read_etc_files(qdistro_broker_t)
 allow qdistro_broker_t etc_t:dir { watch read open getattr search list_dir_perms };
