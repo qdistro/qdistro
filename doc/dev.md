@@ -1,17 +1,17 @@
-# Dev guidelines
+# Developer guide
 
-Patterns distilled from the existing first-party apps (qterminator in
-`qdterm/`, qnotebook in `qnotebook/`) and the broker / SDK / admin-app stack. These conventions are
-the canonical reference — when in doubt about layout, testing, config, or
-idioms, follow what's described here.
+How to set up a machine, build, test, and iterate on qdistro. The
+project-wide invariants (language policy, single-tenant assumptions,
+commit conventions) live in [AGENTS.md](AGENTS.md); this file is the
+practical side — toolchain, gates, images, and per-app conventions.
 
 ## Dev setup
 
 qdistro is one repository: qdistro's own content at the root and the
 components (`qdwin/`, `qdshell/`, `qdlocker/`, `qdgreeter/`, `qdbrowser/`,
 `qdterm/`, `qdfileman/`, `qnotebook/`, the two browser extensions) as
-top-level directories. One clone is the whole layout; no env vars, no sibling
-checkouts, no system install of the sources:
+top-level directories. One clone is the whole layout; no env vars, no
+sibling checkouts, no system install of the sources:
 
 ```sh
 git clone https://github.com/qdistro/qdistro.git
@@ -19,318 +19,372 @@ cd qdistro
 ```
 
 For parallel work, use one git worktree per task
-(`git worktree add .worktrees/<topic> -b <branch>`); a worktree is a complete
-tree and needs nothing linked next to it. See [../AGENTS.md](../AGENTS.md)
-for the working workflow.
+(`git worktree add .worktrees/<topic> -b <branch>`); a worktree is a
+complete tree and needs nothing linked next to it. The checkout on `main`
+is merge-only — work happens in worktrees and is merged in. See
+[../AGENTS.md](../AGENTS.md) for the working workflow.
 
-### Container build prerequisites
+## Host prerequisites
 
-Install rootless Podman and the orchestration commands Bash, Git, Python 3
-(stdlib), and Bats. Libvirt/QEMU are needed for the VM gates. Check command
-availability with `ci/bin/qci-host-deps --check`; `qci preflight` also checks
-Podman and the VM environment. Build dependencies are installed in the pinned
-container image, not on the workstation.
+The host only needs **orchestration** tools. All compilers, Qt, Python
+test modules and headers live in a pinned container image, not on the
+workstation:
+
+- **Rootless Podman** — builds and headless tests run inside it.
+- **Bash, Git, Python 3 (stdlib), Bats** — the qci runner itself.
+- **libvirt + qemu-kvm + bubblewrap** — only for the VM gates (bats, gui,
+  image). Nested KVM must be enabled for the tiers that run VMs inside
+  the VM; see the warning in [../README.md](../README.md#try-qdistro).
+
+Check what the host is missing:
 
 ```sh
-ci/bin/qci host
-# Quick development feedback in the same image:
-ci/bin/qci-host-run bash -c 'cd qdlocker && python3 -m pytest -q tests/unit'
+ci/bin/qci-host-deps --check
+ci/bin/qci preflight          # also verifies the libvirt session and bases
 ```
 
-The gate builds qdwin's vendored patched libweston, qdwin, and qdshell in order.
-Qt tests run offscreen, without host desktop sockets. The worktree stays owned
-by your uid. The image caches the compiler, Qt/QML tools, Python dependencies,
-and QTermWidget binding; npm preparation caches each extension's dependencies
-and downloads. Test rows have no external network. `QCI_OFFLINE=1` requires the
-image and dependency caches to be ready; it never silently contacts a registry
-or package index. See [../ci/README.md](../ci/README.md#host-test-dependencies)
-for cache keys, package lists, and logs.
-
-For manual builds of the root daemons, use `ci/bin/qci-host-run` and point
-`PKG_CONFIG_PATH` at `qdwin/build-qci/meson-uninstalled` after a host gate run.
-FreeRDP/PipeWire development packages and SELinux policy build tools are in the
-container's native dependency recipe. They need not be installed on the host.
-
-The qci VM base defaults to the cloud-derived, dependency-baked image. It has
-runtime and test packages but no native compiler toolchain. Rootless Podman
-builds qdwin, qdshell, the daemons, qsu and SELinux policy modules against the
-pinned snapshot on the host; a checked payload is installed while provisioning
-each run's golden VM.
-Install rootless Podman on the host before running VM integration gates.
-Its cloud SHA256 and Tumbleweed repository snapshot are pinned together in
-[`snapshot.conf`](../snapshot.conf), the one snapshot pin the image, tier-2 and
-Podman builds share; see
-[`ci/README.md`](../ci/README.md#cloud-test-substrate) for rotation, the RPM
-download cache, and the explicit `QDISTRO_VM_BASE=kiwi` alternative.
-
-Prerequisites for the libvirt session (set up once):
+For the libvirt session (set up once):
 
 ```sh
 sudo zypper install libvirt qemu-kvm virt-install virt-manager bubblewrap
-sudo usermod -aG libvirt $(whoami)
-# Then log out / log in for the group change to take effect.
-virsh -c qemu:///session list --all
+sudo usermod -aG libvirt $(whoami)   # log out and back in
+virsh -c qemu:///session list --all  # verifies the per-user session
 ```
 
-The final command verifies the per-user libvirt session used by qdistro. If it
-cannot connect, start the distro's system libvirt service/socket (or open
-virt-manager) and repeat the check; `libvirtd.service` is not a user unit.
+If the session cannot connect, start the distro's system libvirt
+service/socket (or open virt-manager) and repeat; `libvirtd.service` is
+not a user unit.
 
-Integration tests run **inside the baked VM**. GUI tests must never
-run on the host (see [AGENTS.md](AGENTS.md)).
+The VM/image paths additionally need tools `qci-host-deps` does not
+check: **libguestfs + guestfs-tools** (`virt-customize`, `virt-resize`,
+`virt-cat`, `virt-sparsify`) for the base builders, `sshpass` and `jq`
+for `image/verify.sh`, and ImageMagick's `magick` for the GUI gate's
+frame-usability analysis.
 
-For the qdshell QML stack: `cd qdshell && quickshell -p shell.qml`,
-but only inside a VM session where qdwin is the active compositor.
+## Building: the container toolchain
 
-### Agent-assisted GUI runner
+`ci/bin/qci host` runs every build and headless test row — for the root
+and all ten components — inside one rootless Podman image pinned to the
+Tumbleweed snapshot in [`snapshot.conf`](../snapshot.conf). The gate
+builds qdwin's vendored, patched libweston from current source before
+qdwin and qdshell, builds the C daemons and QML plugin, runs every pytest
+and npm suite, and checks the QML stack.
 
-Codex with `gpt-5.6-luna` is the **only** supported visual runner for the
-mechanical markdown scenarios. Run it non-interactively and let qci place each
-attempt in its own temporary working directory:
+```sh
+ci/bin/qci host
+# A single suite in the same toolchain, for development feedback:
+ci/bin/qci-host-run bash -c 'cd qdlocker && python3 -m pytest -q tests/unit'
+ci/bin/qci-host-run bash -c 'cd qdfileman && python3 -m pytest -q'
+```
+
+How the container behaves (see `ci/containers/` and
+[../ci/README.md](../ci/README.md#host-test-dependencies)):
+
+- The worktree is mounted at its original absolute path with
+  `--userns=keep-id`; generated files keep your uid. No host home,
+  display socket, D-Bus socket, or site-packages leaks in. Qt runs
+  offscreen; a private `dbus-run-session` supplies both bus addresses.
+- Build/test rows run with `--network=none`. The two browser
+  extensions' `npm ci` runs in a separate *networked* preparation
+  container; downloads cache under `$QDWIN_CACHE_DIR/host-npm/`
+  (default `~/.cache/qdistro/`).
+- The image is cached by dependency recipe, snapshot pin, and resolved
+  base image ID — ordinary application-source changes reuse it (the
+  recipe also covers the vendored QTermWidget binding sources, so changes
+  there re-key the image).
+- `QCI_OFFLINE=1` refuses to pull anything: it needs the image and the
+  npm/dependency caches already warm.
+
+For manual builds of the root daemons, run meson through
+`ci/bin/qci-host-run` and point `PKG_CONFIG_PATH` at
+`qdwin/build-qci/meson-uninstalled` after a host gate run. There is no
+supported "native host" build path — don't install the toolchain on the
+workstation.
+
+## The Tumbleweed snapshot pin
+
+[`snapshot.conf`](../snapshot.conf) at the repo root is the **one**
+Tumbleweed pin. Everything reads it: the kiwi disk image's repositories
+(`image/build.sh`), the cloud-derived test VM bases
+(`scripts/vm/lib/test-substrate.sh`), the tier-2 workload images, and the
+Podman builder base (`tumbleweed:<snapshot>`). One snapshot means one
+download set and one RPM cache.
+
+- The pin is an 8-digit `history/<snapshot>` id plus the SHA256 of the
+  dated Minimal-VM cloud qcow2 (verified against openSUSE's signed
+  checksum; its `VERSION_ID` must equal the snapshot).
+- **The pin expires 14 days after its snapshot date.** The history
+  service keeps ~4 weeks, so rotate deliberately — roughly weekly. Verify
+  the new cloud image signature and `VERSION_ID`, update `cloud_url`,
+  `cloud_sha256` and `snapshot` together, then rebuild the bases and the
+  tester image. `QDISTRO_TEST_SUBSTRATE=<manifest>` runs experiments
+  against a separate manifest.
+- Cached RPMs under `$QDWIN_CACHE_DIR/{rpm,podman-rpm}/<snapshot>/<arch>/`
+  are download hints only — repositories keep `gpgcheck=1`.
+
+## Test VM bases
+
+The default qci VM base is **not** the product image — it is the
+openSUSE Minimal-VM cloud qcow2, dependency-baked:
+
+| Base | Built by | Contains |
+| --- | --- | --- |
+| `baseweed-admin-<…>.qcow2` | `scripts/vm/build-baseweed-from-scratch.sh` (~5–10 min, once per pin) | cloud image + `admin` uid 1000, test password, qemu-guest-agent, first-boot wizards masked |
+| `baseweed-baked-<…>.qcow2` | `scripts/vm/build-baked-baseweed.sh` (re-runnable; at-rest `virt-customize`) | runtime + test packages baked in; **no compilers** — native bits come from the Podman builder |
+| `baseweed-enforcing-baked.qcow2` | `scripts/vm/build-enforcing-baseweed.sh` | `SELINUX=enforcing` + a host SSH key for the bats lane (qga is denied under enforcing) |
+
+The admin/baked filenames carry the cloud SHA and snapshot, so a pin bump
+produces new disks and never mutates bases that preserved VMs still boot
+from. The enforcing bake is the exception: it is the fixed name
+`baseweed-enforcing-baked.qcow2` and `--force` replaces it in place —
+rebuild it after a rotation, but not while a run is using it.
+
+Per run, `bats` and `gui` provision a **golden** qcow2 once — native
+qdwin/qdshell/daemons/qsu binaries and SELinux modules built in Podman
+from current source, layered over the base — and every worker clones it
+(~10 s provisioning per VM). `QCI_NO_GOLDEN=1` disables this.
+
+`QDISTRO_VM_BASE=kiwi` clones workers from a kiwi tester/`ci`-profile
+image imported with `scripts/vm/import-kiwi-base.sh` — the path to use
+when image parity is the test target (`auto` prefers an imported kiwi
+base but silently falls back to baked). Manual driver
+tools (`vm-exec`, `vm-gui`, `vm-start-and-wait`, `spin-test-vm.sh`) are
+documented in [vm-dev-tools.md](vm-dev-tools.md).
+
+## Testing: the gates
+
+`ci/bin/qci` (or `just` in `ci/`) is the monorepo's CI. There is no
+hosted CI. The gate list with full semantics is in
+[../ci/README.md](../ci/README.md); the short tour:
+
+| Gate | What it runs |
+| --- | --- |
+| `preflight` | Host tools, libvirt session, bases, in-tree components. |
+| `lint` | shellcheck (warn), blocking bats syntax, doc link checks. |
+| `selftest` | The qci runner's own contract suite (no VM). Runs first in `host`. |
+| `host` | Every build + headless test row, in the container. |
+| `vm-smoke` | One VM: session, Wayland socket, core user services. |
+| `bats` | Every `tests/integration/vm/*.bats` (plus per-component ones), one disposable VM per file, in parallel. `# qci:host-only` files run on the host. |
+| `gui` | Markdown GUI scenarios driven by a visual agent, plus the executable qdwin smokes. |
+| `image` | Qualify `image/`'s built artifact: extract → static checklist → boot-verify. |
+| `mmnet`, `snapshot-daily`, `release-manifest`, `bootstrap-release-profile`, `registry-check` | Multi-VM network lane; daily VM; release-contract checks. |
+| `full` | preflight + host + release checks + image + vm-smoke + bats + gui (hours). |
+
+Every run is self-contained under `ci/runs/<gate>-<utc>-<pid>/`:
+`report.md`/`report.html`, `results.tsv`, `manifest.txt`,
+`repo-state.tsv`, `timings.tsv`, plus `bats/`, `gui/`, `journals/`,
+`screenshots/`. `qci triage --latest` is where a failure starts.
+
+**Pick gates with `qci affected --changed-from main`.** It selects whole
+gates, not per-component tests — a qdterm change selects `host bats gui`,
+and each selected gate runs in full (~2–3 h total). For development
+feedback use the cheap loops in [Iterating](#iterating-day-to-day); the
+selected gates are the acceptance bar.
+
+**Shared host:** run **one** `full`/GUI run at a time. Runs share the
+`qdistro-template` domain, the baseweed bases, and host RAM/CPU (host
+ports are probed per run so multiple *users* can coexist — see
+[../AGENTS.md](../AGENTS.md#shared-host-qci-rule)). Check for a live run
+before starting:
+
+```sh
+systemctl --user list-units 'qci-*'
+pgrep -af '[c]i/bin/qci'
+virsh -c qemu:///session list --all | grep qci-
+```
+
+Launch long runs under `systemd-run --user --unit=qci-<name> ...` (or
+`ci/bin/qci-tmux full`) so they survive the terminal — and **never edit a
+script while a run that sources it is going**; bash reads scripts
+incrementally and an edit mid-run corrupts the driver. Commit first,
+then launch.
+
+Failed disposable VMs are preserved (hibernated, usually `powered_off`
+in practice — see `ci/AGENTS.md`) and named in `manifest.txt`.
+`virsh -c qemu:///session start <vm>` brings it back; `qci cleanup
+--dry-run` sweeps stale `qci-*` domains and never touches
+`qdistro-daily*`.
+
+## The GUI gate: a visual runner contract
+
+Markdown scenarios (`tests/integration/permissions-gui/`,
+`qdwin-noctalia/`, `workflow-gui/`, `presentation-gui/`, qdwin/qdlocker
+suites) are playbooks executed by a **vision-capable coding agent**, one
+disposable VM per scenario. `qci gui` renders each scenario into a prompt
+under `agent-notes/` and hands it to `QCI_AGENT_CMD` (`{prompt}` is the
+prompt path):
 
 ```sh
 QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
-  qdistro/ci/bin/qci gui
+  ci/bin/qci gui
 ```
 
-Keep `-c model_reasoning_effort=medium`: without it codex uses the host's own
-default, which is not the same on every host (lab1's codex runs Luna at
-`reasoning effort: none`, visible in the header of each `gui/*.agent.log`).
-The validated runs used `medium`; full-20261006T175536Z-3524705 ran all 40
-scenarios at `none`, and one driver retyped its scenario path with a character
-missing and recorded ERROR without running the scenario. The manifest records
-the pinned value as `qci_agent_reasoning_effort` (`unpinned` when the template
-names none).
+Rules that make a run count:
 
-Do not add `--ephemeral`: the gate reads each attempt's codex rollout to see
-which frames the driver actually opened, and records a pixel-dependent verdict
-whose driver opened none as ERROR (see `ci/README.md`).
+- **The sanctioned driver is Codex with `gpt-5.6-luna` at
+  `model_reasoning_effort=medium`**, pinned explicitly every run — an
+  inherited host default (some hosts run Luna at `none`) silently changes
+  the run's meaning. `QCI_AGENT_MODEL` must name the model whenever the
+  template doesn't, or the manifest records `unknown`.
+- **No `--ephemeral`.** The gate reads each attempt's Codex rollout to
+  verify the driver actually *opened* the attested PNG frames; a
+  pixel-dependent verdict from a driver that opened none is recorded
+  `ERROR` (`agent-unviewed-verdict`). If the template sets `CODEX_HOME`,
+  export the same path as `QCI_GUI_CODEX_HOME`.
+- **Vision, not OCR.** Scenarios are graded by looking at screenshots —
+  colour, layout, focus, the *absence* of a control. OCR (tesseract, when
+  installed, runs over every attested frame as corroboration — otherwise
+  the text column records `skip`) reads text only; a runner
+  that cannot open images must record `ERROR`, never `PASS`/`FAIL`. A
+  2026-09 run graded 113 scenario attempts through OCR text alone and its
+  visual verdicts were worthless — that failure mode is why this rule
+  exists.
+- **Isolation is enforced, not optional.** The gate detaches controllers
+  from the host display/session and sandboxes each agent in a Bubblewrap
+  namespace that hides the host X11/Wayland/D-Bus sockets. Scenarios
+  never run on the host; the `gui-qdwin` golden pins Pixman + 1280×800 so
+  screenshots and injected input share stable coordinates.
+- `QCI_GUI_RETRY=1` retries a scenario **once, on a fresh VM**, and only
+  for tight infra signatures (`transport-timeout`,
+  `agent-api-unreachable`, `agent-tooling`) — never a product
+  `FAIL`/`ERROR`. A retried pass is always logged to `flake.tsv`.
+- Opt-in lanes stay off in normal runs: `QCI_GUI_APPS=1` (third-party app
+  compatibility, `qdwin/tests/apps/`), `QCI_LABWC_ADMIN_LANE=1` and
+  `QCI_XWAYLAND_E2E=1` (the labwc/XWayland harness lane; `qci gui-admin`
+  sets it). GUI concurrency defaults to serial (`QCI_GUI_JOBS` to
+  override) — parallel full GUI stacks have produced flakes that don't
+  reproduce in isolation.
 
-The recorded model uses `QCI_AGENT_MODEL` when it is set, otherwise a model
-named in `QCI_AGENT_CMD`, and otherwise records `unknown` — there is NO default,
-deliberately, so a run whose driver cannot be identified is visible as such
-rather than being labelled with the model it was supposed to use. Set
-`QCI_AGENT_MODEL` whenever a generic wrapper selects the model outside the
-visible command template, or the manifest will record `unknown`.
+To re-run one scenario or one file: `qci gui --scenario <abs path>`,
+`qci bats --file <f.bats>`; against a preserved VM add `--vm <name>` (or
+`qci replay <scenario> <vm>`). `ci/bin/qci-lane check` lists maintained
+scenario groups (`gui-locker`, `bats-fast`, …) for focused runs.
 
-There is no second driver. `gpt-5.6-luna` is the only driver verified against
-the visual-evidence bar (it opens a PNG from disk mid-session and reports colour
-and layout, not just text). A visual scenario is graded by a runner that can
-open a PNG and look at it; when Luna is unavailable the honest outcome is a
-blocked run, not a substitute model. A runner that cannot open an image must
-record `ERROR` rather than a verdict. To retry a single scenario on a fresh VM:
+## Building the disk image
+
+The tester artifact is a **raw disk image**
+(`qdistro-<version>-<snapshot>.raw.xz` + `.sha256`), built by kiwi inside
+a builder VM — no host root, no host kiwi:
 
 ```sh
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
-QCI_AGENT_MODEL=gpt-5.6-luna \
-QCI_GUI_RETRY=1 \
-  qdistro/ci/bin/qci gui --scenario tests/integration/permissions-gui/01-tui-approver-visual.md
+cd image/
+QDISTRO_PROFILE=dev ./build-in-vm.sh   # ~30–40 min cold: clone + kiwi + xz + host-side proof
+./verify.sh                          # boots the raw under qemu:///session, ~10–15 min
+./verify.sh --stick                  # + USB/SecureBoot/nested/dd battery (what the gate runs)
 ```
 
-The classified retry covers an exact provider-capacity response as well as a
-provider connection outage. It retries the selected model once on a fresh VM;
-it never retries a product `FAIL` or `ERROR`.
+- `build-in-vm.sh` clones the baked base, runs `kiwi-ng system build` +
+  `result bundle` in the VM, copies the raw and `bundle/` to
+  `$QDISTRO_BUILD_DIR` (default `/var/tmp/qdistro-build-<uid>` — never
+  `/tmp`, the raw is 28 GiB), and proves the artifact on the host:
+  checksum, `xz -t`, decompressed size, and the baked `PROFILE=` matching
+  the request.
+- `QDISTRO_PROFILE` is `dev` or `release` (default `release`) and selects
+  passwordless-sudo dev mode and the SELinux mode; a mis-profiled build
+  fails loudly rather than shipping mislabeled.
+- The image runs the **same** bootstrap installer chain as a bare-metal
+  install (`qdistro-bootstrap.sh`), in offline mode, and records the
+  chain in `/var/lib/qdistro/bootstrap/installer-chain.state`; the
+  provenance manifest is `/etc/qdistro/release` on the image.
+- `iterate-kiwi.sh` pushes `config.xml`/`config.sh`/`build.sh` into a
+  running builder for a fast loop; `verify-contents.sh` +
+  `extract-root.sh` run the static checklist without booting.
+- `qci image` (part of `full`) resolves `bundle/*.raw.xz`, extracts,
+  checklists, and boot-verifies the same artifact — and checks its
+  identity: the `SOURCE` commit, `config.xml` version, `snapshot.conf`
+  snapshot, and the baked `PROFILE` must match the run's
+  `QDISTRO_PROFILE` (default `release`, so a `dev` artifact needs
+  `QDISTRO_PROFILE=dev` on the run too). A cached decompressed raw is
+  verified byte-for-byte before reuse, so keep room for another 28 GiB.
+  No artifact → the gate is `blocked`/`build`, never a pass;
+  `QCI_SKIP_IMAGE=1` records an explicit skip for a dev `full` (refused
+  under `QCI_RELEASE=1`).
 
-For the complete GUI matrix, including the opt-in third-party application
-coverage (the periodic `gui-apps` lane, `qdwin/tests/apps/01` and `05`–`11`),
-opt into that lane (it bakes the app-deps golden) and use eight disposable VM
-workers. A normal `qci full` leaves the lane off; do not export
-`QCI_GUI_APPS` or `QDWIN_APP_DEPS` in routine full-run scripts:
+The full contract — chain table, profile semantics, checklist, failure
+modes — is [../image/AGENTS.md](../image/AGENTS.md). **Do not run
+`verify.sh` while a builder VM is up** on the same session daemon.
 
-```sh
-QCI_GUI_JOBS=8 QCI_GUI_APPS=1 \
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
-QCI_AGENT_MODEL=gpt-5.6-luna \
-  qdistro/ci/bin/qci gui
-```
+## The installable track: packaging/
 
-The app-deps image includes the GVfs providers required for Thunar's standard
-Recent, Trash, Computer, and Network locations; a partial file-manager UI is a
-bake failure, not a reason to relax the visual scenario.
+Alongside the raw image, `packaging/` builds the qdistro stack as signed
+RPMs and a bootable **Agama installer ISO** (unattended via an OEMDRV
+medium). Everything external is configurable via `packaging/env.sh` +
+gitignored `env.local.sh`; the defaults float on Tumbleweed (this track
+does not read `snapshot.conf`). Quickstart and the DUD variant for the
+stock ISO: [../packaging/README.md](../packaging/README.md).
 
-`--yolo` is appropriate here only because the runner controls a disposable VM
-and must invoke `virsh`, `vm-exec`, and evidence-writing commands without an
-interactive approval. The scenario still fails closed unless the agent writes
-an explicit passing verdict and exits zero.
+## Iterating day to day
 
-#### Visual evidence: vision, not OCR
-
-Visual scenarios are graded by **opening the harvested PNG and looking at it**.
-OCR is not a grading backend. Tesseract *is* installed on this workstation
-(5.5.3, `eng`) and the gate runs it over every attested frame, but only as
-**text corroboration**: the result is recorded in
-`visual-evidence/manifest.tsv` and never decides a verdict. With no backend
-present the text column reads `skip` and scenarios grade exactly as before.
-
-Why the runner must be vision-capable, and why OCR cannot stand in for it:
-
-- OCR reads text and nothing else. It cannot establish a colour, a layout or
-  geometry claim, focus, z-order, animation, or the **absence** of a control —
-  and those are most of what these scenarios actually assert. A text-only
-  backend can be perfectly healthy and still have no opinion about the verdict.
-- A successful OCR run that reads zero words is indistinguishable from a
-  correct reading of a blank screen, so "OCR succeeded" is not evidence.
-
-Measured on one real capture (`qdlocker-09-step2-mic.png`), both backends over
-the same frame:
-
-| | Tesseract 5.5.3 | Luna (`view_image`) |
-|---|---|---|
-| banner + clock + date text | yes | yes |
-| cost | 0.25s, deterministic | a model call |
-| `⚠` glyph | read as `A` | read as a warning marker |
-| dark-navy background, pink outline | — | yes |
-| the empty password field below the "Password" label | **invisible** (no text to read) | yes, with its yellow outline |
-
-The last row is the whole argument: a scenario asserting "the password field is
-present and empty" is unanswerable by OCR and trivially answerable by looking.
-OCR earns its place as a cheap deterministic cross-check on quoted text — if a
-runner claims the screen said X and the attested frame's OCR contains no X,
-that is worth surfacing — but it is a corroborator, not a judge.
-
-Luna is verified against this bar. `todo/reviews/luna-vision-probe-result.md`
-records it opening `qdlocker-09-step2-mic.png` from disk mid-session with its
-`view_image` tool and returning the banner text verbatim, the dark-navy
-background, the pink warning outline, and the yellow-outlined empty password
-field — three of which OCR cannot report at all. The description was checked
-against the image by hand.
-
-Rules for the driver, in order of precedence:
-
-1. If you can open the image, open it. A screenshot you captured but did not
-   inspect is not evidence, and a verdict written from memory of what the
-   scenario said is a fabricated verdict.
-2. If you cannot open images, the scenario's visual assertions are
-   **unobservable by you**: record `ERROR` naming the missing capability. Never
-   `PASS`, never `FAIL` — with no pixels in hand there is no verdict about
-   pixels.
-3. Do not substitute OCR for step 1. Running OCR and reporting its output as if
-   it settled a colour, geometry, or absence claim is over-claiming, and it is
-   the specific failure that made an earlier full run's visual verdicts
-   worthless. What is actually countable in that run
-   (`full-20260914T194046Z-13620/gui`): **113** agent logs, **75** of them
-   mentioning `tesseract`, and **0** containing any image-open call, on a host
-   whose logs record `tesseract: command not found` — OCR was not installed
-   until 2026-09-16. The method, so the numbers are reproducible rather than
-   asserted:
-
-   ```bash
-   D=ci/runs/full-20260914T194046Z-13620/gui
-   find "$D" -name '*.agent.log' | wc -l                                  # 113
-   find "$D" -name '*.agent.log' -exec grep -l  tesseract {} + | wc -l    #  75
-   find "$D" -name '*.agent.log' -exec grep -li tesseract {} + | wc -l    #  75
-   find "$D" -name '*.agent.log' -exec grep -lEi 'view_image|image_view|read_image' {} + | wc -l   # 0
-   ```
-
-   (One round-2 reviewer reported 74 for the mention count; it is 75 under both
-   case-sensitive and case-insensitive matching.) Earlier drafts of this section said "74 cited ... while
-   only 13 ever opened an image"; neither number could be reproduced, and both
-   B-round-1 reviewers said so independently. A substring count is not a count
-   of invocations — a mention may be quoted instructions — so treat 75 as an
-   upper bound on citations and 0 as the load-bearing figure.
-
-Note that this workstation also carries an unrelated game, which ships
-`/usr/bin/tesseract-game` (its first `--version` line is `init: sdl`). It does
-NOT take the `tesseract` name — that is the real OCR, 5.5.3 — so `command -v
-tesseract` would in fact find the right binary here; an earlier version of this
-paragraph said otherwise and was wrong. `gui_ocr_backend_probe` still requires a
-genuine `tesseract <version>` banner rather than mere presence, because presence
-is the weaker check and a PATH is not ours to assume. It accepts any numeric
-version, not 5.x specifically. No scenario verdict may depend on OCR being
-present, absent, or successful.
-
-The qci GUI gate enforces a host/guest boundary for every runner:
-
-- Graphical applications, compositors, dialogs, screenshots, and input run only
-  in disposable VMs. The host process is a non-interactive controller.
-- Before any GUI gate starts, qci detaches its controller processes from the
-  host `DISPLAY`, Wayland display, desktop activation variables, askpass
-  programs, browser launcher, and D-Bus session bus.
-- Each markdown-scenario agent is additionally placed in a Bubblewrap mount
-  namespace where `/tmp/.X11-unix`, the host Wayland sockets, and the user
-  session-bus socket are hidden. The per-user libvirt sockets remain available,
-  so `virsh -c qemu:///session`, `vm-exec`, and `vm-gui` can drive the guest.
-- qci fails closed before provisioning when `bubblewrap` is unavailable. Do not
-  work around this by running a GUI scenario directly on the workstation.
-- Every explicit `--scenario` path must name an existing readable Markdown
-  playbook. qci validates the complete list before it builds a golden, starts a
-  VM, or launches an agent; a stale path is a usage error, never an invitation
-  for the model to substitute a different test.
-- The disposable `gui-qdwin` image pins Weston's Pixman renderer and a fixed
-  1280×800 output mode. The fixed mode keeps QMP tablet coordinates stable
-  between screenshot-based observation and input injection; production keeps
-  its normal output mode. The
-  interactive desktop defaults to GL for its hardware cursor plane, but GUI CI
-  has no host viewer and therefore gains nothing from that path. On virtio-gpu,
-  GL/KMS can reject atomic commits when a full-output lock surface appears and
-  produce a false black screenshot; Pixman keeps lock-screen and application
-  rendering deterministic inside the VM.
-
-Consequently, a scenario must never call `virt-manager`, `virt-viewer`,
-`remote-viewer`, `xdg-open`, or a graphical app on the host. Inspect images from
-the artifact directory through the visual model; operate the GUI through the VM
-helpers named in the scenario. Do not execute a Markdown GUI playbook directly;
-use `qci gui` so the disposable-VM routing and host-session isolation are always
-applied.
+- Edit in a worktree; `qci affected --changed-from main` picks the gates
+  your change owes.
+- Fast loops: `ci/bin/qci-host-run` for any pytest/meson/npm row;
+  `qci bats --file <f>`; `qci gui --scenario <abs path>`;
+  `qci-lane run <group>` for a maintained subset;
+  `qci feedback qdfileman <paths>` for the qdfileman host job with a
+  gate-obligation report.
+- Debug a failed run from its artifacts: `qci triage --latest`, the
+  preserved VM in `manifest.txt`, `vm-exec`/`vm-gui` into it, then a
+  narrow `--vm` rerun. Save new evidence under the run dir, never only
+  `/tmp`.
+- `timings.tsv` in each run dir breaks down provision vs work seconds —
+  the place to look before claiming a suite got slower.
 
 ## Tech stack
 
-- **PyQt6** 6.5+ (not PyQt5). Modern Qt, better Wayland support.
-- **Python 3.11+** for stdlib `tomllib`.
+- **PyQt6** 6.5+ (not PyQt5, never PySide6 in tests). Modern Qt, better
+  Wayland support.
+- **Python 3.14** — the distro's interpreter; stdlib `tomllib` for config.
 - **TOML** for config. No YAML, JSON, or INI for app config.
 - **pytest** + **pytest-qt** for tests.
 - **SIP-built bindings** where C++ libraries need Python hooks
- (qterminator's QTermWidget bindings are the pattern).
+  (qterminator's QTermWidget bindings are the pattern).
 - **Qt signals/slots**, not GObject or event queues.
 
-## Repo layout
+## Per-app repo layout
+
+The Python apps follow one shape (qdwin is C/meson and the extensions are
+npm — see the component map in [../AGENTS.md](../AGENTS.md) for each
+component's actual entry points):
 
 ```
-<app-name>/
-├── <app-name>/ # source package
-│ ├── __init__.py
-│ ├── __main__.py # entry point: python -m <app>
-│ ├── window.py # main window
-│ ├── config.py # config singleton
-│ ├── plugin.py # plugin loader + base classes
-│ ├── theme.py # dark theme stylesheet
-│ └── ...
-├── tests/ # pytest suite
-│ ├── conftest.py # shared fixtures + cleanup
-│ ├── test_cli.py
-│ ├── test_config.py
-│ ├── test_window.py # GUI tests (qtbot)
-│ ├── test_plugin.py
-│ ├── test_shortcut_coverage.py
-│ └── ...
-├── doc/ # man pages (groff format)
-│ ├── <app>.1 # usage
-│ └── <app>-config.5 # config reference
-├── po/ # i18n translations
-├── icons/
-├── pyproject.toml # package metadata
-├── justfile # task runner
-├── AGENTS.md # LLM-agent guidelines
+<component>/
+├── <package>/            # source package
+│   ├── __init__.py
+│   ├── __main__.py       # entry point: python -m <app>
+│   ├── window.py         # main window
+│   ├── config.py         # config singleton
+│   ├── plugin.py         # plugin loader + base classes
+│   └── theme.py          # dark theme stylesheet
+├── tests/                # pytest suite (+ component-local bats/GUI lanes)
+│   ├── conftest.py       # shared fixtures + cleanup
+│   └── test_*.py
+├── doc/                  # man pages (groff)
+├── po/                   # i18n
+├── pyproject.toml
+├── justfile
+├── AGENTS.md             # agent guidelines — read first
 ├── README.md
 └── LICENSE
 ```
 
-## AGENTS.md at repo root
+`qdterm/` and `qdfileman/` name their directories after the GitHub repos;
+the Python packages, binaries, desktop IDs and D-Bus names are still
+`qterminator` and `qfileman`.
 
-Every app has an `AGENTS.md` at its repo root — the file LLM agents read
-first to orient. Keep it under 100 lines. Contents:
+## AGENTS.md at each component root
 
-- Project purpose (one paragraph).
-- Build / test commands.
-- System dependencies.
-- Architecture overview (file → role).
-- Test conventions.
-- Key design decisions (why we made unusual choices).
+Components keep their agent orientation notes in `AGENTS.md` — some at
+the component root, some under `doc/` or `tests/` (the
+[component map](../AGENTS.md) names each component's). Keep it under
+~100 lines: project purpose (one paragraph), build/test commands, system
+dependencies, architecture (file → role), test conventions, and the key
+design decisions (the *why* behind unusual choices).
 
 ## Headless testing
 
-**All tests must run without a display.** Standard invocation:
+**All tests must run without a display.** Inside the container toolchain
+(or anywhere with the deps):
 
 ```bash
 QT_QPA_PLATFORM=offscreen python3 -m pytest tests/ -v
@@ -338,21 +392,21 @@ QT_QPA_PLATFORM=offscreen python3 -m pytest tests/ -v
 
 GUI tests use `qtbot`; non-GUI tests don't need it at all.
 
-**Shell-script tests use [`bats`](https://github.com/bats-core/bats-core),**
-not ad-hoc `bash` + manual asserts. Same rationale as picking pytest for
-Python: one framework, isolated tests, TAP output, predictable
-setup/teardown. Files named `*.bats`, packaged on Tumbleweed as `bats`.
+**Shell-script tests use
+[`bats`](https://github.com/bats-core/bats-core),** not ad-hoc `bash` +
+manual asserts — one framework, isolated tests, TAP output, predictable
+setup/teardown. Files named `*.bats`; a `.bats` file that makes no guest
+call carries `# qci:host-only` in its first 40 lines and never spends a
+VM.
 
 ### Two test layers
 
 - **Unit + GUI-unit** inside a single app process, headless. Default for
- app development.
-- **Full-stack integration** against the whole qdistro stack running in a
- virt-manager VM, driven from the host via
- [vm-dev-tools](vm-dev-tools.md). Validates broker + SDK + admin
- approval app end-to-end, takes real screenshots, simulates admin
- clicking Approve. Complementary to in-process testing, not a
- replacement.
+  app development.
+- **Full-stack integration** against the whole qdistro stack in a
+  libvirt VM, driven from the host via [vm-dev-tools](vm-dev-tools.md):
+  bats suites plus agent-driven markdown GUI scenarios. Complementary to
+  in-process testing, not a replacement.
 
 ## pytest-qt conventions
 
@@ -363,34 +417,38 @@ setup/teardown. Files named `*.bats`, packaged on Tumbleweed as `bats`.
 - `qtbot.waitSignal(signal, timeout=...)` for signal-driven assertions.
 - `qtbot.addWidget(w)` so qtbot cleans up the widget automatically.
 
-Example:
+Example (after qdterm's `tests/test_window.py`):
 
 ```python
 def test_new_tab_shortcut(qtbot):
- window = MainWindow()
- qtbot.addWidget(window)
- qtbot.waitExposed(window)
- qtbot.keyClick(
- window,
- Qt.Key.Key_T,
- Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
- )
- assert window.tabs.count() == 2
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitExposed(window)
+    qtbot.keyClick(
+        window,
+        Qt.Key.Key_T,
+        Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+    )
+    assert window._tabs.count() == 2
 ```
 
 ## Fixture patterns
 
 ### `fresh_config`
 
-Config singleton is isolated per test — point `CONFIG_DIR` at `tmp_path`:
+Config singleton is isolated per test. Both constants are computed at
+import time, so patch `CONFIG_DIR` **and** `CONFIG_FILE`, and drop the
+cached singleton — the real version is qdterm's `tests/test_window.py`:
 
 ```python
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def fresh_config(tmp_path, monkeypatch):
- monkeypatch.setattr("<app>.config.CONFIG_DIR", tmp_path)
- config.reset()
- yield config
- config.reset()
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", str(tmp_path / "config.toml"))
+    Config._instance = None
+    yield
+    Config._instance = None
 ```
 
 ### Resource cleanup
@@ -401,14 +459,14 @@ include an autouse cleanup fixture:
 ```python
 @pytest.fixture(autouse=True)
 def _cleanup_after_test():
- """Free fds after every test to prevent exhaustion."""
- yield
- app = QApplication.instance()
- if app:
- for _ in range(3):
- app.processEvents()
- gc.collect()
- app.processEvents()
+    """Free fds after every test to prevent exhaustion."""
+    yield
+    app = QApplication.instance()
+    if app:
+        for _ in range(3):
+            app.processEvents()
+            gc.collect()
+            app.processEvents()
 ```
 
 Without it, tests exhaust the system fd limit mid-suite.
@@ -416,7 +474,7 @@ Without it, tests exhaust the system fd limit mid-suite.
 ## Test categories
 
 | Category | Example | Runs |
-|-------------------------|-----------------------------------------------------------|-----------------------------------------------|
+|---|---|---|
 | Pure unit | `test_config.py`, `test_cli.py`, `test_plugin.py` | Fast, no Qt. |
 | GUI unit | `test_window.py`, `test_terminal.py`, `test_titlebar.py` | qtbot + offscreen. |
 | Visual snapshot | `test_gui_visual.py` | Offscreen render compared to reference image. |
@@ -436,56 +494,61 @@ app launches offscreen, opens each registered dialog, and asserts AT-SPI
 
 - **Config singleton**, not Borg, not a DI framework.
 - **Plugin discovery from filesystem**, not Python entry points. Plugin
- directory at `/etc/<app>/plugins/` (admin) and
- `~/.config/<app>/plugins/` (user). Avoids Python packaging complexity
- and makes plugins discoverable with `ls`.
+  directory at `/etc/<app>/plugins/` (admin) and
+  `~/.config/<app>/plugins/` (user). Avoids Python packaging complexity
+  and makes plugins discoverable with `ls`.
 - **Dark theme as default** (via stylesheet); light theme as secondary.
 - **Every widget has a stable `objectName`** (required for
- machine-readable UI).
+  machine-readable UI).
 
-## Dependencies management
+## Dependency management
 
-- Runtime deps in `pyproject.toml` under `[project.dependencies]`.
-- Test deps under `[project.optional-dependencies.test]` (pytest,
- pytest-qt).
-- System deps (C++ libraries bound via SIP) documented in README under
- "Build dependencies."
+- Runtime deps are the `dependencies` array in `[project]` of
+  `pyproject.toml`.
+- Test deps are the `test` array under `[project.optional-dependencies]`
+  (pytest, pytest-qt).
+- System deps (C++ libraries bound via SIP) documented in the component
+  README under "Build dependencies" — and added to
+  `ci/containers/host-packages.txt` so the toolchain image has them.
 
 ## Task runner — `justfile`
 
-Use `just` (modern make replacement) for common tasks:
+Use `just` (modern make replacement) for common per-app tasks:
 
 ```just
 run:
- python3 -m <app-name>
+    python3 -m <app-name>
 
 test:
- QT_QPA_PLATFORM=offscreen python3 -m pytest tests/ -v
+    QT_QPA_PLATFORM=offscreen python3 -m pytest tests/ -v
 
 test-fast:
- python3 -m pytest tests/test_config.py tests/test_cli.py tests/test_plugin.py -v
+    python3 -m pytest tests/test_config.py tests/test_cli.py tests/test_plugin.py -v
 
 lint:
- ruff check <app-name> tests
+    ruff check <app-name> tests
 
 format:
- ruff format <app-name> tests
+    ruff format <app-name> tests
 ```
 
 ## Lint / format
 
 Per language, the linters used across the tree (all run by `qci lint` /
-`qci host`, and worth running locally before a push):
+`qci host`, and worth running before a push):
 
-- **Python** — **`ruff`** for both linting and formatting. **`mypy`** optional;
-  add if typing needs are complex. Don't add black or flake8 — ruff covers both.
-- **Bash** — **`shellcheck`**. The `qci lint` gate runs it warn-by-default (a
-  missing shellcheck is a skip, not a failure); keep new scripts clean.
-- **QML** (qdshell) — **`qmllint`** against `qdshell/.qmllint.ini` (run by
-  `qdshell/scripts/ci-local.sh`, which `qci host` invokes). Host `qmllint`
-  can't resolve the Quickshell `qs.*` modules, so `.qmllint.ini` disables the
-  resulting import/unqualified-access/missing-property cascade; real type
-  coverage over resolving `qs.*` types happens at runtime in the VM via
+- **Python** — **`ruff`** for both linting and formatting. **`mypy`**
+  optional; add if typing needs are complex. Don't add black or flake8 —
+  ruff covers both.
+- **Bash** — **`shellcheck`**. The `qci lint` gate runs it
+  warn-by-default (a missing shellcheck is a skip, not a failure); keep
+  new scripts clean.
+- **QML** (qdshell) — **`qmllint`** against `qdshell/.qmllint.ini` (run
+  by `qdshell/scripts/ci-local.sh`, which `qci host` invokes). Host
+  `qmllint` can't resolve the Quickshell `qs.*` modules, so
+  `.qmllint.ini` disables the resulting
+  import/unqualified-access/missing-property cascade; real type coverage
+  over resolving `qs.*` types happens at runtime in the VM via
   qmltestrunner (and the gui gate).
 - **bats** — `qci lint` also does a bats-syntax parse pass over every
   `*.bats` file.
@@ -494,30 +557,32 @@ Per language, the linters used across the tree (all run by `qci lint` /
 
 Host-side convenience only — **not** required to build, test, or run
 qdistro. It wires up Language Server Protocol servers so editors and LLM
-agents (Claude Code, etc.) get diagnostics, go-to-definition, and
-references across the four languages in this tree: Python, QML, Bash, C.
+agents get diagnostics, go-to-definition, and references across the four
+languages in this tree: Python, QML, Bash, C.
 
 Language servers (install once on the host):
 
-| Language | Server                 | Install                                            |
+| Language | Server | Install |
 |----------|------------------------|----------------------------------------------------|
-| Python   | `pyright-langserver`   | `npm i -g pyright` (or `python3 -m pip install basedpyright`)  |
-| Bash     | `bash-language-server` | `npm i -g bash-language-server`                     |
-| C        | `clangd`               | `sudo zypper install clang-tools`                   |
-| QML      | `qmlls6`               | ships with the Qt6 declarative tools               |
+| Python | `pyright-langserver` | `npm i -g pyright` (or `python3 -m pip install basedpyright`) |
+| Bash | `bash-language-server` | `npm i -g bash-language-server` |
+| C | `clangd` | `sudo zypper install clang-tools` |
+| QML | `qmlls6` | ships with the Qt6 declarative tools |
 
 `clangd` only resolves cross-file includes when it finds a
-`compile_commands.json`. meson emits one — symlink it to the source root:
+`compile_commands.json`. meson emits one — symlink it to the source root.
+The daemons' `meson.build` requires qdwin's `qdistro-protocols` pkgconfig
+file, so build qdwin first and export `PKG_CONFIG_PATH` inside the
+container command (`qci-host-run` does not forward the host's):
 
 ```sh
-(cd daemons && meson setup build)        # writes build/compile_commands.json
+ci/bin/qci-host-run bash -c 'cd qdwin && rm -rf build-qci && meson setup build-qci && meson compile -C build-qci'
+ci/bin/qci-host-run bash -c 'export PKG_CONFIG_PATH="$PWD/qdwin/build-qci/meson-uninstalled" && cd daemons && meson setup build'
 ln -sf build/compile_commands.json daemons/compile_commands.json
 ```
 
-### Claude Code
-
-Claude Code does **not** auto-detect language servers — register them in a
-local plugin at `~/.claude/skills/local-lsp/.claude-plugin/plugin.json`:
+Claude Code does **not** auto-detect language servers — register them in
+a local plugin at `~/.claude/skills/local-lsp/.claude-plugin/plugin.json`:
 
 ```json
 {
@@ -538,28 +603,31 @@ local plugin at `~/.claude/skills/local-lsp/.claude-plugin/plugin.json`:
 }
 ```
 
-Run `/reload-plugins` (or restart) to load it; verify with
-`claude plugin list`. No MCP servers are needed for qdistro work — LSP
-covers in-codebase intelligence, while MCP is for external systems
-(databases, issue trackers) the repo doesn't depend on.
+Run `/reload-plugins` (or restart) to load it. No MCP servers are needed
+for qdistro work — LSP covers in-codebase intelligence, while MCP is for
+external systems the repo doesn't depend on.
 
 ## Documentation
 
-- Man pages under `doc/`. At minimum: `<app>.1` (usage) and
- `<app>-config.5` (config file reference).
+- Man pages under each component's `doc/`. At minimum: `<app>.1` (usage)
+  and `<app>-config.5` (config file reference).
 - `README.md` covers features, installation, runtime deps, quickstart.
-- User-facing docs live in the app's component directory. Admin/devops docs
- stay in the root `doc/`.
+- User-facing docs live in the component directory. Admin/devops docs
+  stay in the root `doc/`.
 
 ## Why these specifics
 
 - **PyQt6 over PyQt5**: better Wayland, better HiDPI, upstream-supported.
+- **Rootless Podman toolchain over host deps**: one pinned environment
+  for every contributor and agent; the host can't drift from what CI
+  runs.
 - **Offscreen platform over Xvfb**: faster, works in containers, no
- display setup.
+  display setup.
 - **`just` over `make`**: simpler, no implicit deps, recipes are just
- commands.
+  commands.
 - **`ruff` over black+flake8**: one tool, one config, faster.
-- **Filesystem plugin discovery over entry points**: no `setup.py` install
- dance for users dropping in scripts; `ls` tells you what's active.
+- **Filesystem plugin discovery over entry points**: no `setup.py`
+  install dance for users dropping in scripts; `ls` tells you what's
+  active.
 - **TOML over YAML/JSON**: stdlib support, comments allowed, less
- whitespace-sensitive.
+  whitespace-sensitive.

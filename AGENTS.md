@@ -2,8 +2,9 @@
 
 qdistro is a single-tenant Linux distribution with Qubes-inspired app
 isolation, built on libweston + Wayland + Python/Qt/QML. This repository holds
-all of it: qdistro's own root content (broker, daemons, SDK, installers, image,
-CI) and ten components as top-level directories. Start with
+all of it: qdistro's own root content (broker, daemons, SDK, session manager,
+installers, image, packaging, CI) and ten components as top-level directories.
+`CLAUDE.md` at the root is a symlink to this file. Start with
 [README.md](README.md) and [doc/overview.md](doc/overview.md).
 
 ## Component map
@@ -24,13 +25,29 @@ CI) and ten components as top-level directories. Start with
 `qdterm/` and `qdfileman/` take their GitHub repository names; their Python
 packages, binaries, desktop IDs and D-Bus names are still `qterminator` and
 `qfileman`. Everything else at the root is qdistro's own content; the root
-[README.md](README.md#repository-layout) maps it.
+[README.md](README.md#repository-layout) maps it. The parts an agent is most
+likely to touch:
+
+- `broker/` — the permission broker; the single arbiter of cross-uid actions.
+- `session_manager/` — silo/session lifecycle behind a D-Bus interface.
+- `tier2/`, `tier3/`, `tier3s/` — the container/uid isolation launch paths;
+  `tier3s/` is the **experimental, dev-only** gVisor (`runsc`) paravirt tier
+  with its own `README.md`/`CONTRACT.md`.
+- `image/` — the kiwi tester-image build (runs the bootstrap installer chain
+  in a VM); `packaging/` — the RPM + Agama installer track.
+- `scripts/install/` — `qdistro-bootstrap.sh` and the installer chain;
+  `scripts/vm/` — the baseweed/golden VM pipeline and drivers.
+- `selinux/` — policy modules; `ci/` — the `qci` gate runner; `tests/` —
+  unit + integration suites; `doc/` — the documentation set.
 
 Subdirectory agent docs (read the nearest one before editing there):
 [ci/AGENTS.md](ci/AGENTS.md), [doc/AGENTS.md](doc/AGENTS.md),
 [image/AGENTS.md](image/AGENTS.md), [tests/AGENTS.md](tests/AGENTS.md),
-[deploy/AGENTS.md](deploy/AGENTS.md), and the `AGENTS.md` files under
-`tests/integration/*/`.
+[deploy/AGENTS.md](deploy/AGENTS.md), [packaging/AGENTS.md](packaging/AGENTS.md),
+and the `AGENTS.md` files under `tests/integration/*/`. The contributor
+invariants — language policy, single-tenant assumptions, default-deny, testing
+and commit conventions — live in [doc/AGENTS.md](doc/AGENTS.md) and apply
+repo-wide.
 
 ## Building
 
@@ -109,8 +126,8 @@ names are generated uniquely, but runs share fixed resources: the
 `qdistro-template` domain in the user's libvirt session, the base images in the
 image directory (`baseweed-baked.qcow2`, `baseweed-enforcing-baked.qcow2`), and
 host CPU/memory. Host ports are probed per run (`scripts/vm/lib/host-port.sh`
-or a kernel-assigned port) so several test users can share one host. Before starting one, check
-what is running:
+or a kernel-assigned port) so several test users can share one host. Before
+starting one, check what is running:
 
 ```sh
 systemctl --user list-units 'qci-*'          # runs launched under systemd-run
@@ -151,6 +168,6 @@ extensions declare none). Do not relicense across directories.
 
 ## Not in this repo
 
-The project tracker and the websites are separate repositories. Private notes
-are not required reading: everything needed to build, test and change qdistro
-is in this tree.
+The project tracker (`todo/`) and the website (`qdistro-site`) are separate
+repositories. Private notes are not required reading: everything needed to
+build, test and change qdistro is in this tree.

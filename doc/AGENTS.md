@@ -6,18 +6,21 @@ qdistro's design or cost real time to learn during development.
 
 ## Project shape
 
-qdistro is three repositories:
+qdistro is one monorepo:
 
-- **qdistro** (this repo) — broker, polkit agent, SDK, daemons,
-  admin app, helpers, scripts, integration tests, documentation.
-- **qdwin** — the libweston shell plugin. C, single-uid filtered
-  global, no policy logic.
-- **qdshell** — the desktop shell, Quickshell/QML. Forked from
-  Noctalia.
+- **Root content** — broker, polkit agent, SDK, daemons, session
+  manager, admin app, helpers, installers, image, packaging, CI,
+  integration tests, documentation.
+- **Component directories** — `qdwin/` (the libweston shell plugin;
+  C, single-uid filtered global, no policy logic), `qdshell/` (the
+  desktop shell, Quickshell/QML forked from Noctalia), `qdgreeter/`,
+  `qdlocker/`, `qdbrowser/`, the two browser extensions, `qdterm/`,
+  `qdfileman/`, `qnotebook/`. The root [../AGENTS.md](../AGENTS.md)
+  has the full component map.
 
-Most contributor work lands in this umbrella. Touch qdwin only when
+Most contributor work lands in root content. Touch `qdwin/` only when
 changing the compositor protocol or the libweston binding; touch
-qdshell only when changing the visible desktop.
+`qdshell/` only when changing the visible desktop.
 
 ## Language policy
 
@@ -32,8 +35,8 @@ This is qdistro's most consequential rule.
   D-Bus.
 - **C is acceptable only in the TCB.** That's qdwin (the
   compositor) and a small set of protocol-glue daemons in
-  `daemons/`. Adding a new C component to the umbrella requires a
-  written justification.
+  `daemons/`. Adding a new C component requires a written
+  justification.
 - **When extending C-based infrastructure, use the embedded
   extension language the host already offers** rather than writing
   more C. Example: Weston 15's lua-shell drives rule-based window
@@ -67,8 +70,8 @@ qdistro is a one-physical-person system. Multiple uids and silos exist to
 separate data, state, authority, and work contexts, not to authenticate
 different humans. When in doubt:
 
-- The admin uid (`jan` on dev VMs, uid 1000) owns hardware and
-  approves cross-uid actions.
+- The admin uid (`admin` on dev VMs and images, uid 1000) owns hardware
+  and approves cross-uid actions.
 - Regular user uids are implementation identities for silos and sessions
   spawned by admin's session manager.
 - There is no multi-user login screen, no per-user fingerprint, no
@@ -96,7 +99,8 @@ bridge).
 Every cross-process interface in qdistro is D-Bus. New daemons must
 publish a D-Bus interface, not a raw Unix socket protocol. Excep-
 tions: the compositor's wp_security_context_v1 listener, browser
-native messaging (the browser's protocol, not ours).
+native messaging (the browser's protocol, not ours), and the tier-3s
+waypipe byte-stream bridge (a transport, not an RPC surface).
 
 The broker uses **dbus-broker** (the message broker daemon), not
 the older dbus-daemon. Two specific landmines from past sessions:
@@ -132,18 +136,22 @@ Defaults:
 
 ## Testing patterns
 
-- **pytest** for Python — under `tests/unit/`. Headless, no D-Bus,
-  no display. Should run in under 5 seconds. Use Textual `Pilot`
-  for TUI snapshot tests; mock D-Bus services with the in-process
-  fakes already present.
-- **bats** for shell — under `tests/integration/vm/`. Always run
-  inside a VM. Each bats file is a topic; new scenarios add a
-  `@test` entry and assert via the helpers in `helpers.bash`.
+- **pytest** for Python — under `tests/unit/` (root) or a component's
+  own `tests/` dir. Headless, no D-Bus, no display. Should run in
+  seconds. Use Textual `Pilot` for TUI snapshot tests; mock D-Bus
+  services with the in-process fakes already present.
+- **bats** for shell — under `tests/integration/vm/`. These run
+  inside a VM, except files carrying `# qci:host-only`, which the
+  runner executes on the host. Each bats file is a topic; new
+  scenarios add a `@test` entry and assert via the helpers in
+  `helpers.bash`.
 - **Markdown playbooks** for GUI scenarios — under
-  `tests/integration/permissions-gui/` and
-  `tests/integration/qdwin-noctalia/`. Each numbered `NN-*.md` is
-  one scenario, executed by a graphic-aware test runner (human or
-  LLM) following the playbook step by step.
+  `tests/integration/` (`permissions-gui/`, `qdwin-noctalia/`,
+  `presentation-gui/`, `workflow-gui/`). Each numbered `NN-*.md` is
+  one scenario, executed by a graphic-aware
+  test runner (human or LLM) following the playbook step by step.
+  The sanctioned runner is pinned via `QCI_AGENT_CMD`; see
+  [dev.md](dev.md).
 
 GUI tests MUST run inside a VM. Bad input injection on the host has
 killed prior development sessions by closing the developer's
@@ -151,22 +159,29 @@ terminal. This is a hard rule.
 
 ## VM workflow
 
-Test VMs are built from upstream OpenSUSE Tumbleweed JeOS via
-`scripts/vm/build-baseweed-from-scratch.sh` (one-time, ~5 minutes)
-+ `scripts/vm/build-baked-baseweed.sh` (bake project dependencies,
-re-runnable, ~76 seconds when cached). Test clones come from
-`clone-baseweed.sh` (instant, copy-on-write). The whole pipeline is
-chained by `scripts/vm/spin-test-vm.sh`.
+Test VMs are built on the shared Tumbleweed `snapshot.conf` pin. The
+chain: `scripts/vm/build-baseweed-from-scratch.sh` (one-time per pin,
+~5–10 min) → `scripts/vm/build-baked-baseweed.sh` (bakes runtime + test
+deps, re-runnable) → `scripts/vm/clone-baseweed.sh` (instant,
+copy-on-write per test VM). `build-enforcing-baseweed.sh` produces the
+SELinux-enforcing base the enforcing lanes use; qci's per-run goldens
+layer on top of these. `spin-test-vm.sh` chains the pipeline.
+
+Native (C/meson) builds for the VMs come from the rootless Podman
+builder (`scripts/vm/build-native-podman.sh` / `Containerfile.native-builder`),
+not from compilers inside the guest.
 
 Driver tools live in `scripts/vm/`:
 
 - `vm-exec <name> <cmd>` — run a shell command in the VM via
-  qemu-guest-agent. Beware: embedded `"` characters break the JSON;
-  use single quotes or push a script file.
-- `vm-gui <name> <action>` — input injection via xdotool through
-  XWayland. Modifier chords (Ctrl+, Alt+) are unreliable under
-  labwc; use `virsh send-key --codeset linux` for those.
-- `vm-start-and-wait <name>` — boot and block until ssh is ready.
+  qemu-guest-agent (the command is JSON-encoded with `jq --arg`, so
+  embedded quotes are safe).
+- `vm-gui <name> <action>` — input injection: ydotool for typing and
+  key chords where available, xdotool through XWayland otherwise.
+  For anything the in-guest tools don't cover, use
+  `virsh send-key --codeset linux`.
+- `vm-start-and-wait <name>` — boot and block until qemu-guest-agent
+  answers.
 
 VM names must end with a `YYMMDD-HHMM` timestamp suffix to avoid
 collisions across parallel test runs.
@@ -215,5 +230,5 @@ This is not a coding-style guide (variable naming, line length).
 That lives in [dev.md](dev.md) for the Python side, in the QML
 file conventions for qdshell, and in `qdwin/doc/AGENTS.md` for
 qdwin. This file is the project-wide invariants — read it before
-your first contribution to any qdistro repo, then defer to the
-repo-specific docs for code-level rules.
+your first contribution, then defer to the subdirectory `AGENTS.md`
+files for code-level rules.
