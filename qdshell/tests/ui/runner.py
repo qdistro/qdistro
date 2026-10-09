@@ -634,11 +634,11 @@ def journal_checkpoint_vm(session: VMSession, *, timeout: float = 20.0
         "exit 63; }\n"
         'CUR=$(printf "%s\\n" "$OUT" | sed -n "s/^-- cursor: //p" | tail -1)\n'
         '[ -n "$CUR" ] || { echo "unit journal cursor unavailable" >&2; exit 63; }\n'
-        # The coredump cursor is a journal POSITION, not a filtered count:
-        # take it from the unfiltered system journal. A SYSLOG_IDENTIFIER=
-        # systemd-coredump filter that matches zero entries emits
-        # "-- No entries --" and no cursor, which would error every test
-        # on a VM with no prior coredumps.
+        # Unfiltered --show-cursor: a cursor is a journal POSITION, not an
+        # entry, and a filtered read emits none when zero entries match (a
+        # crash-free guest has no systemd-coredump records). The
+        # SYSLOG_IDENTIFIER filter stays on the evidence read, so crash
+        # detection is unchanged; only the position bookkeeping widens.
         "COUT=$(journalctl -n0 --show-cursor --no-pager 2>/dev/null) "
         "|| { echo 'coredump journal read failed' >&2; exit 63; }\n"
         'SCUR=$(printf "%s\\n" "$COUT" | sed -n "s/^-- cursor: //p" | tail -1)\n'
@@ -703,12 +703,15 @@ def qs_crash_evidence_vm(session: VMSession, checkpoint: tuple, *,
         f"--after-cursor {shlex.quote(scursor)} "
         "SYSLOG_IDENTIFIER=systemd-coredump 2>/dev/null) "
         "|| { echo 'coredump journal read failed' >&2; exit 63; }\n"
+        # Empty-match hazard: with no NEW coredump entries the filtered
+        # read prints no cursor. An empty match means the interval held no
+        # coredumps, so falling back to the PREVIOUS cursor is safe: the
+        # interval is merely re-scanned next time, and a later coredump
+        # always lands after it (no skip window, unlike a cursor taken
+        # from a separate trailing read).
         'NEWSCUR=$(printf "%s\\n" "$COUT" | sed -n "s/^-- cursor: //p" '
         "| tail -1)\n"
-        # Zero new coredump entries => journalctl emits no cursor; the
-        # position is unchanged, so keep the OLD cursor (the next probe
-        # rescans the same tail). A failed read still exits 63 above.
-        f'[ -n "$NEWSCUR" ] || NEWSCUR={shlex.quote(scursor)}\n'
+        f"NEWSCUR=${{NEWSCUR:-{shlex.quote(scursor)}}}\n"
         "echo '@@EVID@@'\n"
         f'printf "%s\\n" "$OUT" | grep -aiE {shlex.quote(pat)} || true\n'
         "echo '@@CORE@@'\n"
@@ -1406,14 +1409,18 @@ def screenshot_vm(session: VMSession, out_path: Path, *,
     return out_path
 
 
-def _frames_identical(a: Path, b: Path) -> bool:
-    """True when two captures decode to identical frames below the bar.
+def _frames_identical(a: Path, b: Path, *, crop_top: int = 56) -> bool:
+    """True when two captures decode to identical frames.
 
     The top bar contains a live clock ("13:28") that repaints every minute —
     comparing full frames can therefore never reach the bottom-of-scroll
     fixed point (observed live: pages 3-6 of a scrolled tab were identical
     content yet the captures differed). Everything interesting for a
-    scroll-stitched tab lives below the bar; crop it off both frames.
+    scroll-stitched tab lives below the bar; crop it off both frames by
+    default. Callers whose surface of interest IS the bar (e.g. the
+    settle-wait before judging bar_idle) pass crop_top=0 — the once-a-minute
+    clock repaint just costs them extra poll iterations, bounded by their
+    deadline, which is still strictly better than a fixed sleep.
     """
     from PIL import Image, ImageChops
     with Image.open(a) as ia, Image.open(b) as ib:
@@ -1421,7 +1428,7 @@ def _frames_identical(a: Path, b: Path) -> bool:
         if ia.size != ib.size:
             return False
         w, h = ia.size
-        crop = (0, 56, w, h)   # bar height is ~48px at 800p; keep margin
+        crop = (0, crop_top, w, h)   # bar height is ~48px at 800p; keep margin
         da = ia.convert("RGB").crop(crop)
         db = ib.convert("RGB").crop(crop)
         diff = ImageChops.difference(da, db).convert("L")
@@ -1432,6 +1439,48 @@ def _frames_identical(a: Path, b: Path) -> bool:
         # caret, so pixel-perfect bottom detection never converged).
         changed = sum(diff.histogram()[16:])   # pixels differing >15 levels
         return changed < (da.width * da.height) * 0.0005
+
+
+def settle_frame_vm(session: VMSession, out_path: Path, *,
+                    first_delay: float = 2.5, deadline_s: float = 15.0,
+                    interval_s: float = 0.7) -> Path:
+    """Capture `out_path` once the frame has stopped changing.
+
+    Panels that animate on open/close (TrayDrawerPanel's auto-close on
+    empty, drawer transitions) leave a half-rendered frame if the capture
+    lands mid-transition, and how long the transition takes is
+    host-load-dependent — a fixed sleep is neither sufficient under load
+    nor necessary when the frame settles early. Keep `first_delay` as the
+    minimum settle (same value the callers used before), then capture
+    until two consecutive frames compare equal under the same
+    jitter-tolerant check the scroll-stitcher uses (`_frames_identical`
+    with crop_top=0, so the bar counts) — or the deadline passes. The
+    judged frame is always the LAST capture, so a defect that
+    persists is still judged: this only ever waits longer for a real
+    transition to finish, it can never excuse one that did not.
+    """
+    time.sleep(first_delay)
+    deadline = time.time() + deadline_s
+    prev: Path | None = None
+    i = 0
+    while True:
+        i += 1
+        cur = out_path.with_name(f"{out_path.stem}.settle-{i}.png")
+        screenshot_vm(session, cur)
+        # crop_top=0: the settle check must include the bar — the transient
+        # this exists to outlast (a closing panel's residual, a restoring
+        # bar-widget cluster) lives partly INSIDE it.
+        stable = (prev is not None
+                  and _frames_identical(prev, cur, crop_top=0))
+        if prev is not None:
+            with contextlib.suppress(OSError):
+                prev.unlink()
+        prev = cur
+        if stable or time.time() >= deadline:
+            break
+        time.sleep(interval_s)
+    os.replace(prev, out_path)
+    return out_path
 
 
 def _describe_scrolled_vm(session: VMSession, surface, first_png: Path,
@@ -1449,8 +1498,9 @@ def _describe_scrolled_vm(session: VMSession, surface, first_png: Path,
     Each page is a separate shell capture + describe; the judge gets the
     concatenation, so "what must be visible when this tab is open" now means
     "present in the tab's scrollable content" — MORE of the surface is
-    asserted, not less. Bottom-of-scroll is detected by pixel-identical
-    consecutive frames (wheel events at the bottom change nothing); the
+    asserted, not less. Bottom-of-scroll is detected by consecutive
+    frames comparing equal (wheel events at the bottom change nothing,
+    modulo `_frames_identical`'s small-jitter tolerance); the
     duplicate bottom frame is not described. Bounded by max_pages.
     """
     pages: list[tuple[Path, str]] = [(first_png, first_desc)]

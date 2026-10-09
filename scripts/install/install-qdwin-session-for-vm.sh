@@ -472,6 +472,11 @@ Environment=QML_DISABLE_DISK_CACHE=1
 # `import Qdistro.Qdwin 1.0` and the qdwin_shell_v1 binding stays
 # unbound.
 Environment=QML_IMPORT_PATH=/usr/share/qdistro/qml
+# Mirrors deploy/qdshell.service: without a platform theme plugin, themed
+# icon lookups resolve against hicolor (nearly empty) and render the
+# missing-icon checkerboard — launcher app icons were observed blank in
+# the qdshell-ui lane on 2026-10-08. Adwaita is the shipped icon theme.
+Environment=QS_ICON_THEME=Adwaita
 ExecStartPre=/bin/sh -c 'i=0; while [ ! -e "$XDG_RUNTIME_DIR/wayland-1" ]; do i=$((i+1)); [ $i -gt 20 ] && exit 1; sleep 0.25; done'
 ExecStart=/usr/bin/dbus-run-session -- /usr/bin/qs -p /usr/share/quickshell/qdshell
 # Restart=always, not on-failure: qs exits CLEANLY when its wl_display
