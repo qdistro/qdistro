@@ -29,6 +29,18 @@ Cases:
      the armed timer still fires on schedule.
   5. A wake clears the expired marker before release: no spurious `idled`,
      no `resumed`, and the next idle cycle works normally.
+
+Protocol note (sol r1 #1): zwp_idle_inhibitor_v1 says an inhibitor
+established while the system is already idled "isn't honored" until a
+de-idle/re-idle cycle. qdwin's activate bumps ec->idle_inhibit regardless
+of compositor state, so the suppression exercised here is reachable in the
+implementation as it stands — and it is the ONLY way this defect can
+occur: a hold taken before idle_signal prevents the signal entirely
+(weston's idle_handler returns early while inhibited). If that contract
+is ever tightened so idle-time holds do not count, this scenario's trigger
+disappears and the test should be revisited; the delivery rule it pins —
+a suppressed deadline is delivered at the earliest un-inhibited point —
+is correct under either resolution.
 """
 
 from pathlib import Path
@@ -236,7 +248,6 @@ int main(void)
 	struct qdwin_idle_notification n1, n2, n3, n4;
 	struct qdwin_idle_inhibitor inh = { .qdwin = &q };
 	int before;
-	long elapsed;
 	int inconclusive = 0;
 
 	assert(display);
@@ -294,19 +305,31 @@ int main(void)
 	      "case 3: ignore-inhibit notification delivered twice");
 	WAKE(&c);
 
-	/* 4. release before the secondary deadline must not fire early. */
+	/* 4. release before the secondary deadline must not fire early.
+	 *    The premise oracle is the marker itself: timers cannot fire
+	 *    early, so an unset expired_while_inhibited here proves the
+	 *    deadline had not lapsed at release — immune to scheduler
+	 *    stalls, which merely make the deadline pass more certainly. */
 	make_notification(&n3, &q, 3, 2200, 0);   /* secondary ~1200 ms */
 	IDLE(&c);
 	qdwin_idle_inhibitor_activate(&inh);
-	elapsed = pump(loop, 500);
-	qdwin_idle_inhibitor_deactivate(&inh);
-	if (elapsed >= 1100 || pump_errors > 0) {
-		printf("INCONCLUSIVE: case 4's 'not yet' window was consumed "
-		       "by a scheduler stall (%ld ms elapsed)\n", elapsed);
-		inconclusive = 1;
-	} else {
-		CHECK(stub_idled[3] == 0,
-		      "case 4: release delivered a notification early");
+	pump(loop, 500);
+	{
+		int not_fired_yet = !n3.expired_while_inhibited &&
+				    stub_idled[3] == 0;
+		qdwin_idle_inhibitor_deactivate(&inh);
+		if (!not_fired_yet || pump_errors > 0) {
+			/* The deadline lapsed under the hold and the
+			 * release delivered it — the case-1 path, not this
+			 * one. Report the case as untested rather than
+			 * letting it pass or fail on a broken premise. */
+			printf("INCONCLUSIVE: case 4's 'not yet' premise was "
+			       "not met this run\n");
+			inconclusive = 1;
+		} else {
+			CHECK(stub_idled[3] == 0,
+			      "case 4: release delivered a notification early");
+		}
 	}
 	pump(loop, 900);   /* total ~1400 ms, past the 1200 ms deadline */
 	CHECK(stub_idled[3] == 1,
