@@ -142,6 +142,8 @@ provision_key() {  # vault $VAULT, tag sign-key, holds a fresh ed25519 key
     d=$(mktemp -d /run/s130-key.XXXXXX)
     ssh-keygen -t ed25519 -N '' -q -C s130-wfhl -f "$d/key" || { fail "ssh-keygen failed"; finish; }
     KEY_FP=$(ssh-keygen -lf "$d/key.pub" | awk '{print $2}')
+    # An empty KEY_FP would make every *"$KEY_FP"* match below vacuous.
+    case "$KEY_FP" in SHA256:*) ;; *) fail "no fingerprint from ssh-keygen: [$KEY_FP]"; finish ;; esac
     KEY_MID=$(sed -n 3p "$d/key")            # a body line of the private key
     runuser -u admin -- qdistro-pwd-admin lock "$VAULT" >/dev/null 2>&1 || true
     rm -f "/var/lib/qdistro/vaults/$VAULT.vault"
