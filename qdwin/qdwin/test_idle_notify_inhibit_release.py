@@ -318,8 +318,11 @@ int main(void)
 		{
 			int not_fired_yet = !n3.expired_while_inhibited &&
 					    stub_idled[3] == 0;
-			long released_in = now_ms() - arm_at;
 			qdwin_idle_inhibitor_deactivate(&inh);
+			/* Sampled after the release, so a stall inside the
+			 * release itself still counts against the deadline
+			 * (sol r3). */
+			long released_in = now_ms() - arm_at;
 			if (!not_fired_yet || released_in >= 1200 ||
 			    pump_errors > 0) {
 				/* The deadline lapsed under the hold (fired
