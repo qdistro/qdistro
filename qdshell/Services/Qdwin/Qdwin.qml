@@ -184,6 +184,20 @@ Singleton {
     // qdwin-internal switcher.
     property int _switcherIndex: -1
 
+    // §6.8 S4 nested-proxy gating: a nonzero broker CheckPermission call
+    // (busctl spawn stall, call timeout, broker restarting or refusing
+    // the connection) is an UNSUCCESSFUL CALL, not a verdict — mapping it
+    // to deny destroyed a legit disposable's proxy when one busctl call
+    // flaked under load. Defer and re-ask the broker a bounded number of
+    // times instead; only an explicit broker:allow releases the proxy, so
+    // the retry window stays fail-closed. Entries are keyed by handle and
+    // scoped to the compositor connection: handles come from a
+    // compositor-local counter, so the map is dropped wholesale on unbind
+    // (a rebind can reuse the same handle for a different proxy).
+    property var _nestedProxyRetries: ({})
+    property int _nestedProxyMaxAttempts: 4
+    property int _nestedProxyRetryIntervalMs: 2000
+
     // qdwin_shell_v1 binding. Constructed eagerly so the v14 bind
     // happens at qdshell startup — needed for the qdwin focus-emit /
     // keybinding branches to fire (their fallback "unbound" log path
@@ -322,29 +336,109 @@ Singleton {
             && root._verifyWindowIdentity(targetRow);
     }
 
-    function _decideNestedProxy(handle, appId, originUid) {
-        const action = BrokerGate.nestedProxyAction(appId);
-        let decision = { verdict: "deny", reason: "broker-unavailable" };
-        if (qdwinBinding && qdwinBinding.checkPermission !== undefined) {
-            const result = qdwinBinding.checkPermission(
-                action, BrokerGate.nestedProxyDetails(appId, originUid));
-            decision = BrokerGate.parseStringVerdict(
-                result.exitCode, result.stdout || "", "broker-unavailable");
-        }
-        Logger.i("Qdwin", "NESTED_PROXY_GATE",
-                 "handle=" + handle,
-                 "app_id=" + (appId || ""),
-                 "origin_uid=" + originUid,
-                 "verdict=" + decision.verdict,
-                 "reason=" + decision.reason);
+    function _sendNestedProxyDecision(handle, decision, reason) {
         if (!qdwinBinding || !qdwinBinding.bound) {
             Logger.w("Qdwin", "nestedProxyDecision handle=" + handle
                      + " — not bound (verdict reply lost)");
             return;
         }
-        qdwinBinding.nestedProxyDecision(
+        qdwinBinding.nestedProxyDecision(handle, decision, reason);
+    }
+
+    function _forgetNestedProxyRetry(handle) {
+        if (!(handle in root._nestedProxyRetries))
+            return;
+        const copy = Object.assign({}, root._nestedProxyRetries);
+        delete copy[handle];
+        // Reassign (not in-place mutate) so the property's change signal
+        // fires for any future binding on the map's shape.
+        root._nestedProxyRetries = copy;
+        if (Object.keys(copy).length === 0)
+            nestedProxyRetryTimer.stop();
+    }
+
+    function _clearNestedProxyRetries() {
+        root._nestedProxyRetries = {};
+        nestedProxyRetryTimer.stop();
+    }
+
+    function _decideNestedProxy(handle, appId, originUid) {
+        const action = BrokerGate.nestedProxyAction(appId);
+        let decision = { verdict: "deny", reason: "broker-unavailable" };
+        const callable = qdwinBinding && qdwinBinding.checkPermission !== undefined;
+        if (callable) {
+            const result = qdwinBinding.checkPermission(
+                action, BrokerGate.nestedProxyDetails(appId, originUid));
+            decision = BrokerGate.parseStringVerdict(
+                result.exitCode, result.stdout || "", "broker-unavailable");
+        }
+        const prior = root._nestedProxyRetries[handle];
+        const attempt = prior ? prior.attempt + 1 : 1;
+        // An unsuccessful call (exit != 0) is not a verdict: defer the
+        // held proxy and re-ask on the retry timer while attempts remain.
+        // Everything the broker actually answered — allow, deny, an
+        // unknown verdict word, even an unparseable reply — plus a missing
+        // checkPermission method is terminal: send the verdict now.
+        if (decision.reason === "broker-unavailable" && callable
+                && attempt < root._nestedProxyMaxAttempts) {
+            const copy = Object.assign({}, root._nestedProxyRetries);
+            delete copy[handle];  // re-add at the end so the one-per-tick
+            copy[handle] = {      // round-robin can't starve later handles
+                appId: appId || "",
+                originUid: originUid,
+                attempt: attempt,
+                due: Date.now() + root._nestedProxyRetryIntervalMs
+            };
+            root._nestedProxyRetries = copy;
+            nestedProxyRetryTimer.restart();
+            Logger.i("Qdwin", "NESTED_PROXY_GATE",
+                     "handle=" + handle,
+                     "app_id=" + (appId || ""),
+                     "origin_uid=" + originUid,
+                     "verdict=defer",
+                     "reason=broker-unavailable",
+                     "attempt=" + attempt + "/" + root._nestedProxyMaxAttempts);
+            root._sendNestedProxyDecision(handle, 2, "broker-unavailable");
+            return;
+        }
+        if (prior)
+            root._forgetNestedProxyRetry(handle);
+        Logger.i("Qdwin", "NESTED_PROXY_GATE",
+                 "handle=" + handle,
+                 "app_id=" + (appId || ""),
+                 "origin_uid=" + originUid,
+                 "verdict=" + decision.verdict,
+                 "reason=" + decision.reason,
+                 "attempt=" + attempt + "/" + root._nestedProxyMaxAttempts);
+        root._sendNestedProxyDecision(
             handle, BrokerGate.qdwinDecision(decision.verdict),
             decision.reason);
+    }
+
+    function _retryNestedProxyDecisions() {
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            // The compositor connection is gone: its handle counter died
+            // with it and a rebind can reuse the same handle for a
+            // different proxy, so a stale retry could decide the wrong
+            // window. The unbind handler clears the map too; this guards
+            // a tick that lands mid-teardown.
+            root._clearNestedProxyRetries();
+            return;
+        }
+        const now = Date.now();
+        for (const key of Object.keys(root._nestedProxyRetries)) {
+            const entry = root._nestedProxyRetries[key];
+            if (entry.due > now)
+                continue;
+            // One eligible handle per tick: each checkPermission is a
+            // synchronous busctl subprocess (up to ~2s), so serving every
+            // pending handle in one tick would multiply the shell stall.
+            root._decideNestedProxy(parseInt(key, 10), entry.appId,
+                                    entry.originUid);
+            break;
+        }
+        if (Object.keys(root._nestedProxyRetries).length === 0)
+            nestedProxyRetryTimer.stop();
     }
 
     function _decideActivation(handle, sourceHandle, targetHandle, sourceAppId) {
@@ -393,6 +487,18 @@ Singleton {
         qdwinBinding.activationDecision(
             handle, BrokerGate.qdwinDecision(decision.verdict),
             decision.reason);
+    }
+
+    // Drives _retryNestedProxyDecisions while _nestedProxyRetries is
+    // non-empty: re-asks the broker for deferred nested proxies whose
+    // CheckPermission call failed. One eligible handle per tick (see the
+    // tick function) so the synchronous busctl call can't multiply the
+    // shell stall.
+    Timer {
+        id: nestedProxyRetryTimer
+        interval: root._nestedProxyRetryIntervalMs
+        repeat: true
+        onTriggered: root._retryNestedProxyDecisions()
     }
 
     IpcHandler {
@@ -484,6 +590,10 @@ Singleton {
                 CapabilityService.setIdleDpms(false);
                 CapabilityService.setPointerConfig(false);
                 CapabilityService.setXkbRepeat(false);
+                // Nested-proxy retries are scoped to this connection —
+                // the compositor's handle counter dies with it, so queued
+                // retries must not outlive it.
+                root._clearNestedProxyRetries();
                 if (lastError.length > 0)
                     Logger.w("Qdwin", "qdwin_shell_v1 unbound: " + lastError);
             }
@@ -689,6 +799,10 @@ Singleton {
             Quickshell.execDetached(argv);
         }
         onToplevelRemoved: (handle) => {
+            // Drop any pending nested-proxy retry for this handle even
+            // when no windows row matches — the proxy may have been
+            // destroyed before its toplevel row landed.
+            root._forgetNestedProxyRetry(handle);
             for (let i = 0; i < root.windows.count; i++) {
                 if (root.windows.get(i).handle === handle) {
                     root.windows.remove(i);
