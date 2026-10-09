@@ -121,6 +121,12 @@ affected_gates_for_path() {
         # bats VM integration tests.
         tests/integration/vm/*.bats)
             printf 'bats\n' ;;
+        # The sNN-* guest drivers are only consumed by their companion
+        # .bats files (served to the guest at run time by
+        # stage_vm_driver); they are not baked into the image, and the
+        # GUI lane's own probes live under probes/ — top-level only.
+        tests/integration/vm/s[0-9]*.sh)
+            printf 'bats\n' ;;
         # GUI markdown / agent scenarios.
         tests/integration/permissions-gui/*|\
         tests/integration/qdwin-noctalia/*|\
