@@ -106,6 +106,12 @@ Most useful: "I ran step X and Y was unclear / broken." See
 [doc/support.md](doc/support.md) for what to include, how security issues are
 handled privately, and the [known-regressions](doc/known-regressions.md) ledger.
 
+**Install tracks.** There are two: the kiwi **raw disk image** above
+(built by [`image/build-in-vm.sh`](image/AGENTS.md)) and a
+repository-driven **Agama installer ISO** track in
+[`packaging/`](packaging/README.md) (RPMs + unattended install medium;
+prototype). Neither is a signed release yet.
+
 ## One clone
 
 Everything is in this repository; one clone is the whole developer layout:
@@ -128,9 +134,10 @@ qdistro/
 `qfileman` apps (the Python packages and binaries keep those names). The
 component map with one line per directory is in [AGENTS.md](AGENTS.md).
 
-Build order: `qdwin` first (the root daemons compile against qdwin's
-protocol XML at `qdwin/qdwin/*.xml`), then the root daemons, then `qdshell`.
-See [doc/dev.md](doc/dev.md) for the full developer setup.
+Build order is `qdwin` first (the root daemons and qdshell's QML plugin
+compile against qdwin's protocol XML at `qdwin/qdwin/*.xml`), then the root
+daemons, then `qdshell` — all of it driven by the container toolchain in
+[doc/dev.md](doc/dev.md); nothing is built directly on the host.
 
 ## Project principles
 
@@ -168,29 +175,39 @@ Start with [doc/overview.md](doc/overview.md) for the vision, then:
 
 ## Repository layout
 
-Root content (each component directory has its own README):
+Root content (a selective map — every component directory has its own
+README):
 
 ```
 broker/             D-Bus permission broker (the single arbiter of
                     cross-uid actions)
+session_manager/    silo/session lifecycle daemon (org.qdistro.SessionManager1)
 admin_app/          PyQt6 admin approval app (master/detail queue UI)
 tui/                Textual approver twin for headless sessions
 cli/                qdistro-approvals — CLI queue inspector
 
 sdk/                qdistro_app — the Python SDK first-party apps use
 plugins/            send-to plugins for qterminator + qnotebook
+workflow/           the qdistro workflow engine (conditions, audit,
+                    scheduled/triggered actions)
+templates/          derived podman template engine (audit/freshness/gc/
+                    promote) for tier-2 workloads
 
 polkit/             qdistro polkit AuthenticationAgent
 qsu/                sudo replacement (admin-approved, scope-picked)
 pwd/                multi-vault password manager + portal Secret backend
 print/              host-side print proxy (CUPS lives in a dedicated VM)
-phone/              phone integration (Tailscale + ntfy)
+phone/              phone companion daemon (ntfy callback listener;
+                    MVP skeleton — Tailscale transport not wired yet)
 recall/             recall-user privilege compartment + activity capture
 browser_bridge/     identity-pinned browser native-messaging bridge
+browser_daemons/    browser-adjacent daemons (compositor, downloads, mpris)
 snapshots/          btrfs snapshot daemon + Snapper integration
 games/              session spawner for full-hardware-access games
 user_relay/         per-uid session-bus bridge for cross-user send-to
 stubs/              demo apps used to validate the send-to flow
+media/              media exec daemon (not installed by the v1 chain)
+multimachine/       multi-machine display dock / control bridge (post-v1)
 
 daemons/
   audisp/             SELinux audispd plugin (forwards AVCs to broker)
@@ -200,18 +217,35 @@ daemons/
   secctx-exec/        wp_security_context_v1 wrapper
   tier1-exec/         SELinux tier-1 exec-context wrapper
 
-selinux/            SELinux policy modules (qdistro_broker, qdistro_pwd,
-                    qdistro_tier1)
+selinux/            SELinux policy modules (broker, broker-rules,
+                    presentation, pwd, qsu, session_manager, tier1,
+                    tier2, tier3s)
 
 scripts/
   vm/                 build / clone / launch / bootstrap libvirt test VMs
-  install/            in-VM install steps for individual modules
+                      (baseweed base builders, golden provisioning, drivers)
+  install/            in-VM install steps for individual modules +
+                      qdistro-bootstrap.sh (the one installer chain)
   diag/               diagnostic scripts (event probes, dump utilities)
   noctalia/           Noctalia/qdshell smoke + parity helpers
 
-print-vm/           build scripts + libvirt template for the CUPS VM
+image/              the tester disk image — kiwi raw build + verify
+                    pipeline, driven in a builder VM (image/AGENTS.md)
+packaging/          RPM specs + Agama installer ISO tooling —
+                    the repository-driven install track alongside the
+                    kiwi raw image (packaging/README.md)
+
+tier2/              tier-2 Podman container workloads
+tier3/              tier-3 different-user silos (waypipe over AF_UNIX)
+tier3s/             tier-3s gVisor/runsc containers + waypipe GUI bridge
+                    (experimental, dev profile)
 tier4-vm/           Tier-4 (Linux-guest VM) image build + spawn
+tier4-vm-guest/     the tier-4 guest-side image
 tier5-vm/           Tier-5 (audio-isolated VM) image build + spawn
+tier5b-vm/          tier-5b variant
+net-vm/             OpenWrt net VM (moves the network attack surface off
+                    the host; per-silo egress policy)
+print-vm/           build scripts + libvirt template for the CUPS VM
 
 ci/                 local CI harness — the qci gate runner (see below)
 
@@ -219,16 +253,22 @@ tests/
   unit/               pytest unit tests (headless, no D-Bus, no display)
   integration/
     vm/                 bats integration tests run inside a VM
+    qci/                the qci runner's own contract suite (host-only)
     permissions-gui/    GUI scenarios for admin app + TUI + cross-user
                         send-to
     qdwin-noctalia/     qdshell-on-qdwin smoke scenarios
+    workflow-gui/       workflow-engine GUI scenarios
+    presentation-gui/   presentation/snapshot GUI scenarios
+    mmnet/, multimachine/  multi-VM network + multi-machine lanes
 
 deploy/             greetd config, session launchers, dispatcher
                     units installed onto the target machine
-packaging/          RPM specs + Agama installer ISO tooling —
-                    the repository-driven install track alongside the
-                    kiwi raw image (packaging/README.md)
+agents/skills/      agent skills shipped in the tree (the silo-session
+                    skill for agents running inside a silo uid)
+lib/                shared shell library (spawn-common.sh)
 doc/                project documentation (read [overview.md](doc/overview.md) first)
+snapshot.conf       the one Tumbleweed snapshot pin shared by the image,
+                    test VM bases, tier-2 and the Podman builders
 pyproject.toml      pytest config
 LICENSE             GPL-3.0-or-later (root content; components: see License)
 
@@ -240,21 +280,27 @@ qnotebook/ qdchrome-extension/ qdfirefox-extension/   components (AGENTS.md)
 
 Testing happens at two layers, and the split is strict:
 
-1. **Headless host tests** — pytest unit suites, meson/QML checks, npm test
-   runs across the root and every component. No display, no VM.
+1. **Headless host tests** — pytest unit suites, meson/QML builds, npm
+   test runs across the root and every component. All of it runs inside a
+   rootless Podman toolchain image pinned to the Tumbleweed snapshot in
+   [`snapshot.conf`](snapshot.conf) — the host needs orchestration tools
+   only (`ci/bin/qci-host-deps --check` lists them). No display, no VM.
 2. **Full-stack integration** — bats suites and GUI scenarios that run only
-   **inside disposable libvirt VMs**. GUI tests are never run on the host:
-   they inject real input and would fight your live session.
+   **inside disposable libvirt VMs** cloned from a pinned, dependency-baked
+   cloud base. GUI tests are never run on the host: they inject real input
+   and would fight your live session.
 
 The day-to-day entry point for both is the local CI runner,
 [`ci/bin/qci`](ci/README.md):
 
 ```sh
-ci/bin/qci preflight    # verify libvirt session, in-tree components, host tools
-ci/bin/qci host         # all host-side tests/builds, root + every component
+ci/bin/qci preflight    # verify podman, libvirt session, VM bases, host tools
+ci/bin/qci host         # all builds + headless tests, in the container
 ci/bin/qci bats         # bats integration suites, one disposable VM per file,
                         # run in parallel (QCI_JOBS=N to override)
 ci/bin/qci gui          # GUI scenarios in disposable VMs (see below)
+ci/bin/qci image        # qualify a built image/ artifact (extract + checklist
+                        # + boot-verify)
 ci/bin/qci full         # everything
 ```
 
@@ -263,24 +309,32 @@ screenshots, and first-pass fix recommendations) under `ci/runs/`. Failed
 disposable VMs are preserved for triage; `ci/bin/qci triage --latest` is the
 place to start.
 
+A dev `full` skips the image qualification with `QCI_SKIP_IMAGE=1`
+(the image gate needs an artifact built by
+[`image/build-in-vm.sh`](image/AGENTS.md)); `qci affected
+--changed-from main` tells you which gates a change actually owes.
+
 **The GUI gate wants an agent.** The GUI scenarios are markdown playbooks that
 need a visual runner — a coding-agent CLI that can look at screenshots and
-drive the VM. Point `QCI_AGENT_CMD` at your agent and run the gate in a
-foreground terminal (it's the most direct way to watch the product actually
-work):
+drive the VM. The sanctioned driver is Codex with `gpt-5.6-luna` at pinned
+medium reasoning effort; run the gate in a foreground terminal (it's the
+most direct way to watch the product actually work):
 
 ```sh
-QCI_AGENT_CMD='your-agent-cli {prompt}' ci/bin/qci gui
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
+QCI_AGENT_MODEL=gpt-5.6-luna \
+  ci/bin/qci gui
 ```
 
-See [ci/README.md](ci/README.md) for agent-command templating, concurrency
-and retry knobs, and the full gate reference.
+See [ci/README.md](ci/README.md) for the runner contract, concurrency and
+retry knobs, and the full gate reference; [doc/dev.md](doc/dev.md) has the
+developer-facing version.
 
 Lower-level pieces, when you need them directly:
 
 ```sh
-# Unit tests (headless):
-pytest
+# Any headless check in the same container toolchain (network off):
+ci/bin/qci-host-run bash -c 'cd qdlocker && python3 -m pytest -q tests/unit'
 
 # A disposable test VM by hand. QDWIN_VM_TEMPLATE is the libvirt domain
 # whose XML is cloned for each test VM; spin-test-vm.sh auto-creates it
@@ -289,13 +343,9 @@ export QDWIN_VM_TEMPLATE=qdistro-template
 scripts/vm/spin-test-vm.sh my-test
 ```
 
-For host prerequisites (libvirt, qemu-kvm, group membership), see
-[doc/dev.md](doc/dev.md#dev-setup).
-
-The unit suite assumes the dependencies installed by
-`scripts/vm/install-deps.sh`. The simplest reliable host setup is a
-venv with `--system-site-packages` so `dbus-python` resolves from
-the distro packages.
+For host prerequisites (Podman, libvirt, qemu-kvm, group membership), the
+snapshot pin, and the image/packaging build pipelines, see
+[doc/dev.md](doc/dev.md).
 
 ## License
 
