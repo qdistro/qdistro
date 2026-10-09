@@ -13811,6 +13811,12 @@ qdwin_destroy(struct wl_listener *listener, void *data)
  * On wake_signal we always disarm the timer and send `resumed` if
  * the notification was idle.
  *
+ *   - If a secondary timer expires while an inhibitor hold is up, the
+ *     callback cannot rearm (wl_event_source timers are one-shot) and
+ *     idle_signal will not repeat without a wake; the notification is
+ *     marked expired_while_inhibited and `idled` is delivered by the
+ *     last-hold-release path in qdwin_idle_inhibitor_deactivate.
+ *
  * If weston is configured with idle_time=0 (built-in idle timer
  * disabled), qdwin internal-idle mode arms timers immediately at
  * notification creation and rearms them on input activity/wake_signal.
@@ -13823,6 +13829,12 @@ struct qdwin_idle_notification {
 	uint64_t last_activity_msec;
 	int is_idle;
 	int ignore_inhibit;   /* v2 get_input_idle_notification */
+	/* Non-internal mode only: the per-notification timer fired while an
+	 * inhibitor hold was up and the callback returned without rearming.
+	 * idle_signal will not fire again until a wake, so the deadline that
+	 * passed under the hold is delivered by the last-hold-release path
+	 * (qdwin_idle_notifications_deliver_expired). */
+	int expired_while_inhibited;
 	/* §6.7(a): per-notification delay timer. Armed on weston idle_signal
 	 * when timeout_ms > weston idle_time*1000, so the notification fires
 	 * at its requested offset instead of at weston's coarse idle. */
@@ -13877,6 +13889,30 @@ qdwin_idle_note_activity(struct qdwin *qdwin)
 	}
 }
 
+/* Non-internal idle-notify: a notification whose per-notification timer
+ * expired while an inhibitor hold was up was skipped without rearming
+ * (the inhibit poll is internal-mode only), and weston's idle_signal
+ * does not fire again until the compositor wakes and re-idles. Called
+ * when the last hold drops while the compositor is already idle: the
+ * overdue `idled` is delivered now, at the earliest un-inhibited point —
+ * an inhibitor suppresses firing while held, not the inactivity itself.
+ * Deliberately sends no `resumed`, touches no compositor state, and does
+ * not write timers: a notification whose deadline is still ahead keeps
+ * its armed timer and fires on its own schedule. */
+static void
+qdwin_idle_notifications_deliver_expired(struct qdwin *qdwin)
+{
+	struct qdwin_idle_notification *n;
+	wl_list_for_each(n, &qdwin->idle_notifications, link) {
+		if (n->is_idle || n->ignore_inhibit ||
+		    !n->expired_while_inhibited)
+			continue;
+		n->expired_while_inhibited = 0;
+		n->is_idle = 1;
+		ext_idle_notification_v1_send_idled(n->resource);
+	}
+}
+
 struct qdwin_idle_inhibitor {
 	struct qdwin *qdwin;
 	struct wl_resource *resource;
@@ -13918,6 +13954,14 @@ qdwin_idle_inhibitor_deactivate(struct qdwin_idle_inhibitor *inh)
 	    ec->state == WESTON_COMPOSITOR_ACTIVE && ec->idle_source)
 		wl_event_source_timer_update(ec->idle_source,
 					     ec->idle_time * 1000);
+	/* The sibling gap to that re-arm: weston sets state IDLE before
+	 * emitting idle_signal, so a hold taken after the signal and
+	 * released while still idle meets the ACTIVE guard above and
+	 * restarts nothing. Notifications whose secondary deadline expired
+	 * under the hold have no timer left; deliver them now. */
+	if (ec->idle_inhibit == 0 &&
+	    ec->state != WESTON_COMPOSITOR_ACTIVE)
+		qdwin_idle_notifications_deliver_expired(inh->qdwin);
 }
 
 /* iso2/11 E2: single re-evaluation point. Safe to call at any time;
@@ -15830,6 +15874,11 @@ qdwin_idle_notification_timer_fire(void *data)
 			wl_event_source_timer_update(
 				n->timer,
 				(int)QDWIN_IDLE_INTERNAL_INHIBIT_POLL_MS);
+		else
+			/* Non-internal timers do not poll: wl_event_source
+			 * timers are one-shot, so the deadline is lost
+			 * unless the last-hold-release path redelivers it. */
+			n->expired_while_inhibited = 1;
 		return 0;
 	}
 	n->is_idle = 1;
@@ -16017,6 +16066,9 @@ qdwin_on_wake_signal(struct wl_listener *listener, void *data)
 			else
 				wl_event_source_timer_update(n->timer, 0);
 		}
+		/* Real activity supersedes any deadline that lapsed under a
+		 * hold: the next idle cycle re-arms fresh. */
+		n->expired_while_inhibited = 0;
 		if (!n->is_idle)
 			continue;
 		n->is_idle = 0;
