@@ -56,24 +56,131 @@ Singleton {
     readonly property string spawnHelper: "qdistro-tier5-spawn"
     readonly property string spawnLauncher: "pkexec"
 
-    // Shared tier-5 app catalogue. The launcher (VMAppsProvider) surfaces these
-    // and the Settings "Sandboxed VM apps" tab lists them for per-app lifecycle
-    // overrides — both read this single source so the policy key (appId) lines
-    // up. Hardcoded today (the base qcow2 ships a fixed app set); see
-    // VMAppsProvider for the future auto-scan note. Each entry: appId, name,
-    // iconName, comment, execArgv (JSON-stringified array of strings).
-    readonly property var catalogue: [
-        { "appId": "tier5/firefox",          "name": "Firefox (VM)",       "iconName": "firefox",                 "comment": "Isolated Firefox in a per-app VM",                        "execArgv": JSON.stringify(["firefox"]) },
-        { "appId": "tier5/weston-terminal",  "name": "Terminal (VM)",      "iconName": "utilities-terminal",      "comment": "Isolated weston-terminal in a per-app VM (test)",          "execArgv": JSON.stringify(["weston-terminal"]) },
-        { "appId": "tier5/baobab",           "name": "Disk Usage (VM)",    "iconName": "org.gnome.baobab",        "comment": "GNOME disk usage analyzer (GTK4/libadwaita, CSD)",         "execArgv": JSON.stringify(["baobab"]) },
-        { "appId": "tier5/gnome-text-editor","name": "Text Editor (VM)",   "iconName": "org.gnome.TextEditor",    "comment": "GNOME text editor (GTK4/libadwaita, CSD)",                 "execArgv": JSON.stringify(["gnome-text-editor"]) },
-        { "appId": "tier5/nautilus",         "name": "Files (VM)",         "iconName": "org.gnome.Nautilus",      "comment": "GNOME file manager (GTK4/libadwaita, CSD)",                "execArgv": JSON.stringify(["nautilus"]) },
-        { "appId": "tier5/gnome-calculator", "name": "Calculator (VM)",    "iconName": "org.gnome.Calculator",    "comment": "GNOME calculator (GTK4/libadwaita, CSD)",                  "execArgv": JSON.stringify(["gnome-calculator"]) },
-        { "appId": "tier5/dolphin",          "name": "Dolphin (VM)",       "iconName": "system-file-manager",     "comment": "KDE file manager (Qt6/KDE Frameworks, SSD)",               "execArgv": JSON.stringify(["dolphin"]) },
-        { "appId": "tier5/konsole",          "name": "Konsole (VM)",       "iconName": "utilities-terminal",      "comment": "KDE terminal (Qt6/KDE Frameworks, SSD)",                   "execArgv": JSON.stringify(["konsole"]) },
-        { "appId": "tier5/kate",             "name": "Kate (VM)",          "iconName": "accessories-text-editor", "comment": "KDE text editor (Qt6/KDE Frameworks, SSD)",                "execArgv": JSON.stringify(["kate"]) },
-        { "appId": "tier5/kcalc",            "name": "KCalc (VM)",         "iconName": "accessories-calculator",  "comment": "KDE calculator (Qt6, SSD)",                                "execArgv": JSON.stringify(["kcalc"]) },
-    ]
+    // ---- catalogue (dynamic manifest) ------------------------------------
+    // Shared tier-5 app catalogue. The launcher (VMAppsProvider) surfaces
+    // these and the Settings "Sandboxed VM apps" tab lists them for
+    // per-app lifecycle overrides — both read this single source so the
+    // policy key (appId) lines up.
+    //
+    // The catalogue is DISCOVERED from the guest base, not baked here:
+    // tier5-vm/vmapps-scan.py scans the base's .desktop files at image
+    // build time (and on base changes via the
+    // qdistro-tier5-vmapps-scan service/path/timer) and publishes
+    // /usr/share/qdistro/vmapps/base.json. This loader watches that
+    // manifest; on any missing/unparseable/empty/stale manifest the
+    // catalogue falls back to exactly one prebaked entry — foot, the
+    // operator escape hatch (the guest base always ships it, and the
+    // scanner refuses to publish a catalogue-bearing manifest for a
+    // base that lacks it).
+    //
+    // Each entry: appId, desktopId, name, iconName, comment, execArgv
+    // (JSON-stringified array of strings). appId values are the stable
+    // historical keys (tier5/konsole, tier5/firefox, ...) produced by
+    // the scanner's alias map — Settings overrides, --policy-key, VM
+    // naming and broker selectors all key on them.
+    readonly property string manifestPath: "/usr/share/qdistro/vmapps/base.json"
+    property var catalogue: root._footRows()
+    property bool _manifestMissing: false
+
+    // Emitted after every complete catalogue swap (manifest load OR a
+    // fallback transition). Providers refresh an open launcher on it;
+    // the swap is atomic — catalogue never holds a partial model.
+    signal refreshed()
+
+    function _footRows() {
+        return [{
+            "appId":     "tier5/foot",
+            "desktopId": "foot",
+            "name":      "Foot Terminal (VM)",
+            "iconName":  "utilities-terminal",
+            "comment":   "Isolated foot terminal in a per-app VM",
+            "execArgv":  JSON.stringify(["foot"]),
+        }];
+    }
+
+    // A manifest row is usable only with a stable appId, a name, and an
+    // execArgv that parses to a nonempty array of strings.
+    function _validRow(row) {
+        if (!row || typeof row !== "object") return false;
+        if (typeof row.appId !== "string" || !row.appId) return false;
+        if (typeof row.name !== "string" || !row.name) return false;
+        let argv;
+        try { argv = JSON.parse(row.execArgv); } catch (e) { return false; }
+        return Array.isArray(argv) && argv.length > 0
+               && argv.every(a => typeof a === "string") && !!argv[0];
+    }
+
+    function _loadManifest() {
+        let doc = null;
+        try { doc = JSON.parse(manifestFile.text()); } catch (e) { doc = null; }
+        if (!doc || doc.schema !== 1 || !!doc.stale
+                || !Array.isArray(doc.apps) || doc.apps.length === 0) {
+            const why = !doc ? "unparseable"
+                      : doc.schema !== 1 ? "schema != 1"
+                      : doc.stale ? "stale: " + doc.stale
+                      : "empty catalogue";
+            Logger.w("VMApps", "manifest " + why + " — foot-only fallback");
+            root._manifestMissing = false;
+            root.catalogue = root._footRows();
+            root.refreshed();
+            return;
+        }
+        const rows = [];
+        for (const r of doc.apps) {
+            if (!root._validRow(r)) {
+                Logger.w("VMApps", "manifest row malformed — foot-only fallback");
+                root._manifestMissing = false;
+                root.catalogue = root._footRows();
+                root.refreshed();
+                return;
+            }
+            rows.push({
+                "appId":     r.appId,
+                "desktopId": typeof r.desktopId === "string" ? r.desktopId : "",
+                "name":      r.name,
+                "iconName":  typeof r.iconName === "string" ? r.iconName : "",
+                "comment":   typeof r.comment === "string" ? r.comment : "",
+                "execArgv":  r.execArgv,
+            });
+        }
+        root._manifestMissing = false;
+        root.catalogue = rows;
+        root.refreshed();
+    }
+
+    FileView {
+        id: manifestFile
+        path: root.manifestPath
+        watchChanges: true
+        printErrors: false
+        onLoaded: root._loadManifest()
+        onLoadFailed: function (error) {
+            Logger.w("VMApps", "manifest " + root.manifestPath
+                        + " unreadable (" + error + ") — foot-only fallback");
+            root._manifestMissing = true;
+            root.catalogue = root._footRows();
+            root.refreshed();
+        }
+        onFileChanged: {
+            // Re-parsed on the next tick; the write side publishes
+            // atomically (temp+rename), so what reload() reads is always
+            // a complete manifest.
+            reload();
+        }
+    }
+
+    // QFileSystemWatcher cannot watch a file that does not exist yet, so
+    // a manifest staged AFTER session start (rebuilt guest base +
+    // reconcile run while qdshell is up) would never fire onFileChanged.
+    // Poll only while the manifest is missing — once it exists, the
+    // watcher takes over and this timer stops.
+    Timer {
+        id: manifestRetry
+        interval: 15000
+        repeat: true
+        running: root._manifestMissing
+        onTriggered: manifestFile.reload()
+    }
 
     // ---- toplevel filter (existing v1 surface) ---------------------------
     // Each row mirrors Qdwin.windows + adds `silo` ("vm-<tag>").

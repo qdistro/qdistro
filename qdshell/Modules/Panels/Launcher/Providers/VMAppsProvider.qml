@@ -13,16 +13,13 @@ import qs.Services.Qdistro
 // placeholder when toplevel_security_context arrives with a matching
 // instance_id (LAUNCH_TOKEN).
 //
-// **App catalogue** is hardcoded today. Unlike tier-2's PodAppsProvider
-// which scans .desktop files inside each running container via
-// /var/lib/qdistro/podapps/<container>/apps.json, tier-5 doesn't have
-// a per-spawn scan helper yet — the base qcow2 is built once and
-// ships a fixed set of apps (currently Firefox; weston-terminal as a
-// fallback test app). Future: auto-scan
-// /usr/share/applications/ inside qdistro-tier5-base.qcow2 at image-
-// build time and ship the result as
-// /usr/share/qdistro/vmapps/base.json. See
-// doc/containers.md "Future work — Tier-5 VMApps service".
+// **App catalogue** comes from VMApps.catalogue, which is loaded from
+// /usr/share/qdistro/vmapps/base.json — the manifest the guest-base
+// scan publishes at build time and the qdistro-tier5-vmapps-scan
+// service republishes on base changes. When the manifest is missing,
+// malformed, or stale the catalogue is exactly the foot fallback.
+// VMApps.refreshed() fires on every complete swap; we refresh an open
+// launcher's results so a republished catalogue shows up live.
 //
 // Visual note: the launcher's standard entry delegate renders name +
 // icon + description. Until doc/ui.md's silo-badge convention lands
@@ -45,6 +42,16 @@ Item {
   // the appId (the policy key). Each entry carries an execArgv (JSON-stringified
   // array of strings) that runs inside the guest VM via waypipe-server.
   readonly property var apps: VMApps.catalogue
+
+  // Republished manifest → refresh the open launcher so new/removed
+  // tier-5 entries appear without reopening it.
+  Connections {
+    target: VMApps
+    function onRefreshed() {
+      if (root.launcher && root.launcher.isOpen)
+        root.launcher.updateResults();
+    }
+  }
 
   function init() {}
   function onOpened() {}
