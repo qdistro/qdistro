@@ -6,14 +6,19 @@
 #include <qtmetamacros.h>
 #include <qtypes.h>
 
-#include "../../toplevel_management/qml.hpp"
+#include "../../toplevel/qml.hpp"
 #include "connection.hpp"
+#include "monitor.hpp"
 #include "toplevel_mapping.hpp"
 #include "workspace.hpp"
 
-using namespace qs::wayland::toplevel_management;
+using namespace qs::wayland::toplevel;
 
 namespace qs::hyprland::ipc {
+
+QBindable<HyprlandWorkspace*> HyprlandToplevel::bindableWorkspace() { return &this->bWorkspace; }
+
+QBindable<HyprlandMonitor*> HyprlandToplevel::bindableMonitor() { return &this->bMonitor; }
 
 HyprlandToplevel::HyprlandToplevel(HyprlandIpc* ipc): QObject(ipc), ipc(ipc) {
 	this->bMonitor.setBinding([this]() {
@@ -112,7 +117,7 @@ Toplevel* HyprlandToplevel::waylandHandle() {
 	return ToplevelManager::instance()->forImpl(this->mWaylandHandle);
 }
 
-void HyprlandToplevel::setWaylandHandle(impl::ToplevelHandle* handle) {
+void HyprlandToplevel::setWaylandHandle(wlr::ToplevelHandle* handle) {
 	if (this->mWaylandHandle == handle) return;
 	if (this->mWaylandHandle) {
 		QObject::disconnect(this->mWaylandHandle, nullptr, this, nullptr);

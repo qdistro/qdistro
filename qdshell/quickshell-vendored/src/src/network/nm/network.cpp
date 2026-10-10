@@ -72,9 +72,10 @@ void NMNetwork::addSettings(NMSettings* settings) {
 
 	auto onDestroyed = [this, settings]() {
 		if (this->mSettings.take(settings->path())) {
-			emit this->settingsRemoved(settings);
 			this->updateReferenceSettings();
 			if (this->mSettings.isEmpty()) this->bKnown = false;
+			// Deletes `this`
+			emit this->settingsRemoved(settings);
 		}
 	};
 	QObject::connect(settings, &NMSettings::destroyed, this, onDestroyed);
@@ -185,10 +186,10 @@ NMWirelessNetwork::NMWirelessNetwork(const QString& ssid, NetworkDevice* device,
     , bSecurity(WifiSecurityType::Unknown) {
 
 	auto updateSecurity = [this]() {
-		if (NMSettings* settings = this->bReferenceSettings) {
-			this->bSecurity.setBinding([settings]() { return securityFromSettingsMap(settings->map()); });
-		} else if (NMAccessPoint* ap = this->bReferenceAp) {
+		if (NMAccessPoint* ap = this->bReferenceAp) {
 			this->bSecurity.setBinding([ap]() { return ap->security(); });
+		} else if (NMSettings* settings = this->bReferenceSettings) {
+			this->bSecurity.setBinding([settings]() { return securityFromSettingsMap(settings->map()); });
 		} else {
 			this->bSecurity = WifiSecurityType::Unknown;
 		}
@@ -240,8 +241,9 @@ void NMWirelessNetwork::addAccessPoint(NMAccessPoint* ap) {
 	this->mAccessPoints.insert(ap->path(), ap);
 	auto onDestroyed = [this, ap]() {
 		if (this->mAccessPoints.take(ap->path())) {
-			emit this->apRemoved(ap);
 			this->updateReferenceAp();
+			// Deletes `this`
+			emit this->apRemoved(ap);
 		}
 	};
 	// clang-format off

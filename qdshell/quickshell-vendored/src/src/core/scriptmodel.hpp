@@ -1,10 +1,31 @@
 #pragma once
 
+#include <optional>
+
 #include <qabstractitemmodel.h>
 #include <qcontainerfwd.h>
+#include <qjsvalue.h>
+#include <qobject.h>
+#include <qobjectdefs.h>
 #include <qproperty.h>
 #include <qqmlintegration.h>
 #include <qtmetamacros.h>
+#include <qtypes.h>
+
+///! @@ScriptModel value comparison mode.
+namespace ObjectComparison { // NOLINT
+Q_NAMESPACE;
+QML_ELEMENT;
+
+enum Enum : quint8 {
+	/// Compare values using strict JavaScript equality.
+	Identity = 0,
+	/// Compare records and arrays structurally.
+	Structure = 1,
+};
+Q_ENUM_NS(Enum);
+
+} // namespace ObjectComparison
 
 ///! QML model reflecting a javascript expression
 /// ScriptModel is a QML [Data Model] that generates model operations based on changes
@@ -40,6 +61,7 @@
 /// [Data Model]: https://doc.qt.io/qt-6/qtquick-modelviewsdata-modelview.html#qml-data-models
 class ScriptModel: public QAbstractListModel {
 	Q_OBJECT;
+	// clang-format off
 	/// The list of values to reflect in the model.
 	/// > [!WARNING] ScriptModel currently only works with lists of *unique* values.
 	/// > There must not be any duplicates in the given list, or behavior of the model is undefined.
@@ -66,7 +88,8 @@ class ScriptModel: public QAbstractListModel {
 	/// >   values: [...DesktopEntries.applications.values].sort(...)
 	/// > }
 	/// > ```
-	Q_PROPERTY(QVariantList values READ values WRITE setValues NOTIFY valuesChanged);
+	// TODO: use qjsobject for gc/free checks?
+	Q_PROPERTY(QList<QJSValue> values READ values WRITE setValues NOTIFY valuesChanged);
 	/// The property that javascript objects passed into the model will be compared with.
 	///
 	/// For example, if `objectProp` is `"myprop"` then `{ myprop: "a", other: "y" }` and
@@ -74,20 +97,29 @@ class ScriptModel: public QAbstractListModel {
 	///
 	/// Defaults to `""`, meaning no key.
 	Q_PROPERTY(QString objectProp READ objectProp WRITE setObjectProp NOTIFY objectPropChanged);
+	/// How values should be compared. Defaults to `ObjectComparison.Structure`.
+	///
+	/// Identity based comparison is faster if usable for a given model, and often
+  /// achievable with @@objectProp.
+	Q_PROPERTY(ObjectComparison::Enum comparisonMode READ comparisonMode WRITE setComparisonMode NOTIFY comparisonModeChanged);
+	// clang-format on
 	QML_ELEMENT;
 
 public:
-	[[nodiscard]] QVariantList values() const {
+	[[nodiscard]] QList<QJSValue> values() const {
 		auto values = this->mValues;
 		// If not detached, the QML engine will invalidate iterators in updateValuesUnique.
-		if (this->hasActiveIterators) values.detach();
+		if (this->isModifying) values.detach();
 		return values;
 	}
 
-	void setValues(const QVariantList& newValues);
+	void setValues(const QList<QJSValue>& newValues);
 
 	[[nodiscard]] QString objectProp() const { return this->cmpKey; }
 	void setObjectProp(const QString& objectProp);
+
+	[[nodiscard]] ObjectComparison::Enum comparisonMode() const { return this->mComparisonMode; }
+	void setComparisonMode(ObjectComparison::Enum comparisonMode);
 
 	[[nodiscard]] qint32 rowCount(const QModelIndex& parent) const override;
 	[[nodiscard]] QVariant data(const QModelIndex& index, qint32 role) const override;
@@ -96,11 +128,14 @@ public:
 signals:
 	void valuesChanged();
 	void objectPropChanged();
+	void comparisonModeChanged();
 
 private:
-	QVariantList mValues;
+	QList<QJSValue> mValues;
 	QString cmpKey;
-	bool hasActiveIterators = false;
+	ObjectComparison::Enum mComparisonMode = ObjectComparison::Structure;
+	bool isModifying = false;
+	std::optional<QList<QJSValue>> stagedValues;
 
-	void updateValuesUnique(const QVariantList& newValues);
+	bool updateValuesUnique(const QList<QJSValue>& newValues);
 };
