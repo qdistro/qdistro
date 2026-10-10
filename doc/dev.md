@@ -32,9 +32,11 @@ workstation:
 
 - **Rootless Podman** — builds and headless tests run inside it.
 - **Bash, Git, Python 3 (stdlib), Bats** — the qci runner itself.
-- **libvirt + qemu-kvm + bubblewrap** — only for the VM gates (bats, gui,
-  image). Nested KVM must be enabled for the tiers that run VMs inside
-  the VM; see the warning in [../README.md](../README.md#try-qdistro).
+- **libvirt + qemu-kvm + bubblewrap** — needed by the VM gates (bats,
+  gui, image); `qci-host-deps` checks `virsh` regardless of which gates
+  you plan to run. Nested KVM must be enabled for the tiers that run VMs
+  inside the VM; see the warning in
+  [../README.md](../README.md#try-qdistro).
 
 Check what the host is missing:
 
@@ -87,11 +89,16 @@ How the container behaves (see `ci/containers/` and
 - Build/test rows run with `--network=none`. The two browser
   extensions' `npm ci` runs in a separate *networked* preparation
   container; downloads cache under `$QDWIN_CACHE_DIR/host-npm/`
-  (default `~/.cache/qdistro/`).
+  (`$QDWIN_CACHE_DIR` defaults to `~/.cache/qdistro`).
 - The image is cached by dependency recipe, snapshot pin, and resolved
-  base image ID — ordinary application-source changes reuse it (the
-  recipe also covers the vendored QTermWidget binding sources, so changes
-  there re-key the image).
+  base image ID — Python-application source changes reuse it. The
+  vendored QTermWidget binding sources are part of the recipe, so
+  changes there re-key it. Native sources have their own stage:
+  `scripts/vm/build-native-podman.sh` keys its archive on a tar of
+  `qdwin/`, `qdshell/`, `daemons/`, `qsu/` and `selinux/` (plus the
+  vendored-libweston and container build scripts), so a change there
+  rebuilds the native stage — and its fresh quickshell bytes re-key the
+  host image too.
 - `QCI_OFFLINE=1` refuses to pull anything: it needs the image and the
   npm/dependency caches already warm.
 
@@ -161,7 +168,7 @@ hosted CI. The gate list with full semantics is in
 | --- | --- |
 | `preflight` | Host tools, libvirt session, bases, in-tree components. |
 | `lint` | shellcheck (warn), blocking bats syntax, doc link checks. |
-| `selftest` | The qci runner's own contract suite (no VM). Runs first in `host`. |
+| `selftest` | The qci runner's own contract suite (no VM). Runs first in `host`, after the protected-path edit guard. |
 | `host` | Every build + headless test row, in the container. |
 | `vm-smoke` | One VM: session, Wayland socket, core user services. |
 | `bats` | Every `tests/integration/vm/*.bats` (plus per-component ones), one disposable VM per file, in parallel. `# qci:host-only` files run on the host. |
@@ -252,7 +259,8 @@ Rules that make a run count:
 - Opt-in lanes stay off in normal runs: `QCI_GUI_APPS=1` (third-party app
   compatibility, `qdwin/tests/apps/`), `QCI_LABWC_ADMIN_LANE=1` and
   `QCI_XWAYLAND_E2E=1` (the labwc/XWayland harness lane; `qci gui-admin`
-  sets it). GUI concurrency defaults to serial (`QCI_GUI_JOBS` to
+  sets `QCI_LABWC_ADMIN_LANE`). GUI concurrency defaults to serial
+  (`QCI_GUI_JOBS` to
   override) — parallel full GUI stacks have produced flakes that don't
   reproduce in isolation.
 
@@ -576,10 +584,26 @@ file, so build qdwin first and export `PKG_CONFIG_PATH` inside the
 container command (`qci-host-run` does not forward the host's):
 
 ```sh
-ci/bin/qci-host-run bash -c 'cd qdwin && rm -rf build-qci && meson setup build-qci && meson compile -C build-qci'
-ci/bin/qci-host-run bash -c 'export PKG_CONFIG_PATH="$PWD/qdwin/build-qci/meson-uninstalled" && cd daemons && meson setup build'
-ln -sf build/compile_commands.json daemons/compile_commands.json
+# One container run for all of it: qdwin needs the VENDORED libweston .pc
+# (the pinned major is newer than the distro devel package), and the
+# vendored prefix lives on the container's tmpfs — it does not survive
+# between separate qci-host-run invocations.
+ci/bin/qci-host-run bash -c '
+  set -e
+  cd qdwin
+  QDWIN_LIBWESTON_PROFILE=production libweston-vendored/build-libweston.sh
+  export PKG_CONFIG_PATH="$(bash libweston-vendored/pkgconfig-dir.sh)${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  meson setup build-lsp && meson compile -C build-lsp
+  cd ../daemons
+  export PKG_CONFIG_PATH="$PWD/../qdwin/build-lsp/meson-uninstalled:$PKG_CONFIG_PATH"
+  meson setup build-lsp
+'
+ln -sf build-lsp/compile_commands.json daemons/compile_commands.json
 ```
+
+Use a separate build dir name (e.g. `build-lsp`), not `build-qci`: the
+host gate's own meson output lives in `build-qci` and other doc sections
+reuse it — do not delete or overwrite it.
 
 Claude Code does **not** auto-detect language servers — register them in
 a local plugin at `~/.claude/skills/local-lsp/.claude-plugin/plugin.json`:

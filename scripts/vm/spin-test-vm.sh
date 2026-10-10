@@ -13,11 +13,8 @@
 #   6. systemctl start greetd-qdwin.service
 #   7. ping ctrl-socket; print PASS/FAIL + VM name
 #
-# Sibling-checkout layout required:
-#   <parent>/qdistro/   (this repo)
-#   <parent>/qdwin/
-#   <parent>/qdshell/
-#   <parent>/qnotebook/
+# The components it stages (qdwin, qdshell, daemons, broker, qnotebook)
+# are directories of this monorepo; no sibling checkouts are needed.
 #
 # Usage:
 #   QDWIN_VM_TEMPLATE=<template-domain> scripts/vm/spin-test-vm.sh [<prefix>]

@@ -59,7 +59,8 @@ vitest tags), and the per-suite relabel action items.
 | --- | --- |
 | `preflight` | Verify the in-tree component dirs (and warn about stale pre-monorepo sibling checkouts next to the repo), libvirt session, VM tools, prebaked image, and common host tools. |
 | `lint` | Run warn-only shellcheck/scenario-structure metrics plus blocking Bats syntax and maintained-document local-link/anchor validation. `QCI_FLAKE_STRICT=1` also makes scenario flake findings fatal. |
-| `selftest` | Self-test the qci runner itself (no VM): run the host-only `tests/integration/qci/*.bats` suite that locks down the gate-runner contract — exit-class table, usage/unknown dispatch, headless gate manifest/results.tsv, and the affected/replay/offline plumbing. Runs first in `host`. |
+| `selftest` | Self-test the qci runner itself (no VM): run the host-only `tests/integration/qci/*.bats` suite that locks down the gate-runner contract — exit-class table, usage/unknown dispatch, headless gate manifest/results.tsv, and the affected/replay/offline plumbing. Runs first in `host`, after the
+protected-path edit guard. |
 | `feedback qdfileman [paths...]` | Run the shared qdfileman host pytest job for development feedback only; record paths, dependencies, timing and outcome. Refuses release mode. |
 | `host` | Run host tests/builds across all in-tree components: Python pytest repos, WebExtension npm tests/builds, and qdwin/qdshell meson/QML checks. (The qdistro-site website is NOT built here — it ships via a separate website pipeline.) |
 | `vm-smoke` | Create or reuse a VM and verify the qdwin/qdshell session, Wayland socket, and core user services. |

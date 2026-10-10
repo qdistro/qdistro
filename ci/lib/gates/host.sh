@@ -143,8 +143,8 @@ host_mypy_targets() {
 # or a fresh `git worktree` (every qci run worktree) has none, and
 # `npm test` died with "vitest: command not found" (rc 127) — failing the
 # extension rows AND, through the missing coverage artifact, their
-# -coverage-floor rows. AGENTS.md/doc/dev.md document `npm ci` as a manual
-# setup step, which a throwaway run worktree never gets. So the gate owns
+# -coverage-floor rows. A throwaway run worktree never gets a manual
+# `npm ci` setup step. So the gate owns
 # it: when the locked toolchain is absent, run `npm ci` from the committed
 # package-lock.json (--prefer-offline: served from the npm cache when it
 # holds the locked versions, network only for misses). An existing
