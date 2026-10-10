@@ -1500,6 +1500,19 @@ test('popup-grab-hardening',
   ],
 )
 
+# D6 locked-focus-drop behavioural companion: splices the real
+# set_keyboard_focus / _v2 handler bodies from qdwin.c and asserts a locked
+# request is a logged non-fatal DROP with zero side effects (no protocol
+# error, no selection clear, no focus/tracker mutation), while unlocked
+# requests still apply focus. Skips (77) without cc/wayland-server.
+test('focus-lock-drop',
+  python3,
+  suite: 'source_invariant',
+  args: [
+    files('qdwin/test_focus_lock_drop.py'),
+  ],
+)
+
 # S13 deliberate fail-open call-site pins: assert the LIVE layer-shell
 # pre-shell bind gate and the secctx root-launcher attestation delegate to
 # their compiled pure helpers (qdwin-logic-unit pins the helpers themselves;

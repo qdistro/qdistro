@@ -8308,16 +8308,23 @@ qdwin_handle_set_keyboard_focus(struct wl_client *client,
 	 * workspace, set_workspace_name, ...). */
 	if (!qdwin_shell_require_bound(qdwin, resource))
 		return;
-	/* findings F1: refuse focus redirection while locked, matching
-	 * request_fullscreen/tile/maximize/etc. which already post ERROR_LOCKED.
-	 * The locker routes input via its overlay keyboard grab
-	 * (qdwin_overlay_grab_start, role=2), NOT through set_keyboard_focus, so
-	 * gating here cannot break unlock; it removes the inconsistency whereby
-	 * the shell could steer focus to a background app while the screen is
-	 * locked (a latent lock-bypass if grab handling ever changes). */
+	/* findings F1: refuse focus redirection while locked. The refusal is a
+	 * logged, NON-fatal drop like set_pointer_config/set_key_repeat (see
+	 * D6 in test_popup_grab_hardening.py), NOT the ERROR_LOCKED that
+	 * request_fullscreen/tile/maximize post: focus injection is reactive,
+	 * best-effort intent the shell and test drivers emit without checking
+	 * lock state, so a shell restarted during a lock (or any injectFocus
+	 * landing after qdlocker's idle threshold) must not lose its whole
+	 * binding — after which every later call, including the eventual
+	 * legitimate focus restore, dies with it. The lock invariant is
+	 * unchanged: nothing is focused behind the lock screen, and a dropped
+	 * request leaves no deferred intent to replay at unlock. The locker
+	 * routes input via its overlay keyboard grab
+	 * (qdwin_overlay_grab_start, role=2), NOT through set_keyboard_focus,
+	 * so gating here cannot break unlock. */
 	if (qdwin->locked) {
-		wl_resource_post_error(resource, QDWIN_SHELL_V1_ERROR_LOCKED,
-				       "locked");
+		weston_log("qdwin: set_keyboard_focus refused while locked "
+			   "(dropped, non-fatal)\n");
 		return;
 	}
 	struct weston_seat *seat = NULL;
@@ -8434,10 +8441,12 @@ qdwin_handle_set_keyboard_focus_v2(struct wl_client *client,
 	 * bound shell may inject silo-aware keyboard focus / clear selections. */
 	if (!qdwin_shell_require_bound(qdwin, resource))
 		return;
-	/* findings F1: refuse focus redirection while locked (see v1). */
+	/* findings F1: refuse focus redirection while locked — logged,
+	 * NON-fatal drop like v1 (see the comment there for why the refusal
+	 * is a drop, not ERROR_LOCKED). */
 	if (qdwin->locked) {
-		wl_resource_post_error(resource, QDWIN_SHELL_V1_ERROR_LOCKED,
-				       "locked");
+		weston_log("qdwin: set_keyboard_focus_v2 refused while locked "
+			   "(dropped, non-fatal)\n");
 		return;
 	}
 	struct weston_seat *seat = NULL;
