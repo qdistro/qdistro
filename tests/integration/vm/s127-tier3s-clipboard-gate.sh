@@ -146,8 +146,7 @@ t3s_guard_idle_locker
 _lock_st=$(t3s_locker_status)
 case "$_lock_st" in
     *locked=False*) _lock_got=0 ;;
-    *locked=True*)  _lock_got=1 ;;
-    *)              _lock_got=$(t3s_comp_last_lock); _lock_got=${_lock_got:-0} ;;
+    *)              _lock_got=1 ;;
 esac
 is "compositor not locked (focus injection requires an unlocked session)" \
     "$_lock_got" "0"

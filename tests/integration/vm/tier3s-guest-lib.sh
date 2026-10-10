@@ -117,7 +117,7 @@ t3s_comp_last_lock() {
 # focus injection can proceed. Changes no assertion: it keeps the
 # session in the unlocked state the focus/clipboard checks presuppose.
 t3s_guard_idle_locker() {
-    local d=/etc/systemd/user/qdlocker.service.d reply i last
+    local d=/etc/systemd/user/qdlocker.service.d reply i
     faillock --user admin --reset 2>/dev/null || true
     install -d -m 0755 -o 0 -g 0 /etc/qdistro || true
     : > /etc/qdistro/locker-ctrl-introspection
@@ -126,14 +126,22 @@ t3s_guard_idle_locker() {
     install -d -m 0755 "$d"
     printf '[Service]\nEnvironment=QDLOCKER_IDLE_MS=86400000\n' \
         > "$d/99-qci-no-idle-lock.conf"
-    t3s_adm_uctl daemon-reload || true
-    # Restart a running locker so it re-reads QDLOCKER_IDLE_MS. try-restart
-    # (not start) when dormant: starting a locker with no compositor turns
-    # Restart=always into a crash-loop (gui.sh suppress_idle_lock).
+    t3s_adm_uctl daemon-reload || {
+        fail "qdlocker idle-auto-lock held off (unlocked): daemon-reload failed"
+        return 1
+    }
+    # Restart a running locker so it re-reads QDLOCKER_IDLE_MS. Do not start
+    # a dormant locker: Restart=always + no compositor is a crash-loop
+    # (gui.sh suppress_idle_lock). Missing locker after a GUI session-up
+    # is a failed precondition, not an unlocked session.
     if t3s_adm_uctl is-active qdlocker.service >/dev/null; then
-        t3s_adm_uctl restart qdlocker.service || true
+        t3s_adm_uctl restart qdlocker.service || {
+            fail "qdlocker idle-auto-lock held off (unlocked): restart failed"
+            return 1
+        }
     else
-        t3s_adm_uctl try-restart qdlocker.service || true
+        fail "qdlocker idle-auto-lock held off (unlocked): qdlocker.service is not active"
+        return 1
     fi
     reply=""
     for i in $(seq 1 20); do
@@ -149,6 +157,10 @@ t3s_guard_idle_locker() {
         *locked=True*)
             info "qdlocker was locked; typing the admin password to unlock"
             t3s_adm_uctl start ydotoold.service || true
+            for i in $(seq 1 20); do
+                [ -S /run/user/1000/ydotool.sock ] && break
+                sleep 0.2
+            done
             as_admin env YDOTOOL_SOCKET=/run/user/1000/ydotool.sock \
                 ydotool type "Pa_ssw0rd45" >/dev/null 2>&1 || true
             as_admin env YDOTOOL_SOCKET=/run/user/1000/ydotool.sock \
@@ -165,9 +177,15 @@ t3s_guard_idle_locker() {
             pass "qdlocker idle-auto-lock held off (unlocked after password)"
             return 0
             ;;
+        *locked=True*)
+            fail "qdlocker idle-auto-lock held off (unlocked): still locked after password"
+            return 1
+            ;;
     esac
-    last=$(t3s_comp_last_lock)
-    is "qdlocker idle-auto-lock held off (unlocked)" "${last:-0}" "0"
+    # Missing/unknown status is not unlocked — same fail-closed default as
+    # ci/lib/guest/gui-waiters.sh qdwin_guard_idle_locker.
+    fail "qdlocker idle-auto-lock held off (unlocked): status unavailable (${reply:-empty})"
+    return 1
 }
 
 # --- Model A silo identity (Phase C2, CONTRACT.md D4) -----------------------

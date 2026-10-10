@@ -166,12 +166,20 @@ adm_uctl() {
     systemctl --user --machine=admin@.host "$@" 2>/dev/null \
         || runuser -l admin -c "systemctl --user $*" 2>/dev/null
 }
-adm_uctl daemon-reload || true
-if adm_uctl is-active qdlocker.service >/dev/null; then
-    adm_uctl restart qdlocker.service || true
-else
-    adm_uctl try-restart qdlocker.service || true
+adm_uctl daemon-reload
+if ! adm_uctl is-active qdlocker.service >/dev/null; then
+    echo "FAIL: qdlocker.service is not active after start_user_session" >&2
+    exit 1
 fi
+adm_uctl restart qdlocker.service
+env=$(adm_uctl show qdlocker.service -p Environment --value || true)
+case "$env" in
+    *QDLOCKER_IDLE_MS=86400000*) ;;
+    *)
+        echo "FAIL: running qdlocker lacks QDLOCKER_IDLE_MS=86400000 (Environment=$env)" >&2
+        exit 1
+        ;;
+esac
 echo "PASS: qdlocker idle-auto-lock disabled for GUI worker"
 IDLE
 )"
