@@ -23,13 +23,13 @@ dbus.service.Object subclass is a thin shell over them.
 """
 from __future__ import annotations
 
-import concurrent.futures
 import contextlib
 import errno
 import json
 import logging
 import os
 import pwd
+import queue
 import re as _re
 import secrets
 import shlex
@@ -434,6 +434,18 @@ _OFFLOAD_QUEUE_MAX = 16
 # the mutation now would take effect after the client gave up — the same
 # class of surprise the busy budgets exist to prevent.
 _OFFLOAD_QUEUE_STALE_S = 15
+# Bounded grace for already-running offload work at shutdown: daemon
+# workers cannot hold interpreter exit, but a lifecycle op is a
+# multi-step transaction (useradd → grant → link → state → save) whose
+# mid-flight kill leaves partial OS state and skips rollback. Teardown
+# waits this long for _offload_active to drain before final cleanup —
+# bounded so a wedged op cannot stall the stop past TimeoutStopSec.
+_OFFLOAD_SHUTDOWN_GRACE_S = 30
+# Bounded drain for refusal-audit rows at shutdown: the async writer
+# normally keeps up, but a wedged audit sink must not stall teardown —
+# rows still queued after this window are dropped with a warning, the
+# same contract as queue overflow.
+_REFUSAL_AUDIT_DRAIN_S = 10
 
 # Bound on a single cgroup.freeze exchange: the write (which under cgroup
 # v2 only INITIATES the transition) plus the settle wait on cgroup.events.
@@ -7523,23 +7535,64 @@ if dbus is not None:
                 # wg silo up dark rather than failing its start (task 3 C/B3).
                 key_provider=_PwdKeyProvider(),
             )
-            # Bounded pool for _run_offloaded: submit() never parks the
-            # dispatch thread (the queue is unbounded), while
-            # _OFFLOAD_WORKERS caps how much OS-side work runs at once —
-            # account ops already serialize on _accounts_lock, lifecycle
-            # ops on per-silo in-flight claims, so the cap costs little
-            # concurrency but bounds threads/NSS/subprocess fan-out.
-            # TPE workers are non-daemon but are unwound at interpreter
-            # exit by the futures _python_exit atexit hook, matching the
-            # lifetime of the per-call daemon threads this replaces.
-            self._offload_pool = concurrent.futures.ThreadPoolExecutor(
-                max_workers=_OFFLOAD_WORKERS,
-                thread_name_prefix="sessmgr-op")
-            # Dispatch-thread admission counter for _run_offloaded: queued
-            # + running ops. Incremented before submit, decremented when
-            # the task finishes.
+            # Bounded offload for _run_offloaded: a fixed worker set
+            # drains a queue.Queue capped at _OFFLOAD_QUEUE_MAX, so the
+            # retained-work backlog is bounded by construction —
+            # ThreadPoolExecutor's internal queue is unbounded, which
+            # let expired/refused work items accumulate without limit.
+            # put_nowait is atomic (enqueue-or-Full, never both), and
+            # daemon workers cannot hold interpreter exit the way TPE's
+            # non-daemon workers + _python_exit join could.
+            self._offload_work_q: queue.Queue = queue.Queue(
+                maxsize=_OFFLOAD_QUEUE_MAX)
+            for _i in range(_OFFLOAD_WORKERS):
+                threading.Thread(target=self._offload_worker_loop,
+                                 name=f"sessmgr-op-{_i}",
+                                 daemon=True).start()
+            # Dispatch-thread admission counter for _run_offloaded:
+            # admitted ops whose answer is not yet delivered.
+            # Incremented before enqueue, decremented by _invoke when
+            # the op's one answer actually reaches the caller.
             self._offload_pending = 0
             self._offload_pending_lock = threading.Lock()
+            # Running ops teardown must wait out: incremented inside the
+            # same decision_lock section that elects to run work(), so a
+            # worker that passes the _stopping check is always counted
+            # before _stopping can be set — the shutdown grace never
+            # observes a mid-mutation op as absent.
+            self._offload_active = 0
+            # Threads that claimed an op's shutdown refusal but have not
+            # finished delivering it: claimed=answered is not delivered —
+            # teardown must outwait these invokes too, or a paused worker
+            # leaves the caller unanswered at process exit.
+            self._offload_delivering = 0
+            # Set under the cv after the registry drain: no worker may
+            # newly claim an in-flight delivery once drained, making
+            # _offload_delivering monotonic — a final zero is final.
+            self._offload_drained = False
+            self._offload_active_cv = threading.Condition(
+                self._offload_pending_lock)
+            # _stopping stops admissions and makes an already-queued
+            # task answer Stopped instead of mutating; queued items that
+            # never started are drained and settled (explicit Busy +
+            # audit row) rather than dropped silently.
+            self._stopping = False
+            # answer_key -> deliver_now, for ops whose reply was already
+            # scheduled on the GLib loop. Scheduled answers are not
+            # delivered answers: if the loop quits first, the pending
+            # callback never dispatches and bus.flush() cannot run it —
+            # shutdown drains this registry so every admitted request
+            # still gets its one answer.
+            self._offload_answers: dict = {}
+            # Refusal audit writes never run on the dispatch thread —
+            # _AuditLog.record waits on a shared lock for a
+            # synchronous=FULL sqlite INSERT, and a stalled holder would
+            # otherwise park the whole bus behind the refusal path. A
+            # single writer drains a bounded queue; overflow drops the
+            # row with a warning rather than growing unboundedly.
+            self._refusal_audit_q: queue.Queue = queue.Queue(maxsize=64)
+            threading.Thread(target=self._refusal_audit_writer,
+                             name="sessmgr-audit", daemon=True).start()
             if autostart:
                 self.store.autostart_pass()
 
@@ -7632,9 +7685,52 @@ if dbus is not None:
                 log.exception("audit refusal record failed (action=%s "
                               "silo=%s)", action, name)
 
+        def _audit_refusal_async(self, action, name, exc) -> None:
+            """Queue a refusal audit row for the writer thread. Dispatch-
+            thread refusals (admission, queue expiry) must not wait on the
+            audit DB lock — a stalled writer would stall every caller."""
+            try:
+                self._refusal_audit_q.put_nowait((action, name, exc))
+            except queue.Full:
+                log.warning("refusal audit queue full; dropping %s/%s "
+                            "deny row", action, name)
+
+        def _refusal_audit_writer(self) -> None:
+            while True:
+                action, name, exc = self._refusal_audit_q.get()
+                try:
+                    self._audit_refusal(action, name, None, exc)
+                finally:
+                    # task_done lets shutdown bound-wait on the backlog —
+                    # even when record() wedges, unfinished_tasks stays
+                    # non-zero and the bounded drain gives up instead of
+                    # stalling teardown forever.
+                    self._refusal_audit_q.task_done()
+
+        def _offload_worker_loop(self) -> None:
+            """Consume work items off the bounded offload queue for the
+            process lifetime (daemon thread). Each item is a
+            ``(guarded, settle)`` pair built by _run_offloaded; the item
+            answers its own request."""
+            while True:
+                guarded, _settle = self._offload_work_q.get()
+                try:
+                    guarded()
+                except Exception:  # noqa: BLE001 — keep the worker alive
+                    log.exception("offloaded operation raised")
+
+        def _offload_enqueue(self, item) -> None:
+            """Enqueue one ``(guarded, settle)`` work item on the bounded
+            offload queue. queue.Queue.put_nowait is atomic: it enqueues
+            or raises queue.Full — never both — unlike
+            ThreadPoolExecutor.submit(), which can enqueue the callable
+            and only then fail on thread creation."""
+            self._offload_work_q.put_nowait(item)
+
         def _run_offloaded(self, op: str, work, reply, error,
-                           unexpected_error=None) -> None:
-            """Run ``work()`` on a daemon worker thread and deliver the
+                           unexpected_error=None,
+                           audit: tuple[str, str] | None = None) -> None:
+            """Run ``work()`` on the bounded offload pool and deliver the
             method's reply or error via ``GLib.idle_add``, so a slow
             kernel/subprocess/NSS/fsync call inside the store can never
             park the D-Bus dispatch thread.
@@ -7650,28 +7746,204 @@ if dbus is not None:
             ``unexpected_error`` (default: the same SessionManager1.Generic
             translation the synchronous handlers used).
 
-            Admission is bounded two ways so a saturated pool fails
+            Admission is bounded three ways so a saturated pool fails
             interactively instead of queueing silent latency: the
             dispatch thread refuses with SiloBusy once _OFFLOAD_QUEUE_MAX
-            ops are outstanding, and a queue deadline armed on the GLib
-            loop answers Busy _OFFLOAD_QUEUE_STALE_S after admission —
-            independent of whether a pool worker ever becomes free. A
-            started/expired flag pair keeps delivery exactly-once: the
-            worker that eventually picks up an expired op runs nothing
-            the caller already timed out on. The check+set on each side
-            is serialized by decision_lock — unsynchronized events leave
-            an interleaving where the worker starts AND the deadline
-            reports "not started", answering Busy next to a reply."""
+            ops are outstanding (or shutdown has begun), and a queue
+            deadline armed on the GLib loop answers Busy
+            _OFFLOAD_QUEUE_STALE_S after admission — independent of
+            whether a pool worker ever becomes free. A started/expired
+            flag pair serialized by decision_lock keeps delivery
+            exactly-once: the worker that picks up an expired op runs
+            nothing the caller already timed out on, and an unsynchronized
+            pair would let the worker start AND the deadline report "not
+            started" — a Busy next to a reply.
+
+            ``audit`` is ``(action, name)`` for refusals that never reach
+            the worker's peer lookup — admission, expiry and shutdown
+            refusals still owe the durable trail a row; caller is None
+            because the caller identity is only resolved inside work().
+
+            Exactly-once rests on ``expired`` claimed under
+            ``decision_lock``: every dispatch-side refusal (all of which
+            run on the one dispatch thread, so they cannot interleave
+            with each other) only answers if the worker never started;
+            the worker only runs — and answers — if no dispatch-side
+            refusal claimed ``expired`` first. A worker that dequeues
+            during shutdown answers the refusal itself, directly on the
+            connection, since the loop is going or gone.
+
+            Answers are delivered through ``deliver``/``_invoke``: the
+            admission slot is released when the answer is actually
+            delivered — not when the task completes — so a starved loop
+            cannot accumulate unbounded undelivered answers. Scheduled
+            but undispatched answers stay reachable through the
+            ``_offload_answers`` registry, whose membership therefore
+            inherits the ``_OFFLOAD_QUEUE_MAX`` bound; shutdown drains
+            them directly. Admission refusals are answered inline and
+            never enter either registry.
+
+            Slot release is idempotent (``released``): the delivering
+            ``_invoke``, the submit-failure path, cancellation and the
+            abnormal-escape ``abandon`` can each be the releaser
+            depending on race order — submit() can enqueue the callable
+            before raising RuntimeError when thread creation fails, and
+            an existing worker may already be running it."""
 
             map_unexpected = unexpected_error or _to_dbus_exception
             started = threading.Event()
             expired = threading.Event()
+            released = threading.Event()
+            answered = threading.Event()
+            owned = threading.Event()
+            pending_answer: list = []
             decision_lock = threading.Lock()
+            answer_key = object()
+
+            def _drop_answer_registration() -> None:
+                with self._offload_pending_lock:
+                    self._offload_answers.pop(answer_key, None)
+
+            def _invoke(kind: str, payload) -> None:
+                try:
+                    if kind == "error":
+                        error(payload)
+                    else:
+                        reply(*payload)
+                except Exception:  # noqa: BLE001 — teardown best-effort
+                    log.exception("%s reply delivery failed", op)
+                finally:
+                    _drop_answer_registration()
+                    # The admission slot outlives task completion: it is
+                    # released when the op's answer is actually delivered,
+                    # so answers pending on a starved loop stay counted
+                    # against _OFFLOAD_QUEUE_MAX.
+                    release_slot()
+
+            def _claim_pending():
+                # Pop a scheduled answer and mark the op answered in the
+                # same critical section — whichever side (idle dispatch
+                # or shutdown drain) claims it first delivers it, and the
+                # loser can neither redeliver nor answer on top.
+                with decision_lock:
+                    if answered.is_set() or not pending_answer:
+                        return None
+                    kind, payload = pending_answer.pop()
+                    answered.set()
+                    return kind, payload
+
+            def _idle_answer() -> bool:
+                item = _claim_pending()
+                if item is not None:
+                    _invoke(*item)
+                return False
+
+            def deliver(kind: str, payload) -> None:
+                # One answer per op: on the loop while it runs, directly
+                # on the connection once shutdown has begun (a queued
+                # idle source would never dispatch). A previously
+                # scheduled answer wins over a late one.
+                with decision_lock:
+                    if answered.is_set():
+                        return
+                    if self._stopping:
+                        item = (pending_answer.pop()
+                                if pending_answer else (kind, payload))
+                        answered.set()
+                    else:
+                        pending_answer.append((kind, payload))
+                        item = None
+                if item is not None:
+                    _invoke(*item)
+                    return
+                GLib.idle_add(_idle_answer)
+                # _stopping may have been set between the check above and
+                # the shutdown drain claiming this op's pending answer —
+                # if so, claim it directly rather than stranding it on a
+                # dead loop.
+                if self._stopping:
+                    deliver_now()
+
+            def deliver_now() -> None:
+                # Shutdown drain for a scheduled-but-never-dispatched
+                # answer — and for an admitted op that never produced
+                # one: a worker can consume the item with get() yet be
+                # descheduled before claiming it, leaving an unanswered
+                # request the queue drain cannot see. Claimed here under
+                # decision_lock so it lands exactly once; an owned op is
+                # left to its running worker.
+                item = _claim_pending()
+                if item is not None:
+                    _invoke(*item)
+                    return
+                with decision_lock:
+                    if answered.is_set() or owned.is_set():
+                        return
+                    answered.set()
+                    pending_answer.clear()
+                exc = SiloBusy(
+                    f"{op} refused: session manager is shutting down")
+                if audit is not None:
+                    self._audit_refusal_async(audit[0], audit[1], exc)
+                _invoke("error", _to_dbus_exception(exc))
 
             def busy(msg: str) -> None:
-                GLib.idle_add(
-                    lambda: error(_to_dbus_exception(SiloBusy(msg)))
-                    or False)
+                exc = SiloBusy(msg)
+                if audit is not None:
+                    self._audit_refusal_async(audit[0], audit[1], exc)
+                deliver("error", _to_dbus_exception(exc))
+
+            def answer_stopped(counted: bool = False) -> None:
+                # Shutdown refusal delivered on whichever thread caught it
+                # — directly on the connection, because the dispatch loop
+                # is going (or gone) when this fires. The audit row goes
+                # through the async writer like every other refusal: a
+                # synchronous record here would let a wedged audit sink
+                # park the shutdown thread before the bounded grace.
+                # `_offload_delivering` marks claim→invoke in flight: a
+                # worker that paused between them is not active and has
+                # no pending answer, so without this count teardown could
+                # exit with the claimed refusal never delivered.
+                if not counted:
+                    with self._offload_active_cv:
+                        self._offload_delivering += 1
+                try:
+                    with decision_lock:
+                        if answered.is_set() or owned.is_set():
+                            return
+                        answered.set()
+                        pending_answer.clear()
+                    exc = SiloBusy(
+                        f"{op} refused: session manager is shutting down")
+                    if audit is not None:
+                        self._audit_refusal_async(audit[0], audit[1], exc)
+                    _invoke("error", _to_dbus_exception(exc))
+                finally:
+                    with self._offload_active_cv:
+                        self._offload_delivering -= 1
+                        self._offload_active_cv.notify_all()
+
+            def release_slot() -> None:
+                with decision_lock:
+                    if released.is_set():
+                        return
+                    released.set()
+                with self._offload_pending_lock:
+                    self._offload_pending -= 1
+
+            def abandon() -> None:
+                # Reclaim only when the worker itself owned the answer
+                # and escaped without producing one (a BaseException out
+                # of work()): reclaiming for a refusal-owned op would
+                # race the still-in-flight refusal answer and drop it.
+                if not owned.is_set():
+                    return
+                with decision_lock:
+                    if answered.is_set() or pending_answer:
+                        return
+                    answered.set()
+                release_slot()
+                _drop_answer_registration()
 
             def queue_deadline() -> bool:
                 # Fires on the GLib loop _OFFLOAD_QUEUE_STALE_S after
@@ -7687,56 +7959,150 @@ if dbus is not None:
                      f"operation was not started — retry")
                 return False
 
+            def settle() -> None:
+                # Shutdown settle for a cancelled queued op, called from
+                # the dispatch thread in main()'s teardown. If a refusal
+                # was already decided (queue deadline) but its answer is
+                # still only scheduled on the dead loop, drain it
+                # directly rather than leaving the caller unanswered.
+                with decision_lock:
+                    if started.is_set() or expired.is_set():
+                        claimed = False
+                    else:
+                        expired.set()
+                        claimed = True
+                if claimed:
+                    answer_stopped()
+                else:
+                    deliver_now()
+
             def on_worker() -> None:
                 with decision_lock:
                     started.set()
                     if expired.is_set():
+                        # A dispatch-side refusal owns the answer.
                         return
+                    # The _stopping read and the active-count claim are
+                    # atomic under _offload_active_cv — the same lock
+                    # teardown holds when it sets _stopping and waits on
+                    # the counter. Shutdown either sees the running op
+                    # counted (and waits) or lands _stopping first (and
+                    # this worker refuses below instead of mutating).
+                    # From here the worker owes the caller the answer;
+                    # an escape without one is reclaimed by abandon().
+                    with self._offload_active_cv:
+                        if self._stopping and self._offload_drained:
+                            # Teardown already drained the registry and
+                            # claimed this op's answer itself — produce
+                            # nothing, mutate nothing.
+                            drained = True
+                            stopping = False
+                        elif self._stopping:
+                            # Claim the in-flight-delivery slot in the
+                            # same critical section that observed
+                            # _stopping — teardown's wait can then never
+                            # slip between the refusal claim and its
+                            # delivery.
+                            self._offload_delivering += 1
+                            stopping = True
+                            drained = False
+                        else:
+                            owned.set()
+                            self._offload_active += 1
+                            stopping = False
+                            drained = False
+                if drained:
+                    return
+                if stopping:
+                    # Dequeued after shutdown began — too late to cancel
+                    # cleanly through the Future, so the refusal is ours
+                    # to answer; the mutation still does not run.
+                    answer_stopped(counted=True)
+                    return
                 try:
                     out = work()
                 except SessionError as exc:
-                    dbus_exc = _to_dbus_exception(exc)
-                    GLib.idle_add(lambda: error(dbus_exc) or False)
+                    deliver("error", _to_dbus_exception(exc))
                     return
                 except Exception as exc:  # noqa: BLE001 — persistence and
                     # OS adapters can still raise unexpected failures (for
                     # example OSError while saving silos.yaml); log and
                     # answer rather than stranding the caller.
                     log.exception("%s failed unexpectedly", op)
-                    dbus_exc = map_unexpected(exc)
-                    GLib.idle_add(lambda: error(dbus_exc) or False)
+                    deliver("error", map_unexpected(exc))
                     return
-                GLib.idle_add(lambda: reply(*out) or False)
+                deliver("reply", out)
 
             def guarded() -> None:
                 try:
                     on_worker()
                 finally:
-                    with self._offload_pending_lock:
-                        self._offload_pending -= 1
+                    if owned.is_set():
+                        # Retire the running-op count teardown waits on.
+                        with self._offload_active_cv:
+                            self._offload_active -= 1
+                            self._offload_active_cv.notify_all()
+                    # A normal exit left the answer delivered or scheduled;
+                    # _invoke() releases the slot when it lands. Only an
+                    # abnormal escape reaches here with neither.
+                    abandon()
 
             # Bounded admission on the dispatch thread — a full queue is
-            # answered Busy immediately rather than parked on. The counter
-            # is decremented by the submitted task, so a refused call
-            # must not have incremented it.
+            # answered Busy immediately rather than parked on. The
+            # counter is decremented only when the op's answer is
+            # delivered (or the op is abandoned), so a refused call must
+            # not have incremented it — and neither may it register a
+            # drain entry or idle source per refusal. The refusal runs
+            # AFTER the lock is released: queueing the audit row is
+            # quick, but nothing under _offload_pending_lock may block —
+            # worker done callbacks take the same lock to pop entries.
+            refused = None
             with self._offload_pending_lock:
-                if self._offload_pending >= _OFFLOAD_QUEUE_MAX:
-                    busy(f"{op} refused: {_OFFLOAD_QUEUE_MAX} offloaded "
-                         f"operations already outstanding — retry shortly")
-                    return
-                self._offload_pending += 1
+                if self._stopping:
+                    refused = f"{op} refused: session manager is " \
+                        "shutting down"
+                elif self._offload_pending >= _OFFLOAD_QUEUE_MAX:
+                    refused = (f"{op} refused: {_OFFLOAD_QUEUE_MAX} "
+                               f"offloaded operations already "
+                               f"outstanding — retry shortly")
+                else:
+                    self._offload_pending += 1
+                    # Registered only for admitted ops: the slot is held
+                    # until the answer is delivered (_invoke), so the
+                    # drain registry inherits the _OFFLOAD_QUEUE_MAX
+                    # bound and overload cannot grow it.
+                    self._offload_answers[answer_key] = deliver_now
+            if refused is not None:
+                # Never admitted — answer inline on the dispatch thread.
+                # There is no queued work to drain, so retaining an
+                # answer-registration or an idle source per refusal
+                # would grow unbounded under sustained overload.
+                exc = SiloBusy(refused)
+                if audit is not None:
+                    self._audit_refusal_async(audit[0], audit[1], exc)
+                error(_to_dbus_exception(exc))
+                return
 
             try:
-                # submit() only queues — the dispatch thread never parks on
-                # a full pool; the op name is carried in the worker's
-                # failure log line rather than a per-call thread name.
-                self._offload_pool.submit(guarded)
-            except RuntimeError:
-                # Pool already shut down (service stopping). No deadline
-                # was armed yet — the only answer is the Busy below.
-                with self._offload_pending_lock:
-                    self._offload_pending -= 1
-                busy(f"{op} refused: session manager is shutting down")
+                # Enqueue only queues — the dispatch thread never parks
+                # on a full pool. put_nowait is atomic (enqueue or
+                # queue.Full, never both), so a raised Full can never
+                # strand a leaked callable the way ThreadPoolExecutor's
+                # submit-after-enqueue could.
+                self._offload_enqueue((guarded, settle))
+            except Exception:  # noqa: BLE001 — queue.Full when the work
+                # queue is saturated; a patched seam may raise anything.
+                # Only claim the refusal when no worker started (a stray
+                # enqueued item belongs to the worker that took it); the
+                # slot stays held until the Busy is delivered (_invoke),
+                # so repeated enqueue failures cannot grow an unbounded
+                # retained-answer backlog either.
+                with decision_lock:
+                    if started.is_set() or expired.is_set():
+                        return
+                    expired.set()
+                busy(f"{op} refused: offloaded work queue is full "
+                     f"— retry shortly")
                 return
 
             # Queue expiry lives on the dispatch loop, not the worker: an
@@ -7775,7 +8141,8 @@ if dbus is not None:
                 return ()
 
             self._run_offloaded(
-                f"create-silo-{name_s}", create_on_worker, _reply, _error)
+                f"create-silo-{name_s}", create_on_worker, _reply, _error,
+                audit=("create", name_s))
 
         @dbus.service.method(BUS_NAME, in_signature="ssss", out_signature="",
                              async_callbacks=("_reply", "_error"),
@@ -7806,7 +8173,8 @@ if dbus is not None:
                 return ()
 
             self._run_offloaded(
-                f"create-silo-{name_s}", create_on_worker, _reply, _error)
+                f"create-silo-{name_s}", create_on_worker, _reply, _error,
+                audit=("create", name_s))
 
         @dbus.service.method(BUS_NAME, in_signature="ssss", out_signature="",
                              async_callbacks=("_reply", "_error"),
@@ -7838,7 +8206,8 @@ if dbus is not None:
                 return ()
 
             self._run_offloaded(
-                f"create-silo-{name_s}", create_on_worker, _reply, _error)
+                f"create-silo-{name_s}", create_on_worker, _reply, _error,
+                audit=("create", name_s))
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
                              async_callbacks=("_reply", "_error"),
@@ -7859,7 +8228,8 @@ if dbus is not None:
                 return ()
 
             self._run_offloaded(
-                f"delete-silo-{name_s}", delete_on_worker, _reply, _error)
+                f"delete-silo-{name_s}", delete_on_worker, _reply, _error,
+                audit=("delete", name_s))
 
         @dbus.service.method(BUS_NAME, in_signature="ss", out_signature="",
                              async_callbacks=("_reply", "_error"),
@@ -7888,7 +8258,8 @@ if dbus is not None:
                 return ()
 
             self._run_offloaded(
-                f"egress-silo-{name_s}", set_egress_on_worker, _reply, _error)
+                f"egress-silo-{name_s}", set_egress_on_worker, _reply, _error,
+                audit=("egress-configure", name_s))
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
                              async_callbacks=("_reply", "_error"),
@@ -7909,7 +8280,8 @@ if dbus is not None:
                 return ()
 
             self._run_offloaded(
-                f"start-silo-{name_s}", start_on_worker, _reply, _error)
+                f"start-silo-{name_s}", start_on_worker, _reply, _error,
+                audit=("start", name_s))
 
         @dbus.service.method(BUS_NAME, in_signature="sss", out_signature="s",
                              async_callbacks=("_reply", "_error"),
@@ -7938,7 +8310,8 @@ if dbus is not None:
                     caller=caller),)
 
             self._run_offloaded(
-                f"podapp-{container_s}", launch_on_worker, _reply, _error)
+                f"podapp-{container_s}", launch_on_worker, _reply, _error,
+                audit=("podapp-launch", container_s))
 
         @dbus.service.method(BUS_NAME, in_signature="si", out_signature="",
                              async_callbacks=("_reply", "_error"),
@@ -7969,7 +8342,7 @@ if dbus is not None:
 
             self._run_offloaded(
                 f"stop-silo-{silo_name}", stop_on_worker, _reply, _error,
-                unexpected_error=unexpected)
+                unexpected_error=unexpected, audit=("stop", silo_name))
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
                              async_callbacks=("_reply", "_error"),
@@ -7990,7 +8363,8 @@ if dbus is not None:
                 return ()
 
             self._run_offloaded(
-                f"freeze-silo-{name_s}", freeze_on_worker, _reply, _error)
+                f"freeze-silo-{name_s}", freeze_on_worker, _reply, _error,
+                audit=("freeze", name_s))
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
                              async_callbacks=("_reply", "_error"),
@@ -8011,7 +8385,8 @@ if dbus is not None:
                 return ()
 
             self._run_offloaded(
-                f"resume-silo-{name_s}", resume_on_worker, _reply, _error)
+                f"resume-silo-{name_s}", resume_on_worker, _reply, _error,
+                audit=("resume", name_s))
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="b",
                              async_callbacks=("_reply", "_error"),
@@ -8037,7 +8412,8 @@ if dbus is not None:
                 return (ok,)
 
             self._run_offloaded(
-                f"dispose-{name_s}", dispose_on_worker, _reply, _error)
+                f"dispose-{name_s}", dispose_on_worker, _reply, _error,
+                audit=("dispose", name_s))
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="b",
                              async_callbacks=("_reply", "_error"),
@@ -8066,7 +8442,8 @@ if dbus is not None:
                 return (ok,)
 
             self._run_offloaded(
-                f"dispose-token-{token_s}", dispose_on_worker, _reply, _error)
+                f"dispose-token-{token_s}", dispose_on_worker, _reply, _error,
+                audit=("dispose-by-token", token_s))
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="u",
                              async_callbacks=("_reply", "_error"),
@@ -8098,7 +8475,8 @@ if dbus is not None:
                 return (n,)
 
             self._run_offloaded(
-                f"dispose-wf-{wf_s}", dispose_on_worker, _reply, _error)
+                f"dispose-wf-{wf_s}", dispose_on_worker, _reply, _error,
+                audit=("dispose-by-workflow", wf_s))
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
                              async_callbacks=("_reply", "_error"),
@@ -8133,7 +8511,8 @@ if dbus is not None:
                 return (json.dumps(receipt),)
 
             self._run_offloaded(
-                f"import-disp-{token_s}", import_on_worker, _reply, _error)
+                f"import-disp-{token_s}", import_on_worker, _reply, _error,
+                audit=("dispose-export", token_s))
 
         @dbus.service.method(BUS_NAME, in_signature="", out_signature="s",
                              async_callbacks=("_reply", "_error"))
@@ -8305,12 +8684,76 @@ def main():  # pragma: no cover - exercised in the VM
         pass
     finally:
         observer_stop.set()
-        # cancel_futures drops queued-but-unstarted mutations so no
-        # lifecycle op runs after cleanup begins; wait=False does not
-        # park on running workers — a wedged one is still joined by the
-        # interpreter's _python_exit hook, bounded in practice by the
-        # unit's TimeoutStopSec.
-        mgr._offload_pool.shutdown(wait=False, cancel_futures=True)
+        # Stop admissions, then drain the work queue and settle every
+        # item that never started: settle() answers the caller directly
+        # (the loop is down) with an audited Busy instead of a silent
+        # drop. An item a worker dequeues first is caught by the
+        # _stopping check inside on_worker — the get() consumes it, so
+        # each item is settled or worker-answered exactly once, never
+        # both. Running workers are daemon threads; they finish
+        # asynchronously and cannot hold interpreter exit.
+        with mgr._offload_pending_lock:
+            mgr._stopping = True
+        while True:
+            try:
+                _guarded, settle = mgr._offload_work_q.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                settle()
+            except Exception:  # noqa: BLE001 — teardown best-effort
+                log.exception("offload settle failed during shutdown")
+        # Wait out running work before final cleanup: an op mid-way
+        # through a multi-step mutation (e.g. useradd → grant → link →
+        # save) must finish — or at least reach its rollback — before the
+        # daemon-worker process can exit. The grace is bounded so a
+        # wedged op cannot stall the stop past TimeoutStopSec.
+        with mgr._offload_active_cv:
+            if not mgr._offload_active_cv.wait_for(
+                    lambda: (mgr._offload_active == 0
+                             and mgr._offload_delivering == 0),
+                    timeout=_OFFLOAD_SHUTDOWN_GRACE_S):
+                log.warning("offload shutdown grace expired with %d "
+                            "operation(s) running, %d answer(s) in "
+                            "flight", mgr._offload_active,
+                            mgr._offload_delivering)
+        # Drain answers that were scheduled on the loop but never
+        # dispatched — expired ops whose Busy idled behind the quit, and
+        # running ops that finished after it. Scheduled is not delivered:
+        # deliver_now invokes the callback directly, exactly once.
+        with mgr._offload_pending_lock:
+            drains = list(mgr._offload_answers.values())
+        for deliver_now in drains:
+            try:
+                deliver_now()
+            except Exception:  # noqa: BLE001 — teardown best-effort
+                log.exception("offload answer drain failed during shutdown")
+        # Fence new worker-side answer claims: a dequeued worker that
+        # slept through both the wait and the drain now finds its op
+        # already answered (drain fallback) — and any claim that slipped
+        # into the wait→drain window is counted in _offload_delivering,
+        # which is monotonic from here: a zero read is final.
+        with mgr._offload_active_cv:
+            mgr._offload_drained = True
+            if not mgr._offload_active_cv.wait_for(
+                    lambda: mgr._offload_delivering == 0,
+                    timeout=_OFFLOAD_SHUTDOWN_GRACE_S):
+                log.warning("offload shutdown finished with %d answer(s) "
+                            "still in flight", mgr._offload_delivering)
+        # Give the refusal-audit writer a bounded window for the rows
+        # the settle/drain above just queued; a wedged sink must not
+        # stall the stop — the same drop contract as queue overflow.
+        with mgr._refusal_audit_q.all_tasks_done:
+            if not mgr._refusal_audit_q.all_tasks_done.wait_for(
+                    lambda: mgr._refusal_audit_q.unfinished_tasks == 0,
+                    timeout=_REFUSAL_AUDIT_DRAIN_S):
+                log.warning("refusal audit queue not drained at "
+                            "shutdown; %d row(s) dropped",
+                            mgr._refusal_audit_q.unfinished_tasks)
+        try:
+            bus.flush()
+        except Exception:  # noqa: BLE001
+            pass
         mgr.store.stop_all_egress_watchers()
 
 

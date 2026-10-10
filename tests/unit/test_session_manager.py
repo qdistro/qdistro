@@ -1504,11 +1504,12 @@ class TestDBusErrorNames:
             f"mutating D-Bus methods missing async_callbacks: {sync}")
 
     def test_offloaded_work_uses_bounded_pool(self):
-        """_run_offloaded must submit to the bounded executor created in
-        __init__. A per-call daemon thread let a burst of mutating calls
-        spawn unbounded threads + NSS lookups + subprocess fan-out; the
-        pool keeps submit() non-blocking for the dispatch thread while
-        _OFFLOAD_WORKERS caps concurrency."""
+        """_run_offloaded must enqueue onto the bounded offload queue
+        created in __init__. A per-call daemon thread let a burst of
+        mutating calls spawn unbounded threads + NSS lookups +
+        subprocess fan-out; the fixed worker set keeps enqueue
+        non-blocking for the dispatch thread while _OFFLOAD_WORKERS
+        caps concurrency and _OFFLOAD_QUEUE_MAX caps retained work."""
         tree = ast.parse(Path(sm.__file__).read_text())
         helper = next(
             (n for n in ast.walk(tree)
@@ -1516,14 +1517,14 @@ class TestDBusErrorNames:
              and n.name == "_run_offloaded"),
             None)
         assert helper is not None, "_run_offloaded not found"
-        submits = any(
+        enqueues = any(
             isinstance(n, ast.Call)
             and isinstance(n.func, ast.Attribute)
-            and n.func.attr == "submit"
-            and isinstance(n.func.value, ast.Attribute)
-            and n.func.value.attr == "_offload_pool"
+            and n.func.attr == "_offload_enqueue"
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "self"
             for n in ast.walk(helper))
-        assert submits, "_run_offloaded does not submit to _offload_pool"
+        assert enqueues, "_run_offloaded does not call _offload_enqueue"
         per_call_thread = any(
             isinstance(n, ast.Call)
             and isinstance(n.func, ast.Attribute)
