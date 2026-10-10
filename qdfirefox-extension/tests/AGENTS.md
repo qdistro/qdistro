@@ -17,9 +17,11 @@ pass. If an existing test looks wrong, **flag it in your report and leave it**
 
 ## Test runner and layout
 
-- Runner: **vitest** (`devDependencies` in `package.json`). Config is vitest's
-  defaults — there is no `vitest.config.*`; jsdom is available as a devDep for
-  DOM/content-script tests.
+- Runner: **vitest** (`devDependencies` in `package.json`). `vitest.config.js`
+  exists only to pin `coverage.include` to `src/**/*.js` — it keeps
+  unexecuted src files in the coverage denominator and executed `tests/`
+  helpers out of the qci floor measurement; everything else is vitest's
+  defaults. jsdom is available as a devDep for DOM/content-script tests.
 - Layout: flat `tests/*.test.js`, one file per surface (e.g.
   `tests/port.test.js`, `tests/dispatcher.test.js`, `tests/background.test.js`,
   `tests/manifest.test.js`). Shared fixtures live in `tests/helpers.js`
