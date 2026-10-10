@@ -404,3 +404,17 @@ oci_img_present() {
     [[ "$output" == *"$REF"* ]]
     [[ "$output" == *offline* ]]
 }
+
+@test "qd_oci_ensure offline: corrupt cached archive fails the sha256 check" {
+    oci_setup_fake
+    run runoci   # warm
+    [ "$status" -eq 0 ]
+    rm -f "$FAKE_PODMAN_DIR/images/$REF_SHA"
+    printf 'corrupt' >> "$WORK/cache/oci/$REF_SHA/image.tar"
+    export QDISTRO_DEPS_OFFLINE=1
+    run runoci
+    unset QDISTRO_DEPS_OFFLINE
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"fails sha256"* ]]
+    ! grep -q 'load' "$FAKE_PODMAN_DIR/calls.log"
+}

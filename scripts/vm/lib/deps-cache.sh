@@ -92,6 +92,24 @@ qd_repo_base() {
     printf '%s\n' "${QDISTRO_REPO_UPSTREAM:-https://download.opensuse.org/history}"
 }
 
+# qd_repo_base_or_upstream <snapshot> — the default base for consumers that
+# CANNOT resolve file:// (guests, containers, guestfish appliances — the
+# host filesystem is not theirs). Explicit QDISTRO_REPO_BASE wins (caller
+# picked the transport, e.g. qd_serve_guest_base); offline without one
+# fails closed naming the fix; online falls back to upstream. Host-side
+# consumers resolve through qd_repo_base instead (file:// is fine there).
+qd_repo_base_or_upstream() {
+    local snap="${1:-}"
+    if [ -n "${QDISTRO_REPO_BASE:-}" ]; then
+        printf '%s\n' "$QDISTRO_REPO_BASE"; return 0
+    fi
+    if qd_deps_offline; then
+        _qdc_die "offline: no repo base — export QDISTRO_REPO_BASE to a guest-reachable mirror (qd_serve_start + qd_serve_guest_base${snap:+ $snap})"
+        return 1
+    fi
+    printf '%s\n' "${QDISTRO_REPO_UPSTREAM:-https://download.opensuse.org/history}"
+}
+
 # qd_repo_mirror <snapshot> [oss|non-oss ...] [-- worker flags]
 # Warm the repo mirror: repomd-verified metadata + checksum-verified RPMs
 # via scripts/vm/qd-repo-mirror.py. Refuses under the offline flags.
@@ -180,6 +198,8 @@ _qd_oci_save() {
         else
             rm -f "$tmp"; exit 1
         fi
+        ( cd "$dir" && sha256sum image.tar ) > "$dir/.image.tar.sha256.tmp" \
+            && mv "$dir/.image.tar.sha256.tmp" "$dir/image.tar.sha256" || exit 1
         qd_write_manifest oci "$hex" "$ref" image.tar || exit 1
     ) 9>"$lock"
 }
@@ -212,8 +232,22 @@ qd_oci_ensure() {
         digest="$(cat "$refmap")"
         archive="$root/oci/${digest#sha256:}/image.tar"
         if [ -f "$archive" ]; then
+            # Verify the archived bytes before load — a corrupt or
+            # substituted archive must not populate the local store under
+            # this ref.
+            if [ -f "$archive.sha256" ]; then
+                ( cd "$(dirname "$archive")" \
+                    && sha256sum -c image.tar.sha256 ) >/dev/null 2>&1 || {
+                    _qdc_die "qd_oci_ensure: cached archive fails sha256 — $archive"
+                    return 3
+                }
+            fi
             podman load -i "$archive" >/dev/null 2>&1 || {
                 _qdc_die "qd_oci_ensure: podman load failed for $archive"
+                return 3
+            }
+            podman image exists "$ref" || {
+                _qdc_die "qd_oci_ensure: loaded $archive but $ref absent from store"
                 return 3
             }
             printf '%s\n' "$digest"

@@ -116,9 +116,20 @@ qdistro_substrate_recipe_digest() {
 # QDISTRO_REPO_BASE replaces the upstream history base when set — the caller
 # picks a transport that works in its context (file:// on the host, an
 # http:// host bridge for guests); the layout below the base is upstream's.
+# Offline without an override this fails closed instead of emitting an
+# unreachable upstream URL: warm the mirror, qd_serve_start, then export
+# QDISTRO_REPO_BASE from qd_serve_guest_base.
 qdistro_substrate_repo_command() {
     local snap="${QDISTRO_SUBSTRATE_SNAPSHOT:?}" digest="${QDISTRO_SUBSTRATE_CLOUD_SHA256:?}"
-    local base="${QDISTRO_REPO_BASE:-https://download.opensuse.org/history}"
+    local base="${QDISTRO_REPO_BASE:-}"
+    if [ -z "$base" ]; then
+        case "${QDISTRO_DEPS_OFFLINE:-${QCI_OFFLINE:-0}}" in
+            1|true|yes|on)
+                echo "ERROR: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snap)" >&2
+                return 1 ;;
+        esac
+        base="https://download.opensuse.org/history"
+    fi
     cat <<EOF
 mkdir -p /etc/zypp/repos.d /etc/qdistro
 find /etc/zypp/repos.d -maxdepth 1 -name '*.repo' -delete

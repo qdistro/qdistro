@@ -8,8 +8,17 @@ snap=${QDISTRO_SUBSTRATE_SNAPSHOT:?}
 rm -f /etc/zypp/repos.d/*.repo /etc/zypp/services.d/*.service
 # QDISTRO_REPO_BASE swaps the history base for a local mirror; the layout
 # below it is upstream's. Inside a container the mirror must be mounted at
-# the same path or the base must be a reachable http:// endpoint.
-base="${QDISTRO_REPO_BASE:-https://download.opensuse.org/history}"
+# the same path or the base must be a reachable http:// endpoint. Offline
+# without it we fail closed rather than emit an unreachable upstream URL.
+base="${QDISTRO_REPO_BASE:-}"
+if [ -z "$base" ]; then
+    case "${QDISTRO_DEPS_OFFLINE:-${QCI_OFFLINE:-0}}" in
+        1|true|yes|on)
+            echo "container-native-deps: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snap)" >&2
+            exit 3 ;;
+    esac
+    base="https://download.opensuse.org/history"
+fi
 cat > /etc/zypp/repos.d/qdistro-snapshot-oss.repo <<EOF
 [qdistro-snapshot-oss]
 name=qdistro Tumbleweed OSS $snap

@@ -151,25 +151,50 @@ def save_index(dest, index):
 
 
 def audit_repo(base, dest):
-    """Re-verify a completed mirror locally; self-heal files still online."""
+    """Re-verify a mirror locally; self-heal files still online.
+
+    The audit is driven by repomd.xml + primary metadata — every package
+    the repo NAMES must verify, not just files the index happens to know —
+    so a --limit-truncated or crashed mirror is reported incomplete rather
+    than passing on its partial set. A clean audit on a markerless mirror
+    publishes mirror.json (the content IS complete)."""
     repomd = os.path.join(dest, "repodata", "repomd.xml")
     if not os.path.isfile(repomd):
         die(f"verify: no repomd.xml under {dest} — mirror was never completed")
+    marker = os.path.join(dest, "mirror.json")
+    complete = os.path.isfile(marker)
+    if not complete:
+        print("[repo-mirror] verify: no mirror.json — mirror is not marked "
+              "complete; auditing content anyway", file=sys.stderr)
     bad = []
-    for href, sha, algo, _t in parse_repomd(repomd):
+    meta = parse_repomd(repomd)
+    for href, sha, algo, _t in meta:
         local = os.path.join(dest, href)
         if not (os.path.isfile(local) and digest_file(local, algo) == sha):
             bad.append((href, sha, algo))
-    index = load_index(dest)
-    for href, rec in index.items():
-        local = os.path.join(dest, href)
-        if not (os.path.isfile(local)
-                and os.path.getsize(local) == rec.get("size")
-                and digest_file(local, rec.get("algo", "sha256")) == rec.get("sum")):
-            bad.append((href, rec.get("sum"), rec.get("algo", "sha256")))
+    # Every RPM named by primary must verify — the index is only a resume
+    # hint, never the audit's source of truth.
+    pkgs = []
+    primary = next((h for h, _s, _a, t in meta if t == "primary"), None)
+    if primary is not None and os.path.isfile(os.path.join(dest, primary)):
+        for href, sha, algo in iter_packages(os.path.join(dest, primary)):
+            pkgs.append(href)
+            local = os.path.join(dest, href)
+            if not (os.path.isfile(local) and digest_file(local, algo) == sha):
+                bad.append((href, sha, algo))
     if not bad:
-        print(f"[repo-mirror] verify OK: {len(index)} packages + "
+        print(f"[repo-mirror] verify OK: {len(pkgs)} packages + "
               f"repodata under {dest}", file=sys.stderr)
+        if not complete and pkgs:
+            manifest = {"schema": 1, "verified_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "packages": len(pkgs), "source": base}
+            tmp = marker + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(manifest, f, indent=2)
+            os.replace(tmp, marker)
+            print("[repo-mirror] verify: content complete — published "
+                  "mirror.json", file=sys.stderr)
         return
     print(f"[repo-mirror] verify: {len(bad)} file(s) corrupt/missing, refetching",
           file=sys.stderr)
@@ -205,10 +230,15 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
     # checksum-verified. History snapshots are immutable — a complete mirror
     # needs ZERO upstream contact (the disappearing-upstream case this
     # cache exists for). --verify audits; --force re-mirrors.
-    if os.path.isfile(os.path.join(dest, "mirror.json")) and not force:
+    marker = os.path.join(dest, "mirror.json")
+    if os.path.isfile(marker) and not force:
         print(f"[repo-mirror] {repo}: complete mirror present, nothing to do",
               file=sys.stderr)
         return
+    # A refresh that dies mid-way must not leave a stale "complete" marker —
+    # remove it now and republish only after the full pass verifies.
+    if os.path.isfile(marker):
+        os.unlink(marker)
 
     # 1. repomd + its signature sidecars (verbatim; zypper verifies them).
     repomd_local = fetch(src + "repodata/repomd.xml",
@@ -286,8 +316,10 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
             "packages": stats["packages"], "finished_at": time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        with open(os.path.join(dest, "mirror.json"), "w") as f:
+        tmp = marker + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(manifest, f, indent=2)
+        os.replace(tmp, marker)
     print(f"[repo-mirror] {repo}: done — {stats['downloaded']} fetched, "
           f"{stats['skipped']} warm, {stats['packages']} indexed", file=sys.stderr)
     return stats

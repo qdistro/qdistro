@@ -123,7 +123,16 @@ qdistro_write_snapshot_repos() {
     repo_dir="${QDISTRO_ZYPP_REPOS_D:-/etc/zypp/repos.d}"
     # QDISTRO_REPO_BASE swaps the history base for a local mirror; the
     # layout below it is upstream's (<base>/<snap>/tumbleweed/repo/<name>/).
-    base="${QDISTRO_REPO_BASE:-https://download.opensuse.org/history}"
+    # Offline without it we fail closed rather than emit an unreachable URL.
+    base="${QDISTRO_REPO_BASE:-}"
+    if [ -z "$base" ]; then
+        case "${QDISTRO_DEPS_OFFLINE:-${QCI_OFFLINE:-0}}" in
+            1|true|yes|on)
+                echo "[bootstrap] ERROR: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snap)" >&2
+                return 1 ;;
+        esac
+        base="https://download.opensuse.org/history"
+    fi
     mkdir -p "$repo_dir"
     cat > "$repo_dir/qdistro-snapshot-oss.repo" <<EOF
 [qdistro-snapshot-oss]

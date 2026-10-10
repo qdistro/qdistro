@@ -68,7 +68,19 @@ snapshot_id() {
 snapshot_repo_args() {
     # QDISTRO_REPO_BASE swaps the history base for a local mirror (file://
     # deps cache, or a host bridge URL); the layout below it is upstream's.
-    local snap="$1" base="${QDISTRO_REPO_BASE:-https://download.opensuse.org/history}/$1/tumbleweed/repo"
+    # Offline without it we fail closed rather than emit an unreachable URL —
+    # this build runs inside the builder VM, so the transport must be one a
+    # guest can reach (qd_serve_guest_base), not host file://.
+    local snap="$1" base="${QDISTRO_REPO_BASE:-}"
+    if [ -z "$base" ]; then
+        case "${QDISTRO_DEPS_OFFLINE:-${QCI_OFFLINE:-0}}" in
+            1|true|yes|on)
+                echo "snapshot_repo_args: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snap)" >&2
+                return 1 ;;
+        esac
+        base="https://download.opensuse.org/history"
+    fi
+    base="$base/$1/tumbleweed/repo"
     [[ "$snap" =~ ^[0-9]{8}$ ]] || return 2
     printf '%s\n' --ignore-repos \
         "--add-repo=$base/oss/,rpm-md,Tumbleweed-OSS" \

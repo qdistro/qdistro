@@ -249,3 +249,50 @@ print(urllib.request.urlopen('http://127.0.0.1:$port/repos/$SNAP/tumbleweed/repo
     [ "$status" -eq 0 ]
     [[ "$output" == *"baseurl=https://download.opensuse.org/history/$SNAP/tumbleweed/repo/oss/"* ]]
 }
+
+@test "--verify audits every primary package, not just the index" {
+    # A --limit-truncated mirror has a happy index but is INCOMPLETE.
+    run_mirror --limit 1
+    [ "$status" -eq 0 ]
+    local d="$WORK/cache/repos/$SNAP/tumbleweed/repo/oss"
+    [ ! -f "$d/noarch/pkg-b-1.0-1.noarch.rpm" ]
+    [ ! -f "$d/mirror.json" ]
+    # Offline verify must name the package primary demands, not pass the index.
+    run env QDISTRO_DEPS_OFFLINE=1 python3 "$MIRROR" --root "$WORK/cache" \
+        --snapshot "$SNAP" --repo oss --base "$BASE" --verify
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"pkg-b-1.0-1.noarch.rpm"* ]]
+    # Online verify self-heals the gap and a clean audit publishes the marker.
+    run_mirror --verify
+    [ "$status" -eq 0 ]
+    [ -f "$d/noarch/pkg-b-1.0-1.noarch.rpm" ]
+    run_mirror --verify
+    [ "$status" -eq 0 ]
+    [ -f "$d/mirror.json" ]
+}
+
+@test "a killed re-mirror drops the stale completion marker" {
+    run_mirror; [ "$status" -eq 0 ]
+    local d="$WORK/cache/repos/$SNAP/tumbleweed/repo/oss"
+    [ -f "$d/mirror.json" ]
+    # A force re-run that dies mid-flight must not leave "complete" behind:
+    # corrupt the local copy (so it is not reused) AND upstream (so the
+    # refetch fails the repomd->primary chain verification).
+    printf 'tampered' > "$d/noarch/pkg-a-1.0-1.noarch.rpm"
+    printf 'tampered' > "$SNAP_DIR/oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    run_mirror --force
+    [ "$status" -ne 0 ]
+    [ ! -f "$d/mirror.json" ]
+}
+
+@test "qdistro_substrate_repo_command fails closed offline without a base" {
+    run env QCI_OFFLINE=1 bash -c "
+        . '$SUBSTRATE'
+        export QDISTRO_SUBSTRATE_SNAPSHOT=$SNAP
+        export QDISTRO_SUBSTRATE_CLOUD_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        unset QDISTRO_REPO_BASE
+        qdistro_substrate_repo_command"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"QDISTRO_REPO_BASE"* ]]
+    [[ "$output" == *"offline"* ]]
+}

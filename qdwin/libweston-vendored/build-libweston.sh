@@ -153,15 +153,29 @@ prepare_pinned_git_subproject "display-info"
 # wrap. A real git checkout keeps the alignment path above; offline with
 # nothing warm, qd_fetch fails closed naming the dep.
 seed_display_info() {
-    local dir="$SRC/subprojects/display-info" tarball deps
+    local dir="$SRC/subprojects/display-info" tarball deps actual
     [ -d "$dir/.git" ] && return 0
+    deps="$(cd "$HERE/../.." && pwd)/scripts/vm/lib/deps-cache.sh"
+    if [ -f "$deps" ]; then
+        # shellcheck source=/dev/null
+        . "$deps"   # pin defaults + qd_fetch; harmless if never used
+    fi
     tarball="${QDISTRO_DISPLAY_INFO_TARBALL:-}"
     if [ -z "$tarball" ]; then
-        deps="$(cd "$HERE/../.." && pwd)/scripts/vm/lib/deps-cache.sh"
-        [ -f "$deps" ] || return 0
-        # shellcheck source=/dev/null
-        . "$deps"
+        command -v qd_display_info_tarball >/dev/null 2>&1 || return 0
         tarball="$(qd_display_info_tarball)"
+    else
+        # env-staged path: the override is a transport for guest/container
+        # lanes, not a verification bypass — hash the staged bytes against
+        # the pinned digest before trusting them.
+        actual="$(sha256sum "$tarball" | awk '{print $1}')" || {
+            echo "error: cannot hash staged display-info tarball $tarball" >&2
+            return 1
+        }
+        [ "$actual" = "${QDISTRO_DISPLAY_INFO_SHA256:?env-staged tarball needs a digest pin}" ] || {
+            echo "error: staged display-info tarball sha256 mismatch: $actual" >&2
+            return 1
+        }
     fi
     [ -f "$tarball" ] || {
         echo "error: display-info tarball not found: $tarball" >&2
