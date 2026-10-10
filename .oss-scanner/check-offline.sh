@@ -6,9 +6,9 @@ engine=${CONTAINER_ENGINE:-podman}
 image=${1:-localhost/qdistro/oss-scanner:local}
 logs=${OSS_SCANNER_LOG_DIR:-ci/runs/oss-scanner-local}
 mkdir -p "$logs"
-"$engine" image inspect "$image" > "$logs/image.json"
 # Resolve once: a concurrent rebuild of the tag cannot change this check.
 image_id=$("$engine" image inspect --format '{{.Id}}' "$image")
+"$engine" image inspect "$image_id" > "$logs/image.json"
 printf '%s\n' "$image_id" > "$logs/image-id.txt"
 # Default runtime constraints match Anthropic's audit machine. If the host
 # cannot delegate CPU/memory controllers, explicitly set resource limits to 0
