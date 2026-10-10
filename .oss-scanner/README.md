@@ -48,7 +48,7 @@ groups and sanitizer tests still run so their results can be inspected.
 
 The 2026-10-10 local baseline reproduced a native qnotebook crash in
 `test_pdf_export_matches_baseline_in_any_live_mode` during its full suite
-(the presentation-invariants file passes separately). GDB stops in
+(an isolated run can instead reach a PDF-byte comparison failure). GDB stops in
 `QTreeViewPrivate::layout`. The full qdterm suite also blocked in a modal
 `QDialog::exec` during widget closing. These are recorded failures, not
 successful test results or missing-dependency skips. Product code and test
