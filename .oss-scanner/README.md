@@ -19,12 +19,13 @@ Docker also works; set `CONTAINER_ENGINE=docker` for the offline check. The
 Docker builder automatically uses the Dockerfile-specific ignore file;
 Podman receives it explicitly. This excludes local run logs and VM disks
 from the source context.
-The
-check tests network isolation, reinstalls both extension dependency sets from
+The check tests network isolation, reinstalls both extension dependency sets from
 the image's npm cache offline, touches native sources to force recompilation,
 rebuilds the SIP binding, configures native Meson builds from scratch, runs
 every headless group and exercises ASan/UBSan logic/frame-parser tests. It does not mount host dependencies.
-Logs go to `ci/runs/oss-scanner-local/` by default. Every failing step is fatal.
+Logs go to `ci/runs/oss-scanner-local/` by default. Any failure makes the check exit nonzero; independent test groups continue
+to collect evidence. Each check resolves its image tag to an immutable ID
+and records that ID, inspection metadata and the final exit code.
 As in qci's host runner, local headless checks disable container SELinux
 labeling because fixtures use container processes as simulated trusted peers.
 This does not exercise deployed SELinux enforcement; use the VM lane for that.
@@ -42,8 +43,9 @@ for template GC queries. This needs user namespaces but no image downloads.
 The libvirt client is present for absent-domain helper tests; no VM daemon,
 guest disk or host libvirt socket is provided.
 
-`test.sh smoke` runs during image construction. `test.sh all` is the full
-headless audit lane, not the VM/GUI/release gate. See `threat_model.md` for
+`test.sh smoke` runs during image construction. `test.sh all` runs the scanner headless lane. It excludes the desktop
+shell's integration lane and the terminal's printer-dependent test; it does
+not run the VM/GUI/release gates. See `threat_model.md` for
 component priorities, severity guidance and runtime limitations.
 Independent steps have qci's 600-second timeout, configurable through
 `OSS_SCANNER_TEST_TIMEOUT`; the large root suite has qci's separate
@@ -53,27 +55,32 @@ also gets 1800 seconds on the two-CPU audit machine
 the initial 600-second limit expired. A timeout or crash fails the check; remaining
 groups and sanitizer tests still run so their results can be inspected.
 
-The 2026-10-10 local baseline reproduced a native qnotebook crash in
-`test_pdf_export_matches_baseline_in_any_live_mode` during its full suite
-(an isolated run can instead reach a PDF-byte comparison failure). GDB stops in
-`QTreeViewPrivate::layout`. The full qdterm suite also blocked in a modal
-`QDialog::exec` during widget closing. These are recorded failures, not
-successful test results or missing-dependency skips. Product code and test
-assertions are unchanged by this environment preparation.
+The original scanner image exposed two notebook failures although project CI
+passed the same product sources: a native crash in the full suite during
+`test_pdf_export_matches_baseline_in_any_live_mode`, and a PDF comparison
+failure when UTC timestamps cross a second boundary. The native crash stops
+in `QTreeViewPrivate::layout`; its cause remains under investigation. The PDF
+test originally recognized offset dates but not UTC `Z` dates. See current
+local validation evidence for the status after correcting that normalizer.
+The corrected terminal run passed 1,610 tests with two intentional skips.
 
-The native build follows the sequence used by the small GitHub VM-image
-workflow, but retains development tools and build outputs instead of producing
-a bootable QCOW2. It caps Ninja and Quickshell parallelism at two and disables
-Quickshell PCH to fit small audit environments.
+Image construction uses available CPUs on the larger build machine. Offline
+rebuilds default to two jobs. Quickshell PCH is disabled in both environments.
+Selected sanitizer builds cover one compositor logic test and two daemon
+tests; bundled libraries are not wholly instrumented.
 
 ## Dependency snapshot maintenance
 
-The Dockerfile currently pins the dated Tumbleweed dependency snapshot
-20261007. This is independent of the cloud QCOW2 pin in `snapshot.conf`: the
-scanner does not consume a cloud image. openSUSE history URLs expire; refresh
-this ARG and rerun the offline check before they do. Do not assume cached
-local layers prove a fresh online build still works. A retained package mirror
-is needed if future builds must reproduce this snapshot after upstream expiry.
+`snapshot.conf` is the sole dependency snapshot pin. The Dockerfile uses an
+immutable bootstrap image, reads the snapshot from the repository, runs
+`zypper dup` against those dated repositories, and verifies the resulting
+`VERSION_ID`. Changing `snapshot.conf` invalidates the dependency layer.
+The bootstrap digest is not a second package snapshot setting.
+
+openSUSE history URLs expire after roughly a month. Keep the shared pin
+current and rerun a clean online build plus the offline check whenever it
+changes. Cached layers do not establish availability from upstream mirrors.
+A retained package mirror is needed for reproduction after upstream expiry.
 
 ## Enrollment preparation
 

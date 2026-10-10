@@ -1,15 +1,46 @@
 # qdistro scanner guidance
 
-qdistro is an early-stage, single-owner Linux distribution with brokered
-application silos and graduated isolation. It is not yet widely deployed.
+qdistro is an early-stage, single-owner Linux distribution with an authorization service and several
+application isolation mechanisms. It is not yet widely deployed.
 Read `doc/overview.md`, `doc/threat-model.md`, `doc/isolation-tiers.md`,
 `doc/permissions.md`, `doc/architecture.md` and `doc/glossary.md` first.
 Those documents define the guarantees; this file provides audit navigation.
 
+## Security guarantees and scope
+
+This is a desktop for one human owner; the additional Unix accounts separate
+application contexts, not different human users. Read `doc/threat-model.md`
+before judging a behavior as a violation. The project targets accidental data
+leaks and containment of compromised applications, but explicitly does not
+promise containment of actively hostile sessions outside virtual machines,
+or protection against malicious application authors through cooperative SDK
+flags. Treat these limits as part of the guarantee, not as bugs to report.
+
+In scope: authorization and user-approval decisions, caller authentication,
+resource ownership across separate Unix accounts and configured containers,
+compositor client separation, privilege helpers, and browser/remote-message
+inputs. For each finding name the actual configured boundary and demonstrate
+the documented check that should have denied the action. A parser defect or
+approval bypass in a trusted service can be in scope without asserting a
+complete hostile-code sandbox guarantee.
+
+Out of scope: file access among applications sharing an account or running
+without isolation; bypass of cooperative application flags by malicious
+application authors; host-kernel exploits, hardware attacks and side channels;
+and adversarial escape qualification for experimental virtual-machine or
+paravirtualized environments. Do not treat the absence of an undocumented
+sandbox guarantee as a vulnerability. Revisit experimental isolation scope
+only when maintainers explicitly extend this guidance.
+
+Include bundled dependency defects when project patches or integration make
+them reachable from the interfaces above. Unrelated upstream issues without
+project reachability are outside this audit. Trusted administrator actions
+are not privilege escalations merely because they access application data.
+
 ## Priority surfaces and attacker capabilities
 
 * `broker/`, `session_manager/`, `workflow/`, `templates/`: decisions about
-  cross-silo authority, approvals, resource handles, revocation and provenance.
+  cross-application authority, approvals, resource handles, revocation and provenance.
   Exercise requests from an unprivileged caller, stale processes/handles,
   mismatched UID/session identities, reordered events and concurrent requests.
 * `qdwin/qdwin/`, `daemons/`: Wayland client identity, protocol lifetimes,
@@ -28,8 +59,8 @@ The owner/admin and its trusted compositor are policy authorities. A report
 must show an attacker gaining authority it did not already possess. Root/admin
 can already read user data; requiring that authority is not an escalation.
 Host-kernel compromise, hardware attacks and side channels are outside the
-project's userspace guarantee. Tier 0-3 share the host kernel. VM tiers have
-separate guarantees and are experimental. Cooperative first-party SDK flags
+project's userspace guarantee. Unix-account, SELinux and container isolation share the host kernel.
+Virtual-machine isolation has separate guarantees and is experimental. Cooperative first-party SDK flags
 are not promised as kernel-enforced protection against malicious app authors.
 Do not infer stronger guarantees from the word "isolation" alone.
 
@@ -39,7 +70,7 @@ The checkout is `/src`. Dependencies and npm downloads are installed during
 image construction. There is no network during the audit. Do not invoke the
 bootstrap installer, `qci full`, VM provisioning or distro-image builders here.
 The image includes an empty VFS Podman store for GC membership-query tests;
-that does not provide prebuilt silo/workload images or nested VM support.
+that does not provide prebuilt application container images or nested VM support.
 
 * `bash .oss-scanner/build.sh`: incremental native rebuild as root. Production
   vendored libweston, vendored Quickshell, qdwin, daemons and qdshell are built;
@@ -47,7 +78,7 @@ that does not provide prebuilt silo/workload images or nested VM support.
   are built too. Debug info and frame pointers are retained. Native component
   build directories are `<component>/build-oss`. libweston/Quickshell retain
   their own build directories under their vendored source trees.
-* `bash .oss-scanner/test.sh`: complete headless lane. Optional groups are
+* `bash .oss-scanner/test.sh`: scanner headless lane. Optional groups are
   `smoke`, `root`, `native`, `apps`, `extensions`. Tests run as UID 1001 with a
   private D-Bus session and offscreen Qt. Failures propagate to the exit code.
 * `bash .oss-scanner/build-sanitized.sh qdwin`: optional separate ASan/UBSan
@@ -60,7 +91,9 @@ that does not provide prebuilt silo/workload images or nested VM support.
   `meson test -C qdwin/build-oss --list` and equivalent daemon/shell commands.
 * Package versions: `/opt/scanner-rpms.txt`. Build parallelism defaults to two.
 
-The root suite is batched using the same generator as qci. Browser tests use
+The root suite is batched using the same generator as qci. The desktop
+shell's integration lane is excluded; native, Python, QML and JavaScript
+checks still run. Browser tests use
 one process per file. qdterm's printer-coupled test is excluded exactly as in
 qci; runtime printing requires the dedicated VM. Source-invariant and mocked
 backend tests do not demonstrate runtime enforcement. Report skips explicitly.
@@ -78,8 +111,8 @@ passed merely because their headless counterparts passed.
 ## Severity and reports
 
 Critical: demonstrated unprivileged or remote compromise of the trusted
-admin/host, or broad cross-silo secret access without required approval.
-High: demonstrated unauthorized access to another silo's data, approval bypass,
+admin/host, or broad cross-application secret access without required approval.
+High: demonstrated unauthorized access to another application's data, approval bypass,
 peer/session identity confusion granting authority, or reachable memory
 corruption in a trusted service. Reachability and exploitability determine
 severity; memory corruption is not automatically critical.

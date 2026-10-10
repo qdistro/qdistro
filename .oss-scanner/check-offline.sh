@@ -7,6 +7,9 @@ image=${1:-localhost/qdistro/oss-scanner:local}
 logs=${OSS_SCANNER_LOG_DIR:-ci/runs/oss-scanner-local}
 mkdir -p "$logs"
 "$engine" image inspect "$image" > "$logs/image.json"
+# Resolve once: a concurrent rebuild of the tag cannot change this check.
+image_id=$("$engine" image inspect --format '{{.Id}}' "$image")
+printf '%s\n' "$image_id" > "$logs/image-id.txt"
 # Default runtime constraints match Anthropic's audit machine. If the host
 # cannot delegate CPU/memory controllers, explicitly set resource limits to 0
 # and record that the resource envelope was not verified.
@@ -18,8 +21,9 @@ fi
 # otherwise identify stub trusted peers as hostile container_t processes.
 # Actual enforcing-SELinux validation belongs in disposable qdistro VMs.
 # Expressions in the script are expanded inside the offline container.
+status=0
 # shellcheck disable=SC2016
-"$engine" run --rm --init --network=none --security-opt=label=disable --cap-add=SYS_PTRACE "${limits[@]}" --workdir=/src "$image" \
+"$engine" run --rm --init --network=none --security-opt=label=disable --cap-add=SYS_PTRACE "${limits[@]}" --workdir=/src "$image_id" \
     bash -euo pipefail -c '
         python3 - <<"PYNET"
 import socket
@@ -60,5 +64,10 @@ PYNET
         bash .oss-scanner/shell.sh meson test -C daemons/build-oss-sanitized \
             --print-errorlogs --num-processes 2 || test_status=1
         exit "$test_status"
-    ' > "$logs/offline.log" 2>&1
+    ' > "$logs/offline.log" 2>&1 || status=$?
+printf '%s\n' "$status" > "$logs/exit-code.txt"
+if [ "$status" != 0 ]; then
+    printf 'Offline check failed (exit %s). Log: %s/offline.log\n' "$status" "$logs" >&2
+    exit "$status"
+fi
 printf 'Offline rebuild and headless tests passed. Log: %s/offline.log\n' "$logs"
