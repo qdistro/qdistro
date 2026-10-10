@@ -1379,7 +1379,7 @@ identity_check() {
     sed -i 's/ clean$/ DIRTY diff-sha256=0123456789abcdef untracked=0/' "$T/root/etc/qdistro/release"
     run identity_check dev
     [ "$status" -ne 0 ]
-    [[ "$output" == *"exactly one clean source"* ]]
+    [[ "$output" == *"exactly one clean SOURCE line"* ]]
     identity_fixture
     sed -i 's/^SNAPSHOT=.*/SNAPSHOT=19990101/' "$T/root/etc/qdistro/release"
     run identity_check
