@@ -12580,11 +12580,15 @@ qdwin_om_head_resource_destroy(struct wl_resource *resource)
 		return;
 	/* Mode resources owned by this head still reference omh via ->head.
 	 * They are destroyed by the client independently; sever the link so
-	 * their destructor doesn't touch a freed list head. */
+	 * their destructor doesn't touch a freed list head. Unlink too: a
+	 * mode freed while still linked would leave a dead node that a
+	 * later traversal of omh->modes would follow. */
 	{
-		struct qdwin_om_mode *omm;
-		wl_list_for_each(omm, &omh->modes, link)
+		struct qdwin_om_mode *omm, *omt;
+		wl_list_for_each_safe(omm, omt, &omh->modes, link) {
+			wl_list_remove(&omm->link);
 			omm->head = NULL;
+		}
 	}
 	if (omh->mgr)
 		wl_list_remove(&omh->link);
@@ -13255,9 +13259,11 @@ qdwin_om_manager_resource_destroy(struct wl_resource *resource)
 	wl_list_remove(&mgr->link);
 	/* Null head/mode back-pointers; the client destroys those resources. */
 	wl_list_for_each_safe(omh, tmp, &mgr->heads, link) {
-		struct qdwin_om_mode *omm;
-		wl_list_for_each(omm, &omh->modes, link)
+		struct qdwin_om_mode *omm, *omt;
+		wl_list_for_each_safe(omm, omt, &omh->modes, link) {
+			wl_list_remove(&omm->link);
 			omm->head = NULL;
+		}
 		wl_list_remove(&omh->link);
 		omh->mgr = NULL;
 		omh->head = NULL;

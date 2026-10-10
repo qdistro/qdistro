@@ -722,6 +722,8 @@ SPLICED = [
     "qdwin_layer_surfaces_destroy_all",
     "qdwin_ext_ws_manager_resource_destroy",
     "qdwin_ext_ws_managers_destroy_all",
+    "qdwin_om_mode_resource_destroy",
+    "qdwin_om_head_resource_destroy",
     "qdwin_om_manager_resource_destroy",
     "qdwin_om_managers_destroy_all",
     "qdwin_secctx_client_on_destroy",
@@ -741,7 +743,8 @@ SPLICED = [
 
 EPILOGUE = r"""
 #define CHECK(cond, ...) do { \
-	if (!(cond)) { printf("FAIL: " __VA_ARGS__); printf("\n"); return 1; } \
+	if (!(cond)) { printf("FAIL: " __VA_ARGS__); printf("\n"); \
+		fflush(stdout); return 1; } \
 } while (0)
 
 static int focus_handler_calls;
@@ -1245,23 +1248,46 @@ static int case_managers(void)
 	om->qdwin = q;
 	om->resource = res_new(om, qdwin_om_manager_resource_destroy);
 	wl_list_init(&om->heads);
+	/* Two heads: one exercises mode-before-head client destruction,
+	 * the other head-before-mode. The drain severs both; the resource
+	 * destructors must then run in either order without touching a
+	 * freed list node. */
 	struct qdwin_om_head *omh = calloc(1, sizeof *omh);
 	omh->mgr = om;
+	omh->resource = res_new(omh, qdwin_om_head_resource_destroy);
 	omh->head = calloc(1, sizeof *omh->head);
 	omh->output = calloc(1, sizeof *omh->output);
 	wl_list_init(&omh->modes);
 	struct qdwin_om_mode *omm = calloc(1, sizeof *omm);
 	omm->head = omh;
+	omm->resource = res_new(omm, qdwin_om_mode_resource_destroy);
 	wl_list_insert(&omh->modes, &omm->link);
 	wl_list_insert(&om->heads, &omh->link);
+	struct qdwin_om_head *omh2 = calloc(1, sizeof *omh2);
+	omh2->mgr = om;
+	omh2->resource = res_new(omh2, qdwin_om_head_resource_destroy);
+	omh2->head = calloc(1, sizeof *omh2->head);
+	omh2->output = calloc(1, sizeof *omh2->output);
+	wl_list_init(&omh2->modes);
+	struct qdwin_om_mode *omm2 = calloc(1, sizeof *omm2);
+	omm2->head = omh2;
+	omm2->resource = res_new(omm2, qdwin_om_mode_resource_destroy);
+	wl_list_insert(&omh2->modes, &omm2->link);
+	wl_list_insert(&om->heads, &omh2->link);
 	wl_list_insert(&q->om_managers, &om->link);
 
 	struct wl_resource *m_res = m->resource;
 	struct wl_resource *m_group = m->group;
 	struct wl_resource *m_h0 = m->handles[0];
 	struct wl_resource *om_res = om->resource;
+	struct wl_resource *omh_res = omh->resource;
+	struct wl_resource *omm_res = omm->resource;
+	struct wl_resource *omh2_res = omh2->resource;
+	struct wl_resource *omm2_res = omm2->resource;
 	struct weston_head *omh_head = omh->head;
 	struct weston_output *omh_output = omh->output;
+	struct weston_head *omh2_head = omh2->head;
+	struct weston_output *omh2_output = omh2->output;
 	qdwin_ext_ws_managers_destroy_all(q);
 	qdwin_om_managers_destroy_all(q);
 
@@ -1272,9 +1298,22 @@ static int case_managers(void)
 	CHECK(omh->mgr == NULL && omh->head == NULL && omh->output == NULL,
 	      "om head back-refs still armed");
 	CHECK(omm->head == NULL, "om mode back-ref still armed");
+	/* Severed modes are unlinked, not just un-headed: a mode freed
+	 * while still linked would poison a later omh->modes walk. */
+	CHECK(wl_list_empty(&omh->modes) && wl_list_empty(&omh2->modes),
+	      "om modes still linked after sever");
+
+	/* Client teardown order 1: mode resource before head resource. */
+	wl_resource_destroy(omm_res);
+	wl_resource_destroy(omh_res);
+	/* Order 2: head resource before mode resource. */
+	wl_resource_destroy(omh2_res);
+	wl_resource_destroy(omm2_res);
 
 	free(m_res); free(m_group); free(m_h0); free(ref);
-	free(om_res); free(omm); free(omh); free(omh_head); free(omh_output);
+	free(om_res); free(omh_res); free(omm_res);
+	free(omh2_res); free(omm2_res);
+	free(omh_head); free(omh_output); free(omh2_head); free(omh2_output);
 	free(q);
 	return 0;
 }
