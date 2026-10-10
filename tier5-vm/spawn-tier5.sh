@@ -270,10 +270,10 @@ run_as_admin() {
 # are narrowed to REAL qemu by /proc/<pid>/comm (truncated to 15 chars,
 # e.g. "qemu-system-x86"), which also discards the run_as_admin wrapper
 # chain (runuser/env/pgrep) carrying the pattern in its own argv. A
-# vanished candidate between pgrep and /proc read is retried as a normal
-# miss — it simply isn't counted, not a scan failure.
+# candidate whose comm cannot be READ (vanished or permission) is
+# unverifiable — never silently discounted as "not qemu" (sol r7).
 qemu_pids_for_domain() {
-    local name="${1:-$VM_NAME}" p c out="" raw
+    local name="${1:-$VM_NAME}" p c out="" raw unread=""
     # The scan's own plumbing must work before "empty" can mean "dead":
     # runuser auth/exec failure (rc 1/126/127) is otherwise
     # indistinguishable from pgrep's no-match rc 1.
@@ -281,10 +281,15 @@ qemu_pids_for_domain() {
     raw=$(run_as_admin pgrep -f -- "-name guest=$name," 2>/dev/null)
     case $? in 0) ;; 1) return 1 ;; *) return 2 ;; esac
     for p in $raw; do
-        c=$(cat "/proc/$p/comm" 2>/dev/null) || continue
+        # An unreadable /proc/<pid>/comm CANNOT be discounted — the pid
+        # might be our qemu; only a confirmed-qemu or a fully readable
+        # candidate list may produce a verdict (sol r7). A candidate
+        # that vanished between pgrep and read also lands here, which
+        # fails closed — the next scan settles it.
+        c=$(cat "/proc/$p/comm" 2>/dev/null) || { unread=1; continue; }
         case "$c" in qemu-system-*|qemu-kvm) out="$out $p" ;; esac
     done
-    [ -n "$out" ] || return 1
+    [ -n "$out" ] || { [ -n "$unread" ] && return 2; return 1; }
     printf '%s' "$out"
 }
 
@@ -379,29 +384,47 @@ else
                     >/dev/null 2>&1; then
                 continue
             fi
+            # Per-target hold: a wrapper spawning THIS domain right now
+            # takes its fd9 SH on hold-$base, so our nonblocking EX
+            # either loses (a live or in-flight decision owns it →
+            # skip) or wins and serializes every later wrapper behind
+            # our reap (sol r7). Creating the file when absent matches
+            # the spawn's own `install` — hold files are never unlinked.
+            _holddir="${TIER5_HOLD_DIR:-/run/qdistro-tier5}"
+            install -d -m 0700 "$_holddir" 2>/dev/null || true
+            _holdf="$_holddir/hold-$base"
+            [ -f "$_holdf" ] || install -m 0600 /dev/null "$_holdf" 2>/dev/null
+            exec {hfd}>>"$_holdf" 2>/dev/null || continue
+            flock -n -x "$hfd" 2>/dev/null || { exec {hfd}>&-; continue; }
             # Domain still alive? Only a CONFIRMED-dead oracle verdict
             # permits reaping — live OR unverifiable skips, so a false
             # "shut off" can't cost a live guest its disk (sol r6).
             domain_is_live "$base"; _lv=$?
-            [ "$_lv" -eq 1 ] || continue
-            # Orphan: undefine the stopped domain. If it remains defined,
-            # a later start could open the overlay — leave it for the
-            # next spawn's pass rather than unlink under it.
-            run_as_admin virsh undefine "$base" >/dev/null 2>&1 || true
-            if run_as_admin virsh dominfo "$base" >/dev/null 2>&1; then
-                continue
-            fi
+            if [ "$_lv" -ne 1 ]; then exec {hfd}>&-; continue; fi
+            # Defined vs absent must be distinguished precisely — an
+            # unverifiable query (rc 2) is ambiguity, not absence (r7).
+            domain_defined_state "$base"; _ds=$?
+            case "$_ds" in
+                0)  # Defined: undefine MUST succeed — a failed undefine
+                    # leaves a startable config pointing at this overlay.
+                    run_as_admin virsh undefine "$base" >/dev/null 2>&1 \
+                        || { exec {hfd}>&-; continue; } ;;
+                1)  ;;  # confirmed absent — nothing to undefine
+                *)  exec {hfd}>&-; continue ;;
+            esac
             # Settle + re-verify: a `virsh start` issued just before our
-            # undefine can still be exec'ing its qemu. Once the domain
-            # is undefined no NEW start is possible, so a clean scan
-            # after a short settle is the last proof we can get (sol r6).
+            # undefine can still be exec'ing its qemu. With the
+            # definition gone AND the per-target hold held, no NEW start
+            # is possible, so a clean scan here is the last proof the
+            # overlay needs (sol r7).
             sleep 0.3
             domain_is_live "$base"; _lv=$?
             if [ "$_lv" -eq 0 ]; then
                 echo "[tier5] orphan $base came alive during reap — keeping overlay" >&2
             fi
-            [ "$_lv" -eq 1 ] || continue
+            if [ "$_lv" -ne 1 ]; then exec {hfd}>&-; continue; fi
             rm -f "$overlay" 2>/dev/null || true
+            exec {hfd}>&-
             echo "[tier5] reaped orphan overlay $overlay" >&2
         done
     fi
@@ -583,8 +606,19 @@ host_mem_avail_mb() {  # host MemAvailable in MiB, or "" if unreadable
     printf '%s' $((kb / 1024))
 }
 
-domain_is_defined() {
-    run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1
+# domain_defined_state [name] — rc 0 = defined, 1 = CONFIRMED absent,
+# 2 = cannot determine. A bare dominfo failure conflates "domain not
+# found" with a libvirt query outage; only the error text separates
+# them, and an outage must never read as absence (sol r7).
+domain_defined_state() {
+    local name="${1:-$VM_NAME}" err
+    if err=$(run_as_admin virsh dominfo "$name" 2>&1 >/dev/null); then
+        return 0
+    fi
+    printf '%s' "$err" \
+        | grep -qiE 'not found|no domain|does not exist' \
+        && return 1
+    return 2
 }
 
 # Try the ordinary undefine first. If libvirt reports retained per-domain state
@@ -597,9 +631,13 @@ undefine_domain() {
         return 0
     fi
     echo "[tier5] WARN: undefine $VM_NAME failed: $err" >&2
-    if ! domain_is_defined; then
+    domain_defined_state; local ds=$?
+    if [ "$ds" -eq 1 ]; then
         return 0
     fi
+    # rc 2 (query outage) falls through to the metadata-aware retry —
+    # its own failure then reports honestly instead of faking success.
+    [ "$ds" -eq 0 ] || return 1
     if err=$(run_as_admin virsh undefine "$VM_NAME" \
         --managed-save --snapshots-metadata --checkpoints-metadata \
         --nvram --tpm 2>&1); then
@@ -671,10 +709,13 @@ reap_domain() {
     fi
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         undefine_domain || true
-        domain_is_defined || return 0
+        domain_defined_state; _ds=$?
+        [ "$_ds" -eq 1 ] && return 0
+        # rc 0 (still defined) or rc 2 (cannot verify): retry, then
+        # report honestly — either way the caller keeps the overlay.
         sleep 0.5
     done
-    echo "[tier5] ERROR: domain $VM_NAME remains defined after teardown" >&2
+    echo "[tier5] ERROR: domain $VM_NAME still defined or state unverifiable" >&2
     run_as_admin virsh dominfo "$VM_NAME" >&2 || true
     return 1
 }
@@ -811,12 +852,24 @@ cleanup() {
             # leftover (a crashed predecessor) is ours to remove.
             reap_domain "$force" || domain_reaped=0
             if [ "$domain_reaped" = "1" ]; then
-                rm -f "$DISK" 2>/dev/null || true
+                # The unlink needs its own proof of death: a destroy
+                # that raced or a kill that missed can leave a qemu
+                # alive after the definition is gone. Only a
+                # confirmed-dead verdict lets the disk go; anything
+                # else leaves it for the next spawn's orphan reaper
+                # (sol r7).
+                domain_is_live; _lv=$?
+                if [ "$_lv" -eq 1 ]; then
+                    rm -f "$DISK" 2>/dev/null || true
+                else
+                    domain_reaped=0
+                    echo "[tier5] WARN: keeping $DISK — $VM_NAME live or unverifiable" >&2
+                fi
             fi
         fi
     fi
     if [ "$domain_reaped" != "1" ]; then
-        echo "[tier5] ERROR: retaining overlay $DISK because $VM_NAME is still defined" >&2
+        echo "[tier5] ERROR: retaining overlay $DISK — $VM_NAME still defined or unverifiably live" >&2
         return 1
     fi
     return 0
@@ -960,14 +1013,19 @@ create_domain() {
     fi
 
     # Start if not live. The qemu oracle decides — a false "shut off"
-    # domstate must not push `virsh start` at an already-live domain
-    # (sol r6); on an unverifiable scan we still try: virsh start fails
-    # on a running domain, which fails closed anyway.
-    if ! domain_is_live; then
+    # domstate must not push `virsh start` at an already-live domain,
+    # and an unverifiable scan must not guess either (sol r7): rc 0
+    # means a racer started it (proceed — the guest is ours), rc 1
+    # starts it, rc 2 fails closed.
+    domain_is_live; _lv=$?
+    if [ "$_lv" -eq 1 ]; then
         if ! run_as_admin virsh start "$VM_NAME" >/dev/null; then
             echo "[tier5] FAIL: virsh start failed" >&2
             exit 6
         fi
+    elif [ "$_lv" -eq 2 ]; then
+        echo "[tier5] FAIL: cannot determine liveness of $VM_NAME before start" >&2
+        REAP=0; exit 3
     fi
 }
 
@@ -1155,14 +1213,24 @@ else
                     REAP=0; exit 3 ;;
             esac
             echo "[tier5] reclaiming stopped foreign domain $VM_NAME (state=$_fst)" >&2
-            if ! run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1; then
+            if ! undefine_domain; then
                 echo "[tier5] FAIL: cannot undefine foreign domain $VM_NAME" >&2
                 REAP=0; exit 5
+            fi
+            # The definition must be PROVEN gone before we touch the
+            # overlay — a startable config pointing at $DISK is as bad
+            # as a live qemu for our rm, and an unverifiable query is
+            # ambiguity, not absence (sol r7).
+            domain_defined_state; _ds=$?
+            if [ "$_ds" -ne 1 ]; then
+                echo "[tier5] FAIL: foreign domain $VM_NAME still defined" >&2
+                echo "        or unverifiable after undefine — keeping its overlay" >&2
+                REAP=0; exit 3
             fi
             # Settle + re-verify: a `virsh start` issued just before our
             # undefine can still be exec'ing its qemu; with the domain
             # now undefined no NEW start is possible, so a clean scan
-            # here closes the probe→unlink window (sol r6).
+            # here closes the probe→unlink window (sol r6/r7).
             sleep 0.3
             domain_is_live; _lv=$?
             if [ "$_lv" -ne 1 ]; then
@@ -1243,25 +1311,24 @@ if [ "$MODE" = "vm" ]; then
     # blip declared a HEALTHY guest stopped and tore it down (perm-gui 20/21
     # cold-start failed every run for this reason). Treat empty/error output as
     # transient and ride it out; only an explicit terminal state ends the wait.
-    misses=0; exec_gone=0
+    exec_gone=0
     while :; do
         d_state=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '[:space:]')
         case "$d_state" in
-            running|paused|idle|pmsuspended) misses=0 ;;
-            "") misses=$((misses + 1)); [ "$misses" -ge 5 ] && break ;;
-            *)  # Terminal-state CLAIM — VERIFY before ending the watch:
-                # nested-virt domstate can report "shut off" for a LIVE
-                # qemu, and a false terminal here would tear the app
-                # session down mid-flight (sol r6). Only a proven-dead
-                # verdict breaks now; a live verdict resets; an
-                # unverifiable scan rides a bounded miss budget so a
-                # persistently broken oracle can't hang the wrapper.
+            running|paused|idle|pmsuspended) ;;
+            *)  # Anything not explicitly live — a terminal claim, empty
+                # output, a query blip — is verified by the qemu oracle:
+                # only a CONFIRMED-dead verdict ends the session watch.
+                # Breaking on an ambiguous signal would hand a
+                # possibly-live guest (and its still-running app) to
+                # teardown's destroy+kill (sol r7). A live verdict or an
+                # unverifiable scan both keep waiting; a truly dead
+                # guest yields confirmed-dead as soon as the scan can
+                # run, and a persistently broken oracle just keeps this
+                # harmless watch going — the app-exit watch below is the
+                # primary session-end signal anyway.
                 domain_is_live; _lv=$?
-                case "$_lv" in
-                    1) break ;;
-                    0) misses=0 ;;
-                    *) misses=$((misses + 1)); [ "$misses" -ge 10 ] && break ;;
-                esac ;;
+                [ "$_lv" -eq 1 ] && break ;;
         esac
         # Session-on-done: each session publishes ONE app; once that app exits
         # (e.g. its last window was closed -> request_close -> the app quit)

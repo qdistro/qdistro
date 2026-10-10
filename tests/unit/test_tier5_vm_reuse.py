@@ -16,6 +16,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[2]
 SPAWN = (ROOT / "tier5-vm/spawn-tier5.sh").read_text()
+CLEANUP = (ROOT / "tier5-vm/qdistro-tier5-cleanup.sh").read_text()
 VMAPS = (ROOT / "qdshell/Services/Qdistro/VMApps.qml").read_text()
 PROVIDER = (
     ROOT / "qdshell/Modules/Panels/Launcher/Providers/VMAppsProvider.qml"
@@ -202,7 +203,12 @@ def test_stopped_foreign_domain_is_reclaimed_not_adopted():
     assert "shutoff|crashed" in reclaim
     assert "refusing to reclaim" in reclaim
     assert 'virsh destroy "$VM_NAME"' not in reclaim
-    assert 'virsh undefine "$VM_NAME"' in reclaim
+    # metadata-aware undefine + proof the definition is gone (an
+    # unverifiable dominfo is ambiguity, not absence)
+    assert "undefine_domain" in reclaim
+    assert "domain_defined_state; _ds=$?" in reclaim
+    assert '[ "$_ds" -ne 1 ]' in reclaim
+    assert "or unverifiable after undefine" in reclaim
     assert 'rm -f "$DISK"' in reclaim
     # settle + confirmed-dead recheck between undefine and unlink
     assert reclaim.index("sleep 0.3") < reclaim.index('rm -f "$DISK"')
@@ -213,15 +219,25 @@ def test_stopped_foreign_domain_is_reclaimed_not_adopted():
 
 def test_orphan_reaper_uses_qemu_liveness_not_domstate():
     # ensures: the startup orphan-overlay reaper cannot delete a live
-    #          guest's disk on a false "shut off" — only a CONFIRMED-dead
-    #          domain_is_live verdict permits reaping, the domain must
-    #          be verified-gone after undefine, and a settle + re-verify
-    #          guards the rm against an out-of-band start (sol r6)
+    #          guest's disk — it takes the target domain's own hold
+    #          (racing spawns serialize), requires a CONFIRMED-dead
+    #          domain_is_live verdict, distinguishes "not found" from a
+    #          libvirt outage via the dominfo error text, requires
+    #          undefine success on a defined domain, and settles +
+    #          re-verifies before the rm (sol r7)
     reaper = SPAWN[SPAWN.index("orphan-overlay reaper"):
                    SPAWN.index("reaped orphan overlay")]
+    # per-target flock serializes against a wrapper spawning that domain
+    assert 'hold-$base' in reaper
+    assert 'flock -n -x "$hfd"' in reaper
     assert 'domain_is_live "$base"' in reaper
     assert reaper.count('_lv=$?') >= 2  # verdict before AND after undefine
-    assert 'dominfo "$base"' in reaper  # still-defined -> leave overlay
+    # dominfo uses the precise 3-state helper — "not found" vs outage
+    assert 'domain_defined_state "$base"; _ds=$?' in reaper
+    assert 'not found|no domain|does not exist' in SPAWN
+    # a defined domain must be undefine'd SUCCESSFULLY (no || true)
+    assert 'virsh undefine "$base"' in reaper
+    assert 'virsh undefine "$base" >/dev/null 2>&1 || true' not in reaper
     # exact backing-file match via JSON field, not a substring grep
     assert '--output=json' in reaper
     assert '"backing-filename"' in reaper
@@ -295,3 +311,93 @@ def test_provider_settings_action_targets_the_same_appid():
     assert "SettingsPanel.Tab.VMApps" in PROVIDER
     assert '"labelKey": item.appId' in PROVIDER
     assert "SettingsPanelService.openToEntry" in PROVIDER
+
+
+def test_qemu_scan_unreadable_comm_is_uncertain_not_dead():
+    # ensures: a pgrep hit whose /proc/<pid>/comm cannot be READ is
+    #          ambiguity, never "confirmed dead" — the pid might be our
+    #          qemu, so an all-unreadable candidate list must report
+    #          unreliable (rc 2), not a clean empty scan (sol r7)
+    for src, name in ((SPAWN, "spawn"), (CLEANUP, "cleanup")):
+        body = re.search(
+            r"qemu_pids_for_domain\(\)\s*\{(?P<body>.*?)\n\}",
+            src, re.S,
+        ).group("body")
+        assert 'c=$(cat "/proc/$p/comm"' in body, name
+        assert "unread" in body, name
+        # an unreadable candidate while no qemu was confirmed -> rc 2
+        assert '[ -n "$unread" ] && return 2' in body, name
+        # and the confirmed-dead rc 1 sits BEHIND that uncertainty check
+        # in the same conditional: unread candidates resolve to rc 2 first
+        assert '&& return 2; return 1' in body, name
+
+
+def test_wait_loop_breaks_only_on_confirmed_dead():
+    # ensures: an ambiguous domstate (empty, blip, or a terminal CLAIM)
+    #          can never end the session watch — breaking would hand a
+    #          possibly-live guest to teardown's destroy+kill. Only a
+    #          confirmed-dead oracle verdict breaks; unverifiable scans
+    #          keep waiting (sol r7)
+    loop = SPAWN[SPAWN.index("exec_gone=0\n    while :; do"):
+                 SPAWN.index("wait loop ended")]
+    # no miss-budget break remains anywhere in the loop
+    assert 'misses=$((misses + 1))' not in loop
+    assert "[ \"$misses\" -ge" not in loop
+    # the single break path is the confirmed-dead verdict
+    assert "domain_is_live; _lv=$?" in loop
+    assert '[ "$_lv" -eq 1 ] && break' in loop
+
+
+def test_cleanup_unlink_requires_confirmed_dead():
+    # ensures: the normal teardown path cannot unlink $DISK while a qemu
+    #          still lives or the scan cannot say — reap_domain's own
+    #          undefine/dominfo verdict is not the final word; the rm is
+    #          gated on a confirmed-dead oracle of its own (sol r7)
+    body = _section("cleanup")
+    gate = body[body.index("reap_domain"):]
+    assert "domain_is_live; _lv=$?" in gate
+    assert '[ "$_lv" -eq 1 ]' in gate
+    # the rm sits INSIDE the confirmed-dead branch, after the check
+    assert gate.index('[ "$_lv" -eq 1 ]') < gate.index('rm -f "$DISK"')
+    assert "live or unverifiable" in gate
+
+
+def test_create_domain_fails_closed_on_unverifiable_liveness():
+    # ensures: an unverifiable scan cannot route into `virsh start` —
+    #          rc 2 fails closed (domain/disk retained, no start guess),
+    #          only confirmed-dead (rc 1) starts; live (rc 0) proceeds
+    #          to adoption-equivalent behaviour (sol r7)
+    body = _section("create_domain")
+    assert "domain_is_live; _lv=$?" in body
+    assert '[ "$_lv" -eq 1 ]' in body
+    assert '[ "$_lv" -eq 2 ]' in body
+    assert "cannot determine liveness" in body
+    # virsh start is only reachable from the confirmed-dead branch
+    assert body.index('[ "$_lv" -eq 1 ]') \
+        < body.index('run_as_admin virsh start')
+    assert body.index('run_as_admin virsh start') \
+        < body.index('[ "$_lv" -eq 2 ]')
+    # the refuse path preserves everything — no teardown authorization
+    refuse = body[body.index("cannot determine liveness"):]
+    assert "REAP=0" in refuse
+
+
+def test_cleanup_helper_requires_absent_definition_for_unlink():
+    # ensures: the standalone cleanup tool cannot leave a startable
+    #          domain pointing at a deleted overlay — the rm requires a
+    #          verified-absent definition (dominfo error text separates
+    #          "not found" from a libvirt outage) AND confirmed-dead
+    #          qemu (sol r7)
+    tail = CLEANUP[CLEANUP.index('if [ -f "$DISK" ]'):]
+    assert '_derr2=' in tail
+    assert 'not found|no domain|does not exist' in tail
+    assert "still defined" in tail
+    assert "cannot verify" in tail
+    assert "qemu_pids_for_domain; _lv=$?" in tail
+    assert '[ "$_lv" -eq 1 ]' in tail
+    assert 'rm -f "$DISK"' in tail
+    # definition check precedes the qemu check precedes the rm
+    assert tail.index("_derr2=") < tail.index("qemu_pids_for_domain")
+    assert tail.index("qemu_pids_for_domain") < tail.index('rm -f "$DISK"')
+    # undefine failure is surfaced, not swallowed into "not present"
+    assert "WARN: undefine" in CLEANUP

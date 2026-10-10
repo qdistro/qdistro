@@ -161,6 +161,21 @@ silently merge:
   `qdistro-tier5-cleanup.sh` helper. This covers collisions ACROSS
   catalogue reloads, where the running guest outlives the manifest
   that created it.
+
+  Every destructive step fails closed on that oracle's third state:
+  cannot-determine NEVER counts as dead. A pgrep candidate whose
+  `/proc/<pid>/comm` is unreadable, a failed `virsh undefine`, and a
+  `dominfo` error that is not "not found" are all ambiguity, and
+  ambiguity preserves the guest, the definition, and the overlay.
+  Concretely: the wait loop ends its watch only on a confirmed-dead
+  verdict (an ambiguous `domstate` keeps waiting — the app-exit watch
+  remains the primary session-end signal); `create_domain` refuses to
+  `virsh start` on an unverifiable scan; the orphan reaper takes the
+  target's own hold before judging, requires a successful `undefine`
+  (or proven "not found"), and re-verifies death after a settle; and
+  every overlay `rm` — in teardown, reclaim, reaper, and
+  `qdistro-tier5-cleanup.sh` — is preceded by confirmed-absent
+  definition + confirmed-dead qemu, in that order.
 - `launch()` also requires the row's appId to be in the CURRENT
   catalogue, so a stale provider row cannot adopt a guest it no longer
   owns.
