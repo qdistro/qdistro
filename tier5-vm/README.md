@@ -132,6 +132,35 @@ The wrapper supports two modes:
  client. So inside guest, `waypipe server -s 2:PORT --vsock`
  reaches the host's listener.
 
+## Per-app guests: adoption, not pooling
+
+The domain is the SILO for a catalogue appId: `VMApps.launch()` derives
+`<vm_name>` deterministically from the appId (`t5-<sanitized-appId>`), so
+every launch of the same app names the same guest. Ownership is a
+flock(2) protocol on `/run/qdistro-tier5/hold-<vm_name>` — no daemon:
+
+- Each wrapper carries a **shared session hold** (fd9) for its whole
+  lifetime, so concurrent sessions of the same app share the guest —
+  same appId, same trust domain, same silo tag.
+- A launch that finds the domain **running adopts it** under its own
+  session hold (no cold start); a missing/stopped domain is (re)created
+  under a short **exclusive** decision hold that serializes racing
+  creators and teardown claims.
+- On app exit the wrapper drops its hold and runs the idle window
+  (`IDLE_SHUTDOWN_SECS`, low-mem early end): a relaunch adopting during
+  the window cancels teardown. The **last lock holder** wins an
+  exclusive teardown claim and runs destroy + undefine + overlay unlink.
+- Locks are fd-bound, so a crashed wrapper releases everything; a
+  leftover running/defined domain is adopted or reaped by the next
+  spawn. `TIER5_KEEP_DOMAIN=1` still leaves the domain untouched for
+  debugging — the next launch then adopts it.
+
+Deliberately out of scope: cross-APP pooling (a shared guest for
+different appIds would break the appId==silo identity) and longest-idle
+eviction across different VMs. What exists is per-app relaunch reuse
+with per-app policy sections (`[app:tier5/<appId>]`), which keeps the
+isolation and lifecycle contracts identical to one-VM-per-launch.
+
 ## Cold-boot budget and diagnostics
 
 `--vm` waits up to 180 seconds for `qemu-guest-agent` by default. Nested guests

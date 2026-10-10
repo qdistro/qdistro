@@ -275,7 +275,7 @@ if [ "$MODE" = "loopback" ]; then
     PORT="${EXPLICIT_PORT:-${TIER5_PORT:-7777}}"
 else
     # --vm mode: prereqs.
-    for tool in virsh qemu-img; do
+    for tool in virsh qemu-img flock; do
         command -v "$tool" >/dev/null || {
             echo "[tier5] FAIL: --vm needs $tool installed" >&2
             exit 2
@@ -354,6 +354,35 @@ else
     fi
     SILO_TAG="$VM_NAME"
 
+    # --- per-VM ownership hold (relaunch reuse) ------------------------
+    # flock(2) protocol on $HOLD_FILE, used by every wrapper invocation
+    # that touches this domain:
+    #   fd9  — session hold: SHARED for the wrapper's whole lifetime, so
+    #          concurrent launches of the same app coexist on one guest.
+    #          The create decision RELEASES then retakes it EXCLUSIVELY
+    #          (an upgrade would deadlock against a concurrent upgrader),
+    #          serializing against a teardown claim or a racing create —
+    #          but never against plain SH adopters.
+    #   fd10 — teardown claim: a nonblocking EX probe. If it fails, a
+    #          live session (or an in-flight decision) still owns the VM
+    #          and this wrapper must leave it alone; if it wins, we are
+    #          the last holder and own teardown.
+    # Locks are fd-bound, so a crashed wrapper (SIGKILL, OOM) releases
+    # everything automatically — a leftover running/defined domain is
+    # then adopted or reaped by the next spawn. The hold FILES are never
+    # unlinked while in use: unlink+recreate would split the flock
+    # namespace across two inodes and lose mutual exclusion.
+    HOLD_DIR="${TIER5_HOLD_DIR:-/run/qdistro-tier5}"
+    install -d -m 0700 "$HOLD_DIR"
+    HOLD_FILE="$HOLD_DIR/hold-$VM_NAME"
+    [ -f "$HOLD_FILE" ] || install -m 0600 /dev/null "$HOLD_FILE"
+    exec 9>>"$HOLD_FILE"
+    exec 10>>"$HOLD_FILE"
+    if ! flock -w 120 -s 9; then
+        echo "[tier5] FAIL: timed out waiting for the $VM_NAME session hold" >&2
+        exit 3
+    fi
+
     # Allocate CID: scan defined domains for taken CIDs, pick next free.
     if [ -n "${TIER5_CID:-}" ]; then
         CID="$TIER5_CID"
@@ -410,8 +439,11 @@ if [ "$USE_SECCTX" = "1" ] && ! command -v qdistro-secctx-exec >/dev/null 2>&1; 
     exit 3
 fi
 
-CLIENT_LOG="$ADMIN_RUNTIME/tier5-${SILO_TAG}-${APP_BASENAME}-client.log"
-SERVER_LOG="$ADMIN_RUNTIME/tier5-${SILO_TAG}-${APP_BASENAME}-server.log"
+# Log names carry the launch token's short prefix: concurrent sessions of
+# the SAME app share $SILO_TAG (the per-app domain), so silo+app alone no
+# longer disambiguates two live wrappers' logs.
+CLIENT_LOG="$ADMIN_RUNTIME/tier5-${SILO_TAG}-${APP_BASENAME}-${LAUNCH_TOKEN:0:8}-client.log"
+SERVER_LOG="$ADMIN_RUNTIME/tier5-${SILO_TAG}-${APP_BASENAME}-${LAUNCH_TOKEN:0:8}-server.log"
 mkdir -p "$ADMIN_RUNTIME"
 : >"$CLIENT_LOG" >"$SERVER_LOG"
 chown "$ADMIN_USER" "$CLIENT_LOG" "$SERVER_LOG" 2>/dev/null || true
@@ -620,40 +652,79 @@ reap_domain() {
     return 1
 }
 
-# idle_keep_warm — after the published app exits, optionally keep the (now idle)
-# VM up for IDLE_SHUTDOWN_SECS before teardown. This is a configurable shutdown
-# DELAY, not cross-spawn reuse (this wrapper owns one VM and tears it down on
-# exit; true relaunch-into-a-warm-VM needs a persistent pool manager — a
-# documented follow-up). Ends early under host memory pressure (LOWMEM_MB) or if
-# the guest stops on its own. A SIGTERM during the wait hits the force trap.
+# --- teardown ownership -------------------------------------------------
+# REAP is the teardown decision: unset = undecided, 1 = this wrapper is the
+# last lock holder and must destroy+undefine+unlink, 0 = a live session (or
+# an in-flight decision) still owns the VM — leave it alone.
+REAP=
+
+# release_hold — drop the fd9 session hold so a relaunch's adoption probe
+# (or a teardown claim) is no longer blocked by this exiting wrapper.
+release_hold() {
+    flock -u 9 2>/dev/null || true
+}
+
+# decide_teardown — claim or relinquish teardown ownership via a nonblocking
+# EX probe on fd10. Winning means NO wrapper holds the domain: every actor
+# either exited or is still waiting for the lock, so the winner sees the
+# final state of the world and may destroy it. Losing means someone adopted
+# (or is deciding) — leaving the VM is always safe then because that holder
+# runs this same decision at its own exit.
+decide_teardown() {
+    [ -n "$REAP" ] && return 0
+    release_hold
+    if flock -n -x 10 2>/dev/null; then
+        REAP=1
+    else
+        REAP=0
+    fi
+}
+
+# idle_keep_warm — after the published app exits, release the session hold
+# and wait up to IDLE_SHUTDOWN_SECS for a RELAUNCH to adopt the still-running
+# VM (the per-app guest: qdshell derives the domain name from the catalogue
+# appId, so a relaunch of the same app names the same domain and attaches
+# under its own session hold). Any lock contention during the window means
+# an adoption is under way — leave the VM to it. The window still ends
+# early on guest self-stop or host memory pressure; at the deadline the
+# last holder claims teardown exclusively. A SIGTERM during the wait hits
+# the force trap, whose cleanup runs decide_teardown on the same protocol.
 idle_keep_warm() {
-    [ "${TIER5_KEEP_DOMAIN:-0}" = "1" ] && return 0
+    [ "${TIER5_KEEP_DOMAIN:-0}" = "1" ] && { REAP=0; return 0; }
+    release_hold
     [ "$IDLE_SHUTDOWN_SECS" -gt 0 ] || return 0
-    echo "[tier5] app exited; holding idle $VM_NAME up to ${IDLE_SHUTDOWN_SECS}s before shutdown" >&2
+    echo "[tier5] app exited; holding idle $VM_NAME up to ${IDLE_SHUTDOWN_SECS}s for relaunch" >&2
     local waited=0 step avail st
     while [ "$waited" -lt "$IDLE_SHUTDOWN_SECS" ]; do
         st=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '[:space:]')
         case "$st" in shutoff|crashed|"")
-            echo "[tier5] guest stopped on its own during idle hold" >&2; return 0 ;;
+            echo "[tier5] guest stopped on its own during idle window" >&2; return 0 ;;
         esac
         if [ "$LOWMEM_MB" -gt 0 ]; then
             avail=$(host_mem_avail_mb)
             if [ -n "$avail" ] && [ "$avail" -lt "$LOWMEM_MB" ]; then
-                echo "[tier5] host low memory (${avail}MB < ${LOWMEM_MB}MB); ending idle hold for $VM_NAME" >&2
+                echo "[tier5] host low memory (${avail}MB < ${LOWMEM_MB}MB); ending idle window for $VM_NAME" >&2
                 return 0
             fi
         fi
+        # Adoption probe: an exclusive grab on fd10 can only succeed while
+        # NO session/decision lock exists. Take and drop it immediately so
+        # the adoption window stays open between polls.
+        if ! flock -n -x 10 2>/dev/null; then
+            echo "[tier5] $VM_NAME adopted by a relaunch; leaving it running" >&2
+            REAP=0
+            return 0
+        fi
+        flock -u 10
         step=5; [ $((IDLE_SHUTDOWN_SECS - waited)) -lt 5 ] && step=$((IDLE_SHUTDOWN_SECS - waited))
         sleep "$step"; waited=$((waited + step))
     done
-    echo "[tier5] idle timeout (${IDLE_SHUTDOWN_SECS}s) elapsed; shutting down $VM_NAME" >&2
+    echo "[tier5] idle window (${IDLE_SHUTDOWN_SECS}s) elapsed without relaunch" >&2
 }
 
 CLIENT_PID=
 SERVER_PID=
 LAUNCHREC_PATH=""
-DOMAIN_DEFINED=0
-DISK_CREATED=0
 CLEANUP_STARTED=0
 cleanup() {
     # force=1 (signal teardown) skips graceful and ALWAYS runs, even if a
@@ -682,13 +753,20 @@ cleanup() {
         fi
     fi
     local domain_reaped=1
-    if [ "$MODE" = "vm" ] && [ "$DOMAIN_DEFINED" = "1" ] && \
-       [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ]; then
-        reap_domain "$force" || domain_reaped=0
-    fi
-    if [ "$MODE" = "vm" ] && [ "$DISK_CREATED" = "1" ] && \
-       [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ] && [ "$domain_reaped" = "1" ]; then
-        rm -f "$DISK" 2>/dev/null || true
+    if [ "$MODE" = "vm" ] && [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ]; then
+        # Decide teardown ownership if idle_keep_warm didn't already: only
+        # the last lock holder may destroy the shared per-app domain — an
+        # earlier wrapper's exit must never reap a VM a relaunch adopted.
+        decide_teardown
+        if [ "$REAP" = "1" ]; then
+            # reap_domain is idempotent on absent/stopped domains, so it
+            # runs unconditionally under an exclusive claim: any defined
+            # leftover (a crashed predecessor) is ours to remove.
+            reap_domain "$force" || domain_reaped=0
+            if [ "$domain_reaped" = "1" ]; then
+                rm -f "$DISK" 2>/dev/null || true
+            fi
+        fi
     fi
     if [ "$domain_reaped" != "1" ]; then
         echo "[tier5] ERROR: retaining overlay $DISK because $VM_NAME is still defined" >&2
@@ -812,17 +890,38 @@ if [ "$MODE" = "loopback" ]; then
 fi
 
 # --- 2'. --vm mode --------------------------------------------------
-# Linked-clone disk per VM if missing.
-if [ ! -f "$DISK" ]; then
-    if ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$DISK" >/dev/null 2>&1; then
-        echo "[tier5] FAIL: qemu-img create -b $DISK_BASE failed at $DISK" >&2
-        exit 4
+# Adopt-or-create under the per-VM hold lock. We already carry the fd9
+# SHARED session hold, so once a running domain is observed it cannot be
+# torn out from under us — a teardown claim needs an exclusive lock that
+# every SH holder conflicts with. A running domain is adopted as-is (the
+# guest is per-APP: qdshell derives the name from the catalogue appId, so
+# a relaunch of the same app names the same domain); a missing or stopped
+# one is (re)created under a short EXCLUSIVE upgrade that serializes
+# against a racing creator or an exiting wrapper's teardown claim.
+create_domain() {
+    # Linked-clone disk per VM if missing.
+    if [ ! -f "$DISK" ]; then
+        if ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$DISK" >/dev/null 2>&1; then
+            echo "[tier5] FAIL: qemu-img create -b $DISK_BASE failed at $DISK" >&2
+            exit 4
+        fi
     fi
-    DISK_CREATED=1
-fi
 
-# Define domain if absent.
-if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+    # Define domain if absent.
+    if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+        _create_domain_define
+    fi
+
+    # Start if not running.
+    if ! run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
+        if ! run_as_admin virsh start "$VM_NAME" >/dev/null; then
+            echo "[tier5] FAIL: virsh start failed" >&2
+            exit 6
+        fi
+    fi
+}
+
+_create_domain_define() {
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     TMPL="${TIER5_DOMAIN_TEMPLATE:-}"
     if [ -z "$TMPL" ]; then
@@ -888,18 +987,39 @@ if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
         exit 5
     fi
     rm -f "$TMP_XML"
-    DOMAIN_DEFINED=1
-fi
+}
 
-# Start if not running.
-if ! run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
-    if ! run_as_admin virsh start "$VM_NAME" >/dev/null; then
-        echo "[tier5] FAIL: virsh start failed" >&2
-        exit 6
+# The decision: adopt a running domain under our shared session hold, or
+# take EXCLUSIVE for the create path. The session SH is RELEASED before
+# the exclusive grab — an SH->EX upgrade on one fd deadlocks against a
+# concurrent upgrader (each waits for the other's SH), and an EX on a
+# second fd would deadlock against our own SH. The release window is
+# safe: a teardown that claims the gap destroys a VM with no holders,
+# and a relaunch that adopts in the gap either sees the domain running
+# (keeps it, our EX then waits) or ends up at this same create decision
+# behind us. The re-check under exclusivity always sees a final state.
+ADOPTED=0
+if run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
+    ADOPTED=1
+else
+    flock -u 9 2>/dev/null || true
+    if ! flock -w 120 -x 9; then
+        echo "[tier5] FAIL: timed out waiting for the $VM_NAME decision hold" >&2
+        exit 3
     fi
+    if run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
+        # A racing creator finished while we waited for exclusivity.
+        ADOPTED=1
+    else
+        create_domain
+    fi
+    flock -s 9
 fi
-DOMAIN_DEFINED=1
-echo "[tier5] domain $VM_NAME running (cid=$CID)" >&2
+if [ "$ADOPTED" = "1" ]; then
+    echo "[tier5] adopted running domain $VM_NAME (per-app guest shared across relaunches)" >&2
+else
+    echo "[tier5] domain $VM_NAME running (cid=$CID)" >&2
+fi
 
 # Wait for qga. A deadline (rather than a fixed iteration count) keeps the
 # contract honest if individual virsh calls stall briefly under nested VM load.
@@ -970,18 +1090,21 @@ if [ "$MODE" = "vm" ]; then
             "") misses=$((misses + 1)); [ "$misses" -ge 5 ] && break ;;
             *) break ;;
         esac
-        # Teardown-on-done: a tier-5 VM hosts a SINGLE published app, so once that
-        # app exits (e.g. its last window was closed -> request_close -> the app
-        # quit) the VM has no further purpose. Watch the published process via the
-        # guest agent; an explicit "exited":true ends the wait. We then optionally
-        # hold the idle VM (idle_keep_warm — IDLE_SHUTDOWN_SECS/low-mem policy)
-        # and break, so the EXIT-trap cleanup() reaps it (graceful ACPI shutdown
-        # by default — see reap_domain/SHUTDOWN_METHOD — then undefine + overlay
-        # unlink). Before this, the loop ended ONLY on a guest self-poweroff, so
-        # closing the app window leaked the whole nested VM + overlay (perm-gui/21
-        # S3-S5). Keying on the APP process (GUEST_PID), not a single toplevel,
-        # is deliberate: a multi-window app is reaped when it FULLY exits, not on
-        # the first window close.
+        # Session-on-done: each session publishes ONE app; once that app exits
+        # (e.g. its last window was closed -> request_close -> the app quit)
+        # this wrapper's work is done. Watch the published process via the
+        # guest agent; an explicit "exited":true ends the wait. We then run
+        # idle_keep_warm — the relaunch window (IDLE_SHUTDOWN_SECS/low-mem
+        # policy plus last-holder teardown claim) — and break; the EXIT-trap
+        # cleanup() tears the domain down ONLY if no session adopted it in
+        # the meantime (graceful ACPI shutdown by default — see reap_domain/
+        # SHUTDOWN_METHOD — then undefine + overlay unlink). Before the
+        # app-process watch, the loop ended ONLY on a guest self-poweroff, so
+        # closing the app window leaked the whole nested VM + overlay
+        # (perm-gui/21 S3-S5). Keying on OUR app process (GUEST_PID), not a
+        # single toplevel or the whole guest, is deliberate: a multi-window
+        # app ends its session when it FULLY exits, and a guest may outlive
+        # us because a relaunched session of the same app adopted it.
         # --timeout is load-bearing: `qemu-agent-command` BLOCKS by default, so a
         # guest whose qga has gone unresponsive (a dying/OOMing guest is exactly
         # the case that matters) would hang this loop forever and the
@@ -990,7 +1113,7 @@ if [ "$MODE" = "vm" ]; then
         es=$(run_as_admin virsh qemu-agent-command --timeout 5 "$VM_NAME" \
              "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$GUEST_PID}}" 2>&1)
         if printf '%s' "$es" | grep -qE '"exited"[[:space:]]*:[[:space:]]*true'; then
-            echo "[tier5] published app (pid=$GUEST_PID) exited; reaping $VM_NAME" >&2
+            echo "[tier5] published app (pid=$GUEST_PID) exited; session done for $VM_NAME" >&2
             idle_keep_warm
             break
         elif printf '%s' "$es" | grep -qiE 'PID [0-9]+ does not exist|does not exist'; then
@@ -1004,7 +1127,7 @@ if [ "$MODE" = "vm" ]; then
             # and is left to the domstate path above (guest death) to handle.
             exec_gone=$((exec_gone + 1))
             if [ "$exec_gone" -ge 2 ]; then
-                echo "[tier5] published app (pid=$GUEST_PID) reaped by qga (no longer tracked); reaping $VM_NAME" >&2
+                echo "[tier5] published app (pid=$GUEST_PID) reaped by qga (no longer tracked); session done for $VM_NAME" >&2
                 idle_keep_warm
                 break
             fi
@@ -1013,7 +1136,7 @@ if [ "$MODE" = "vm" ]; then
         fi
         sleep 2
     done
-    echo "[tier5] $VM_NAME wait loop ended; cleanup will destroy+undefine+unlink" >&2
+    echo "[tier5] $VM_NAME wait loop ended; last-holder teardown claim decides teardown" >&2
     kill "$CLIENT_PID" 2>/dev/null; wait "$CLIENT_PID" 2>/dev/null
     exit 0
 else

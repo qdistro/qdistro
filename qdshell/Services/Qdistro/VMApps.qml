@@ -218,14 +218,20 @@ Singleton {
         return !!secctxAppId && secctxAppId.startsWith(root.tier5Prefix);
     }
 
-    // Generate a fresh VM name for a launch. spawn-tier5.sh validates
-    // [a-zA-Z0-9][a-zA-Z0-9_-]{0,62}, so use a short hex suffix.
-    function _generateVmName(appId) {
+    // Deterministic per-app VM name — the tier-5 guest is the SILO for
+    // the catalogue appId, so every launch of the same app names the same
+    // domain. spawn-tier5.sh's hold-lock protocol lets a relaunch adopt
+    // the still-running VM instead of paying a cold start, keeps
+    // concurrent same-app launches on one guest (same trust domain: the
+    // silo tag IS the VM name), and hands teardown to whichever session
+    // is last out of the idle window. The wrapper validates
+    // [a-zA-Z0-9][a-zA-Z0-9_-]{0,62}.
+    function _vmNameForApp(appId) {
         const stub = (appId || "vmapp").replace(/[^a-zA-Z0-9_-]/g, "-")
-                                       .slice(0, 24);
-        const suffix = Math.floor(Math.random() * 0xFFFFFF)
-                           .toString(16).padStart(6, "0");
-        return "t5-" + stub + "-" + suffix;
+                                       .replace(/-{2,}/g, "-")
+                                       .replace(/^-+|-+$/g, "")
+                                       .slice(0, 56);
+        return "t5-" + (stub || "vmapp");
     }
 
     function rebuild() {
@@ -273,11 +279,12 @@ Singleton {
 
     // ---- launch ----------------------------------------------------------
     // Called from Launcher / Taskbar click handlers. Forks
-    // spawn-tier5.sh --vm <auto-name> -- <argv...>; the helper emits
+    // spawn-tier5.sh --vm <per-app-name> -- <argv...>; the helper emits
     // LAUNCH_TOKEN=<hex> early on stdout. We register a placeholder
     // keyed on the token; it's resolved when the inner toplevel
     // arrives carrying instance_id == launchToken (set by spawn-
-    // tier5.sh's qdistro-secctx-exec wrap).
+    // tier5.sh's qdistro-secctx-exec wrap). The VM name is the appId's
+    // deterministic silo name — relaunches adopt the running guest.
     //
     // row shape: { appId, name, iconName, execArgv (string JSON-encoded
     // array of strings) }
@@ -292,7 +299,7 @@ Singleton {
             Logger.w("VMApps", "launch: empty execArgv for " + row.appId);
             return;
         }
-        const vmName = row.vmName || root._generateVmName(row.appId);
+        const vmName = row.vmName || root._vmNameForApp(row.appId);
         // Build: pkexec qdistro-tier5-spawn --vm <vmName> --policy-key <appId>
         //        -- <argv...>
         // --policy-key carries the STABLE catalogue appId so the wrapper can

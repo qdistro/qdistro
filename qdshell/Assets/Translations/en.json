@@ -2229,7 +2229,7 @@
       "grace-description": "How long to wait for a graceful shutdown to finish before forcing the VM off.",
       "section-idle": "Idle",
       "idle-label": "Shut down idle VM after",
-      "idle-description": "Keep a VM running this long after its app closes, then shut it down. 0 shuts it down immediately. (No relaunch reuse yet — this is a shutdown delay.)",
+      "idle-description": "Keep a VM running this long after its app closes, then shut it down. Relaunching the same app during the window reuses the running VM instead of cold-starting. 0 shuts the VM down as soon as the last session ends.",
       "section-memory": "Memory",
       "lowmem-label": "Shut down idle VMs under low memory",
       "lowmem-description": "When free system memory drops below this amount, shut idle VMs down right away instead of waiting for the idle timeout. 0 disables this.",
