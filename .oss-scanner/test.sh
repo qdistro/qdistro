@@ -31,7 +31,9 @@ if [ "$group" = smoke ]; then
     pytest_group . -q tests/unit/test_broker_upload_lineage.py tests/unit/test_broker_subscriber_restart.py tests/unit/test_admin_widgets_logic.py
 fi
 if [[ "$group" = all || "$group" = root ]]; then
-    run bash -c "$(host_pytest_cmd 'find:tests/unit -name "test_*.py"' 30 '' '-q')"
+    # qci gives the much larger root suite its own 1800-second budget.
+    step_timeout=${OSS_SCANNER_ROOT_TEST_TIMEOUT:-1800} \
+        run bash -c "$(host_pytest_cmd 'find:tests/unit -name "test_*.py"' 30 '' '-q')"
     pytest_group . -q tests/unit/test_admin_widgets_logic.py tests/unit/test_broker_subscriber_restart.py tests/unit/test_broker_upload_lineage.py
 fi
 if [[ "$group" = all || "$group" = native || "$group" = smoke ]]; then

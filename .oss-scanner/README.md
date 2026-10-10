@@ -42,7 +42,8 @@ guest disk or host libvirt socket is provided.
 headless audit lane, not the VM/GUI/release gate. See `threat_model.md` for
 component priorities, severity guidance and runtime limitations.
 Independent steps have qci's 600-second timeout, configurable through
-`OSS_SCANNER_TEST_TIMEOUT`. A timeout or crash fails the check; remaining
+`OSS_SCANNER_TEST_TIMEOUT`; the large root suite has qci's separate
+1800-second budget (`OSS_SCANNER_ROOT_TEST_TIMEOUT`). A timeout or crash fails the check; remaining
 groups and sanitizer tests still run so their results can be inspected.
 
 The 2026-10-10 local baseline reproduced a native qnotebook crash in
