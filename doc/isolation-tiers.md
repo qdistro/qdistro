@@ -299,7 +299,8 @@ gVisor blocks `SCM_RIGHTS` to host sockets and direct Wayland fd passing is
 impossible; Phase C put the launches under an owning cgroup scope and Phase
 C2 moved every podman/runsc call to the silo account (admin keeps only the
 host-side bridge client and the broker/resolver calls; root supervises,
-creates the scope and tears down — nothing runs podman or runsc as root).
+creates the scope and tears down — nothing runs podman or runsc as root
+except the probe's hash-verified `runsc --version`).
 
 - **Identity.** `qt3s-<silo>` is a real host account in the
   `qdistro-tier3s` group with an automatic `/etc/subuid` + `/etc/subgid`

@@ -32,8 +32,8 @@
 # files (each hard-capped at OUT_MAX bytes; at the cap the call is a failed
 # query), never to a pipe a leftover process could hold open; it runs in its
 # own process group (timeout(1)'s), which is SIGKILLed as soon as the call
-# returns or its bound passes, whether or not the call itself exited; admin
-# (podman) calls also run in their own root-created transient scope, whose
+# returns or its bound passes, whether or not the call itself exited; the
+# dropped-uid (podman) calls also run in their own root-created transient scope, whose
 # cgroup is SIGKILLed (cgroup.kill) the same way and which systemd stops by
 # itself at RuntimeMaxSec should this script die first. A TERM/INT/HUP kills
 # the call in flight. A timeout is a failed query, never "absent". The
@@ -124,7 +124,7 @@ past_deadline() { [ -n "$END_US" ] && { now_us; [ "$NOW_US" -ge "$END_US" ]; }; 
 # afterwards; stdin is $CALL_IN (default /dev/null). It runs in timeout(1)'s
 # own process group; when timeout returns (the call ended, or its bound passed
 # and timeout signalled it) the whole group is SIGKILLed, so a descendant that
-# ignores SIGTERM or outlives its parent does not survive it. --scope (admin
+# ignores SIGTERM or outlives its parent does not survive it. --scope (non-root
 # calls) also puts it in a fresh root-created transient scope: rootless podman
 # and runuser start helpers in new sessions, which a process-group kill misses
 # but the scope's cgroup does not. That cgroup is SIGKILLed (cgroup.kill) the
@@ -419,7 +419,7 @@ vanished() {   # vanished <silo uid> <container>: podman definitively says it is
 
 # labelled [token]: tier3s-labelled containers across every silo's podman
 # store (one token's with an argument), from `podman ps --format json`,
-# decoded and validated in python3: admin-chosen label bytes are never split
+# decoded and validated in python3: attacker-influenced label bytes are never split
 # by a separator (fable A r1 P2-2). Sets L to records of 6 fields
 # "<verdict> <token> <unit> <id> <name> <silo uid>", verdict
 # ok|badtoken|badunit|badid (an invalid field is "-"; the name is

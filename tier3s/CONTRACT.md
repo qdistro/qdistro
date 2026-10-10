@@ -84,8 +84,9 @@ tries to send with its parent's PID, which takes privilege, so the message is
 attributed to the spawn itself. Every other process in the launch unit's
 cgroup is refused by systemd however it learns the socket path (the path is
 not a secret): the dropped-privilege processes the spawn runs there (the
-probe's podman as the silo account, `podman image exists`, the start poll's
-inspect, `dbus-send` and the resolver as admin) and the silo podman calls of
+probe's podman, `podman image exists` and the start poll's inspect as the
+silo account; the resolver as admin; the `dbus-send` `RegisterLaunch` as
+root) and the silo podman calls of
 the pre-launch reaper (which run in their own call scopes, §4), with anything
 they start, such as a container's OCI runtime helper during a `podman rm` of
 a stale labelled container. A forged
@@ -169,7 +170,8 @@ stays silo-owned inside. The account is provisioned lazily at first launch
 (§5 step 3b) and validated on every launch; the host bridge client and the
 broker/resolver calls still run as admin. Root does three things only:
 supervise, create the scope, and tear down through the recorded scope.
-Nothing runs podman or runsc as root.
+Nothing runs podman or runsc as root except the probe's hash-verified
+`runsc --version`.
 
 ### Installed paths (root-owned; only with `QDISTRO_TIER3S=1`)
 
@@ -354,8 +356,8 @@ No runsc-bundle process was outside the scope, and admin could not raise
   could leave behind when the spawn died between `mkdir` and its first write)
   has no unit. The cleanup removes it only on positive evidence that nothing
   ran under it: `qdistro-tier3s-<token>.scope` positively dead, its cgroup
-  absent or empty, and admin's podman listing (which must succeed) shows no
-  container with that token label. Otherwise it is preserved and the cleanup
+  absent or empty, and the silo accounts' podman listings (which must
+  succeed) show no container with that token label. Otherwise it is preserved and the cleanup
   exits non-zero. `--unit <any unit>`, `--reap-stale` and `<token>` all
   apply this, and the manager's stop verification keeps counting it for every
   unit until it is gone. The cost of never ignoring it (fable A r2 P3-4):

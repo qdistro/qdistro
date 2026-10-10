@@ -169,9 +169,10 @@ layer on top of these. `spin-test-vm.sh` chains the pipeline.
 
 Native (C/meson) builds for the test VMs come from the rootless Podman
 builder (`scripts/vm/build-native-podman.sh` / `Containerfile.native-builder`),
-not from compilers inside the guest — `QDISTRO_VM_BASE=kiwi` is the
-exception: its bases are prebuilt images, so their guest installs compile
-in-VM.
+not from compilers inside the guest — with a non-baked base such as
+`QDISTRO_VM_BASE=kiwi` the build defaults to `NATIVE_MODE=guest` and
+compiles in-VM instead (`QCI_NATIVE_BUILDER=podman` overrides back to the
+Podman builder; the baked base requires it).
 
 Driver tools live in `scripts/vm/`:
 

@@ -97,8 +97,8 @@ How the container behaves (see `ci/containers/` and
   `scripts/vm/build-native-podman.sh` keys its archive on a tar of
   `qdwin/`, `qdshell/`, `daemons/`, `qsu/` and `selinux/` (plus the
   vendored-libweston and container build scripts), so a change there
-  rebuilds the native stage — and its fresh quickshell bytes re-key the
-  host image too.
+  rebuilds the native stage; the host image re-keys when the rebuilt
+  quickshell bytes differ (a qdwin-only change usually reuses it).
 - `QCI_OFFLINE=1` refuses to pull anything: it needs the image and the
   npm/dependency caches already warm.
 
@@ -425,7 +425,7 @@ VM.
 - `qtbot.waitSignal(signal, timeout=...)` for signal-driven assertions.
 - `qtbot.addWidget(w)` so qtbot cleans up the widget automatically.
 
-Example (after qdterm's `tests/test_window.py`):
+Example (modeled on qdterm's `tests/test_window.py`):
 
 ```python
 def test_new_tab_shortcut(qtbot):
@@ -487,16 +487,16 @@ Without it, tests exhaust the system fd limit mid-suite.
 | GUI unit | `test_window.py`, `test_terminal.py`, `test_titlebar.py` | qtbot + offscreen. |
 | Visual snapshot | `test_gui_visual.py` | Offscreen render compared to reference image. |
 | Shortcut coverage | `test_shortcut_coverage.py` | Every shortcut in the keymap has a test. |
-| Accessibility coverage | `test_accessibility.py` | Every dialog is machine-readable. |
+| Accessibility coverage | (see [ui](ui.md)) | No per-app `test_accessibility.py` exists yet; the dialog/tooling conventions are mandatory design rules, not yet a uniform test suite. |
 | Integration | `test_integration_*.py` | Multi-window, mocked peripherals. |
 
 **Shortcut-coverage tests are mandatory.** Every app maintains one that
 enumerates declared shortcuts and asserts each has a corresponding action
-wired up.
+wired up (e.g. qdterm's `tests/test_shortcut_coverage.py`).
 
-**Accessibility-coverage tests are mandatory** (see [ui](ui.md)). Every
-app launches offscreen, opens each registered dialog, and asserts AT-SPI
-+ qdistro UIModel tree is introspectable.
+**Accessibility conventions are mandatory** (see [ui](ui.md)) — every
+action needs a shortcut, dialogs expose AT-SPI-readable metadata — but
+there is no uniform per-app accessibility test suite yet.
 
 ## Code conventions
 
@@ -586,8 +586,8 @@ container command (`qci-host-run` does not forward the host's):
 ```sh
 # One container run for all of it: qdwin needs the VENDORED libweston .pc
 # (the pinned major is newer than the distro devel package), and the
-# vendored prefix lives on the container's tmpfs — it does not survive
-# between separate qci-host-run invocations.
+# vendored prefix lives on the container's ephemeral layer — it does not
+# survive between separate qci-host-run invocations.
 ci/bin/qci-host-run bash -c '
   set -e
   cd qdwin
@@ -603,7 +603,14 @@ ln -sf build-lsp/compile_commands.json daemons/compile_commands.json
 
 Use a separate build dir name (e.g. `build-lsp`), not `build-qci`: the
 host gate's own meson output lives in `build-qci` and other doc sections
-reuse it — do not delete or overwrite it.
+reuse it — do not delete or overwrite it. Three caveats: the vendored
+libweston build takes a few minutes (if a host gate has already run you
+can skip straight to the daemons `meson setup` with the
+`build-qci/meson-uninstalled` route below); the recipe's qdwin compile DB
+points at the container-local `/tmp` prefix, so it is only useful inside
+the container — only the daemons DB is linked out; and
+`daemons/compile_commands.json` is a plain untracked file — expect it in
+`git status`.
 
 Claude Code does **not** auto-detect language servers — register them in
 a local plugin at `~/.claude/skills/local-lsp/.claude-plugin/plugin.json`:

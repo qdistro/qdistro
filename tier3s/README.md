@@ -10,9 +10,11 @@ Status: **Phase 0** (provision + prerequisite screen) and **Phase S**
 (feasibility spike, `spike/README.md`): GO, with three conditions: a runsc
 state root, an owning scope delegated to the calling account, a
 secctx-wrapped bridge client. **Phase C** shipped the owning cgroup scope;
-**Phase C2** moved every podman/runsc call to a dedicated per-silo account
-`qt3s-<silo>` (provisioned lazily at first launch) — admin keeps only the
-host-side bridge client and the broker/resolver calls. runsc is not in the
+**Phase C2** moved every podman call and the workload's `runsc` to a
+dedicated per-silo account `qt3s-<silo>` (provisioned lazily at first
+launch) — admin keeps only the host-side bridge client and the
+broker/resolver calls, and the only `runsc` root itself runs is the
+probe's hash-verified `--version` check. runsc is not in the
 image, kiwi config or any installer (provisioned on
 demand, D1), and nothing in qdistro selects this tier automatically (O6:
 explicit launch, no fallback). Dev profile only
@@ -110,8 +112,7 @@ config or installer; `QDISTRO_TIER3S=1` gates only `install-session-manager.sh`
 A tier-3s silo runs one headless workload under gVisor (`runsc`, platform
 systrap) in rootless podman as the dedicated per-silo account
 `qt3s-<silo>` (provisioned lazily at first launch, `--userns=keep-id`),
-with no
-network (podman `--network=none` and runsc `network=none`), a read-only root,
+with no network (podman `--network=none` and runsc `network=none`), a read-only root,
 no capabilities, no-new-privileges, `label=disable` and a per-workload seccomp
 file. A root supervisor (`spawn-tier3s.sh`, run by
 `qdistro-tier3s-silo@<name>.service`) gates the launch through the broker,
@@ -128,12 +129,12 @@ refused launch never falls back to tier 2 or 3.
 
 Every command below runs **as root** in the guest; the steps that must run
 as another account say so with `runuser -u <account> --`. The checkout is
-staged root-owned
-and world-readable at `/var/tmp/qdistro-src` (`chown -R root:root`,
-`chmod 0755` on the top), so root, admin and the silo accounts can read it
-and the
-provisioner accepts it; a checkout under `/root` would be unreadable to
-them.
+staged root-owned and world-readable at `/var/tmp/qdistro-src`
+(`chown -R root:root`, `chmod 0755` on the top), so root, admin and the
+silo accounts can read it and the provisioner accepts it; a checkout
+under `/root` would be unreadable to them. Admin's rootless podman needs
+`/run/user/1000` — `loginctl enable-linger admin` provides it without a
+graphical session.
 
 ```sh
 cd /var/tmp/qdistro-src
@@ -162,8 +163,15 @@ runuser -u admin -- busctl --system --timeout=300 call org.qdistro.SessionManage
     /org/qdistro/SessionManager1 org.qdistro.SessionManager1 CreateTier3sSilo ssss smoke headless-smoke smoke none
 runuser -u admin -- busctl --system --timeout=300 call org.qdistro.SessionManager1 \
     /org/qdistro/SessionManager1 org.qdistro.SessionManager1 StartSilo s smoke   # provisions qt3s-smoke, then refuses (no image)
+# podman-as-silo needs the scrubbed environment the launch itself uses —
+# a silo account has no /run/user/<uid> and no logind session:
 runuser -u admin -- podman save localhost/qdistro/tier3s-headless-smoke:latest \
-    | runuser -u qt3s-smoke -- podman load
+    | runuser -u qt3s-smoke -- env -i PATH=/usr/bin:/bin \
+        HOME="$(getent passwd qt3s-smoke | cut -d: -f6)" \
+        USER=qt3s-smoke LOGNAME=qt3s-smoke \
+        XDG_RUNTIME_DIR="/run/qdistro-tier3s-rt/$(id -u qt3s-smoke)" \
+        CONTAINERS_CONF=/usr/lib/qdistro/tier3s/containers.conf \
+        podman load
 runuser -u admin -- busctl --system --timeout=300 call org.qdistro.SessionManager1 \
     /org/qdistro/SessionManager1 org.qdistro.SessionManager1 StartSilo s smoke
 ```
@@ -177,9 +185,9 @@ A GUI launch additionally needs the admin qdwin session running (the bridge
 client connects to `/run/user/1000/wayland-1` — `loginctl enable-linger
 admin; systemctl --user --machine=admin@.host start qdwin-session.target`)
 and the workload's image in the silo account's own store
-(`make-tier3s-image.sh weston-terminal` / `foot` builds it as admin, or the
-cached
-`tier3s-<workload>.oci.tar`; copy it into the silo's store as in step 5).
+(`make-tier3s-image.sh weston-terminal` / `foot` builds it as admin, or
+the cached `tier3s-<workload>.oci.tar`; copy it into the silo's store as
+in step 5).
 The broker rule key names the app, e.g.
 `qdistro.tier3s.spawn:weston-terminal/weston-terminal`. The window appears
 on the admin desktop tagged `[3s:<silo>] `; qdshell logs

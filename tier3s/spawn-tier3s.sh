@@ -397,7 +397,7 @@ PODMAN_ARGV=(
     --runtime-flag=network=none          # runsc's own network stack off, not just podman's
     "${DEBUG_FLAGS[@]}"
     "${GUI_RTFLAG[@]}"
-    --cgroup-manager=cgroupfs            # with the admin-delegated scope this keeps every process in it (D-A3b)
+    --cgroup-manager=cgroupfs            # with the silo-delegated scope this keeps every process in it (D-A3b)
     run --rm --name "$CONTAINER"
     --label "qdistro_tier3s_token=$TOKEN" --label "qdistro_tier3s_unit=$UNIT"
     --security-opt label=disable         # runsc rejects a non-empty SELinux process label
@@ -596,10 +596,10 @@ exec 9>&-
 # The unit has NotifyAccess=main (astra A r2 #4): systemd takes READY=1 only
 # from this process, the unit's main PID (ExecStart's helper execs into it).
 # Run as root and directly from this shell, systemd-notify sends with this
-# shell's PID (it first tries its parent's PID, which needs privilege). An
-# admin process in the unit's cgroup (the probe's, image or inspect podman,
-# dbus-send, the resolver, or anything they run) cannot claim this PID, so
-# it cannot complete the start even knowing the socket path.
+# shell's PID (it first tries its parent's PID, which needs privilege). A
+# non-root process in the unit's cgroup (the silo-account podman calls, the
+# admin-side bridge client and resolver, or anything they run) cannot claim
+# this PID, so it cannot complete the start even knowing the socket path.
 notify_ready() {
     [ -n "$NOTIFY_SOCK" ] || return 0
     NOTIFY_SOCKET="$NOTIFY_SOCK" systemd-notify --ready --status="tier3s launch $TOKEN running"
