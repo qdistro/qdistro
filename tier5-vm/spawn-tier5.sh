@@ -255,25 +255,52 @@ run_as_admin() {
 }
 
 # qemu_pids_for_domain [name] — print the pid(s) of the qemu process(es)
-# backing a domain (default $VM_NAME), or nothing. This is the ONLY
-# reliable liveness oracle here: on a nested-virt host libvirt's
-# domstate lies (reports "shut off" while qemu is still ALIVE — the
-# failure mode commit 8ac0a39 was written for). libvirt launches the
-# qemu:///session qemu with `-name guest=<domain>,debug-threads=on`, so
-# we match on `guest=<name>,`. pgrep runs through run_as_admin so it can
-# see the admin-owned session qemu. Candidates are narrowed to REAL
-# qemu processes by /proc/<pid>/comm (truncated to 15 chars, e.g.
-# "qemu-system-x86"); this also discards the run_as_admin wrapper chain
-# (runuser/env/pgrep) that carries the same pattern in its own argv and
-# would otherwise self-match. Defined early: the orphan-overlay reaper
-# in --vm bring-up consults it for domains other than $VM_NAME.
+# backing a domain (default $VM_NAME). This is the ONLY reliable liveness
+# oracle here: on a nested-virt host libvirt's domstate lies (reports
+# "shut off" while qemu is still ALIVE — the failure mode commit 8ac0a39
+# was written for). RETURN CODES are the contract (sol r6):
+#   0 — pids printed: a backing qemu EXISTS
+#   1 — clean empty scan: confirmed NO backing qemu
+#   2 — scan unreliable: runuser/pgrep/proc lookup failed. NOT "dead" —
+#       callers must fail closed, never treat it as proof of absence.
+# libvirt launches the session qemu with `-name guest=<domain>,…`, so the
+# pattern requires the discrete `-name guest=` token — no false match on
+# another qemu carrying the string in an unrelated argument. pgrep runs
+# through run_as_admin to see admin-owned session processes; candidates
+# are narrowed to REAL qemu by /proc/<pid>/comm (truncated to 15 chars,
+# e.g. "qemu-system-x86"), which also discards the run_as_admin wrapper
+# chain (runuser/env/pgrep) carrying the pattern in its own argv. A
+# vanished candidate between pgrep and /proc read is retried as a normal
+# miss — it simply isn't counted, not a scan failure.
 qemu_pids_for_domain() {
-    local name="${1:-$VM_NAME}" p c out=""
-    for p in $(run_as_admin pgrep -f "guest=$name," 2>/dev/null); do
+    local name="${1:-$VM_NAME}" p c out="" raw
+    # The scan's own plumbing must work before "empty" can mean "dead":
+    # runuser auth/exec failure (rc 1/126/127) is otherwise
+    # indistinguishable from pgrep's no-match rc 1.
+    run_as_admin true >/dev/null 2>&1 || return 2
+    raw=$(run_as_admin pgrep -f -- "-name guest=$name," 2>/dev/null)
+    case $? in 0) ;; 1) return 1 ;; *) return 2 ;; esac
+    for p in $raw; do
         c=$(cat "/proc/$p/comm" 2>/dev/null) || continue
         case "$c" in qemu-system-*|qemu-kvm) out="$out $p" ;; esac
     done
+    [ -n "$out" ] || return 1
     printf '%s' "$out"
+}
+
+# domain_is_live [name] — is the guest ACTUALLY alive? rc: 0 live,
+# 1 confirmed dead, 2 cannot determine. domstate is only a hint —
+# nested-virt libvirt reports "shut off" for a LIVE qemu — so EITHER
+# "running" OR a backing qemu pid means live, and "dead" requires a
+# clean qemu-pid scan.
+domain_is_live() {
+    local name="${1:-$VM_NAME}"
+    if run_as_admin virsh domstate "$name" 2>/dev/null | grep -qw running; then
+        return 0
+    fi
+    qemu_pids_for_domain "$name" >/dev/null
+    case $? in 0) return 0 ;; 2) return 2 ;; esac
+    return 1
 }
 
 # domain_xml_tmpfile is provided by lib/spawn-common.sh (sourced below); it
@@ -341,34 +368,39 @@ else
             base=$(basename "$overlay" .qcow2)
             # Don't touch our own per-spawn name even before it's created.
             [ "$base" = "$VM_NAME" ] && continue
-            # Confirm the overlay is one of ours (backed by DISK_BASE).
-            if ! run_as_admin qemu-img info "$overlay" 2>/dev/null \
-                    | grep -qF "backing file: $DISK_BASE"; then
-                continue
-            fi
+            # Confirm the overlay is one of ours — EXACT backing-file
+            # match from the JSON output, not a substring grep (sol r6).
+            _backing=$(run_as_admin qemu-img info --output=json "$overlay" \
+                2>/dev/null \
+                | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
+            [ "$_backing" = "$DISK_BASE" ] || continue
             # Live wrapper holding it? Skip.
             if pgrep -af "spawn-tier5\.sh.*--vm[[:space:]]+$base([[:space:]]|$)" \
                     >/dev/null 2>&1; then
                 continue
             fi
-            # Domain still alive? domstate is a DIAGNOSTIC, not an
-            # oracle — nested-virt libvirt reports "shut off" for a live
-            # qemu (see qemu_pids_for_domain). Skip on EITHER signal so
-            # a false reading can't cost a live guest its disk (sol r5).
-            if run_as_admin virsh domstate "$base" 2>/dev/null \
-                    | grep -qw running \
-                || [ -n "$(qemu_pids_for_domain "$base")" ]; then
-                continue
-            fi
-            # Orphan: undefine any stopped domain + unlink overlay — but
-            # re-verify liveness after undefine: an out-of-band `virsh
-            # start` in the probe→undefine gap makes the domain
-            # transient-running; its overlay must survive our rm.
+            # Domain still alive? Only a CONFIRMED-dead oracle verdict
+            # permits reaping — live OR unverifiable skips, so a false
+            # "shut off" can't cost a live guest its disk (sol r6).
+            domain_is_live "$base"; _lv=$?
+            [ "$_lv" -eq 1 ] || continue
+            # Orphan: undefine the stopped domain. If it remains defined,
+            # a later start could open the overlay — leave it for the
+            # next spawn's pass rather than unlink under it.
             run_as_admin virsh undefine "$base" >/dev/null 2>&1 || true
-            if [ -n "$(qemu_pids_for_domain "$base")" ]; then
-                echo "[tier5] orphan $base came alive during reap — keeping overlay" >&2
+            if run_as_admin virsh dominfo "$base" >/dev/null 2>&1; then
                 continue
             fi
+            # Settle + re-verify: a `virsh start` issued just before our
+            # undefine can still be exec'ing its qemu. Once the domain
+            # is undefined no NEW start is possible, so a clean scan
+            # after a short settle is the last proof we can get (sol r6).
+            sleep 0.3
+            domain_is_live "$base"; _lv=$?
+            if [ "$_lv" -eq 0 ]; then
+                echo "[tier5] orphan $base came alive during reap — keeping overlay" >&2
+            fi
+            [ "$_lv" -eq 1 ] || continue
             rm -f "$overlay" 2>/dev/null || true
             echo "[tier5] reaped orphan overlay $overlay" >&2
         done
@@ -704,12 +736,17 @@ idle_keep_warm() {
     release_hold
     [ "$IDLE_SHUTDOWN_SECS" -gt 0 ] || return 0
     echo "[tier5] app exited; holding idle $VM_NAME up to ${IDLE_SHUTDOWN_SECS}s for relaunch" >&2
-    local waited=0 step avail st
+    local waited=0 step avail
     while [ "$waited" -lt "$IDLE_SHUTDOWN_SECS" ]; do
-        st=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '[:space:]')
-        case "$st" in shutoff|crashed|"")
-            echo "[tier5] guest stopped on its own during idle window" >&2; return 0 ;;
-        esac
+        # End the window early only on a CONFIRMED-dead guest — a false
+        # "shut off" domstate must not cut the adoption window short and
+        # hand a live guest to the teardown claim (sol r6). Live or
+        # unverifiable keep watching (adoption probe + low-mem below);
+        # the deadline bounds the wait.
+        domain_is_live; _lv=$?
+        [ "$_lv" -eq 1 ] && {
+            echo "[tier5] guest stopped on its own during idle window" >&2; return 0
+        }
         if [ "$LOWMEM_MB" -gt 0 ]; then
             avail=$(host_mem_avail_mb)
             if [ -n "$avail" ] && [ "$avail" -lt "$LOWMEM_MB" ]; then
@@ -922,8 +959,11 @@ create_domain() {
         _create_domain_define
     fi
 
-    # Start if not running.
-    if ! run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
+    # Start if not live. The qemu oracle decides — a false "shut off"
+    # domstate must not push `virsh start` at an already-live domain
+    # (sol r6); on an unverifiable scan we still try: virsh start fails
+    # on a running domain, which fails closed anyway.
+    if ! domain_is_live; then
         if ! run_as_admin virsh start "$VM_NAME" >/dev/null; then
             echo "[tier5] FAIL: virsh start failed" >&2
             exit 6
@@ -1009,12 +1049,15 @@ _create_domain_define() {
 # and a relaunch that adopts in the gap either sees the domain running
 # (keeps it, our EX then waits) or ends up at this same create decision
 # behind us. The re-check under exclusivity always sees a final state.
-# Early FOREIGN check, BEFORE we join the lock session: a running domain
+# Early FOREIGN check, BEFORE we join the lock session: a LIVE domain
 # bound to a different appId means we refuse here — a mismatched spawn
 # that never takes fd9 can never starve the true owner's teardown claim
-# (sol r4). The unlocked read can race, so the locked checks in the
-# decision below remain authoritative.
-if run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
+# (sol r4). Liveness uses the qemu oracle, not domstate alone — a false
+# "shut off" must not slip a live foreign guest past this check either
+# (sol r6). An unverifiable scan falls through to the authoritative
+# locked checks below, which re-verify under the holds.
+domain_is_live; _early_lv=$?
+if [ "$_early_lv" -eq 0 ]; then
     _early_bound=$(domain_appid)
     if [ "$_early_bound" != "$POLICY_KEY" ]; then
         echo "[tier5] FAIL: domain $VM_NAME is bound to app" >&2
@@ -1063,7 +1106,8 @@ fi
 # pin REAP=0: a wrapper that never established ownership must never
 # tear down someone else's guest.
 ADOPTED=0
-if run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
+domain_is_live; _lv=$?
+if [ "$_lv" -eq 0 ]; then
     _bound=$(domain_appid)
     if [ "$_bound" != "$POLICY_KEY" ]; then
         echo "[tier5] FAIL: domain $VM_NAME is bound to app '${_bound:-<unbound>}'," >&2
@@ -1071,13 +1115,19 @@ if run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
         REAP=0; exit 3
     fi
     ADOPTED=1
+elif [ "$_lv" -eq 2 ]; then
+    # Cannot prove the domain is dead OR alive — never guess on an
+    # isolation boundary; leaving is always safe (sol r6).
+    echo "[tier5] FAIL: cannot determine liveness of $VM_NAME — refusing" >&2
+    REAP=0; exit 3
 else
     flock -u 9 2>/dev/null || true
     if ! flock -w 120 -x 9; then
         echo "[tier5] FAIL: timed out waiting for the $VM_NAME decision hold" >&2
         exit 3
     fi
-    if run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
+    domain_is_live; _lv=$?
+    if [ "$_lv" -eq 0 ]; then
         # A racing creator finished while we waited for exclusivity.
         _bound=$(domain_appid)
         if [ "$_bound" != "$POLICY_KEY" ]; then
@@ -1086,21 +1136,16 @@ else
             REAP=0; exit 3
         fi
         ADOPTED=1
+    elif [ "$_lv" -eq 2 ]; then
+        echo "[tier5] FAIL: cannot determine liveness of $VM_NAME — refusing" >&2
+        REAP=0; exit 3
     else
         if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 \
                 && [ "$(domain_appid)" != "$POLICY_KEY" ]; then
-            # Domain bound to another (or no) app squatting our name.
-            # Liveness is decided by the backing qemu process, NEVER by
-            # domstate — nested-virt libvirt reports "shut off" for a
-            # LIVE qemu (qemu_pids_for_domain/8ac0a39, sol r5). Require
-            # BOTH no qemu pids AND a terminal domstate; anything else
-            # fails closed. No virsh destroy: a dead-qemu domain
-            # undefines directly.
-            if [ -n "$(qemu_pids_for_domain)" ]; then
-                echo "[tier5] FAIL: foreign domain $VM_NAME has a live" >&2
-                echo "        qemu (domstate unreliable) — refusing to reclaim" >&2
-                REAP=0; exit 3
-            fi
+            # Domain bound to another (or no) app squatting our name,
+            # and confirmed DEAD by the qemu oracle above. domstate
+            # stays on as a belt: it must also read terminal. No virsh
+            # destroy ever runs against a foreign guest (sol r5/r6).
             _fst=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null \
                     | tr -d '[:space:]')
             case "$_fst" in
@@ -1114,12 +1159,15 @@ else
                 echo "[tier5] FAIL: cannot undefine foreign domain $VM_NAME" >&2
                 REAP=0; exit 5
             fi
-            # An out-of-band `virsh start` in the probe→undefine gap
-            # leaves the foreign guest transient-RUNNING; its overlay
-            # must survive our rm (sol r5).
-            if [ -n "$(qemu_pids_for_domain)" ]; then
-                echo "[tier5] FAIL: foreign domain $VM_NAME started during" >&2
-                echo "        reclaim — keeping its overlay" >&2
+            # Settle + re-verify: a `virsh start` issued just before our
+            # undefine can still be exec'ing its qemu; with the domain
+            # now undefined no NEW start is possible, so a clean scan
+            # here closes the probe→unlink window (sol r6).
+            sleep 0.3
+            domain_is_live; _lv=$?
+            if [ "$_lv" -ne 1 ]; then
+                echo "[tier5] FAIL: foreign domain $VM_NAME live or" >&2
+                echo "        unverifiable after undefine — keeping its overlay" >&2
                 REAP=0; exit 3
             fi
             rm -f "$DISK" 2>/dev/null || true
@@ -1201,7 +1249,19 @@ if [ "$MODE" = "vm" ]; then
         case "$d_state" in
             running|paused|idle|pmsuspended) misses=0 ;;
             "") misses=$((misses + 1)); [ "$misses" -ge 5 ] && break ;;
-            *) break ;;
+            *)  # Terminal-state CLAIM — VERIFY before ending the watch:
+                # nested-virt domstate can report "shut off" for a LIVE
+                # qemu, and a false terminal here would tear the app
+                # session down mid-flight (sol r6). Only a proven-dead
+                # verdict breaks now; a live verdict resets; an
+                # unverifiable scan rides a bounded miss budget so a
+                # persistently broken oracle can't hang the wrapper.
+                domain_is_live; _lv=$?
+                case "$_lv" in
+                    1) break ;;
+                    0) misses=0 ;;
+                    *) misses=$((misses + 1)); [ "$misses" -ge 10 ] && break ;;
+                esac ;;
         esac
         # Session-on-done: each session publishes ONE app; once that app exits
         # (e.g. its last window was closed -> request_close -> the app quit)

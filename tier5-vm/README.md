@@ -145,19 +145,22 @@ silently merge:
   derived names collide, and `launch()` has no manifest-supplied name
   path — the appId is the only identity.
 - The domain records its bound appId in `<metadata>` at define time.
-  Adoption verifies bound == `--policy-key`: a RUNNING domain bound to
+  Adoption verifies bound == `--policy-key`: a LIVE domain bound to
   another (or no) app is refused (the wrapper exits with REAP=0 — it
   never tears down a guest it does not own), and a foreign domain is
-  reclaimed under the exclusive hold only when its backing qemu is
-  proven dead — liveness comes from `qemu_pids_for_domain` (procfs
-  `guest=<name>` match, verified via `/proc/<pid>/comm`), never from
-  `domstate`, which nested-virt libvirt can report as "shut off" for a
-  live qemu; a terminal `domstate` stays on as a belt. The overlay is
-  unlinked only after a post-undefine liveness re-check, so an
-  out-of-band `virsh start` in the probe gap can't lose its disk. The
-  same oracle guards the startup orphan-overlay reaper. This covers
-  collisions ACROSS catalogue reloads, where the running guest outlives
-  the manifest that created it.
+  reclaimed under the exclusive hold only when `domain_is_live`
+  confirms it dead. "Live" is decided by `qemu_pids_for_domain` —
+  a pgrep on libvirt's `-name guest=<vm>` argv token narrowed to real
+  qemu via `/proc/<pid>/comm`, with a distinct cannot-determine rc —
+  never by `domstate` alone, which nested-virt libvirt can report as
+  "shut off" for a live qemu. A terminal `domstate` stays on as a belt,
+  and a settle + re-verify between `undefine` and the overlay unlink
+  closes the out-of-band-`virsh start` window. The same oracle guards
+  the startup orphan-overlay reaper, the adopt/create decision, the
+  idle-keep-warm window, the session wait loop, and the standalone
+  `qdistro-tier5-cleanup.sh` helper. This covers collisions ACROSS
+  catalogue reloads, where the running guest outlives the manifest
+  that created it.
 - `launch()` also requires the row's appId to be in the CURRENT
   catalogue, so a stale provider row cannot adopt a guest it no longer
   owns.

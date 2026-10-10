@@ -32,8 +32,39 @@ run_as_admin() {
         "$@"
 }
 
+# qemu_pids_for_domain — same contract as spawn-tier5.sh: 0 pids live,
+# 1 confirmed dead, 2 scan unreliable. domstate can report "shut off"
+# for a LIVE qemu under nested virt, so unlinking the overlay is gated
+# on a proven-dead scan, never on the destroy/undefine attempts above.
+qemu_pids_for_domain() {
+    local name="${1:-$VM_NAME}" p c out="" raw
+    run_as_admin true >/dev/null 2>&1 || return 2
+    raw=$(run_as_admin pgrep -f -- "-name guest=$name," 2>/dev/null)
+    case $? in 0) ;; 1) return 1 ;; *) return 2 ;; esac
+    for p in $raw; do
+        c=$(cat "/proc/$p/comm" 2>/dev/null) || continue
+        case "$c" in qemu-system-*|qemu-kvm) out="$out $p" ;; esac
+    done
+    [ -n "$out" ] || return 1
+    printf '%s' "$out"
+}
+
 if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+    # destroy can no-op under a lying domstate — signal leftover qemu
+    # directly (mirrors reap_domain's fallback), then demand a
+    # confirmed-dead scan before touching the overlay.
+    _qp=$(qemu_pids_for_domain) || true
+    if [ -n "$_qp" ]; then
+        echo "[tier5-cleanup] destroy left qemu alive for $VM_NAME (pids:$_qp); killing" >&2
+        run_as_admin kill $_qp 2>/dev/null || true
+        for _ in 1 2 3 4 5 6; do
+            sleep 0.5
+            _qp=$(qemu_pids_for_domain) || true
+            [ -n "$_qp" ] || break
+        done
+        [ -n "$_qp" ] && run_as_admin kill -9 $_qp 2>/dev/null || true
+    fi
     run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
     echo "[tier5-cleanup] $VM_NAME destroyed + undefined"
 else
@@ -41,6 +72,13 @@ else
 fi
 
 if [ -f "$DISK" ]; then
-    rm -f "$DISK"
-    echo "[tier5-cleanup] removed $DISK"
+    qemu_pids_for_domain; _lv=$?
+    if [ "$_lv" -eq 1 ]; then
+        rm -f "$DISK"
+        echo "[tier5-cleanup] removed $DISK"
+    else
+        echo "[tier5-cleanup] FAIL: $VM_NAME qemu live or unverifiable" >&2
+        echo "        — keeping $DISK" >&2
+        exit 5
+    fi
 fi

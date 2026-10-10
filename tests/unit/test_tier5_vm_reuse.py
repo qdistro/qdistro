@@ -41,16 +41,35 @@ def test_hold_file_and_fds_are_per_vm_and_locked_shared():
 def test_create_path_serializes_under_exclusive_hold():
     # ensures: two racing cold-starts can never double-define the domain
     #          — the create runs under an exclusive lock and re-checks
-    #          domstate after acquiring it
+    #          liveness (the qemu oracle, not bare domstate) after
+    #          acquiring it
     assert "flock -u 9 2>/dev/null || true" in SPAWN
     assert "flock -w 120 -x 9" in SPAWN
     decision = SPAWN[SPAWN.index("ADOPTED=0"):]
     upgrade = decision.index("flock -w 120 -x 9")
-    recheck = decision.index("domstate", upgrade)
+    recheck = decision.index("domain_is_live", upgrade)
     create = decision.index("create_domain", upgrade)
     assert upgrade < recheck < create
     assert "flock -s 9" in decision[: decision.index("DOMAIN_DEFINED=1") if "DOMAIN_DEFINED=1" in decision else len(decision)]
     assert "[tier5] adopted running domain" in SPAWN
+
+
+def test_liveness_decisions_use_the_qemu_oracle():
+    # ensures: every spot that decides "is the guest alive" goes through
+    #          domain_is_live (domstate hint + qemu-pid scan with an
+    #          explicit cannot-determine rc), never bare `domstate|grep
+    #          running` — nested-virt domstate lies (sol r6)
+    body = _section("qemu_pids_for_domain")
+    # the oracle distinguishes clean-empty from scan-failure
+    assert "return 2" in body and "return 1" in body
+    assert "run_as_admin true" in body  # runuser broken != "no qemu"
+    # the match requires the discrete `-name guest=` argv token
+    assert '"-name guest=$name,"' in body
+    live = _section("domain_is_live")
+    assert "domstate" in live and "qemu_pids_for_domain" in live
+    # adopt, reclaim, idle-window, wait-loop, and the early check all
+    # consume the oracle
+    assert SPAWN.count("domain_is_live") >= 6
 
 
 def test_teardown_is_claimed_by_the_last_holder_only():
@@ -170,41 +189,42 @@ def test_adoption_verifies_bound_appid():
 
 def test_stopped_foreign_domain_is_reclaimed_not_adopted():
     # ensures: a foreign domain is reclaimed only when its backing qemu
-    #          is proven DEAD — domstate alone can report "shut off" for
-    #          a live qemu under nested KVM, so liveness comes from
-    #          qemu_pids_for_domain with a terminal domstate as belt
-    #          (sol r5). No virsh destroy ever runs against a foreign
-    #          guest, and a post-undefine liveness recheck protects the
+    #          is proven DEAD by domain_is_live — domstate alone can
+    #          report "shut off" for a live qemu under nested KVM, so it
+    #          is only a belt on top of the oracle verdict (sol r5/r6).
+    #          No virsh destroy ever runs against a foreign guest, and a
+    #          settle + post-undefine liveness recheck protects the
     #          overlay from an out-of-band start in the probe gap.
     assert "reclaiming stopped foreign domain" in SPAWN
     start = SPAWN.index('if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 \\\n                && [ "$(domain_appid)" != "$POLICY_KEY" ]')
     end = SPAWN.index("create_domain\n    fi\n    flock -s 9")
     reclaim = SPAWN[start:end]
-    # qemu-pid liveness CALL precedes the domstate query AND is repeated
-    # between undefine and rm (comment text mentions both names, so
-    # anchor on the call sites, not bare identifiers)
-    pidcall = '"$(qemu_pids_for_domain)"'
-    domcall = 'virsh domstate "$VM_NAME"'
-    assert reclaim.count(pidcall) >= 2
-    assert reclaim.index(pidcall) < reclaim.index(domcall)
-    assert reclaim.index(pidcall, reclaim.index(domcall)) \
-        < reclaim.index('rm -f "$DISK"')
     assert "shutoff|crashed" in reclaim
     assert "refusing to reclaim" in reclaim
     assert 'virsh destroy "$VM_NAME"' not in reclaim
     assert 'virsh undefine "$VM_NAME"' in reclaim
     assert 'rm -f "$DISK"' in reclaim
+    # settle + confirmed-dead recheck between undefine and unlink
+    assert reclaim.index("sleep 0.3") < reclaim.index('rm -f "$DISK"')
+    assert reclaim.index("domain_is_live", reclaim.index("undefine")) \
+        < reclaim.index('rm -f "$DISK"')
+    assert "live or" in reclaim  # the post-undefine refuse branch
 
 
 def test_orphan_reaper_uses_qemu_liveness_not_domstate():
     # ensures: the startup orphan-overlay reaper cannot delete a live
-    #          guest's disk on a false "shut off" — it skips on EITHER
-    #          domstate=running OR a backing qemu pid, and re-verifies
-    #          liveness between undefine and rm (sol r5)
+    #          guest's disk on a false "shut off" — only a CONFIRMED-dead
+    #          domain_is_live verdict permits reaping, the domain must
+    #          be verified-gone after undefine, and a settle + re-verify
+    #          guards the rm against an out-of-band start (sol r6)
     reaper = SPAWN[SPAWN.index("orphan-overlay reaper"):
                    SPAWN.index("reaped orphan overlay")]
-    assert 'qemu_pids_for_domain "$base"' in reaper
-    assert "domstate" in reaper
+    assert 'domain_is_live "$base"' in reaper
+    assert reaper.count('_lv=$?') >= 2  # verdict before AND after undefine
+    assert 'dominfo "$base"' in reaper  # still-defined -> leave overlay
+    # exact backing-file match via JSON field, not a substring grep
+    assert '--output=json' in reaper
+    assert '"backing-filename"' in reaper
     assert "came alive during reap" in SPAWN
 
 
