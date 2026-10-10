@@ -19,6 +19,7 @@ RUN bash /recipe/install-deps.sh
 # Exercise the file-manager's real local-tool integrations offline too.
 RUN zypper -n install --no-recommends zip unzip 7zip xdg-utils util-linux-systemd udisks2 rclone
 RUN zypper -n install --no-recommends wiggle mergiraf
+RUN zypper -n install --no-recommends tmux mosh
 COPY . /src
 WORKDIR /src
 # Policy tooling and user management install executables in /usr/sbin.
