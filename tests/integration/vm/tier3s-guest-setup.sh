@@ -44,6 +44,10 @@ while [ $# -gt 0 ]; do
 done
 T3S_TAG=t3s-setup
 . "$(dirname "$0")/tier3s-guest-lib.sh"
+# Hold the idle locker off before the multi-minute installer. The host
+# helper also installs the drop-in; this is the guest-side proof and a
+# second chance when the driver is run without t3s_setup_file.
+[ -n "$GUI_WL" ] && t3s_guard_idle_locker
 SRC=/root/qdistro-src-t3s
 T3S_PATHS="/usr/lib/qdistro/tier3s /usr/libexec/qdistro/qdistro-tier3s-scope
 /usr/libexec/qdistro/qdistro-tier3s-cleanup /usr/libexec/qdistro/qdistro-tier3s-silo-launch

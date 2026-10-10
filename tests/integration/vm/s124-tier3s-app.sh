@@ -32,6 +32,7 @@ is "weston-terminal image staged in admin's store" "$(yes_no pm image exists loc
 is "foot image staged in admin's store" "$(yes_no pm image exists localhost/qdistro/tier3s-foot:latest)" yes
 is "admin compositor socket present" "$(yes_no test -S $ADMIN_RT/$GUI_DISPLAY)" yes
 is "qdshell is up" "$(as_admin systemctl --user is-active qdshell.service 2>/dev/null)" active
+t3s_guard_idle_locker
 is "ydotoold socket present (input injection path)" "$(yes_no test -S /run/user/1000/ydotool.sock)" yes
 is "profile is dev" "$(sed -n 's/^QDISTRO_PROFILE=//p' /etc/qdistro/profile | tail -1)" dev
 assert_all_clear pre

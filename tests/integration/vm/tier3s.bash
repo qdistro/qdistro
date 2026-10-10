@@ -148,6 +148,43 @@ t3s_setup_file() {
         # the waypipe bridge needs the real compositor session up BEFORE the
         # guest-side checks (wayland-1 socket, qdshell) run
         start_user_session || fail_loud "admin user session (qdwin/qdshell) did not come up" || return 1
+        # IPC injectFocus is not user activity. The stock 300s idle lock
+        # fires during guest-setup and the later driver, and qdwin then
+        # (correctly) posts ERROR_LOCKED on set_keyboard_focus. Hold the
+        # locker off for the life of this disposable worker — same
+        # QDLOCKER_IDLE_MS drop-in as tiered-isolation.bats / gui.sh.
+        vm_run "$(cat <<'IDLE'
+set -e
+d=/etc/systemd/user/qdlocker.service.d
+install -d -m0755 "$d"
+printf '[Service]\nEnvironment=QDLOCKER_IDLE_MS=86400000\n' > "$d/99-qci-no-idle-lock.conf"
+install -d -m0755 /etc/qdistro
+: > /etc/qdistro/locker-ctrl-introspection
+chown 0:0 /etc/qdistro/locker-ctrl-introspection
+chmod 0644 /etc/qdistro/locker-ctrl-introspection
+adm_uctl() {
+    systemctl --user --machine=admin@.host "$@" 2>/dev/null \
+        || runuser -l admin -c "systemctl --user $*" 2>/dev/null
+}
+adm_uctl daemon-reload
+if ! adm_uctl is-active qdlocker.service >/dev/null; then
+    echo "FAIL: qdlocker.service is not active after start_user_session" >&2
+    exit 1
+fi
+adm_uctl restart qdlocker.service
+env=$(adm_uctl show qdlocker.service -p Environment --value || true)
+case "$env" in
+    *QDLOCKER_IDLE_MS=86400000*) ;;
+    *)
+        echo "FAIL: running qdlocker lacks QDLOCKER_IDLE_MS=86400000 (Environment=$env)" >&2
+        exit 1
+        ;;
+esac
+echo "PASS: qdlocker idle-auto-lock disabled for GUI worker"
+IDLE
+)"
+        assert_success || fail_loud "could not disable qdlocker idle-auto-lock for the GUI worker" || return 1
+        assert_output_contains "PASS: qdlocker idle-auto-lock disabled for GUI worker" || return 1
     fi
     vm_run "mkdir -p /var/tmp/t3s-dl && cd /var/tmp/t3s-dl && for f in tier3s-guest-lib.sh tier3s-guest-setup.sh; do curl -fsS -o \$f http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/\$f || exit 97; done && bash tier3s-guest-setup.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT} --expect-fresh$guiarg"
     t3s_log t3s-setup
@@ -165,6 +202,7 @@ t3s_setup_file() {
         done
         assert_output_contains "PASS: admin compositor socket present" || return 1
         assert_output_contains "PASS: qdshell is up" || return 1
+        assert_output_contains "PASS: qdlocker idle-auto-lock held off" || return 1
     fi
 }
 
