@@ -81,6 +81,69 @@ const win = fs.readFileSync(
         "VMAppsTab rows must expose their appId as highlightKey");
 }
 
+// --- deterministic per-app VM name (relaunch reuse) ---------------------
+// ensures: every launch of the same app lands on the same domain — the
+//          name is a pure function of appId with no random component, so
+//          the wrapper's hold-lock protocol and the silo tag share one
+//          identity
+{
+    const fn = service.slice(
+        service.indexOf("function _vmNameForApp(appId)"),
+        service.indexOf("function rebuild()"));
+    assert.ok(fn.length > 0, "_vmNameForApp must exist in VMApps.qml");
+    assert.ok(!fn.includes("Math.random"),
+        "the VM name must not contain random components");
+    assert.ok(fn.includes('"t5-" +'),
+        "the VM name keeps the t5- prefix convention");
+    assert.ok(service.includes("root._vmNameForApp(row.appId)"),
+        "launch must use the deterministic per-app name");
+    assert.ok(!service.includes("_generateVmName"),
+        "the random per-launch name generator must be gone");
+    // ensures: launch still passes the stable appId through --policy-key
+    assert.ok(service.includes('"--policy-key", row.appId'),
+        "launch must keep passing appId as the policy key");
+}
+
+// --- collision-freedom is proven behaviorally (sol r1 P1) ---------------
+// ensures: two DISTINCT catalogue appIds can never share a domain — a
+//          name collision would run the second app inside the first
+//          app's guest, breaking per-app isolation. The real product
+//          functions are evaluated (they are plain JS), not re-derived.
+{
+    const hashSrc = service.slice(
+        service.indexOf("function _appIdHash(appId)"),
+        service.indexOf("function _vmNameForApp(appId)"));
+    const nameSrc = service.slice(
+        service.indexOf("function _vmNameForApp(appId)"),
+        service.indexOf("function rebuild()"));
+    const make = new Function(
+        hashSrc + "\n" + nameSrc + "\nreturn { _vmNameForApp };");
+    const vmNameForApp = make()._vmNameForApp;
+    assert.strictEqual(typeof vmNameForApp, "function");
+
+    // ensures: relaunches of the SAME app still converge on one domain
+    assert.strictEqual(vmNameForApp("tier5/kate"), vmNameForApp("tier5/kate"),
+        "the name must be deterministic per appId");
+    // ensures: ids that sanitize alike do not merge into one guest
+    assert.notStrictEqual(vmNameForApp("tier5/foo.bar"),
+        vmNameForApp("tier5/foo-bar"),
+        "appIds differing only in punctuation must name different domains");
+    // ensures: ids that truncate alike do not merge either — the hash
+    //          must cover the FULL appId, not the truncated stub
+    const longA = "tier5/" + "a".repeat(60) + ".one";
+    const longB = "tier5/" + "a".repeat(60) + ".two";
+    assert.notStrictEqual(vmNameForApp(longA), vmNameForApp(longB),
+        "appIds sharing the 60-char prefix must name different domains");
+    // ensures: names stay inside the wrapper's validation budget
+    for (const id of ["tier5/kate", longA, "weird app (x)!.desktop", "x"]) {
+        const n = vmNameForApp(id);
+        assert.match(n, /^t5-[a-zA-Z0-9_-]+-[0-9a-f]{8}$/,
+            `name '${n}' must be t5-<stub>-<8 hex chars>`);
+        assert.ok(n.length <= 63,
+            `name '${n}' exceeds the wrapper's 63-char budget`);
+    }
+}
+
 console.log(
     "vmapps-app-settings: launcher action, enum-id tab nav, appId " +
-    "highlight invariants passed");
+    "highlight, deterministic VM name invariants passed");

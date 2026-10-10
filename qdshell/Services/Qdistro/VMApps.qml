@@ -226,12 +226,29 @@ Singleton {
     // silo tag IS the VM name), and hands teardown to whichever session
     // is last out of the idle window. The wrapper validates
     // [a-zA-Z0-9][a-zA-Z0-9_-]{0,62}.
+    //
+    // The name is "t5-" + a human-readable stub + "-" + an FNV-1a hash of
+    // the FULL appId. The hash is load-bearing: distinct appIds that
+    // sanitize or truncate alike ("a.b" vs "a-b") must never resolve to
+    // one domain — a collision would run the second app inside the first
+    // app's guest and break per-app isolation (sol r1 P1).
+    function _appIdHash(appId) {
+        let h = 0x811c9dc5;
+        for (let i = 0; i < appId.length; i++) {
+            h ^= appId.charCodeAt(i);
+            h = Math.imul(h, 0x01000193) >>> 0;
+        }
+        return ("0000000" + h.toString(16)).slice(-8);
+    }
+
     function _vmNameForApp(appId) {
-        const stub = (appId || "vmapp").replace(/[^a-zA-Z0-9_-]/g, "-")
-                                       .replace(/-{2,}/g, "-")
-                                       .replace(/^-+|-+$/g, "")
-                                       .slice(0, 56);
-        return "t5-" + (stub || "vmapp");
+        const id = appId || "vmapp";
+        const stub = id.replace(/[^a-zA-Z0-9_-]/g, "-")
+                       .replace(/-{2,}/g, "-")
+                       .replace(/^-+|-+$/g, "")
+                       .slice(0, 51);
+        // 3 + <=51 + 1 + 8 = <=63, inside the wrapper's name budget.
+        return "t5-" + (stub || "vmapp") + "-" + _appIdHash(id);
     }
 
     function rebuild() {

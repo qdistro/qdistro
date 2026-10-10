@@ -92,6 +92,36 @@ def test_vmapps_vm_name_is_deterministic_per_appid():
     assert "root._vmNameForApp(row.appId)" in VMAPS
 
 
+def test_vmapps_vm_name_is_collision_resistant():
+    # ensures: distinct appIds can never share a domain (sol r1 P1) —
+    #          the name carries a hash of the FULL appId, appended AFTER
+    #          the truncated stub so truncation cannot lose uniqueness
+    body = re.search(
+        r"function _vmNameForApp\(appId\)\s*\{(?P<body>.*?)\n    \}",
+        VMAPS,
+        re.S,
+    ).group("body")
+    assert "_appIdHash(id)" in body, (
+        "the VM name must include a hash of the full appId, "
+        "not just the sanitized stub"
+    )
+    stub_slice = body.index(".slice(")
+    hash_call = body.index("_appIdHash(id)")
+    assert stub_slice < hash_call, (
+        "the hash must be computed over the full id and appended after "
+        "the truncated stub"
+    )
+    h = re.search(
+        r"function _appIdHash\(appId\)\s*\{(?P<body>.*?)\n    \}",
+        VMAPS,
+        re.S,
+    )
+    assert h, "_appIdHash not found in VMApps.qml"
+    assert "appId.charCodeAt" in h.group("body"), (
+        "the hash must iterate the full appId string"
+    )
+
+
 def test_concurrent_session_logs_are_unique_per_launch():
     # ensures: two live wrappers of the same app never clobber each
     #          other's waypipe logs — log names carry a per-launch token

@@ -135,7 +135,9 @@ The wrapper supports two modes:
 ## Per-app guests: adoption, not pooling
 
 The domain is the SILO for a catalogue appId: `VMApps.launch()` derives
-`<vm_name>` deterministically from the appId (`t5-<sanitized-appId>`), so
+`<vm_name>` deterministically from the appId
+(`t5-<sanitized-stub>-<fnv1a8(appId)>` — the hash covers the FULL appId
+so ids that sanitize or truncate alike can never share a guest), so
 every launch of the same app names the same guest. Ownership is a
 flock(2) protocol on `/run/qdistro-tier5/hold-<vm_name>` — no daemon:
 
