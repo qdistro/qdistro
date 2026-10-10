@@ -66,7 +66,7 @@ QDISTRO_PKGS=(
   qemu-audio-pipewire qemu-audio-alsa
   libguestfs guestfs-tools
   snapper            # btrfs snapshot management
-  btrfs-progs        # btrfs subvolume commands
+  btrfsprogs         # btrfs subvolume commands
   # qdshell runtime is the vendored upstream Quickshell build
   # (qdshell/quickshell-vendored/, built by the bootstrap's
   # build_quickshell step). No `quickshell` package exists in Tumbleweed —

@@ -8,9 +8,10 @@ Source:         %{name}-%{version}.tar.gz
 # QML dep scanning emits unsatisfiable requires for: the implicit `qs.*`
 # project namespace (the QML tree itself — Quickshell resolves it relative
 # to `-p`), `Qdistro.*` (our own plugin, same package), and `Quickshell.*`
-# (compiled into the noctalia-qs binary — it ships no qmldir/provides).
-# Disable .qml auto-requires entirely; the real runtime deps are the
-# explicit Requires below (noctalia-qs, qt6-declarative-imports).
+# (compiled into the vendored quickshell binary — it ships no
+# qmldir/provides). Disable .qml auto-requires entirely; the real runtime
+# deps are the explicit Requires below (qdistro-quickshell,
+# qt6-declarative-imports).
 %global _disable_qml_requires 1
 Provides:       qt6qmlimport(Qdistro.Qdwin.1)
 BuildRequires:  meson
@@ -30,9 +31,10 @@ BuildRequires:  wayland-protocols-devel
 # qdistro-protocols.pc.
 BuildRequires:  qdwin
 # Runtime: the shell is a Quickshell project loaded by
-# `qs -p /usr/share/quickshell/qdshell` (qdshell.service). Tumbleweed's
-# quickshell package is named noctalia-qs (binary /usr/bin/qs).
-Requires:       noctalia-qs
+# `qs -p /usr/share/quickshell/qdshell` (qdshell.service). Tumbleweed
+# ships no upstream quickshell package — the runtime is qdistro's
+# vendored build (binary /usr/bin/qs).
+Requires:       qdistro-quickshell
 Requires:       qt6-declarative-imports
 # dbus-run-session wraps ExecStart in qdshell.service.
 Requires:       dbus-1

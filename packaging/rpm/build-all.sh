@@ -15,7 +15,7 @@ mkdir -p "$here/repo" "$here/rpmbuild/SOURCES"
 
 # qdwin first (qdistro-protocols.pc), then the vendored libweston tree and
 # the shell that build against it; leaf packages last, metapackage at the end.
-order=(qdwin qdistro-libweston-vendored qdistro-daemons qdshell
+order=(qdwin qdistro-libweston-vendored qdistro-quickshell qdistro-daemons qdshell
        qdistro-presentation qdgreeter qdlocker qterminator qfileman
        qnotebook qdbrowser qdistro-session qdistro-admin qdistro-browser-bridge qdistro-desktop)
 if [ $# -gt 0 ]; then order=("$@"); fi

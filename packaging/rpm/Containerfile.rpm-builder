@@ -29,6 +29,10 @@ RUN rm -f /etc/zypp/repos.d/*.repo /etc/zypp/services.d/*.service \
       liblcms2-devel libdisplay-info-devel libX11-devel libxcb-devel \
       cairo-devel libpng16-devel libpng16-compat-devel pango-devel \
       fontconfig-devel glib2-devel libva-devel \
+      cmake spirv-tools vulkan-devel pam-devel polkit-devel \
+      jemalloc-devel cpptrace-devel \
+      qt6-quick-private-devel qt6-qml-private-devel qt6-shadertools-devel \
+      qt6-waylandclient-devel qt6-waylandclient-private-devel \
  && zypper clean -a
 
 # Build once:
