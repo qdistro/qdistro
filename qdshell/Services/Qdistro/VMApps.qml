@@ -145,6 +145,7 @@ Singleton {
         }
         root._manifestMissing = false;
         root.catalogue = rows;
+        Logger.i("VMApps", "manifest loaded: " + rows.length + " app(s)");
         root.refreshed();
     }
 
