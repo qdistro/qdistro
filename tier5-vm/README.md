@@ -77,6 +77,42 @@ in `spec/29` . Reasons:
  loopback for in-VM smoke tests (no actual nested guest needed;
  exercises the data path).
 
+## The VM-app catalogue
+
+qdshell's tier-5 launcher catalogue is **derived from the guest base
+image**, not hardcoded. The pipeline:
+
+1. `vmapps-scan.py` reads the guest `.desktop` files out of the base
+   qcow2 (libguestfs, read-only — or a directory with `--root` for
+   tests), applies XDG precedence and filtering, expands Exec field
+   codes, and maps desktop IDs onto stable `tier5/<appId>` keys
+   (legacy aliases keep `tier5/firefox` etc. pinned across renames).
+2. `build-guest-image.sh` runs the scanner after customizing the base
+   and publishes `qdistro-tier5-base.json` beside the qcow2. A scan
+   failure fails the image build — a base that cannot publish its
+   catalogue is not installable.
+3. `image/config.sh` stages the sidecar at
+   `/usr/share/qdistro/vmapps/base.json` inside the product image and
+   fails when the qcow2 was built without one.
+4. On the installed system, `qdistro-tier5-vmapps-scan.service` +
+   `.path` (installed by `install-tier5-for-vm.sh`) re-run the scanner
+   through `vmapps-reconcile.sh` whenever the base image changes — a
+   rebuilt or replaced base republishes the catalogue without a
+   reboot. Absent base → manifest removed; unreadable base or scan
+   exhaustion → a `stale` manifest is published so the degradation is
+   explicit in the file itself.
+5. `qdshell/Services/Qdistro/VMApps.qml` loads the manifest via a
+   watched FileView, so a republish hot-swaps the catalogue in the
+   running session. Missing/empty/malformed/stale manifest → the
+   catalogue degrades to exactly the Foot entry (the operator escape
+   hatch; this is why the scanner requires a guest `foot` binary).
+
+The `appId` is the stable policy key end to end: Settings per-app
+lifecycle overrides key on `[app:tier5/<appId>]` sections, and
+`VMApps.launch()` passes it to `spawn-tier5.sh --policy-key`, so a
+manifest row, its Settings override, and its spawn policy are always
+the same identity.
+
 ## Modes
 
 The wrapper supports two modes:
