@@ -62,8 +62,13 @@ TIER5_BUILD_GUEST="$SCRIPT_DIR/../../tier5-vm/build-guest-image.sh"
 CACHE_DIR="${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}"
 . "$SCRIPT_DIR/lib/test-substrate.sh"
 . "$SCRIPT_DIR/lib/rpm-cache.sh"
+. "$SCRIPT_DIR/lib/deps-cache.sh"
 qdistro_load_test_substrate
-CLOUD_CACHE="$CACHE_DIR/cloud/$QDISTRO_SUBSTRATE_CLOUD_SHA256.qcow2"
+# deps-cache layout: cloud/<sha256>/<upstream-name>.qcow2 (content-keyed,
+# manifest + signature sidecars). Adopt the pre-cache flat file if present.
+CLOUD_CACHE="$(qd_path cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$(basename "$QDISTRO_SUBSTRATE_CLOUD_URL")")"
+qd_adopt cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" \
+    "$CACHE_DIR/cloud/$QDISTRO_SUBSTRATE_CLOUD_SHA256.qcow2" "$QDISTRO_SUBSTRATE_CLOUD_URL"
 BAKED_RECIPE="$(qdistro_substrate_recipe_digest baked)"
 BAKED_CACHE="$CACHE_DIR/tier5-$QDISTRO_SUBSTRATE_CLOUD_SHA256-$QDISTRO_SUBSTRATE_SNAPSHOT-${BAKED_RECIPE:0:12}.qcow2"
 CLOUD_URL="$QDISTRO_SUBSTRATE_CLOUD_URL"

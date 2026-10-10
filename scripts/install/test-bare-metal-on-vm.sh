@@ -97,12 +97,22 @@ prep_image() {
     local dest="$IMG_DIR/qdistro-baremetal-test-$distro.qcow2"
 
     if [ "$distro" = "tumbleweed" ]; then
-        # J25: this shares tumbleweed-cloud-base.qcow2 with
-        # build-baseweed-from-scratch.sh, so an unverified download here would
-        # poison that cache too. Route through the signed-verification helper.
+        # J25: this shared the legacy flat cache with the baseweed builders;
+        # now resolves the newest openSUSE-signed dated image and stores it
+        # content-keyed under the deps cache (cloud/<sha256>/<name>).
         # shellcheck source=../vm/lib/opensuse-cloud-image.sh
         . "$SCRIPT_DIR/../vm/lib/opensuse-cloud-image.sh"
-        download_verified_cloud_image "$url" "$cache" \
+        . "$SCRIPT_DIR/../vm/lib/deps-cache.sh"
+        local tw_dir tw_name resolved tw_sha
+        tw_dir="$(dirname "$url")"
+        tw_name="$(basename "$url" | sed 's/-Snapshot20[0-9]*\.qcow2$//; s/\.qcow2$//')"
+        resolved="$(resolve_latest_cloud_image "$tw_dir" "$tw_name")" \
+            || { log "[$distro] ERROR: could not resolve latest signed cloud image"; return 1; }
+        url="${resolved%% *}"; tw_sha="${resolved##* }"
+        cache="$(qd_path cloud "$tw_sha" "$(basename "$url")")"
+        # Adopt the shared flat cache file if it happens to hold these bytes.
+        qd_adopt cloud "$tw_sha" "$CACHE_DIR/tumbleweed-cloud-base.qcow2" "$url" || true
+        download_verified_cloud_image "$url" "$cache" "$tw_sha" \
             || { log "[$distro] ERROR: cloud image failed openSUSE signature/digest verification"; return 1; }
     elif [ ! -s "$cache" ]; then
         # NOTE (J25): the ubuntu base is not openSUSE-signed and has no

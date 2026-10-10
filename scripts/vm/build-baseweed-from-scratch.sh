@@ -54,10 +54,15 @@ VM_PASSWORD='Pa_ssw0rd45'
 IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 . "$SCRIPT_DIR/lib/test-substrate.sh"
 . "$SCRIPT_DIR/lib/rpm-cache.sh"
+. "$SCRIPT_DIR/lib/deps-cache.sh"
 qdistro_load_test_substrate
 CACHE_DIR="${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}"
 CLOUD_URL="$QDISTRO_SUBSTRATE_CLOUD_URL"
-CLOUD_CACHE="$CACHE_DIR/cloud/$QDISTRO_SUBSTRATE_CLOUD_SHA256.qcow2"
+# deps-cache layout: cloud/<sha256>/<upstream-name>.qcow2 (content-keyed,
+# manifest + signature sidecars). Adopt the pre-cache flat file if present.
+CLOUD_CACHE="$(qd_path cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$(basename "$CLOUD_URL")")"
+qd_adopt cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" \
+    "$CACHE_DIR/cloud/$QDISTRO_SUBSTRATE_CLOUD_SHA256.qcow2" "$CLOUD_URL"
 DEST="$(qdistro_substrate_base_path admin "$IMG")"
 PARTIAL="$DEST.partial"
 
