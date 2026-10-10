@@ -1,0 +1,6 @@
+# LOCAL DRAFT: replace this address with a confirmed monitored public mailbox.
+repo: https://github.com/qdistro/qdistro#main
+primary_contact: maintainer@example.org
+homepage: https://qdistro.org
+dockerfile: .oss-scanner/Dockerfile
+threat_model: .oss-scanner/threat_model.md
