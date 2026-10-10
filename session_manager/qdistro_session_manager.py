@@ -23,6 +23,8 @@ dbus.service.Object subclass is a thin shell over them.
 """
 from __future__ import annotations
 
+import concurrent.futures
+import contextlib
 import errno
 import json
 import logging
@@ -407,6 +409,31 @@ DEFAULT_STOP_GRACE_S = 5
 # is given time to finish, and a waiter is not stuck forever if the holder
 # never clears the slot.
 _T_INFLIGHT_WAIT = 120
+# Interactive lifecycle callers get a SiloBusy answer, not a stall: the
+# D-Bus client timeout (~25 s) means a 120 s wait never reaches them
+# anyway. Ten seconds covers a healthy in-flight cgroup write; a wedged
+# one is answered Busy so the caller can retry instead of queueing
+# behind it.
+_T_INFLIGHT_BUSY_S = 10
+# How long delete() waits for the account-transaction mutex before
+# answering SiloBusy. The lock can legitimately be held for minutes
+# (useradd -m / userdel -r on a big home tree), so a contended acquire
+# is answered Busy rather than queued invisibly — the delete was never
+# started, retrying is safe.
+_T_ACCOUNTS_ACQUIRE_S = 5
+# Bound on concurrent offloaded D-Bus work. A burst of mutating calls
+# used to spawn one daemon thread each; the pool queues them instead so
+# thread count, NSS lookups and subprocess fan-out stay bounded.
+_OFFLOAD_WORKERS = 4
+# Admission bound on the offload queue: a mutation submitted while this
+# many ops are already queued/running is answered SiloBusy on the dispatch
+# thread instead of queueing invisibly behind work it cannot pass.
+_OFFLOAD_QUEUE_MAX = 16
+# A queued op that waited this long is answered SiloBusy rather than run:
+# the caller's D-Bus timeout (~25s default) has already fired, so running
+# the mutation now would take effect after the client gave up — the same
+# class of surprise the busy budgets exist to prevent.
+_OFFLOAD_QUEUE_STALE_S = 15
 
 # Bound on a single cgroup.freeze exchange: the write (which under cgroup
 # v2 only INITIATES the transition) plus the settle wait on cgroup.events.
@@ -4090,6 +4117,29 @@ class _SiloStore:
         self._stop_cv = threading.Condition(self._lock)
         self.load()
 
+    @contextlib.contextmanager
+    def _accounts_locked(self, timeout: float | None = None):
+        """Acquire _accounts_lock, optionally with a bound that answers
+        SiloBusy instead of queueing invisibly.
+
+        A minutes-long account transaction (useradd -m / userdel -r on a
+        big home tree) holds this mutex the whole time. Callers that can
+        legitimately wait pass no timeout; interactive D-Bus paths pass
+        _T_ACCOUNTS_ACQUIRE_S so a contended acquire is answered Busy —
+        the op was never started, retrying is safe — rather than parked
+        past the client's own timeout.
+        """
+        if timeout is None:
+            self._accounts_lock.acquire()
+        elif not self._accounts_lock.acquire(timeout=timeout):
+            raise SiloBusy(
+                "another account transaction is in progress; the "
+                "operation was not started — retry when it finishes")
+        try:
+            yield
+        finally:
+            self._accounts_lock.release()
+
     # ---- persistence ----------------------------------------------------
 
     def load(self) -> None:
@@ -4538,8 +4588,17 @@ class _SiloStore:
                         kind=kind, launch=launch_norm,
                         egress=egress_norm,
                     )
-                    self._silos[name] = silo
-                    self.save()
+                    try:
+                        self._silos[name] = silo
+                        self.save()
+                    except Exception:
+                        # Same discipline as the tier3 commit below: a
+                        # save() failure must not leave an unpersisted
+                        # row visible that a retry then reports as a
+                        # duplicate. Pop under the same _lock hold — the
+                        # row was never observable outside it.
+                        self._silos.pop(name, None)
+                        raise
                     self._emit_change(silo.name, silo.state)
             else:
                 silo = self._create_tier3_user(
@@ -4659,86 +4718,122 @@ class _SiloStore:
                 try:
                     self._ops.link_silo_launcher(name)
                 except Exception as e:  # noqa: BLE001
-                    # Roll back in the ONLY safe order: the grant first,
-                    # and the account ONLY if the grant is definitely
-                    # gone. A fragment carries a numeric user="<uid>";
-                    # deleting the account while its fragment survives
-                    # leaves a fragment naming a uid NSS cannot resolve,
-                    # and dbus-broker ABORTS on that at its next reload
-                    # (see write_relay_policy). Killing the system bus is
-                    # far worse than leaking a Linux account, so a failed
-                    # revocation keeps the account — which keeps the uid
-                    # resolvable — and asks for manual cleanup.
-                    #
-                    # The launcher sweep runs on BOTH revocation
-                    # outcomes. link_silo_launcher compensates its own
-                    # partial state, but its compensation tolerates an
-                    # unlink failure — so on a double failure a link can
-                    # still be on disk, and an early `raise` here would
-                    # leave account + fragment + link together.
-                    _link_path = (SILO_LAUNCHER_LINK_DIR /
-                                  SILO_LAUNCHER_LINK_FMT.format(name=name))
-                    _frag_path = RELAY_POLICY_DIR / relay_policy_filename(name)
-                    _link_left = False
-                    try:
-                        self._ops.unlink_silo_launcher(name)
-                    except Exception as undo:  # noqa: BLE001
-                        _link_left = True
-                        log.error(
-                            "could not remove the launcher link for %r "
-                            "while rolling back: %s — remove %s by hand",
-                            name, undo, _link_path)
-                    try:
-                        self._ops.remove_relay_policy(name)
-                    except Exception as undo:  # noqa: BLE001
-                        log.error(
-                            "could not revoke the relay grant for %r "
-                            "while rolling back a launcher-link failure "
-                            "(%s). KEEPING the Linux user: deleting it "
-                            "now would leave a fragment naming an "
-                            "unresolvable uid, which aborts dbus-broker "
-                            "at its next reload. Remove %s%s and the "
-                            "user %r by hand, in that order.",
-                            name, undo, _frag_path,
-                            f" and {_link_path}" if _link_left else "",
-                            name)
-                        raise SessionError(
-                            f"could not link the launcher unit for silo "
-                            f"{name!r} ({e}), and rolling back its relay "
-                            f"grant also failed ({undo}); the Linux user "
-                            f"was kept so the bus stays up — remove "
-                            f"{_frag_path} and the user {name!r} by hand, "
-                            f"in that order") from e
-                    try:
-                        self._ops.userdel(name)
-                    except Exception as undo:  # noqa: BLE001
-                        log.error(
-                            "rolling back the useradd for %r after a "
-                            "launcher-link failure also failed: %s",
-                            name, undo)
-                    raise SessionError(
-                        f"could not link the launcher unit for silo "
-                        f"{name!r}: {e}") from e
-                self._ops.make_state_dir(name, uid)
-                # Commit: the row only becomes visible now, so no reader —
-                # and no racing lifecycle op — can observe a silo whose
-                # account provisioning is still in flight.
-                with self._lock:
-                    silo = Silo(
-                        name=name, uid=int(uid), state=State.CREATED,
-                        autostart=bool(autostart),
-                        created_at=int(time.time()),
-                        last_change=int(time.time()),
-                        kind=KIND_TIER3_USER, launch=launch_norm,
-                        egress=egress_norm,
-                    )
-                    self._silos[name] = silo
-                    self.save()
-                    self._emit_change(silo.name, silo.state)
-                    return silo
+                    leftover = self._rollback_account_transaction(name)
+                    msg = (f"could not link the launcher unit for silo "
+                           f"{name!r}: {e}")
+                    if leftover:
+                        msg += (f"; manual cleanup needed, in the order "
+                                f"listed: {leftover}")
+                    raise SessionError(msg) from e
+                # The tail — state dir plus the row commit — gets the same
+                # all-or-nothing treatment. A failure here used to leak
+                # the system user + relay grant + launcher link with no
+                # silo row, so a retry tripped on user_exists and the
+                # artifacts were stranded. Roll the OS side back in the
+                # same safe order instead.
+                try:
+                    self._ops.make_state_dir(name, uid)
+                    # Commit: the row only becomes visible now, so no
+                    # reader — and no racing lifecycle op — can observe a
+                    # silo whose account provisioning is still in flight.
+                    with self._lock:
+                        silo = Silo(
+                            name=name, uid=int(uid), state=State.CREATED,
+                            autostart=bool(autostart),
+                            created_at=int(time.time()),
+                            last_change=int(time.time()),
+                            kind=KIND_TIER3_USER, launch=launch_norm,
+                            egress=egress_norm,
+                        )
+                        try:
+                            self._silos[name] = silo
+                            self.save()
+                        except Exception:
+                            # Pop under the same _lock hold: no _lock-only
+                            # reader could have observed the row yet, so
+                            # the rollback below leaves no observable
+                            # trace of it.
+                            self._silos.pop(name, None)
+                            raise
+                        self._emit_change(silo.name, silo.state)
+                        return silo
+                except Exception as e:  # noqa: BLE001
+                    leftover = self._rollback_account_transaction(name)
+                    msg = (f"could not finish provisioning silo {name!r}: "
+                           f"{e}")
+                    if leftover:
+                        msg += (f"; manual cleanup needed, in the order "
+                                f"listed: {leftover}")
+                    raise SessionError(msg) from e
         finally:
             with self._lock:
                 self._creating_inflight.pop(name, None)
+
+    def _rollback_account_transaction(self, name: str) -> str:
+        """Best-effort undo of the OS half of a failed tier3 create().
+
+        The caller holds _accounts_lock (the whole account transaction is
+        serialized there), so no other account op interleaves. Order is
+        the ONLY safe order, identical for every post-useradd failure:
+        state dir and launcher link first, then the relay grant, and the
+        Linux account ONLY when the grant is definitely gone. A fragment
+        carries a numeric user="<uid>"; deleting the account while its
+        fragment survives leaves a fragment naming a uid NSS cannot
+        resolve, and dbus-broker ABORTS on that at its next reload (see
+        write_relay_policy). Killing the system bus is far worse than
+        leaking a Linux account, so a failed revocation keeps the
+        account — which keeps the uid resolvable — and reports it for
+        manual cleanup.
+
+        The unlink sweep runs on BOTH revocation outcomes:
+        link_silo_launcher compensates its own partial state, but its
+        compensation tolerates an unlink failure — so on a double
+        failure a link can still be on disk, and skipping the sweep
+        would leave account + fragment + link together.
+
+        Returns a "; "-joined description of what could not be removed —
+        an empty string when the rollback was clean.
+        """
+        leftovers: list[str] = []
+        try:
+            self._ops.remove_state_dir(name)
+        except Exception as undo:  # noqa: BLE001
+            leftovers.append(f"state dir {SILOS_STATE_DIR / name}")
+            log.error("could not remove the state dir for %r while "
+                      "rolling back: %s", name, undo)
+        link_path = (SILO_LAUNCHER_LINK_DIR /
+                     SILO_LAUNCHER_LINK_FMT.format(name=name))
+        try:
+            self._ops.unlink_silo_launcher(name)
+        except Exception as undo:  # noqa: BLE001
+            leftovers.append(f"launcher link {link_path}")
+            log.error(
+                "could not remove the launcher link for %r while "
+                "rolling back: %s — remove %s by hand",
+                name, undo, link_path)
+        frag_path = RELAY_POLICY_DIR / relay_policy_filename(name)
+        try:
+            self._ops.remove_relay_policy(name)
+        except Exception as undo:  # noqa: BLE001
+            leftovers.append(f"relay fragment {frag_path}")
+            leftovers.append(
+                f"system user {name!r} (kept so the uid stays resolvable "
+                f"— remove the fragment first, then the user)")
+            log.error(
+                "could not revoke the relay grant for %r while rolling "
+                "back (%s). KEEPING the Linux user: deleting it now "
+                "would leave a fragment naming an unresolvable uid, "
+                "which aborts dbus-broker at its next reload. Remove "
+                "%s and the user %r by hand, in that order.",
+                name, undo, frag_path, name)
+            return "; ".join(leftovers)
+        try:
+            self._ops.userdel(name)
+        except Exception as undo:  # noqa: BLE001
+            leftovers.append(f"system user {name!r}")
+            log.error("rolling back the useradd for %r also failed: %s",
+                      name, undo)
+        return "; ".join(leftovers)
 
     @staticmethod
     def _refuse_unless_deletable(silo: Silo) -> None:
@@ -4771,7 +4866,11 @@ class _SiloStore:
             # userdel -r on a big home tree can run for minutes, and the
             # old all-under-_lock shape parked every other store method
             # (including ListSilos answering a D-Bus query) behind it.
-            with self._accounts_lock:
+            # The acquire is bounded: a delete() queueing silently behind
+            # another minutes-long account transaction outlives the
+            # client's own timeout, so contention answers SiloBusy —
+            # nothing was started, retrying is safe.
+            with self._accounts_locked(timeout=_T_ACCOUNTS_ACQUIRE_S):
                 with self._lock:
                     # Recheck under the mutex: a create could have claimed
                     # the name in the gap above.
@@ -4808,7 +4907,12 @@ class _SiloStore:
                     # Re-validate before committing to DELETING: the purge
                     # and reload above ran without _lock, and a start() or
                     # in-flight stop could have moved the row meanwhile.
-                    silo = self._await_inflight_locked(name)
+                    # The busy budget matters here, not just for the
+                    # caller: this wait runs under _accounts_lock, so a
+                    # long inflight wait would queue every other account
+                    # transaction behind it.
+                    silo = self._await_inflight_locked(
+                        name, budget_s=_T_INFLIGHT_BUSY_S)
                     self._refuse_unless_deletable(silo)
                     self._transition(silo, State.DELETING)
                 try:
@@ -5197,7 +5301,11 @@ class _SiloStore:
                     # their cgroup/systemctl work lands and only bump
                     # operation_generation on commit, so a snapshot taken
                     # mid-write cannot be told apart from a settled one.
-                    silo = self._await_inflight_locked(name)
+                    # StartSilo is interactive: a wedged in-flight write
+                    # is answered Busy rather than stalling the client
+                    # past its own timeout.
+                    silo = self._await_inflight_locked(
+                        name, budget_s=_T_INFLIGHT_BUSY_S)
                     if silo.state != State.ACTIVE:
                         body, claim = self._claim_start_locked(silo)
                         break
@@ -5504,9 +5612,11 @@ class _SiloStore:
             # phase-2 teardown (running without the lock) must NOT return
             # success prematurely — the first stop may still fail. Wait for
             # the in-flight op to finish (same bounded helper as freeze and
-            # resume), then re-check the final state. A deadline raises and
-            # leaves the holder's slot and the silo state alone.
-            silo = self._await_inflight_locked(name)
+            # resume), then re-check the final state. A deadline answers
+            # SiloBusy — retryable, never premature success — and leaves
+            # the holder's slot and the silo state alone.
+            silo = self._await_inflight_locked(
+                name, budget_s=_T_INFLIGHT_BUSY_S)
             if silo.state == State.STOPPED:
                 return
             if silo.state not in (State.ACTIVE, State.FROZEN):
@@ -5818,29 +5928,35 @@ class _SiloStore:
             self._clear_stop_inflight(silo_name, claim)
             self._transition(silo, State.STOPPED)
 
-    def _await_inflight_locked(self, name: str) -> Silo:
+    def _await_inflight_locked(self, name: str, *,
+                               budget_s: float = _T_INFLIGHT_WAIT) -> Silo:
         """Wait (on _stop_cv, with _lock held) until no lock-free lifecycle
         write is in flight for *name*, then return the current silo.
 
-        Bounded by _T_INFLIGHT_WAIT — the waiter, not the cgroup write the
-        other thread is stuck in. Condition.wait returns False when the
-        timeout elapses and True on a wakeup, including a spurious one, so
-        this loops until the slot is clear or the deadline passes. Remaining
-        time comes from time.monotonic(); a burst of spurious wakeups cannot
-        extend the wait.
+        Bounded by *budget_s* — the waiter, not the cgroup write the other
+        thread is stuck in. Interactive callers pass _T_INFLIGHT_BUSY_S: a
+        healthy in-flight write settles in far less, and a wedged one must
+        be answered SiloBusy (retryable) instead of stalling the caller
+        past its own D-Bus client timeout. Internal sequencing paths keep
+        the default _T_INFLIGHT_WAIT. Condition.wait returns False when
+        the timeout elapses and True on a wakeup, including a spurious
+        one, so this loops until the slot is clear or the deadline
+        passes. Remaining time comes from time.monotonic(); a burst of
+        spurious wakeups cannot extend the wait.
 
-        On deadline, raises SessionError naming the silo. Does NOT clear the
-        other thread's _stopping_inflight slot and does NOT force silo state.
-        Raises UnknownSilo if the silo is deleted while we wait. Caller must
+        On deadline, raises SiloBusy naming the silo — a typed "try
+        later", not a generic failure. Does NOT clear the other thread's
+        _stopping_inflight slot and does NOT force silo state. Raises
+        UnknownSilo if the silo is deleted while we wait. Caller must
         hold _lock and must not yet have claimed the slot.
         """
         silo = self.get(name)
-        deadline = time.monotonic() + _T_INFLIGHT_WAIT
+        deadline = time.monotonic() + budget_s
 
-        def _stuck() -> SessionError:
-            return SessionError(
+        def _stuck() -> SiloBusy:
+            return SiloBusy(
                 f"in-flight lifecycle op for silo {name!r} did not finish "
-                f"within {_T_INFLIGHT_WAIT:g}s")
+                f"within {budget_s:g}s; retry shortly")
 
         while name in self._stopping_inflight:
             remaining = deadline - time.monotonic()
@@ -5877,7 +5993,8 @@ class _SiloStore:
             #    half-applied one. Deferring the transition also means a failed
             #    write leaves the silo cleanly ACTIVE with no rollback needed.
             with self._lock:
-                silo = self._await_inflight_locked(name)
+                silo = self._await_inflight_locked(
+                    name, budget_s=_T_INFLIGHT_BUSY_S)
                 if silo.kind == KIND_TIER3S:
                     # tier3s/CONTRACT.md §6: freezing the owning scope would
                     # freeze the podman CLI and conmon too, and gVisor-level
@@ -5933,7 +6050,8 @@ class _SiloStore:
             # cgroup.freeze(False) write lock-free, flip FROZEN→ACTIVE only on
             # success (no rollback needed; a failed unfreeze leaves it FROZEN).
             with self._lock:
-                silo = self._await_inflight_locked(name)
+                silo = self._await_inflight_locked(
+                    name, budget_s=_T_INFLIGHT_BUSY_S)
                 if silo.kind == KIND_TIER3S:
                     raise BadArgument(
                         "freeze/resume is unsupported for tier3s silos")
@@ -7405,6 +7523,23 @@ if dbus is not None:
                 # wg silo up dark rather than failing its start (task 3 C/B3).
                 key_provider=_PwdKeyProvider(),
             )
+            # Bounded pool for _run_offloaded: submit() never parks the
+            # dispatch thread (the queue is unbounded), while
+            # _OFFLOAD_WORKERS caps how much OS-side work runs at once —
+            # account ops already serialize on _accounts_lock, lifecycle
+            # ops on per-silo in-flight claims, so the cap costs little
+            # concurrency but bounds threads/NSS/subprocess fan-out.
+            # TPE workers are non-daemon but are unwound at interpreter
+            # exit by the futures _python_exit atexit hook, matching the
+            # lifetime of the per-call daemon threads this replaces.
+            self._offload_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_OFFLOAD_WORKERS,
+                thread_name_prefix="sessmgr-op")
+            # Dispatch-thread admission counter for _run_offloaded: queued
+            # + running ops. Incremented before submit, decremented when
+            # the task finishes.
+            self._offload_pending = 0
+            self._offload_pending_lock = threading.Lock()
             if autostart:
                 self.store.autostart_pass()
 
@@ -7513,11 +7648,50 @@ if dbus is not None:
             strand the client until the D-Bus timeout. SessionError maps
             to its typed error name; anything else maps through
             ``unexpected_error`` (default: the same SessionManager1.Generic
-            translation the synchronous handlers used)."""
+            translation the synchronous handlers used).
+
+            Admission is bounded two ways so a saturated pool fails
+            interactively instead of queueing silent latency: the
+            dispatch thread refuses with SiloBusy once _OFFLOAD_QUEUE_MAX
+            ops are outstanding, and a queue deadline armed on the GLib
+            loop answers Busy _OFFLOAD_QUEUE_STALE_S after admission —
+            independent of whether a pool worker ever becomes free. A
+            started/expired flag pair keeps delivery exactly-once: the
+            worker that eventually picks up an expired op runs nothing
+            the caller already timed out on. The check+set on each side
+            is serialized by decision_lock — unsynchronized events leave
+            an interleaving where the worker starts AND the deadline
+            reports "not started", answering Busy next to a reply."""
 
             map_unexpected = unexpected_error or _to_dbus_exception
+            started = threading.Event()
+            expired = threading.Event()
+            decision_lock = threading.Lock()
+
+            def busy(msg: str) -> None:
+                GLib.idle_add(
+                    lambda: error(_to_dbus_exception(SiloBusy(msg)))
+                    or False)
+
+            def queue_deadline() -> bool:
+                # Fires on the GLib loop _OFFLOAD_QUEUE_STALE_S after
+                # submit. If no worker picked the op up by now, the
+                # caller has crossed its D-Bus timeout; answer Busy and
+                # flag the slot so the worker that eventually arrives
+                # does not run a mutation nobody is waiting on.
+                with decision_lock:
+                    if started.is_set() or expired.is_set():
+                        return False
+                    expired.set()
+                busy(f"{op} waited behind a saturated worker pool; the "
+                     f"operation was not started — retry")
+                return False
 
             def on_worker() -> None:
+                with decision_lock:
+                    started.set()
+                    if expired.is_set():
+                        return
                 try:
                     out = work()
                 except SessionError as exc:
@@ -7534,8 +7708,43 @@ if dbus is not None:
                     return
                 GLib.idle_add(lambda: reply(*out) or False)
 
-            threading.Thread(
-                target=on_worker, name=op, daemon=True).start()
+            def guarded() -> None:
+                try:
+                    on_worker()
+                finally:
+                    with self._offload_pending_lock:
+                        self._offload_pending -= 1
+
+            # Bounded admission on the dispatch thread — a full queue is
+            # answered Busy immediately rather than parked on. The counter
+            # is decremented by the submitted task, so a refused call
+            # must not have incremented it.
+            with self._offload_pending_lock:
+                if self._offload_pending >= _OFFLOAD_QUEUE_MAX:
+                    busy(f"{op} refused: {_OFFLOAD_QUEUE_MAX} offloaded "
+                         f"operations already outstanding — retry shortly")
+                    return
+                self._offload_pending += 1
+
+            try:
+                # submit() only queues — the dispatch thread never parks on
+                # a full pool; the op name is carried in the worker's
+                # failure log line rather than a per-call thread name.
+                self._offload_pool.submit(guarded)
+            except RuntimeError:
+                # Pool already shut down (service stopping). No deadline
+                # was armed yet — the only answer is the Busy below.
+                with self._offload_pending_lock:
+                    self._offload_pending -= 1
+                busy(f"{op} refused: session manager is shutting down")
+                return
+
+            # Queue expiry lives on the dispatch loop, not the worker: an
+            # op stuck behind blocked workers gets its Busy answer at the
+            # deadline instead of a bare D-Bus timeout. Once armed, the
+            # started/expired pair guarantees exactly one answer.
+            GLib.timeout_add(int(_OFFLOAD_QUEUE_STALE_S * 1000),
+                             queue_deadline)
 
         @dbus.service.method(BUS_NAME, in_signature="si", out_signature="",
                              async_callbacks=("_reply", "_error"),
@@ -8096,6 +8305,12 @@ def main():  # pragma: no cover - exercised in the VM
         pass
     finally:
         observer_stop.set()
+        # cancel_futures drops queued-but-unstarted mutations so no
+        # lifecycle op runs after cleanup begins; wait=False does not
+        # park on running workers — a wedged one is still joined by the
+        # interpreter's _python_exit hook, bounded in practice by the
+        # unit's TimeoutStopSec.
+        mgr._offload_pool.shutdown(wait=False, cancel_futures=True)
         mgr.store.stop_all_egress_watchers()
 
 

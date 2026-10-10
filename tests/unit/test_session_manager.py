@@ -714,6 +714,82 @@ class TestCreate:
         assert "uid: 2000" in text
         assert "state: Created" in text
 
+    def test_create_rolls_back_when_state_dir_fails(self, store, ops):
+        """The create() tail is all-or-nothing: a make_state_dir failure
+        must not strand the system user + relay grant + launcher link
+        with no silo row — the old leak left a retry tripping on
+        user_exists."""
+        def boom(name, uid):
+            raise OSError("ENOSPC on /var/lib/qdistro/silos")
+        ops.make_state_dir = boom
+        with pytest.raises(sm.SessionError):
+            store.create("work", 2000)
+        assert "work" not in ops.users
+        assert "work" not in ops.relay_policies
+        assert "work" not in ops.launcher_links
+        assert "work" not in ops.state_dirs
+        with pytest.raises(UnknownSilo):
+            store.get("work")
+        # A retry after the failed create is clean — the leftover
+        # account is gone, not in the way.
+        del ops.make_state_dir
+        assert store.create("work", 2000).uid == 2000
+
+    def test_create_rolls_back_when_save_fails(self, store, ops):
+        """save() fails after the row was inserted into _silos: the
+        rollback must pop the row (under the same _lock hold, so no
+        reader could have observed it) AND unwind the OS side —
+        otherwise a retry reports a stale duplicate while the account
+        is also left over."""
+        orig_save = store.save
+        def boom():
+            raise OSError("disk full writing silos.yaml")
+        store.save = boom
+        with pytest.raises(sm.SessionError):
+            store.create("work", 2000)
+        assert "work" not in ops.users
+        assert "work" not in ops.relay_policies
+        assert "work" not in ops.launcher_links
+        with pytest.raises(UnknownSilo):
+            store.get("work")
+        store.save = orig_save
+        assert store.create("work", 2000).uid == 2000
+
+    def test_create_rollback_keeps_user_when_grant_revoke_fails(
+            self, store, ops):
+        """The shared tail rollback honours the keep-account rule: a
+        relay fragment that survives must keep the Linux user, because
+        deleting it leaves a fragment naming an unresolvable uid —
+        which aborts dbus-broker on its next reload."""
+        ops.relay_policy_remove_should_fail = True
+        def boom(name, uid):
+            raise OSError("state dir")
+        ops.make_state_dir = boom
+        with pytest.raises(sm.SessionError):
+            store.create("work", 2000)
+        # Grant survives → the user MUST survive with it; the link and
+        # the (partial) state dir are still swept.
+        assert ops.users["work"] == 2000
+        assert "work" in ops.relay_policies
+        assert "work" not in ops.launcher_links
+
+    def test_create_fast_path_save_failure_leaves_no_row(self, store, ops):
+        """The non-tier3 commit gets the same pop-on-save-failure
+        discipline: an unpersisted in-memory row must not masquerade as
+        a duplicate to a retry."""
+        def boom():
+            raise OSError("disk full writing silos.yaml")
+        store.save = boom
+        with pytest.raises(OSError):
+            store.create("work", 1000, kind="tier2-template",
+                         launch=dict(_LAUNCH))
+        with pytest.raises(UnknownSilo):
+            store.get("work")
+        del store.save
+        silo = store.create("work", 1000, kind="tier2-template",
+                            launch=dict(_LAUNCH))
+        assert silo.kind == "tier2-template"
+
 
 class TestDelete:
     def test_delete_refuses_active(self, store):
@@ -747,6 +823,53 @@ class TestDelete:
     def test_delete_unknown(self, store):
         with pytest.raises(UnknownSilo):
             store.delete("nonexistent")
+
+    def test_delete_answers_busy_when_accounts_lock_held(
+            self, store, ops, monkeypatch):
+        """A delete() parked behind another account transaction used to
+        queue invisibly — minutes of userdel -r can hold _accounts_lock
+        while the client's own timeout has already fired. The acquire is
+        now bounded and answers SiloBusy: the delete never started, so
+        retrying is safe."""
+        monkeypatch.setattr(sm, "_T_ACCOUNTS_ACQUIRE_S", 0.2)
+        store.create("work", 2000)
+        store._accounts_lock.acquire()
+        try:
+            with pytest.raises(SiloBusy):
+                store.delete("work")
+        finally:
+            store._accounts_lock.release()
+        # Nothing was started: the silo and its account are untouched.
+        assert store.get("work").state == State.CREATED
+        assert "work" in ops.users
+
+
+class TestInflightBusy:
+    def test_inflight_wait_answers_busy_on_deadline(self, store, ops):
+        """An in-flight lifecycle write that outlives the budget answers
+        SiloBusy — a typed 'retry later' the client can classify — and
+        leaves the other thread's claim untouched."""
+        store.create("work", 2000)
+        store.start("work")
+        with store._lock:
+            store._stopping_inflight["work"] = object()
+            with pytest.raises(SiloBusy):
+                store._await_inflight_locked("work", budget_s=0.05)
+            assert "work" in store._stopping_inflight
+
+    def test_freeze_answers_busy_when_inflight_stuck(
+            self, store, ops, monkeypatch):
+        """freeze() passes the interactive budget: a wedged in-flight
+        write is answered SiloBusy rather than stalling past the D-Bus
+        client timeout."""
+        monkeypatch.setattr(sm, "_T_INFLIGHT_BUSY_S", 0.05)
+        store.create("work", 2000)
+        store.start("work")
+        with store._lock:
+            store._stopping_inflight["work"] = object()
+            with pytest.raises(SiloBusy):
+                store.freeze("work")
+            assert "work" in store._stopping_inflight
 
 
 # ---------------------------------------------------------------------------
@@ -903,14 +1026,14 @@ class TestLifecycle:
                 freeze_wrote.set()
                 let_freeze_commit.wait(10)
 
-        def spy_await(n):
+        def spy_await(n, **kw):
             awaits.append(n)
             if len(awaits) == 2:
                 # The stale verdict was discarded while the slot was
                 # still claimed (generation untouched at that point) —
                 # only the in-flight recheck could have caught it.
                 starter_waiting.set()
-            return orig_await(n)
+            return orig_await(n, **kw)
 
         ops.cgroup_freeze = gated_freeze
         store._await_inflight_locked = spy_await
@@ -1248,7 +1371,7 @@ class TestS14FreezeLockScope:
         holder still finishes and clears the slot itself.
         """
         import threading
-        monkeypatch.setattr(sm, "_T_INFLIGHT_WAIT", 0.2)
+        monkeypatch.setattr(sm, "_T_INFLIGHT_BUSY_S", 0.2)
         store.create("work", 2000)
         store.start("work")
         in_write = threading.Event()
@@ -1379,6 +1502,38 @@ class TestDBusErrorNames:
         sync = sorted(n for n, ok in seen.items() if not ok)
         assert not sync, (
             f"mutating D-Bus methods missing async_callbacks: {sync}")
+
+    def test_offloaded_work_uses_bounded_pool(self):
+        """_run_offloaded must submit to the bounded executor created in
+        __init__. A per-call daemon thread let a burst of mutating calls
+        spawn unbounded threads + NSS lookups + subprocess fan-out; the
+        pool keeps submit() non-blocking for the dispatch thread while
+        _OFFLOAD_WORKERS caps concurrency."""
+        tree = ast.parse(Path(sm.__file__).read_text())
+        helper = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, ast.FunctionDef)
+             and n.name == "_run_offloaded"),
+            None)
+        assert helper is not None, "_run_offloaded not found"
+        submits = any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "submit"
+            and isinstance(n.func.value, ast.Attribute)
+            and n.func.value.attr == "_offload_pool"
+            for n in ast.walk(helper))
+        assert submits, "_run_offloaded does not submit to _offload_pool"
+        per_call_thread = any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "threading"
+            and n.func.attr in ("Thread", "Timer", "ThreadPoolExecutor")
+            for n in ast.walk(helper))
+        assert not per_call_thread, (
+            "_run_offloaded spawns a per-call thread — the pool bound is "
+            "the whole point (Event/Lock coordination is fine)")
 
 
 # ---------------------------------------------------------------------------

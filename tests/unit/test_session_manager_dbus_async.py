@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import threading
 
 import pytest
@@ -27,6 +28,9 @@ def test_stop_silo_returns_dispatch_thread_while_teardown_runs(monkeypatch):
 
     mgr = object.__new__(sm.SessionManager)
     mgr.store = Store()
+    mgr._offload_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    mgr._offload_pending = 0
+    mgr._offload_pending_lock = threading.Lock()
     mgr._peer_caller = lambda _sender, _conn: {
         "uid": 1000, "pid": 42, "exe": "/bin/test"}
     mgr._require_admin = lambda _sender, _conn: None
@@ -81,6 +85,9 @@ def test_unexpected_store_oserror_replies_with_generic_dbus_error(
 
     mgr = object.__new__(sm.SessionManager)
     mgr.store = store
+    mgr._offload_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    mgr._offload_pending = 0
+    mgr._offload_pending_lock = threading.Lock()
     mgr._peer_caller = lambda _sender, _conn: {
         "uid": 1000, "pid": 42, "exe": "/bin/test"}
     mgr._require_admin = lambda _sender, _conn: None
@@ -108,11 +115,22 @@ def _mgr(store, monkeypatch):
     rubber-stamp admin check — the same shape as the StopSilo tests."""
     mgr = object.__new__(sm.SessionManager)
     mgr.store = store
+    mgr._offload_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    mgr._offload_pending = 0
+    mgr._offload_pending_lock = threading.Lock()
     mgr._peer_caller = lambda _sender, _conn: {
         "uid": 1000, "pid": 42, "exe": "/bin/test"}
     mgr._require_admin = lambda _sender, _conn: None
     mgr.audit = None
     monkeypatch.setattr(sm.GLib, "idle_add", lambda callback: callback())
+    # No GLib main loop runs in tests; dispatch the queue deadline on a
+    # daemon Timer with the same one-shot, honour-the-interval semantics.
+    def _timeout_add(ms, fn, *args):
+        t = threading.Timer(ms / 1000.0, lambda: fn(*args))
+        t.daemon = True
+        t.start()
+        return 0
+    monkeypatch.setattr(sm.GLib, "timeout_add", _timeout_add)
     return mgr
 
 
@@ -609,3 +627,99 @@ def test_completed_start_invalidates_a_probe_taken_mid_launch(tmp_path):
         "after the launch had already succeeded")
     store.observe_runtime_once()
     assert store.get("work").observed_status == "launcher-running"
+
+
+@pytest.mark.skipif(sm.dbus is None, reason="dbus-python unavailable")
+def test_offload_admission_refuses_beyond_queue_max(monkeypatch, tmp_path):
+    """Once _OFFLOAD_QUEUE_MAX ops are outstanding, the dispatch thread
+    answers SiloBusy immediately — the mutation is never submitted and
+    the store is never touched."""
+    store = sm._SiloStore(
+        _FakeOps(), config_path=tmp_path / "silos.yaml")
+    mgr = _mgr(store, monkeypatch)
+    mgr._offload_pending = sm._OFFLOAD_QUEUE_MAX
+    store_touched = threading.Event()
+
+    def create_spy(*a, **kw):
+        store_touched.set()
+
+    mgr.store.create = create_spy
+    replied = threading.Event()
+    errored = threading.Event()
+    errors: list = []
+
+    def on_error(exc):
+        errors.append(exc)
+        errored.set()
+
+    mgr.CreateSilo("work", 2000, replied.set, on_error,
+                   sender=":1.2", conn=object())
+
+    assert errored.wait(1), "saturated pool never answered Busy"
+    assert not replied.is_set()
+    assert len(errors) == 1
+    assert errors[0].get_dbus_name() == f"{sm.BUS_NAME}.SiloBusy"
+    assert not store_touched.wait(0.2), "refused op still reached the store"
+    # The refused call released its slot — the counter is unchanged.
+    assert mgr._offload_pending == sm._OFFLOAD_QUEUE_MAX
+
+
+@pytest.mark.skipif(sm.dbus is None, reason="dbus-python unavailable")
+def test_offload_stale_queued_op_answers_busy_instead_of_running(
+        monkeypatch, tmp_path):
+    """The queue deadline fires whether or not a worker is free: an op
+    stuck behind occupied workers gets its SiloBusy at the deadline —
+    before the caller's D-Bus timeout — and the worker that eventually
+    picks it up runs nothing."""
+    store = sm._SiloStore(
+        _FakeOps(), config_path=tmp_path / "silos.yaml")
+    mgr = _mgr(store, monkeypatch)
+    monkeypatch.setattr(sm, "_OFFLOAD_QUEUE_STALE_S", 0.2)
+
+    # Occupy both pool workers so the lifecycle op stays queued.
+    occupied = [threading.Event(), threading.Event()]
+    release = threading.Event()
+
+    def park(ev):
+        def work():
+            ev.set()
+            assert release.wait(5), "test did not release the workers"
+            return ()
+        return work
+
+    for ev in occupied:
+        mgr._run_offloaded("blocker", park(ev),
+                           threading.Event().set, lambda e: None)
+    assert all(ev.wait(2) for ev in occupied), "workers never started"
+
+    store_touched = threading.Event()
+    mgr.store.start = lambda *a, **kw: store_touched.set()
+    replied = threading.Event()
+    errored = threading.Event()
+    errors: list = []
+
+    def on_error(exc):
+        errors.append(exc)
+        errored.set()
+
+    mgr.StartSilo("work", replied.set, on_error,
+                  sender=":1.2", conn=object())
+
+    # The Busy answer arrives at the queue deadline, while every worker
+    # is still parked — not at the D-Bus timeout and not when a worker
+    # eventually frees.
+    assert errored.wait(2), "queued op got no answer at its deadline"
+    assert not replied.is_set()
+    assert len(errors) == 1
+    assert errors[0].get_dbus_name() == f"{sm.BUS_NAME}.SiloBusy"
+
+    release.set()
+    # The expired task is still dequeued (clearing its admission slot)
+    # but must not run the mutation the caller already timed out on.
+    for _ in range(100):
+        with mgr._offload_pending_lock:
+            if mgr._offload_pending == 0:
+                break
+        threading.Event().wait(0.02)
+    assert mgr._offload_pending == 0
+    assert not store_touched.is_set(), "expired op still ran the mutation"
