@@ -37,6 +37,9 @@ This is qdistro's most consequential rule.
   compositor) and a small set of protocol-glue daemons in
   `daemons/`. Adding a new C component requires a written
   justification.
+- A new Python daemon gets its own top-level root directory
+  (like `broker/`, `session_manager/`, `admin_app/`) —
+  `daemons/` is the native C stage, not the Python home.
 - **When extending C-based infrastructure, use the embedded
   extension language the host already offers** rather than writing
   more C. Example: Weston 15's lua-shell drives rule-based window
@@ -150,8 +153,11 @@ Defaults:
   scenarios add a `@test` entry and assert via the helpers in
   `helpers.bash`.
 - **Markdown playbooks** for GUI scenarios — under
-  `tests/integration/` (`permissions-gui/`, `qdwin-noctalia/`,
-  `presentation-gui/`, `workflow-gui/`). Each numbered `NN-*.md` is
+  `tests/integration/` (`permissions-gui/` for broker
+  permission/approval flows, `qdwin-noctalia/` for shell UI on
+  qdwin, `presentation-gui/` for the shared appearance snapshot
+  reaching first-party apps, `workflow-gui/` for the workflow
+  engine end-to-end). Each numbered `NN-*.md` is
   one scenario, executed by a graphic-aware
   test runner (human or LLM) following the playbook step by step.
   The sanctioned runner is pinned via `QCI_AGENT_CMD`; see
@@ -186,9 +192,10 @@ Driver tools live in `scripts/vm/`:
   embedded quotes are safe). It runs as **root** with no login
   session; for commands that need admin's uid and real session
   (`systemctl --user`, `qdlocker.sock`, `qdshell.service`, …) use the
-  `vm_run_admin` helper in `tests/integration/vm/helpers.bash`, or
-  `runuser -u admin --` / `systemctl --user --machine=admin@.host`
-  inside the guest.
+  `vm_run_admin` helper in `tests/integration/vm/helpers.bash` (it
+  wraps `runuser -l admin -c '…'` — the `-l` login form; plain
+  `runuser -u` gives the uid only), or
+  `systemctl --user --machine=admin@.host` inside the guest.
 - `vm-gui <name> <action>` — input injection: ydotool for typing and
   key chords where available, xdotool through XWayland otherwise.
   For anything the in-guest tools don't cover, use
