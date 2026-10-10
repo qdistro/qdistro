@@ -160,11 +160,11 @@ def check_stage_order(body):
     # Every family drain must be present AND must run before stage 4
     # neutralizes the binding resources.
     flat = _flat(body)
-    neutralize = _pos(flat, "wl_resource_set_user_data("
-                            "qdwin->shell_resource,NULL)")
+    neutralize = _pos(flat, "qdwin_neutralize_binding_resources(qdwin)")
     if neutralize < 0:
-        return fail("stage4: shell_resource user_data neutralization "
-                    "missing")
+        return fail("stage4: qdwin_neutralize_binding_resources(qdwin) "
+                    "missing — unclaimed bindings keep freed-qdwin "
+                    "user_data")
     for call in FAMILY_DRAINS:
         pos = _pos(flat, call)
         if pos < 0:
@@ -266,6 +266,51 @@ def check_sym_helper(source):
     return 0
 
 
+def check_binding_neutralizer(source):
+    body, err = _function_body(
+        source, r"static enum wl_iterator_result\s+"
+                r"qdwin_neutralize_binding_resource\s*\(",
+        "qdwin_neutralize_binding_resource")
+    if err:
+        return fail(err)
+    flat = _flat(body)
+    for iface in ("qdwin_shell_v1_interface.name",
+                  "qdwin_locker_v1_interface.name",
+                  "qdwin_lock_surface_v1_interface.name"):
+        if iface not in flat:
+            return fail(f"neutralizer does not cover {iface} — an "
+                        "unclaimed binding of that class keeps freed-qdwin "
+                        "user_data")
+    walk, err = _function_body(
+        source, r"static void\s+qdwin_neutralize_binding_resources\s*\(",
+        "qdwin_neutralize_binding_resources")
+    if err:
+        return fail(err)
+    flat = _flat(walk)
+    for call in ("wl_display_get_client_list(", "wl_client_for_each(",
+                 "wl_client_for_each_resource("):
+        if call not in flat:
+            return fail(f"neutralizer walk missing {call} — it must "
+                        "enumerate every client resource, not only the "
+                        "claimed bindings")
+    return 0
+
+
+def check_primary_device_unlink(source):
+    for name in ("qdwin_primary_seat_seat_destroyed",
+                 "qdwin_primary_seats_destroy_all"):
+        body, err = _function_body(
+            source, r"static void\s+%s\s*\(" % name, name)
+        if err:
+            return fail(err)
+        flat = _flat(body)
+        if "wl_list_remove(&device->link)" not in flat:
+            return fail(f"{name}: leaves device->link on pseat->devices "
+                        "— the late device resource destructor's "
+                        "wl_list_remove writes through the freed seat")
+    return 0
+
+
 def check_nested_drain_edges(source):
     body, err = _function_body(
         source, r"qdwin_nested_toplevel_resource_destroy\s*\(",
@@ -304,6 +349,8 @@ def main():
     for check in (
         lambda: check_stage_order(body),
         lambda: check_shell_locker_guards(source),
+        lambda: check_binding_neutralizer(source),
+        lambda: check_primary_device_unlink(source),
         lambda: check_toplevel_drain(source),
         lambda: check_sym_helper(source),
         lambda: check_nested_drain_edges(source),

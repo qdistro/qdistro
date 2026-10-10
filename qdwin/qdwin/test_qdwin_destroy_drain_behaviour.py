@@ -53,6 +53,9 @@ Cases:
      the handler still runs (pick_view) but caches nothing.
  13. Full pass: populate every family, run every drain, free(qdwin),
      fire every late path — zero touches of the freed struct under ASan.
+ 14. Unclaimed bindings: the stage-4 enumeration neutralizes EVERY
+     qdwin-class resource on the display (claimed or not); a late
+     disconnect after free(qdwin) hits the NULL guard.
 """
 
 from pathlib import Path
@@ -119,7 +122,7 @@ PROLOGUE = r"""
 /* ---- reduced weston / wayland types -------------------------------- */
 
 struct weston_coord_global { int placeholder; };
-struct wl_display { int placeholder; };
+struct wl_display { struct wl_list client_list; };
 struct wl_event_source { int removed; };
 struct weston_desktop_surface { void *user_data; int destroyed; };
 struct weston_surface { struct wl_signal destroy_signal; };
@@ -128,11 +131,17 @@ struct weston_curtain { int destroyed; };
 struct weston_output { const char *name; struct wl_list link; };
 struct weston_mode { int placeholder; };
 struct weston_head { int placeholder; };
-struct wl_client { struct wl_signal destroy_signal; };
+struct wl_client {
+	struct wl_signal destroy_signal;
+	struct wl_list resource_list;
+	struct wl_list link;
+};
 struct wl_resource {
 	void *user_data;
 	void (*destructor)(struct wl_resource *);
 	int destroyed;
+	const char *class_name;
+	struct wl_list link;
 };
 
 struct weston_compositor {
@@ -454,6 +463,7 @@ static struct wl_resource *res_new(void *ud,
 	assert(r);
 	r->user_data = ud;
 	r->destructor = destructor;
+	wl_list_init(&r->link);
 	return r;
 }
 static void qd_res_set_user_data(struct wl_resource *r, void *d)
@@ -471,6 +481,43 @@ static void qd_res_destroy(struct wl_resource *r)
 #define wl_resource_set_user_data qd_res_set_user_data
 #define wl_resource_get_user_data qd_res_get_user_data
 #define wl_resource_destroy qd_res_destroy
+
+static const char *probe_res_get_class(struct wl_resource *r)
+{ return r->class_name; }
+#define wl_resource_get_class probe_res_get_class
+
+/* Client/resource enumeration — backs the stage-4 binding neutralizer.
+ * wl_client_for_each is a header macro built on get_link/from_link, so
+ * stubbing those two redirects the whole walk into the fixture lists. */
+static struct wl_list *probe_display_get_client_list(struct wl_display *d)
+{ return d ? &d->client_list : NULL; }
+#define wl_display_get_client_list probe_display_get_client_list
+static struct wl_list *probe_wl_client_get_link(struct wl_client *c)
+{ return &c->link; }
+#define wl_client_get_link probe_wl_client_get_link
+static struct wl_client *probe_wl_client_from_link(struct wl_list *l)
+{ struct wl_client *c = NULL; return wl_container_of(l, c, link); }
+#define wl_client_from_link probe_wl_client_from_link
+static void probe_client_for_each_resource(
+	struct wl_client *c,
+	enum wl_iterator_result (*it)(struct wl_resource *, void *),
+	void *ud)
+{
+	struct wl_resource *r;
+	wl_list_for_each(r, &c->resource_list, link)
+		if (it(r, ud) == WL_ITERATOR_STOP)
+			break;
+}
+#define wl_client_for_each_resource probe_client_for_each_resource
+
+/* Just the .name the neutralizer compares; the rest of the generated
+ * wl_interface shape is irrelevant to the fixture. */
+static const struct wl_interface qdwin_shell_v1_interface =
+	{ .name = "qdwin_shell_v1" };
+static const struct wl_interface qdwin_locker_v1_interface =
+	{ .name = "qdwin_locker_v1" };
+static const struct wl_interface qdwin_lock_surface_v1_interface =
+	{ .name = "qdwin_lock_surface_v1" };
 
 static int probe_event_source_remove(struct wl_event_source *s)
 { event_source_remove_calls++; s->removed = 1; return 0; }
@@ -632,6 +679,9 @@ SPLICED = [
     "qdwin_om_managers_destroy_all",
     "qdwin_secctx_client_on_destroy",
     "qdwin_secctx_clients_destroy_all",
+    "qdwin_neutralize_binding_resource",
+    "qdwin_neutralize_binding_resources",
+    "qdwin_primary_device_resource_destroy",
     "qdwin_shell_resource_destroy",
     "qdwin_locker_resource_destroy",
     "qdwin_proxy_pointer_track_focus",
@@ -1013,6 +1063,11 @@ static int case_listener_families(void)
 	ps->seat = &main_seat;
 	ps->current_source = calloc(1, sizeof *ps->current_source);
 	dev->pseat = ps;
+	/* The device resource is client-owned and outlives the seat: its
+	 * late destructor must hit the re-initialized self-link, not the
+	 * freed pseat head (sol impl r2 P1). */
+	struct wl_resource *dev_res =
+		res_new(dev, qdwin_primary_device_resource_destroy);
 	wl_list_init(&ps->devices);
 	wl_list_insert(&ps->devices, &dev->link);
 	wl_list_insert(&main_seat.destroy_signal.listener_list,
@@ -1074,6 +1129,12 @@ static int case_listener_families(void)
 	CHECK(wl_list_empty(&q->secctx_clients), "secctx still listed");
 	CHECK(wl_list_empty(&q->layer_surfaces), "layer surface still listed");
 	CHECK(dev->pseat == NULL, "primary device still armed");
+	CHECK(dev->link.next == &dev->link && dev->link.prev == &dev->link,
+	      "primary device link still points into the freed seat");
+	/* The real destructor's wl_list_remove on a stale link would write
+	 * through freed memory — ASan-visible even without the check. */
+	qd_res_destroy(dev_res);
+	CHECK(dev_res->destroyed, "device destructor did not run");
 	CHECK(clear_selection_calls == 1, "held selection not cancelled");
 	CHECK(end_grab_calls >= 1,
 	      "layer popup grab never ended");
@@ -1093,7 +1154,7 @@ static int case_listener_families(void)
 	free(psrc);
 	free(fs_res); free(fsurf);
 	free(ls_res); free(lpv); free(lsv); free(lsurf);
-	free(client); free(dev); free(q);
+	free(client); free(dev_res); free(q);
 	return 0;
 }
 
@@ -1265,6 +1326,10 @@ static int case_grab_suppression(void)
 	probe_dsurf_destroy = NULL;
 	struct weston_desktop_surface *ds = dsurf_new(tl);
 	tl->desktop_surface = ds;
+	/* Non-NULL lookup result: if the handler reaches the proxy lookup
+	 * it would cache a dying proxy — calls==0 is the real proof the
+	 * NULL singleton suppressed it (sol impl r2). */
+	proxy_for_view_result = tl;
 
 	qdwin_toplevels_destroy_all(q);
 
@@ -1272,6 +1337,9 @@ static int case_grab_suppression(void)
 	CHECK(focus_handler_calls == 1,
 	      "end_grab did not synchronously fire the focus handler");
 	CHECK(pick_calls == 1, "suppressed focus handler did not pick");
+	CHECK(proxy_for_view_calls == 0,
+	      "focus handler reached the proxy lookup through a NULL "
+	      "singleton");
 	CHECK(q->active_input_proxy == NULL,
 	      "focus handler cached a proxy through the NULL singleton");
 
@@ -1383,6 +1451,67 @@ static int case_full_pass(void)
 	return 0;
 }
 
+/* 14: unclaimed bindings — the stage-4 enumeration neutralizes EVERY
+ * qdwin-class resource on the display, not just the claimed ones. A
+ * bind that never claimed a role keeps user_data==qdwin until client
+ * disconnect; its late destructor would otherwise compare fields of
+ * the freed qdwin (sol impl r2 P1). */
+static int case_unclaimed_bindings(void)
+{
+	reset_counters();
+	struct qdwin *q = q_new();
+	static struct wl_display display;
+	wl_list_init(&display.client_list);
+	comp.wl_display = &display;
+
+	struct wl_client *client = calloc(1, sizeof *client);
+	wl_list_init(&client->resource_list);
+	wl_list_insert(&display.client_list, &client->link);
+
+	struct wl_resource *claimed =
+		res_new(q, qdwin_shell_resource_destroy);
+	claimed->class_name = "qdwin_shell_v1";
+	q->shell_resource = claimed;
+	q->shell_bound = 1;
+	struct wl_resource *unclaimed =
+		res_new(q, qdwin_shell_resource_destroy);
+	unclaimed->class_name = "qdwin_shell_v1";
+	struct wl_resource *ulk =
+		res_new(q, qdwin_locker_resource_destroy);
+	ulk->class_name = "qdwin_locker_v1";
+	struct wl_resource *lsr = res_new(q, NULL);
+	lsr->class_name = "qdwin_lock_surface_v1";
+	struct wl_resource *foreign = res_new(q, NULL);
+	foreign->class_name = "wl_data_device";
+	/* Foreign first: the walk must cover the whole list. */
+	wl_list_insert(&client->resource_list, &foreign->link);
+	wl_list_insert(&client->resource_list, &lsr->link);
+	wl_list_insert(&client->resource_list, &ulk->link);
+	wl_list_insert(&client->resource_list, &unclaimed->link);
+	wl_list_insert(&client->resource_list, &claimed->link);
+
+	qdwin_neutralize_binding_resources(q);
+	CHECK(claimed->user_data == NULL &&
+	      unclaimed->user_data == NULL &&
+	      ulk->user_data == NULL &&
+	      lsr->user_data == NULL,
+	      "a qdwin-class binding kept its freed-qdwin user_data");
+	CHECK(foreign->user_data == q,
+	      "neutralizer touched a foreign resource");
+
+	/* Late disconnect after free(q): every qdwin-class destructor must
+	 * no-op; under ASan a surviving user_data would deref freed q. */
+	free(q);
+	qdwin_shell_resource_destroy(claimed);
+	qdwin_shell_resource_destroy(unclaimed);
+	qdwin_locker_resource_destroy(ulk);
+
+	free(claimed); free(unclaimed); free(ulk); free(lsr); free(foreign);
+	free(client);
+	comp.wl_display = NULL;
+	return 0;
+}
+
 int main(void)
 {
 	memset(&comp, 0, sizeof comp);
@@ -1402,7 +1531,8 @@ int main(void)
 	if ((r = case_binding_destructors())) return r;
 	if ((r = case_grab_suppression())) return r;
 	if ((r = case_full_pass())) return r;
-	printf("destroy-drain behaviour: 12 cases OK\n");
+	if ((r = case_unclaimed_bindings())) return r;
+	printf("destroy-drain behaviour: 13 cases OK\n");
 	return 0;
 }
 """
@@ -1422,12 +1552,17 @@ def main():
     parts = [PROLOGUE]
     # Forward declarations first — the spliced order doesn't match call
     # order (e.g. toplevels_destroy_all calls nested_proxy_destroy).
+    return_types = {
+        "qdwin_neutralize_binding_resource": "enum wl_iterator_result",
+    }
     for name in SPLICED:
         body = extract(qdwin_c, name)
         sig = body[:body.index("{")].strip()
-        parts.append(f"static void {sig};")
+        parts.append(f"static {return_types.get(name, 'void')} {sig};")
     for name in SPLICED:
-        parts.append("static void " + extract(qdwin_c, name))
+        parts.append(
+            f"static {return_types.get(name, 'void')} "
+            + extract(qdwin_c, name))
     parts.append(EPILOGUE)
 
     with tempfile.TemporaryDirectory() as td:

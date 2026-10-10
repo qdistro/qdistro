@@ -13675,6 +13675,41 @@ static void qdwin_ext_ws_managers_destroy_all(struct qdwin *qdwin);
 static void qdwin_om_managers_destroy_all(struct qdwin *qdwin);
 static void qdwin_secctx_clients_destroy_all(struct qdwin *qdwin);
 
+/* wl_client_for_each_resource iterator: clear user_data on every
+ * qdwin-* binding resource whose resource destructor binds `struct
+ * qdwin *` from user_data (qdwin_shell_v1, qdwin_locker_v1,
+ * qdwin_lock_surface_v1 — the only three). The claimed resources are
+ * tracked in qdwin->*_resource, but a client may bind a global or
+ * create a lock surface without ever claiming a role, and such a
+ * resource keeps user_data==qdwin until client disconnect. If it
+ * outlives the compositor teardown, its late destructor would compare
+ * fields of the freed qdwin — enumerate and neutralize them all. */
+static enum wl_iterator_result
+qdwin_neutralize_binding_resource(struct wl_resource *resource, void *data)
+{
+	const char *cls = wl_resource_get_class(resource);
+	(void)data;
+	if (cls &&
+	    (strcmp(cls, qdwin_shell_v1_interface.name) == 0 ||
+	     strcmp(cls, qdwin_locker_v1_interface.name) == 0 ||
+	     strcmp(cls, qdwin_lock_surface_v1_interface.name) == 0))
+		wl_resource_set_user_data(resource, NULL);
+	return WL_ITERATOR_CONTINUE;
+}
+
+/* Walk every client resource on the display and run the neutralizer.
+ * wl_client_for_each / wl_client_for_each_resource are the only public
+ * enumeration points; neither mutates the lists being walked here. */
+static void
+qdwin_neutralize_binding_resources(struct qdwin *qdwin)
+{
+	struct wl_client *client;
+	wl_client_for_each(client,
+		wl_display_get_client_list(qdwin->compositor->wl_display))
+		wl_client_for_each_resource(
+			client, qdwin_neutralize_binding_resource, NULL);
+}
+
 static void
 qdwin_destroy(struct wl_listener *listener, void *data)
 {
@@ -13763,27 +13798,23 @@ qdwin_destroy(struct wl_listener *listener, void *data)
 	qdwin_om_managers_destroy_all(qdwin);
 	qdwin_secctx_clients_destroy_all(qdwin);
 
-	/* Stage 4 — neutralize the bindings whose resource destructors
-	 * dereference user_data==qdwin without a NULL check. The resources
-	 * themselves are client-owned and outlive us; clearing their
-	 * user_data makes the late destructor (shell/locker unbind, lock
-	 * surface teardown) a no-op instead of a use-after-free. Then drop
-	 * our own lock-surface listeners and the dedicated lock view. */
+	/* Stage 4 — neutralize EVERY binding resource whose destructor
+	 * binds user_data as `struct qdwin *`, not only the claimed ones:
+	 * unclaimed qdwin_shell_v1/qdwin_locker_v1/lock-surface bindings
+	 * keep user_data==qdwin until client disconnect and their late
+	 * destructors would otherwise read freed memory. The enumeration
+	 * walks every client resource; resources are client-owned and
+	 * outlive us, and clearing their user_data makes the late
+	 * destructor (shell/locker unbind, lock surface teardown) a no-op
+	 * instead of a use-after-free. Then drop our own lock-surface
+	 * listeners and the dedicated lock view. */
 	if (qdwin->shell_background)
 		wl_resource_destroy(qdwin->shell_background->resource);
-	if (qdwin->shell_resource) {
-		wl_resource_set_user_data(qdwin->shell_resource, NULL);
-		qdwin->shell_resource = NULL;
-		qdwin->shell_bound = 0;
-	}
-	if (qdwin->locker_resource) {
-		wl_resource_set_user_data(qdwin->locker_resource, NULL);
-		qdwin->locker_resource = NULL;
-	}
-	if (qdwin->lock_resource) {
-		wl_resource_set_user_data(qdwin->lock_resource, NULL);
-		qdwin->lock_resource = NULL;
-	}
+	qdwin_neutralize_binding_resources(qdwin);
+	qdwin->shell_resource = NULL;
+	qdwin->shell_bound = 0;
+	qdwin->locker_resource = NULL;
+	qdwin->lock_resource = NULL;
 	if (qdwin->lock_surface) {
 		wl_list_remove(&qdwin->lock_surface_commit.link);
 		wl_list_remove(&qdwin->lock_surface_destroy.link);
@@ -13807,7 +13838,13 @@ qdwin_destroy(struct wl_listener *listener, void *data)
 	 * freed qdwin; leaking the ~one struct keeps that callback's
 	 * desktop->api / desktop->user_data reads valid until the process
 	 * exits. Freeing it here would be a use-after-free window we cannot
-	 * close from the public API. */
+	 * close from the public API.
+	 *
+	 * The retained desktop->user_data==qdwin does leave one unsafe
+	 * route: api.surface_added still receives the freed pointer, so
+	 * this teardown is only correct for TERMINAL shutdown — no client
+	 * request dispatch may run after this point (weston's destroy
+	 * listener ordering guarantees it). */
 	qdwin->desktop = NULL;
 	if (qdwin->shell_global)
 		wl_global_destroy(qdwin->shell_global);
@@ -19670,8 +19707,15 @@ qdwin_primary_seat_seat_destroyed(struct wl_listener *l, void *data)
 	wl_list_init(&pseat->seat_destroy_listener.link);
 	if (pseat->current_source)
 		qdwin_primary_seat_clear_selection(pseat, 1);
-	wl_list_for_each_safe(device, tmp, &pseat->devices, link)
+	/* Device resources are client-owned and outlive the seat: unlink
+	 * each link now — leaving it on pseat->devices makes the late
+	 * qdwin_primary_device_resource_destroy wl_list_remove write
+	 * through the freed head. */
+	wl_list_for_each_safe(device, tmp, &pseat->devices, link) {
 		device->pseat = NULL;
+		wl_list_remove(&device->link);
+		wl_list_init(&device->link);
+	}
 	wl_list_remove(&pseat->link);
 	free(pseat);
 }
@@ -19691,8 +19735,11 @@ qdwin_primary_seats_destroy_all(struct qdwin *qdwin)
 		wl_list_init(&pseat->seat_destroy_listener.link);
 		if (pseat->current_source)
 			qdwin_primary_seat_clear_selection(pseat, 1);
-		wl_list_for_each_safe(device, dtmp, &pseat->devices, link)
+		wl_list_for_each_safe(device, dtmp, &pseat->devices, link) {
 			device->pseat = NULL;
+			wl_list_remove(&device->link);
+			wl_list_init(&device->link);
+		}
 		wl_list_remove(&pseat->link);
 		free(pseat);
 	}
