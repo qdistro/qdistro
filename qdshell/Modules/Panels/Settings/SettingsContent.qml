@@ -167,15 +167,28 @@ Item {
   property int _pendingSubTab: -1
 
   function navigateToResult(entry) {
-    if (entry.tab < 0 || entry.tab >= tabsModel.length)
+    // Entries may address a tab by its stable SettingsPanel.Tab enum id
+    // (tabId) instead of a display-order index (tab), so callers do not
+    // have to hard-code the sidebar ordering.
+    var tabIndex = entry.tab;
+    if (entry.tabId !== undefined && entry.tabId !== null) {
+      tabIndex = -1;
+      for (var i = 0; i < tabsModel.length; i++) {
+        if (tabsModel[i].id === entry.tabId) {
+          tabIndex = i;
+          break;
+        }
+      }
+    }
+    if (tabIndex < 0 || tabIndex >= tabsModel.length)
       return;
 
     highlightLabelKey = entry.labelKey;
     _pendingSubTab = (entry.subTab !== null && entry.subTab !== undefined) ? entry.subTab : -1;
 
-    const alreadyOnTab = (currentTabIndex === entry.tab);
+    const alreadyOnTab = (currentTabIndex === tabIndex);
     navigatingFromSearch = true;
-    currentTabIndex = entry.tab;
+    currentTabIndex = tabIndex;
     navigatingFromSearch = false;
 
     if (alreadyOnTab && activeTabContent) {
@@ -345,6 +358,13 @@ Item {
 
     // Check if this item has a matching label
     if (item.hasOwnProperty("label") && item.label === I18n.tr(labelKey)) {
+      return item;
+    }
+
+    // Or a programmatic highlight key — stable, untranslated identifiers
+    // (e.g. a tier-5 catalogue appId) that a caller can target without
+    // going through a display string.
+    if (item.hasOwnProperty("highlightKey") && item.highlightKey === labelKey) {
       return item;
     }
 

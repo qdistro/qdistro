@@ -1,7 +1,9 @@
 import QtQuick
 import Quickshell
 import qs.Commons
+import qs.Modules.Panels.Settings
 import qs.Services.Qdistro
+import qs.Services.UI
 
 // VMAppsProvider — surface tier-5 (per-app VM) apps in the launcher.
 //
@@ -79,10 +81,39 @@ Item {
           launcher.closeImmediately();
         Qt.callLater(() => {
           Logger.d("VMAppsProvider",
-            "Launching " + row.appId + " in a fresh tier-5 VM");
+            "Launching " + row.appId + " in its tier-5 VM");
           VMApps.launch(row);
         });
       },
     }));
+  }
+
+  // Secondary action: open this app's row in Settings → "Sandboxed VM
+  // apps" (the per-app lifecycle overrides keyed by the same catalogue
+  // appId). Rides the standard openToEntry pipeline; the tab is addressed
+  // by its stable SettingsPanel.Tab enum id and the row by its
+  // highlightKey == appId, so neither display ordering nor translated
+  // labels are part of the contract.
+  function getItemActions(item) {
+    if (!item || !item.appId)
+      return [];
+    return [
+          {
+            "icon": "settings",
+            "tooltip": I18n.tr("tooltips.vm-app-settings"),
+            "action": function () {
+              const screen = root.launcher ? root.launcher.screen : null;
+              if (root.launcher && root.launcher.close)
+                root.launcher.close();
+              Qt.callLater(() => {
+                SettingsPanelService.openToEntry({
+                                                   "tabId": SettingsPanel.Tab.VMApps,
+                                                   "labelKey": item.appId,
+                                                   "subTab": -1
+                                                 }, screen);
+              });
+            }
+          }
+        ];
   }
 }

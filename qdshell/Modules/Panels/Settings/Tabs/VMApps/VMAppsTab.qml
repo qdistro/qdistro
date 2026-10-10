@@ -241,6 +241,11 @@ ColumnLayout {
       id: appRow
       required property var modelData
       readonly property string appId: modelData.appId
+      // Addressable by the Settings search/highlight pipeline
+      // (findAndHighlightWidget) through the stable catalogue appId — the
+      // launcher's per-app settings action navigates here with
+      // labelKey == appId.
+      readonly property string highlightKey: appRow.appId
       readonly property var ov: root.overrideFor(appId)
       readonly property bool overridden: root.isOverridden(appId)
       Layout.fillWidth: true
