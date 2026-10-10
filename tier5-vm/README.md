@@ -147,18 +147,18 @@ silently merge:
 - The domain records its bound appId in `<metadata>` at define time.
   Adoption verifies bound == `--policy-key`: a LIVE domain bound to
   another (or no) app is refused (the wrapper exits with REAP=0 — it
-  never tears down a guest it does not own), and a foreign domain is
-  reclaimed under the exclusive hold only when `domain_is_live`
-  confirms it dead. "Live" is decided by `qemu_pids_for_domain` alone —
+  never tears down a guest it does not own), and a defined foreign
+  domain is refused outright rather than reclaimed — confirmed qemu
+  death proves no live guest is killed, but it does not make the
+  foreign definition or disk ours; the owner relaunches under its own
+  name and an admin removes a genuinely stale squatter deliberately.
+  "Live" is decided by `qemu_pids_for_domain` alone —
   a pgrep on libvirt's `-name guest=<vm>` argv token narrowed to real
   qemu via `/proc/<pid>/comm`, with a distinct cannot-determine rc.
   `domstate` is not consulted for liveness at all: nested-virt libvirt
   can lie in both directions — "shut off" for a live qemu and stale
   "running" for a dead one — and no backing qemu process means death,
-  since libvirt cannot run a VM without one. A terminal `domstate`
-  stays on only as a belt in the foreign-reclaim path, and a settle +
-  re-verify between `undefine` and the overlay unlink closes the
-  out-of-band-`virsh start` window. The same oracle guards
+  since libvirt cannot run a VM without one. The same oracle guards
   the startup orphan-overlay reaper, the adopt/create decision, the
   idle-keep-warm window, the session wait loop, and the standalone
   `qdistro-tier5-cleanup.sh` helper. This covers collisions ACROSS
@@ -168,16 +168,24 @@ silently merge:
   Every destructive step fails closed on that oracle's third state:
   cannot-determine NEVER counts as dead. A pgrep candidate whose
   `/proc/<pid>/comm` is unreadable, a failed `virsh undefine`, and a
-  `dominfo` error that is not "not found" are all ambiguity, and
-  ambiguity preserves the guest, the definition, and the overlay.
+  failed defined-state query are all ambiguity, and ambiguity
+  preserves the guest, the definition, and the overlay. Defined-state
+  is decided by `virsh list --all --name` — an enumeration that
+  SUCCEEDS is authoritative (name absent = confirmed absent); any
+  query failure is unverifiable. It deliberately does not parse
+  `dominfo` stderr: absence phrasing drifts across libvirt versions
+  and loose substrings match outage text like "libvirt socket not
+  found".
   Concretely: the wait loop consults the oracle every iteration and
   ends only on a confirmed-dead verdict (the app-exit watch remains
   the primary session-end signal); `create_domain` re-verifies the
   domain binding before `virsh start` and refuses on an unverifiable
   scan or a foreign binding; the orphan reaper takes the target's own
-  hold before judging, requires a successful `undefine` (or proven
-  "not found"), and re-verifies death after a settle; and every
-  overlay `rm` — in teardown, reclaim, reaper, and
+  hold before judging, touches only overlays whose domain is
+  CONFIRMED ABSENT (it never undefines — a defined-but-dead domain
+  has an owner record the reaper cannot adjudicate), and re-verifies
+  death after a settle; and every
+  overlay `rm` — in teardown, reaper, and
   `qdistro-tier5-cleanup.sh` — is preceded by confirmed-absent
   definition + confirmed-dead qemu, in that order. The cleanup helper
   additionally claims the domain's hold exclusively for its whole

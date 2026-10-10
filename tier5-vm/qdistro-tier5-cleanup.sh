@@ -50,6 +50,20 @@ qemu_pids_for_domain() {
     printf '%s' "$out"
 }
 
+# domain_defined_state — rc 0 defined, 1 CONFIRMED absent, 2 cannot
+# determine. Uses `virsh list --all --name`: an enumeration that
+# succeeds is authoritative; ANY failure is unverifiable. Dominfo
+# absence needs error-text parsing whose shape drifts across libvirt
+# versions and can match outage text (sol r11).
+domain_defined_state() {
+    local list
+    if ! list=$(run_as_admin virsh list --all --name 2>/dev/null); then
+        return 2
+    fi
+    printf '%s\n' "$list" | grep -Fxq -- "$VM_NAME" && return 0
+    return 1
+}
+
 # Serialize on the domain's own hold file — the same flock protocol the
 # spawn wrappers use. A live wrapper holds a shared fd9 lock for its
 # whole session, so our bounded EXCLUSIVE claim either wins (no wrapper
@@ -73,9 +87,10 @@ fi
 
 # Teardown itself is best-effort against our own domain; only the FINAL
 # gate below (confirmed-absent definition + confirmed-dead qemu) may
-# unlink the overlay. A dominfo failure is read precisely — "not found"
-# is absence; any other error is ambiguity, never absence (sol r7).
-if _derr=$(run_as_admin virsh dominfo "$VM_NAME" 2>&1 >/dev/null); then
+# unlink the overlay. Defined-state is read via the enumeration oracle —
+# a query failure is ambiguity, never absence (sol r7/r11).
+domain_defined_state; _ds=$?
+if [ "$_ds" -eq 0 ]; then
     # The hold proves no wrapper uses the name — it does not prove the
     # domain is tier-5's. Require the appId binding the spawn stamps at
     # define time before destroying: an unbound (or unreadable) domain
@@ -107,8 +122,7 @@ if _derr=$(run_as_admin virsh dominfo "$VM_NAME" 2>&1 >/dev/null); then
         echo "[tier5-cleanup] WARN: undefine $VM_NAME failed" >&2
     fi
     echo "[tier5-cleanup] $VM_NAME destroyed + undefined"
-elif printf '%s' "$_derr" \
-        | grep -qiE 'not found|no domain|does not exist'; then
+elif [ "$_ds" -eq 1 ]; then
     echo "[tier5-cleanup] $VM_NAME not present"
 else
     echo "[tier5-cleanup] WARN: cannot query $VM_NAME — libvirt error" >&2
@@ -118,11 +132,11 @@ if [ -f "$DISK" ]; then
     # Both proofs are required before the overlay goes: NO startable
     # definition remains (a still-defined domain can be started against
     # a disk we are about to delete) AND no backing qemu lives.
-    if _derr2=$(run_as_admin virsh dominfo "$VM_NAME" 2>&1 >/dev/null); then
+    domain_defined_state; _ds=$?
+    if [ "$_ds" -eq 0 ]; then
         echo "[tier5-cleanup] FAIL: $VM_NAME still defined — keeping $DISK" >&2
         exit 5
-    elif ! printf '%s' "$_derr2" \
-            | grep -qiE 'not found|no domain|does not exist'; then
+    elif [ "$_ds" -ne 1 ]; then
         echo "[tier5-cleanup] FAIL: cannot verify $VM_NAME is gone" >&2
         echo "        — keeping $DISK" >&2
         exit 5

@@ -71,7 +71,7 @@ def test_liveness_decisions_use_the_qemu_oracle():
     # override it in either direction (sol r8)
     assert "virsh domstate" not in live
     assert "qemu_pids_for_domain" in live
-    # adopt, reclaim, idle-window, wait-loop, and the early check all
+    # adopt, refuse, idle-window, wait-loop, and the early check all
     # consume the oracle
     assert SPAWN.count("domain_is_live") >= 6
 
@@ -191,60 +191,79 @@ def test_adoption_verifies_bound_appid():
     assert decision.count("REAP=0; exit 3") >= 2
 
 
-def test_stopped_foreign_domain_is_reclaimed_not_adopted():
-    # ensures: a foreign domain is reclaimed only when its backing qemu
-    #          is proven DEAD by domain_is_live — domstate alone can
-    #          report "shut off" for a live qemu under nested KVM, so it
-    #          is only a belt on top of the oracle verdict (sol r5/r6).
-    #          No virsh destroy ever runs against a foreign guest, and a
-    #          settle + post-undefine liveness recheck protects the
-    #          overlay from an out-of-band start in the probe gap.
-    assert "reclaiming stopped foreign domain" in SPAWN
+def test_stopped_foreign_domain_is_refused_not_reclaimed():
+    # ensures: a defined domain bound to another (or no) app can NEVER
+    #          be destroyed by this wrapper — confirmed qemu death only
+    #          proves no live guest is killed; it does not make the
+    #          foreign definition or disk ours (sol r11). The launch
+    #          refuses outright: no domstate terminal check, no
+    #          undefine, no overlay rm against the foreign guest.
     start = SPAWN.index('if [ "$_ds" -eq 0 ] && [ "$(domain_appid)" != "$POLICY_KEY" ]')
     end = SPAWN.index("create_domain\n    fi\n    flock -s 9")
-    reclaim = SPAWN[start:end]
-    assert "shutoff|crashed" in reclaim
-    assert "refusing to reclaim" in reclaim
-    assert 'virsh destroy "$VM_NAME"' not in reclaim
-    # metadata-aware undefine + proof the definition is gone (an
-    # unverifiable dominfo is ambiguity, not absence)
-    assert "undefine_domain" in reclaim
-    assert "domain_defined_state; _ds=$?" in reclaim
-    assert '[ "$_ds" -ne 1 ]' in reclaim
-    assert "or unverifiable after undefine" in reclaim
-    assert 'rm -f "$DISK"' in reclaim
-    # settle + confirmed-dead recheck between undefine and unlink
-    assert reclaim.index("sleep 0.3") < reclaim.index('rm -f "$DISK"')
-    assert reclaim.index("domain_is_live", reclaim.index("undefine")) \
-        < reclaim.index('rm -f "$DISK"')
-    assert "live or" in reclaim  # the post-undefine refuse branch
+    block = SPAWN[start:end]
+    assert "refusing to reclaim another app's guest" in block
+    assert "REAP=0; exit 3" in block
+    # nothing destructive may remain in the foreign path
+    assert "undefine_domain" not in block
+    assert "virsh destroy" not in block
+    assert 'rm -f "$DISK"' not in block
+    assert "virsh domstate" not in block
 
 
 def test_orphan_reaper_uses_qemu_liveness_not_domstate():
     # ensures: the startup orphan-overlay reaper cannot delete a live
-    #          guest's disk — it takes the target domain's own hold
-    #          (racing spawns serialize), requires a CONFIRMED-dead
-    #          domain_is_live verdict, distinguishes "not found" from a
-    #          libvirt outage via the dominfo error text, requires
-    #          undefine success on a defined domain, and settles +
-    #          re-verifies before the rm (sol r7)
+    #          guest's disk OR a defined domain's overlay — it takes the
+    #          target domain's own hold (racing spawns serialize),
+    #          requires a CONFIRMED-dead domain_is_live verdict, and
+    #          only reaps overlays whose domain is CONFIRMED ABSENT. It
+    #          never undefines: a defined-but-dead domain has an owner
+    #          record the reaper cannot adjudicate (sol r11).
     reaper = SPAWN[SPAWN.index("orphan-overlay reaper"):
                    SPAWN.index("reaped orphan overlay")]
     # per-target flock serializes against a wrapper spawning that domain
     assert 'hold-$base' in reaper
     assert 'flock -n -x "$hfd"' in reaper
     assert 'domain_is_live "$base"' in reaper
-    assert reaper.count('_lv=$?') >= 2  # verdict before AND after undefine
-    # dominfo uses the precise 3-state helper — "not found" vs outage
+    assert reaper.count('_lv=$?') >= 2  # verdict before AND after settle
+    # dominfo uses the precise 3-state helper — and only a CONFIRMED
+    # absence (rc 1) may proceed to the rm
     assert 'domain_defined_state "$base"; _ds=$?' in reaper
-    assert 'not found|no domain|does not exist' in SPAWN
-    # a defined domain must be undefine'd SUCCESSFULLY (no || true)
-    assert 'virsh undefine "$base"' in reaper
-    assert 'virsh undefine "$base" >/dev/null 2>&1 || true' not in reaper
+    assert '[ "$_ds" -ne 1 ]' in reaper
+    # no undefine ever: deleting a startable definition's disk is not
+    # the reaper's call to make
+    assert "virsh undefine" not in reaper
+    assert "undefine_domain" not in reaper
     # exact backing-file match via JSON field, not a substring grep
     assert '--output=json' in reaper
     assert '"backing-filename"' in reaper
     assert "came alive during reap" in SPAWN
+
+
+def test_defined_state_helper_is_precise_and_defined_before_first_call():
+    # ensures: domain absence comes from a SUCCESSFUL enumeration, not
+    #          dominfo stderr — error-text absence detection drifts
+    #          across libvirt versions (12.x prints only "failed to get
+    #          domain 'X'") and loose substrings match outage text like
+    #          "libvirt socket not found" (sol r11). A successful
+    #          `virsh list --all --name` without the name is confirmed
+    #          absence; ANY query failure is unverifiable. And the
+    #          helper must be DEFINED before the startup reaper's call
+    #          site — bash resolves functions at call time; a later
+    #          definition returns 127 and silently skips every orphan.
+    body = _section("domain_defined_state")
+    assert "virsh list --all --name" in body
+    assert 'grep -Fxq -- "$name"' in body
+    assert "dominfo" not in body
+    # defined before the reaper calls it
+    assert SPAWN.index("domain_defined_state()") \
+        < SPAWN.index('domain_defined_state "$base"')
+    # the cleanup helper uses the same enumeration oracle
+    cb = re.search(
+        r"domain_defined_state\(\)\s*\{(?P<body>.*?)\n\}",
+        CLEANUP, re.S,
+    ).group("body")
+    assert "virsh list --all --name" in cb
+    assert "dominfo" not in cb
 
 
 def test_foreign_refusal_never_joins_the_lock_session_early():
@@ -439,26 +458,28 @@ def test_cleanup_helper_serializes_on_the_domain_hold():
     assert "flock -w 5 -x 9" in CLEANUP
     # the lock precedes every teardown step
     assert CLEANUP.index("flock -w 5 -x 9") \
-        < CLEANUP.index('virsh dominfo "$VM_NAME"')
+        < CLEANUP.index("domain_defined_state; _ds=$?")
     assert "live wrapper session holds" in CLEANUP
 
 
 def test_cleanup_helper_requires_absent_definition_for_unlink():
     # ensures: the standalone cleanup tool cannot leave a startable
     #          domain pointing at a deleted overlay — the rm requires a
-    #          verified-absent definition (dominfo error text separates
-    #          "not found" from a libvirt outage) AND confirmed-dead
-    #          qemu (sol r7)
+    #          verified-absent definition (a successful enumeration
+    #          without the name — a query failure is ambiguity, never
+    #          absence) AND confirmed-dead qemu (sol r7/r11)
     tail = CLEANUP[CLEANUP.index('if [ -f "$DISK" ]'):]
-    assert '_derr2=' in tail
-    assert 'not found|no domain|does not exist' in tail
+    assert "domain_defined_state; _ds=$?" in tail
+    assert '[ "$_ds" -eq 0 ]' in tail
+    assert '[ "$_ds" -ne 1 ]' in tail
     assert "still defined" in tail
     assert "cannot verify" in tail
     assert "qemu_pids_for_domain; _lv=$?" in tail
     assert '[ "$_lv" -eq 1 ]' in tail
     assert 'rm -f "$DISK"' in tail
     # definition check precedes the qemu check precedes the rm
-    assert tail.index("_derr2=") < tail.index("qemu_pids_for_domain")
+    assert tail.index("domain_defined_state") \
+        < tail.index("qemu_pids_for_domain")
     assert tail.index("qemu_pids_for_domain") < tail.index('rm -f "$DISK"')
     # undefine failure is surfaced, not swallowed into "not present"
     assert "WARN: undefine" in CLEANUP

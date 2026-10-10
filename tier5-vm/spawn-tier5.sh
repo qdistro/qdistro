@@ -307,6 +307,25 @@ domain_is_live() {
     return 1
 }
 
+# domain_defined_state [name] — rc 0 = defined, 1 = CONFIRMED absent,
+# 2 = cannot determine. Uses `virsh list --all --name`, not dominfo
+# stderr: an enumeration that SUCCEEDS is authoritative (name in the
+# list = defined; not in it = confirmed absent), while ANY failure is
+# unverifiable. Dominfo absence detection would need error-text parsing
+# whose shape drifts across libvirt versions — 12.x prints only
+# "failed to get domain 'X'" while older releases print "Domain not
+# found", and a loose "not found" substring also matches outage text
+# like "libvirt socket not found" (sol r11). MUST stay defined before
+# the startup reaper (~line 380), which is the first caller.
+domain_defined_state() {
+    local name="${1:-$VM_NAME}" list
+    if ! list=$(run_as_admin virsh list --all --name 2>/dev/null); then
+        return 2
+    fi
+    printf '%s\n' "$list" | grep -Fxq -- "$name" && return 0
+    return 1
+}
+
 # domain_xml_tmpfile is provided by lib/spawn-common.sh (sourced below); it
 # renders into a private 0700 dir under the admin runtime. (A local definition
 # here would be shadowed by that source anyway.)
@@ -362,10 +381,12 @@ else
     # Per-VM overlay qcow2 files in $DISK_DIR are orphaned when a
     # prior spawn-tier5.sh wrapper died without running its EXIT trap
     # (segfault, kill -9, host crash, OOM-killer). Reap those whose
-    # wrapper is no longer alive AND whose libvirt domain is either
-    # absent or not running. Conservative: only touches qcow2 files
-    # whose backing file is $DISK_BASE (won't accidentally rm a
-    # user's unrelated qcow2 in the same dir).
+    # wrapper is no longer alive AND whose libvirt domain is CONFIRMED
+    # ABSENT — a defined-but-stopped domain keeps its overlay: it has
+    # an owner record (its bound app restarts it on next launch) that
+    # the reaper cannot adjudicate (sol r11). Conservative: only
+    # touches qcow2 files whose backing file is $DISK_BASE (won't
+    # accidentally rm a user's unrelated qcow2 in the same dir).
     if [ "${TIER5_NO_REAP:-0}" != "1" ] && [ -d "$DISK_DIR" ]; then
         for overlay in "$DISK_DIR"/*.qcow2; do
             [ -f "$overlay" ] || continue
@@ -400,22 +421,18 @@ else
             # "shut off" can't cost a live guest its disk (sol r6).
             domain_is_live "$base"; _lv=$?
             if [ "$_lv" -ne 1 ]; then exec {hfd}>&-; continue; fi
-            # Defined vs absent must be distinguished precisely — an
-            # unverifiable query (rc 2) is ambiguity, not absence (r7).
+            # Only a CONFIRMED-ABSENT domain makes this a true file
+            # orphan. The reaper never undefines: a defined-but-dead
+            # domain has an owner record — its bound app restarts it on
+            # next launch, and deleting the disk under it is not ours
+            # to do (sol r11). Unverifiable queries skip the same way.
             domain_defined_state "$base"; _ds=$?
-            case "$_ds" in
-                0)  # Defined: undefine MUST succeed — a failed undefine
-                    # leaves a startable config pointing at this overlay.
-                    run_as_admin virsh undefine "$base" >/dev/null 2>&1 \
-                        || { exec {hfd}>&-; continue; } ;;
-                1)  ;;  # confirmed absent — nothing to undefine
-                *)  exec {hfd}>&-; continue ;;
-            esac
-            # Settle + re-verify: a `virsh start` issued just before our
-            # undefine can still be exec'ing its qemu. With the
-            # definition gone AND the per-target hold held, no NEW start
-            # is possible, so a clean scan here is the last proof the
-            # overlay needs (sol r7).
+            if [ "$_ds" -ne 1 ]; then exec {hfd}>&-; continue; fi
+            # Settle + re-verify: an out-of-band `virsh create` could
+            # still be exec'ing a qemu under this name. With no
+            # definition AND the per-target hold held, no cooperating
+            # start is possible, so a clean scan here is the last proof
+            # the overlay needs (sol r7/r11).
             sleep 0.3
             domain_is_live "$base"; _lv=$?
             if [ "$_lv" -eq 0 ]; then
@@ -603,21 +620,6 @@ host_mem_avail_mb() {  # host MemAvailable in MiB, or "" if unreadable
     kb=$(grep -E '^MemAvailable:' /proc/meminfo 2>/dev/null | grep -oE '[0-9]+' | head -1)
     [ -n "$kb" ] || return 0
     printf '%s' $((kb / 1024))
-}
-
-# domain_defined_state [name] — rc 0 = defined, 1 = CONFIRMED absent,
-# 2 = cannot determine. A bare dominfo failure conflates "domain not
-# found" with a libvirt query outage; only the error text separates
-# them, and an outage must never read as absence (sol r7).
-domain_defined_state() {
-    local name="${1:-$VM_NAME}" err
-    if err=$(run_as_admin virsh dominfo "$name" 2>&1 >/dev/null); then
-        return 0
-    fi
-    printf '%s' "$err" \
-        | grep -qiE 'not found|no domain|does not exist' \
-        && return 1
-    return 2
 }
 
 # Try the ordinary undefine first. If libvirt reports retained per-domain state
@@ -848,8 +850,8 @@ cleanup() {
         if [ "$REAP" = "1" ]; then
             # The claim only proves no wrapper holds the domain NOW —
             # not that it is still OURS. The original guest could have
-            # died during the idle window and the name been reclaimed
-            # by another app; destroying that foreign replacement is
+            # died during the idle window and the name been re-bound to
+            # another app; destroying that foreign replacement is
             # exactly the cross-app kill the binding exists to prevent
             # (sol r9). Re-verify before reaping: a DEFINED domain must
             # carry our binding, confirmed-absent has no owner to
@@ -1029,7 +1031,7 @@ create_domain() {
 
     # Define only on CONFIRMED absence. An already-defined domain must
     # be OURS before we may start it — the decision layer checked the
-    # binding, but a transient dominfo outage could have hidden a
+    # binding, but a transient query outage could have hidden a
     # foreign domain then (sol r8); an unverifiable query refuses.
     domain_defined_state; _ds=$?
     case "$_ds" in
@@ -1190,8 +1192,9 @@ fi
 # reloads can retire one appId and publish another that derives the same
 # name, and the running guest outlives the manifest it came from. A
 # RUNNING foreign domain is refused (its sessions may still be live);
-# a STOPPED foreign domain is undefine+overlay-reclaimed under the
-# exclusive hold (no fd9 holder can remain once we hold it). Refusals
+# a DEFINED foreign domain is refused outright even when its qemu is
+# confirmed dead — death proves we would not kill a live guest, but it
+# does not make the foreign definition or disk ours (sol r11). Refusals
 # pin REAP=0: a wrapper that never established ownership must never
 # tear down someone else's guest.
 ADOPTED=0
@@ -1229,7 +1232,7 @@ else
         echo "[tier5] FAIL: cannot determine liveness of $VM_NAME — refusing" >&2
         REAP=0; exit 3
     else
-        # Foreign-binding check needs a PRECISE defined-state: a dominfo
+        # Foreign-binding check needs a PRECISE defined-state: a query
         # outage must not be read as "no domain" — create_domain would
         # then skip define and `virsh start` a stopped foreign guest the
         # moment the query recovers (sol r8).
@@ -1240,45 +1243,19 @@ else
             REAP=0; exit 3
         fi
         if [ "$_ds" -eq 0 ] && [ "$(domain_appid)" != "$POLICY_KEY" ]; then
-            # Domain bound to another (or no) app squatting our name,
-            # and confirmed DEAD by the qemu oracle above. domstate
-            # stays on as a belt: it must also read terminal. No virsh
-            # destroy ever runs against a foreign guest (sol r5/r6).
-            _fst=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null \
-                    | tr -d '[:space:]')
-            case "$_fst" in
-                shutoff|crashed) ;;
-                *)  echo "[tier5] FAIL: foreign domain $VM_NAME in state" >&2
-                    echo "        '${_fst:-unknown}' — refusing to reclaim" >&2
-                    REAP=0; exit 3 ;;
-            esac
-            echo "[tier5] reclaiming stopped foreign domain $VM_NAME (state=$_fst)" >&2
-            if ! undefine_domain; then
-                echo "[tier5] FAIL: cannot undefine foreign domain $VM_NAME" >&2
-                REAP=0; exit 5
-            fi
-            # The definition must be PROVEN gone before we touch the
-            # overlay — a startable config pointing at $DISK is as bad
-            # as a live qemu for our rm, and an unverifiable query is
-            # ambiguity, not absence (sol r7).
-            domain_defined_state; _ds=$?
-            if [ "$_ds" -ne 1 ]; then
-                echo "[tier5] FAIL: foreign domain $VM_NAME still defined" >&2
-                echo "        or unverifiable after undefine — keeping its overlay" >&2
-                REAP=0; exit 3
-            fi
-            # Settle + re-verify: a `virsh start` issued just before our
-            # undefine can still be exec'ing its qemu; with the domain
-            # now undefined no NEW start is possible, so a clean scan
-            # here closes the probe→unlink window (sol r6/r7).
-            sleep 0.3
-            domain_is_live; _lv=$?
-            if [ "$_lv" -ne 1 ]; then
-                echo "[tier5] FAIL: foreign domain $VM_NAME live or" >&2
-                echo "        unverifiable after undefine — keeping its overlay" >&2
-                REAP=0; exit 3
-            fi
-            rm -f "$DISK" 2>/dev/null || true
+            # A defined domain that is NOT ours squats our name — bound
+            # to another app or to nothing. Refuse rather than reclaim:
+            # confirmed-dead proves no live guest is killed, but it does
+            # NOT make the foreign definition or the foreign disk ours —
+            # destroying another app's stopped guest crosses the same
+            # boundary the binding exists to protect (sol r11). The
+            # owner relaunches under its own name; an admin removes a
+            # genuinely stale squatting domain deliberately.
+            _fb=$(domain_appid)
+            echo "[tier5] FAIL: domain $VM_NAME is bound to app" >&2
+            echo "        '${_fb:-<unbound>}', not '$POLICY_KEY' —" >&2
+            echo "        refusing to reclaim another app's guest" >&2
+            REAP=0; exit 3
         fi
         create_domain
     fi
