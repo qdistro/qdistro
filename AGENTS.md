@@ -126,8 +126,10 @@ sanctioned visual driver pinned explicitly in `QCI_AGENT_CMD`; see
 - **Commit by explicit path** (`git add <paths>`, never `git add -A`) when
   several sessions may share a checkout.
 - Edits to root `tests/`, `ci/prompts/` or `selinux/` are guarded; qci fails
-  them unless `QCI_ALLOW_TEST_EDITS=1` is set for a genuine test/CI change.
-  Say so in the commit message.
+  them unless `QCI_ALLOW_TEST_EDITS=1` is set for a genuine test/CI change —
+  or a *deliberate* product change to a protected path (e.g. a new daemon's
+  `selinux/` module). In that case the same flag sanctions it; say so in the
+  commit message either way.
 
 ## Shared-host qci rule
 
