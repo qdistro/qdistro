@@ -526,3 +526,22 @@ def test_duplicate_appid_never_emitted(tmp_path: Path) -> None:
     assert res.returncode == 0, res.stderr
     ids = [r["appId"] for r in _manifest(out)["apps"]]
     assert len(ids) == len(set(ids))
+
+
+def test_appid_outside_policy_key_charset_is_dropped(tmp_path: Path) -> None:
+    root, base, out = _fixture(tmp_path)
+    _exe(root, "usr/bin/foot")
+    _exe(root, "usr/bin/eviltool")
+    # The appId is the wrapper's --policy-key and the domain's bound
+    # identity; a desktop filename that derives an out-of-charset appId
+    # (space, +, UTF-8) must never be published — the wrapper would
+    # reject it at launch anyway, and silently re-binding could alias
+    # another app's guest (sol r4).
+    _write(root, f"{SHARE_APPS}/foot.desktop", _desktop("Foot", "foot"))
+    _write(root, f"{SHARE_APPS}/my app.desktop", _desktop("Bad", "eviltool"))
+    _write(root, f"{SHARE_APPS}/evil+tool.desktop", _desktop("Bad2", "eviltool"))
+    res = _scan(root, base, out)
+    assert res.returncode == 0, res.stderr
+    ids = [r["appId"] for r in _manifest(out)["apps"]]
+    assert ids == ["tier5/foot"], ids
+    assert "outside the policy-key charset" in res.stderr

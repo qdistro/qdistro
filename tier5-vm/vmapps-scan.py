@@ -49,6 +49,7 @@ import argparse
 import configparser
 import json
 import os
+import re
 import stat as statmod
 import subprocess
 import sys
@@ -93,6 +94,11 @@ LEGACY_APP_IDS = {
 # VM has no foot server (footclient exits immediately) and a foot server
 # opens no window. The drop-in denylist file can extend this.
 BUILTIN_DENYLIST = {"footclient", "foot-server"}
+
+# The spawn wrapper's --policy-key / domain-binding charset — keep in
+# sync with the [[ =~ ]] rule in spawn-tier5.sh. Rows whose derived
+# appId violates it are dropped before publication.
+_APP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 
 # Exec field codes the launcher side provides at activation time — we
 # have no file/URL to substitute, so the token is dropped entirely.
@@ -513,9 +519,21 @@ def select_apps(
             log(f"{desktop_id}: denylisted — skipped")
             continue
 
+        app_id = LEGACY_APP_IDS.get(desktop_id, f"tier5/{desktop_id}")
+        # The appId becomes the spawn wrapper's --policy-key AND the
+        # domain's bound identity, so it must satisfy the wrapper's key
+        # charset — an unshapeable desktop filename (spaces, +, UTF-8)
+        # would otherwise reach launch() and die at the wrapper, or
+        # worse, alias another app's binding (sol r4). Drop and log
+        # rather than publish an unusable row.
+        if not _APP_ID_RE.match(app_id):
+            log(f"{desktop_id}: appId {app_id!r} outside the policy-key "
+                f"charset — dropped")
+            continue
+
         rows.append(
             {
-                "appId": LEGACY_APP_IDS.get(desktop_id, f"tier5/{desktop_id}"),
+                "appId": app_id,
                 "desktopId": desktop_id,
                 "name": name,
                 "iconName": icon,

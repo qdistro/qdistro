@@ -56,10 +56,13 @@ def test_create_path_serializes_under_exclusive_hold():
 def test_teardown_is_claimed_by_the_last_holder_only():
     # ensures: a wrapper exiting while a relaunched session holds the VM
     #          leaves it running — teardown requires winning an
-    #          exclusive claim, and losing the claim skips destroy
+    #          exclusive claim, and losing the claim skips destroy. The
+    #          claim is BOUNDED (-w) not -n: a transient foreign hold
+    #          must not starve the last real owner (sol r4)
     body = _section("decide_teardown")
     assert "release_hold" in body
-    assert "flock -n -x 10" in body
+    assert "flock -w 2 -x 10" in body
+    assert "flock -n -x 10" not in body
     cleanup = SPAWN[SPAWN.index("cleanup() {"):]
     assert "decide_teardown" in cleanup
     reap_pos = cleanup.index("reap_domain")
@@ -166,15 +169,28 @@ def test_adoption_verifies_bound_appid():
 
 
 def test_stopped_foreign_domain_is_reclaimed_not_adopted():
-    # ensures: a STOPPED domain bound to another app is undefined +
-    #          overlay-dropped under the exclusive hold — reclaim, never
-    #          start someone else's guest
+    # ensures: a foreign domain is only reclaimed after domstate confirms
+    #          a TERMINAL state — an unknown/false state fails closed and
+    #          no virsh destroy ever runs against another app's guest
+    #          (nested-KVM domstate is documented flaky, sol r4)
     assert "reclaiming stopped foreign domain" in SPAWN
-    reclaim = SPAWN[SPAWN.index("reclaiming stopped foreign domain"):]
-    assert 'virsh destroy "$VM_NAME"' in reclaim
+    start = SPAWN.index('if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 \\\n                && [ "$(domain_appid)" != "$POLICY_KEY" ]')
+    end = SPAWN.index("create_domain\n    fi\n    flock -s 9")
+    reclaim = SPAWN[start:end]
+    assert "shutoff|crashed" in reclaim
+    assert "refusing to reclaim" in reclaim
+    assert 'virsh destroy "$VM_NAME"' not in reclaim
     assert 'virsh undefine "$VM_NAME"' in reclaim
     assert 'rm -f "$DISK"' in reclaim
-    assert reclaim.index("create_domain") > reclaim.index("rm -f")
+
+
+def test_foreign_refusal_never_joins_the_lock_session_early():
+    # ensures: the common foreign-running case is refused BEFORE the fd9
+    #          session hold is taken, so a mismatched spawn can never
+    #          starve the true owner's bounded teardown claim (sol r4)
+    early = SPAWN.index("refusing cross-app adoption")
+    hold = SPAWN.index('flock -w 120 -s 9')
+    assert early < hold, "the unlocked foreign check must precede fd9"
 
 
 def test_launch_requires_current_catalogue_membership():
@@ -204,6 +220,21 @@ def test_launch_has_no_manifest_vmname_bypass():
     )
     assert m, "launch(row) not found in VMApps.qml"
     assert "row.vmName" not in m.group("body")
+
+
+def test_invalid_explicit_policy_key_fails_not_falls_back():
+    # ensures: an explicit --policy-key/env key outside the charset is a
+    #          hard error — the old silent basename fallback let two
+    #          distinct invalid appIds collapse onto one binding and
+    #          share a guest (sol r4)
+    keyblock = SPAWN[SPAWN.index('POLICY_KEY="${EXPLICIT_POLICY_KEY'):
+                   SPAWN.index("_conf_file_ok")]
+    assert "FAIL: invalid policy key" in keyblock
+    assert "exit 3" in keyblock
+    # the unkeyed basename default is sanitized, never left invalid
+    assert "tr -c 'A-Za-z0-9._/-' '_'" in keyblock
+    # and the wrapper never rewrites a BAD explicit key to the basename
+    assert 'POLICY_KEY="$APP_BASENAME"' not in keyblock
 
 
 def test_concurrent_session_logs_are_unique_per_launch():

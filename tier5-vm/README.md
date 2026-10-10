@@ -147,28 +147,42 @@ silently merge:
 - The domain records its bound appId in `<metadata>` at define time.
   Adoption verifies bound == `--policy-key`: a RUNNING domain bound to
   another (or no) app is refused (the wrapper exits with REAP=0 — it
-  never tears down a guest it does not own), and a STOPPED foreign
-  domain is undefine+overlay-reclaimed under the exclusive hold. This
-  covers collisions ACROSS catalogue reloads, where the running guest
-  outlives the manifest that created it.
+  never tears down a guest it does not own), and a foreign domain is
+  reclaimed under the exclusive hold only after `domstate` confirms a
+  terminal state (`shut off`/`crashed`); a failed or ambiguous state
+  query fails closed — the wrapper never runs `virsh destroy` against a
+  foreign guest. This covers collisions ACROSS catalogue reloads,
+  where the running guest outlives the manifest that created it.
 - `launch()` also requires the row's appId to be in the CURRENT
   catalogue, so a stale provider row cannot adopt a guest it no longer
   owns.
+- The key itself is validated, not rewritten: an explicit
+  `--policy-key`/`TIER5_POLICY_KEY` outside
+  `[A-Za-z0-9][A-Za-z0-9._/-]{0,127}` is a hard error (silently
+  falling back to the app basename would let two distinct bad appIds
+  share one binding). The scanner drops out-of-charset appIds before
+  publication and `_validRow` re-checks at load, so the wrapper only
+  ever sees keys it can honor. Unkeyed direct/`--loopback` use derives
+  a sanitized key from the app basename.
 
 Ownership is a
 flock(2) protocol on `/run/qdistro-tier5/hold-<vm_name>` — no daemon:
 
 - Each wrapper carries a **shared session hold** (fd9) for its whole
   lifetime, so concurrent sessions of the same app share the guest —
-  same appId, same trust domain, same silo tag.
+  same appId, same trust domain, same silo tag. A spawn that would be
+  refused (running foreign domain) exits BEFORE taking the hold, so a
+  mismatched launch can never starve the true owner's teardown.
 - A launch that finds the domain **running adopts it** under its own
   session hold (no cold start); a missing/stopped domain is (re)created
   under a short **exclusive** decision hold that serializes racing
   creators and teardown claims.
 - On app exit the wrapper drops its hold and runs the idle window
   (`IDLE_SHUTDOWN_SECS`, low-mem early end): a relaunch adopting during
-  the window cancels teardown. The **last lock holder** wins an
-  exclusive teardown claim and runs destroy + undefine + overlay unlink.
+  the window cancels teardown. The **last lock holder** wins a
+  *bounded* exclusive teardown claim (waits out transient holds, gives
+  up on a genuine live session) and runs destroy + undefine + overlay
+  unlink.
 - Locks are fd-bound, so a crashed wrapper releases everything; a
   leftover running/defined domain is adopted or reaped by the next
   spawn. `TIER5_KEEP_DOMAIN=1` still leaves the domain untouched for

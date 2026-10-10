@@ -102,7 +102,11 @@ Singleton {
     // execArgv that parses to a nonempty array of strings.
     function _validRow(row) {
         if (!row || typeof row !== "object") return false;
-        if (typeof row.appId !== "string" || !row.appId) return false;
+        // The appId is the wrapper's --policy-key and the domain's bound
+        // identity; out-of-charset ids must never reach launch (sol r4).
+        if (typeof row.appId !== "string"
+                || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(row.appId))
+            return false;
         if (typeof row.name !== "string" || !row.name) return false;
         let argv;
         try { argv = JSON.parse(row.execArgv); } catch (e) { return false; }

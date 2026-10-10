@@ -354,35 +354,6 @@ else
     fi
     SILO_TAG="$VM_NAME"
 
-    # --- per-VM ownership hold (relaunch reuse) ------------------------
-    # flock(2) protocol on $HOLD_FILE, used by every wrapper invocation
-    # that touches this domain:
-    #   fd9  — session hold: SHARED for the wrapper's whole lifetime, so
-    #          concurrent launches of the same app coexist on one guest.
-    #          The create decision RELEASES then retakes it EXCLUSIVELY
-    #          (an upgrade would deadlock against a concurrent upgrader),
-    #          serializing against a teardown claim or a racing create —
-    #          but never against plain SH adopters.
-    #   fd10 — teardown claim: a nonblocking EX probe. If it fails, a
-    #          live session (or an in-flight decision) still owns the VM
-    #          and this wrapper must leave it alone; if it wins, we are
-    #          the last holder and own teardown.
-    # Locks are fd-bound, so a crashed wrapper (SIGKILL, OOM) releases
-    # everything automatically — a leftover running/defined domain is
-    # then adopted or reaped by the next spawn. The hold FILES are never
-    # unlinked while in use: unlink+recreate would split the flock
-    # namespace across two inodes and lose mutual exclusion.
-    HOLD_DIR="${TIER5_HOLD_DIR:-/run/qdistro-tier5}"
-    install -d -m 0700 "$HOLD_DIR"
-    HOLD_FILE="$HOLD_DIR/hold-$VM_NAME"
-    [ -f "$HOLD_FILE" ] || install -m 0600 /dev/null "$HOLD_FILE"
-    exec 9>>"$HOLD_FILE"
-    exec 10>>"$HOLD_FILE"
-    if ! flock -w 120 -s 9; then
-        echo "[tier5] FAIL: timed out waiting for the $VM_NAME session hold" >&2
-        exit 3
-    fi
-
     # Allocate CID: scan defined domains for taken CIDs, pick next free.
     if [ -n "${TIER5_CID:-}" ]; then
         CID="$TIER5_CID"
@@ -462,16 +433,26 @@ chown "$ADMIN_USER" "$CLIENT_LOG" "$SERVER_LOG" 2>/dev/null || true
 #
 # POLICY_KEY is the STABLE per-app identity: qdshell passes its catalogue appId
 # (e.g. "tier5/firefox") via --policy-key (argv survives pkexec; env does not).
-# Absent/invalid, we fall back to the app basename — stable enough for direct
-# CLI/test use but NOT for distinguishing catalogue entries that share an exe.
+# It is also the appId bound into the domain's <metadata> at define time —
+# adoption requires an exact match, so the key IS an isolation boundary.
+# An EXPLICIT key that fails the charset is a hard error, NOT a basename
+# fallback: silently rebinding would let two distinct invalid appIds
+# collapse onto one executable's binding and adopt one guest (sol r4).
+# `[[ =~ ]]`, NOT grep — grep anchors line-by-line, so a newline-bearing
+# key would slip past ^…$; `[[ =~ ]]` anchors against the whole string.
 LIFECYCLE_CONF="${TIER5_LIFECYCLE_CONF:-$ADMIN_HOME/.config/qdistro/tier5-lifecycle.conf}"
-POLICY_KEY="${EXPLICIT_POLICY_KEY:-${TIER5_POLICY_KEY:-$APP_BASENAME}}"
-# Validate the key (catalogue-shaped): reject control chars / pathological
-# section names; fall back to the app basename on a bad key. Use bash `[[ =~ ]]`,
-# NOT grep — grep matches line-by-line, so a newline-bearing key would slip past
-# an anchored ^…$ regex; `[[ =~ ]]` anchors against the whole string.
-if ! [[ "$POLICY_KEY" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]; then
-    POLICY_KEY="$APP_BASENAME"
+POLICY_KEY="${EXPLICIT_POLICY_KEY:-${TIER5_POLICY_KEY:-}}"
+if [ -n "$POLICY_KEY" ]; then
+    if ! [[ "$POLICY_KEY" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]; then
+        echo "[tier5] FAIL: invalid policy key '$POLICY_KEY'" >&2
+        exit 3
+    fi
+else
+    # Unkeyed direct/test use: derive from the app basename, sanitized to
+    # the same charset so the recorded binding is always well-formed.
+    POLICY_KEY=$(printf '%s' "$APP_BASENAME" | tr -c 'A-Za-z0-9._/-' '_')
+    case "$POLICY_KEY" in [A-Za-z0-9]*) ;; *) POLICY_KEY="x$POLICY_KEY";; esac
+    POLICY_KEY="${POLICY_KEY:0:128}"
 fi
 
 _conf_file_ok() {  # honor only a regular, admin/root-owned, sane-perm file
@@ -674,16 +655,21 @@ release_hold() {
     flock -u 9 2>/dev/null || true
 }
 
-# decide_teardown — claim or relinquish teardown ownership via a nonblocking
-# EX probe on fd10. Winning means NO wrapper holds the domain: every actor
-# either exited or is still waiting for the lock, so the winner sees the
-# final state of the world and may destroy it. Losing means someone adopted
-# (or is deciding) — leaving the VM is always safe then because that holder
-# runs this same decision at its own exit.
+# decide_teardown — claim or relinquish teardown ownership via a BOUNDED
+# EX claim on fd10. Winning means NO wrapper holds the domain: every
+# actor either exited or is still waiting for the lock, so the winner
+# sees the final state of the world and may destroy it. Losing means
+# someone adopted (or is deciding) — leaving the VM is always safe then
+# because that holder runs this same decision at its own exit. The wait
+# is bounded rather than -n: a transient hold (e.g. a foreign spawn's
+# brief SH before its binding refusal) must not starve the last real
+# owner's claim and leak a running guest (sol r4). 2s outlasts any
+# refuse-path exit by orders of magnitude; a genuine session holds far
+# longer, so a losing claim just delays this exit slightly.
 decide_teardown() {
     [ -n "$REAP" ] && return 0
     release_hold
-    if flock -n -x 10 2>/dev/null; then
+    if flock -w 2 -x 10 2>/dev/null; then
         REAP=1
     else
         REAP=0
@@ -1009,6 +995,50 @@ _create_domain_define() {
 # and a relaunch that adopts in the gap either sees the domain running
 # (keeps it, our EX then waits) or ends up at this same create decision
 # behind us. The re-check under exclusivity always sees a final state.
+# Early FOREIGN check, BEFORE we join the lock session: a running domain
+# bound to a different appId means we refuse here — a mismatched spawn
+# that never takes fd9 can never starve the true owner's teardown claim
+# (sol r4). The unlocked read can race, so the locked checks in the
+# decision below remain authoritative.
+if run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
+    _early_bound=$(domain_appid)
+    if [ "$_early_bound" != "$POLICY_KEY" ]; then
+        echo "[tier5] FAIL: domain $VM_NAME is bound to app" >&2
+        echo "        '${_early_bound:-<unbound>}', not '$POLICY_KEY'" >&2
+        echo "        — refusing cross-app adoption" >&2
+        REAP=0; exit 3
+    fi
+fi
+
+# --- per-VM ownership hold (relaunch reuse) ------------------------
+# flock(2) protocol on $HOLD_FILE, used by every wrapper invocation
+# that touches this domain:
+#   fd9  — session hold: SHARED from the adopt/create decision onward,
+#          so concurrent launches of the same app coexist on one guest.
+#          The create decision RELEASES then retakes it EXCLUSIVELY
+#          (an upgrade would deadlock against a concurrent upgrader),
+#          serializing against a teardown claim or a racing create —
+#          but never against plain SH adopters.
+#   fd10 — teardown claim: a BOUNDED EX claim (see decide_teardown). If
+#          it fails, a live session (or an in-flight decision) still
+#          owns the VM and this wrapper must leave it alone; if it wins,
+#          we are the last holder and own teardown.
+# Locks are fd-bound, so a crashed wrapper (SIGKILL, OOM) releases
+# everything automatically — a leftover running/defined domain is
+# then adopted or reaped by the next spawn. The hold FILES are never
+# unlinked while in use: unlink+recreate would split the flock
+# namespace across two inodes and lose mutual exclusion.
+HOLD_DIR="${TIER5_HOLD_DIR:-/run/qdistro-tier5}"
+install -d -m 0700 "$HOLD_DIR"
+HOLD_FILE="$HOLD_DIR/hold-$VM_NAME"
+[ -f "$HOLD_FILE" ] || install -m 0600 /dev/null "$HOLD_FILE"
+exec 9>>"$HOLD_FILE"
+exec 10>>"$HOLD_FILE"
+if ! flock -w 120 -s 9; then
+    echo "[tier5] FAIL: timed out waiting for the $VM_NAME session hold" >&2
+    exit 3
+fi
+
 # Bound identity: a domain is OURS only when its recorded appId equals
 # our POLICY_KEY exactly. The name alone is not identity — catalogue
 # reloads can retire one appId and publish another that derives the same
@@ -1045,11 +1075,22 @@ else
     else
         if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 \
                 && [ "$(domain_appid)" != "$POLICY_KEY" ]; then
-            # Stopped domain bound to another (or no) app squatting our
-            # name: no fd9 holder can remain under our EX, so reclaim —
-            # undefine and drop its overlay before we create ours.
-            echo "[tier5] reclaiming stopped foreign domain $VM_NAME" >&2
-            run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+            # Domain bound to another (or no) app squatting our name.
+            # Confirm a TERMINAL state before reclaiming — a failed or
+            # falsely-"shut off" domstate must never lead us to undefine
+            # (let alone destroy) a live foreign guest; unknown states
+            # fail closed (nested-KVM domstate is documented flaky,
+            # sol r4). No virsh destroy: a confirmed-terminal domain
+            # undefines directly.
+            _fst=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null \
+                    | tr -d '[:space:]')
+            case "$_fst" in
+                shutoff|crashed) ;;
+                *)  echo "[tier5] FAIL: foreign domain $VM_NAME in state" >&2
+                    echo "        '${_fst:-unknown}' — refusing to reclaim" >&2
+                    REAP=0; exit 3 ;;
+            esac
+            echo "[tier5] reclaiming stopped foreign domain $VM_NAME (state=$_fst)" >&2
             if ! run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1; then
                 echo "[tier5] FAIL: cannot undefine foreign domain $VM_NAME" >&2
                 REAP=0; exit 5

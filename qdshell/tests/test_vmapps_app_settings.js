@@ -194,6 +194,30 @@ const win = fs.readFileSync(
         "launch must reject appIds dropped from the catalogue");
 }
 
+// --- out-of-charset appIds never enter the catalogue (sol r4) -----------
+// ensures: an appId the wrapper cannot honor as --policy-key is dropped
+//          at load — a malformed manifest row must not reach launch and
+//          die at the wrapper, or alias another app's binding. The real
+//          _validRow is evaluated, not re-derived.
+{
+    const src = service.slice(
+        service.indexOf("function _validRow(row)"),
+        service.indexOf("function _loadManifest()"));
+    const make = new Function(src + "\nreturn _validRow;");
+    const _validRow = make();
+    const good = {
+        appId: "tier5/org.kde.kate", name: "Kate",
+        execArgv: '["kate"]', iconName: "kate",
+    };
+    assert.strictEqual(_validRow(good), true,
+        "a well-formed catalogue row must validate");
+    for (const bad of ["tier5/my app", "evil+tool", "app\tid",
+                       "-leading-dash", "tier5/" + "x".repeat(200), ""]) {
+        assert.strictEqual(_validRow({...good, appId: bad}), false,
+            `appId '${bad}' outside the policy-key charset must drop`);
+    }
+}
+
 // --- the vmName bypass stays closed (sol r2 P1) -------------------------
 // ensures: launch() cannot take a manifest-supplied domain name that
 //          would skip the collision guard — appId is the only identity
