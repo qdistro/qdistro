@@ -1,6 +1,32 @@
 #!/usr/bin/env bats
 # Host-only contention contract: no libvirt or VM is touched.
 
+# Monotonic seconds for readiness deadlines: /proc/uptime, not bash
+# SECONDS (wall clock; jumps with NTP/suspend) -- same convention as
+# scripts/vm/vm-exec's monotonic_s.
+rw_mono_s() {
+    local u
+    read -r u _ < /proc/uptime 2>/dev/null || return 1
+    printf '%s\n' "${u%%.*}"
+}
+
+# Poll <command...> until it succeeds or <budget_s> of monotonic time
+# passes. These waits are READINESS budgets: they stop scheduling new
+# polls at the deadline and return 1, so callers must fail loudly --
+# a fixed iteration count that silently falls through once made a
+# never-released lock look like a free one.
+rw_wait_until() {   # rw_wait_until <budget_s> <interval_s> <command...>
+    local budget=$1 interval=$2 start now
+    shift 2
+    start=$(rw_mono_s) || { echo "cannot read /proc/uptime for a readiness deadline"; return 1; }
+    while :; do
+        "$@" && return 0
+        now=$(rw_mono_s) || { echo "lost /proc/uptime mid-poll; readiness not established"; return 1; }
+        [ $((now - start)) -ge "$budget" ] && return 1
+        sleep "$interval"
+    done
+}
+
 setup() {
     # A GUI scenario agent's marker would turn the contention checks below into
     # refusals; only the refusal test sets it, explicitly.
@@ -15,18 +41,30 @@ setup() {
 . "$RUN_LOCK_HELPER"
 qdistro_run_lock_reexec "$0" "$@"
 printf '%s\n' ready > "$RUN_LOCK_READY"
-exec sleep 30
+# Outlive the whole bats file: teardown kills this, but a fixed 30s sleep
+# could expire mid-file under host load and leave the contention tests
+# asserting against a dead holder's stale lock file. 900s still self-cleans
+# the lock if the suite itself is SIGKILLed before teardown.
+exec sleep 900
 SH
     chmod +x "$T/holder"
     export RUN_LOCK_HELPER="$REPO/scripts/vm/run-lock.sh"
     export RUN_LOCK_READY="$T/ready"
     "$T/holder" > "$T/holder.log" 2>&1 &
     HOLDER=$!
-    for i in $(seq 1 100); do
-        [ -f "$RUN_LOCK_READY" ] && break
-        sleep 0.01
-    done
-    [ -f "$RUN_LOCK_READY" ]
+    # The launcher publishes `ready` only after acquiring the run lock;
+    # under load that took longer than the old nominal 1s poll
+    # (selftest qci-bats row, 2026-10-09). If the budget lapses, say why.
+    if ! rw_wait_until 15 0.05 test -f "$RUN_LOCK_READY"; then
+        echo "lock holder never published $RUN_LOCK_READY within 15s; holder log:" >&2
+        cat "$T/holder.log" >&2 || true
+        return 1
+    fi
+    # `ready` only proves the holder STARTED; the tests below need it to
+    # still own the lock when they run.
+    local lockpid
+    lockpid=$(cat "$QDWIN_IMG_DIR/.qdistro-vm-run.lock")
+    kill -0 "$lockpid"
 }
 
 teardown() {
@@ -101,10 +139,13 @@ teardown() {
     local pid bgpid lock="$QDWIN_IMG_DIR/.qdistro-vm-run.lock"
     pid=$(cat "$lock")
     kill "$pid"
-    for i in $(seq 1 100); do
-        flock -n "$lock" true 2>/dev/null && break
-        sleep 0.01
-    done
+    # The flock is released only when the killed holder's fd closes; if the
+    # deadline lapses the old loop fell through and the next lines ran
+    # against a still-held lock. Fail loudly instead.
+    if ! rw_wait_until 15 0.05 flock -n "$lock" true; then
+        echo "run lock still held 15s after killing recorded holder pid=$pid"
+        false
+    fi
     cat > "$T/forker" <<'SH'
 #!/usr/bin/env bash
 . "$RUN_LOCK_HELPER"

@@ -155,7 +155,9 @@ SHIM
     start=$SECONDS
     qd22_s3_launch
     [ $((SECONDS - start)) -lt 5 ]
-    run qd22_s3_ack
+    # The budget is a readiness bound; shrink it so this selftest does not
+    # spend the production default polling a pid that can never appear.
+    QD22_S3_ACK_BUDGET_S=2 run qd22_s3_ack
     [ "$status" -eq 1 ]
     [[ "$output" == *"never published its pid"* ]]
     [[ "$output" == *"RUNUSER-FAILED: injected"* ]]
