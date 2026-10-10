@@ -14,7 +14,16 @@ rc=0
 # Match qci's host-step wall-clock bound. A stuck Qt dialog must fail visibly
 # while allowing the other independent suites to run.
 step_timeout=${OSS_SCANNER_TEST_TIMEOUT:-600}
-run() { echo "[scanner-test] $*"; timeout --signal=TERM --kill-after=10 "$step_timeout" "$@" || rc=1; }
+run() {
+    echo "[scanner-test] ($PWD) $*"
+    local status=0
+    timeout --signal=TERM --kill-after=10 "$step_timeout" "$@" || status=$?
+    if [ "$status" != 0 ]; then
+        echo "[scanner-test] FAIL: exit $status (timeout limit ${step_timeout}s): $*" >&2
+        rc=1
+        return "$status"
+    fi
+}
 pytest_group() { local dir=$1; shift; (cd "$dir" && run python3 -m pytest "$@") || rc=1; }
 group=${1:-all}
 case "$group" in all|smoke|root|native|apps|extensions) ;; *) echo "usage: $0 [all|smoke|root|native|apps|extensions]" >&2; exit 2;; esac
