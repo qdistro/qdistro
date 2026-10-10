@@ -132,16 +132,18 @@ t3s_guard_idle_locker() {
     }
     # Restart a running locker so it re-reads QDLOCKER_IDLE_MS. Do not start
     # a dormant locker: Restart=always + no compositor is a crash-loop
-    # (gui.sh suppress_idle_lock). Missing locker after a GUI session-up
-    # is a failed precondition, not an unlocked session.
+    # (gui.sh suppress_idle_lock). A stopped locker cannot idle-lock — GUI
+    # 58/59 provision stops qdlocker before guest-setup so long scenarios
+    # keep visible frames. Install the drop-in anyway so a later start
+    # picks it up.
     if t3s_adm_uctl is-active qdlocker.service >/dev/null; then
         t3s_adm_uctl restart qdlocker.service || {
             fail "qdlocker idle-auto-lock held off (unlocked): restart failed"
             return 1
         }
     else
-        fail "qdlocker idle-auto-lock held off (unlocked): qdlocker.service is not active"
-        return 1
+        pass "qdlocker idle-auto-lock held off (locker not active; idle lock cannot fire)"
+        return 0
     fi
     reply=""
     for i in $(seq 1 20); do
