@@ -462,3 +462,37 @@ def test_cleanup_helper_requires_absent_definition_for_unlink():
     assert tail.index("qemu_pids_for_domain") < tail.index('rm -f "$DISK"')
     # undefine failure is surfaced, not swallowed into "not present"
     assert "WARN: undefine" in CLEANUP
+
+
+def test_teardown_reverifies_binding_after_winning_the_claim():
+    # ensures: winning the teardown claim only proves no wrapper holds
+    #          the domain NOW — if the original guest died and another
+    #          app reclaimed the name, the last holder must not destroy
+    #          the foreign replacement (sol r9). A defined domain must
+    #          re-verify its appId binding before reap_domain runs;
+    #          unverifiable state keeps everything.
+    body = _section("cleanup")
+    gate = body[body.index('[ "$REAP" = "1" ]'):body.index("reap_domain")]
+    assert "domain_defined_state; _ds=$?" in gate
+    assert "_bound=$(domain_appid)" in gate
+    assert '[ "$_ds" -eq 0 ] && [ "$_bound" != "$POLICY_KEY" ]' in gate
+    assert "re-bound" in gate
+    assert '[ "$_ds" -eq 2 ]' in gate
+    # both keep-branches leave domain_reaped=0 so nothing is destroyed
+    # or unlinked
+    assert gate.count("domain_reaped=0") >= 2
+
+
+def test_cleanup_helper_requires_tier5_binding_to_destroy():
+    # ensures: the standalone tool cannot destroy a domain that is not
+    #          provably tier-5's — the hold serializes wrappers, but
+    #          only the appId binding stamped at define time proves
+    #          ownership; unbound or unreadable domains are refused
+    #          before any virsh destroy (sol r9)
+    head = CLEANUP[:CLEANUP.index('virsh destroy "$VM_NAME"')]
+    assert "qdistro:appId" in head
+    assert "virsh dumpxml" in head
+    assert "not provably ours" in head
+    assert "exit 3" in head
+    # the binding check runs INSIDE the hold and BEFORE destroy
+    assert head.index("flock -w 5 -x 9") < head.index("qdistro:appId")

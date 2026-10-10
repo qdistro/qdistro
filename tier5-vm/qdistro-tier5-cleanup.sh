@@ -76,6 +76,18 @@ fi
 # unlink the overlay. A dominfo failure is read precisely — "not found"
 # is absence; any other error is ambiguity, never absence (sol r7).
 if _derr=$(run_as_admin virsh dominfo "$VM_NAME" 2>&1 >/dev/null); then
+    # The hold proves no wrapper uses the name — it does not prove the
+    # domain is tier-5's. Require the appId binding the spawn stamps at
+    # define time before destroying: an unbound (or unreadable) domain
+    # under this name is not provably ours (sol r9).
+    _bound=$(run_as_admin virsh dumpxml "$VM_NAME" 2>/dev/null \
+        | tr -d '\n' \
+        | sed -n 's|.*<qdistro:appId[^>]*>\([^<]*\)</qdistro:appId>.*|\1|p')
+    if [ -z "$_bound" ]; then
+        echo "[tier5-cleanup] FAIL: $VM_NAME carries no tier-5 appId" >&2
+        echo "        binding — not provably ours; refusing to destroy" >&2
+        exit 3
+    fi
     run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
     # destroy can no-op under a lying domstate — signal leftover qemu
     # directly (mirrors reap_domain's fallback), then demand a

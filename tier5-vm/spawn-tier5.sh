@@ -846,23 +846,44 @@ cleanup() {
         # earlier wrapper's exit must never reap a VM a relaunch adopted.
         decide_teardown
         if [ "$REAP" = "1" ]; then
-            # reap_domain is idempotent on absent/stopped domains, so it
-            # runs unconditionally under an exclusive claim: any defined
-            # leftover (a crashed predecessor) is ours to remove.
-            reap_domain "$force" || domain_reaped=0
-            if [ "$domain_reaped" = "1" ]; then
-                # The unlink needs its own proof of death: a destroy
-                # that raced or a kill that missed can leave a qemu
-                # alive after the definition is gone. Only a
-                # confirmed-dead verdict lets the disk go; anything
-                # else leaves it for the next spawn's orphan reaper
-                # (sol r7).
-                domain_is_live; _lv=$?
-                if [ "$_lv" -eq 1 ]; then
-                    rm -f "$DISK" 2>/dev/null || true
-                else
-                    domain_reaped=0
-                    echo "[tier5] WARN: keeping $DISK — $VM_NAME live or unverifiable" >&2
+            # The claim only proves no wrapper holds the domain NOW —
+            # not that it is still OURS. The original guest could have
+            # died during the idle window and the name been reclaimed
+            # by another app; destroying that foreign replacement is
+            # exactly the cross-app kill the binding exists to prevent
+            # (sol r9). Re-verify before reaping: a DEFINED domain must
+            # carry our binding, confirmed-absent has no owner to
+            # protect, and an unverifiable state keeps everything.
+            domain_defined_state; _ds=$?
+            _bound=""
+            [ "$_ds" -eq 0 ] && _bound=$(domain_appid)
+            if [ "$_ds" -eq 0 ] && [ "$_bound" != "$POLICY_KEY" ]; then
+                echo "[tier5] $VM_NAME re-bound to '${_bound:-<unbound>}'" >&2
+                echo "        — leaving domain and overlay alone" >&2
+                domain_reaped=0
+            elif [ "$_ds" -eq 2 ]; then
+                echo "[tier5] cannot verify $VM_NAME state —" >&2
+                echo "        keeping domain and overlay" >&2
+                domain_reaped=0
+            else
+                # reap_domain is idempotent on absent/stopped domains,
+                # so it runs unconditionally under an exclusive claim:
+                # any defined leftover (a crashed predecessor) is ours.
+                reap_domain "$force" || domain_reaped=0
+                if [ "$domain_reaped" = "1" ]; then
+                    # The unlink needs its own proof of death: a destroy
+                    # that raced or a kill that missed can leave a qemu
+                    # alive after the definition is gone. Only a
+                    # confirmed-dead verdict lets the disk go; anything
+                    # else leaves it for the next spawn's orphan reaper
+                    # (sol r7).
+                    domain_is_live; _lv=$?
+                    if [ "$_lv" -eq 1 ]; then
+                        rm -f "$DISK" 2>/dev/null || true
+                    else
+                        domain_reaped=0
+                        echo "[tier5] WARN: keeping $DISK — $VM_NAME live or unverifiable" >&2
+                    fi
                 fi
             fi
         fi
