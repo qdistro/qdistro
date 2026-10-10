@@ -45,6 +45,14 @@ Independent steps have qci's 600-second timeout, configurable through
 `OSS_SCANNER_TEST_TIMEOUT`. A timeout or crash fails the check; remaining
 groups and sanitizer tests still run so their results can be inspected.
 
+The 2026-10-10 local baseline reproduced a native qnotebook crash in
+`test_pdf_export_matches_baseline_in_any_live_mode` during its full suite
+(the presentation-invariants file passes separately). GDB stops in
+`QTreeViewPrivate::layout`. The full qdterm suite also blocked in a modal
+`QDialog::exec` during widget closing. These are recorded failures, not
+successful test results or missing-dependency skips. Product code and test
+assertions are unchanged by this environment preparation.
+
 The native build follows the sequence used by the small GitHub VM-image
 workflow, but retains development tools and build outputs instead of producing
 a bootable QCOW2. It caps Ninja and Quickshell parallelism at two and disables
