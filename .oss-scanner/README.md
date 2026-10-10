@@ -24,7 +24,10 @@ Logs go to `ci/runs/oss-scanner-local/` by default. Every failing step is fatal.
 The runtime requests 2 CPUs and 8 GB RAM. If rootless container resource
 controllers are unavailable, `OSS_SCANNER_RESOURCE_LIMITS=0` permits testing
 network isolation and dependencies without claiming that memory envelope.
-On such a host, `taskset -c 0,1` can still restrict CPU affinity.
+On such a host, CPU affinity must be set **inside** the container: Podman can
+reset affinity inherited from the host. For example, use
+`podman run --rm --network=none --entrypoint=taskset IMAGE -c 0,1 bash`.
+Choose CPUs from the container's allowed set; verify with `os.sched_getaffinity`.
 
 `test.sh smoke` runs during image construction. `test.sh all` is the full
 headless audit lane, not the VM/GUI/release gate. See `threat_model.md` for
