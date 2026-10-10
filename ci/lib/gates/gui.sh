@@ -254,7 +254,9 @@ gui_scenario_requires_qdwin() {
         qdistro/tests/integration/permissions-gui/58-tier3s-window-visible.md|\
         tests/integration/permissions-gui/58-tier3s-window-visible.md|\
         qdistro/tests/integration/permissions-gui/59-tier3s-close-cleanup.md|\
-        tests/integration/permissions-gui/59-tier3s-close-cleanup.md)
+        tests/integration/permissions-gui/59-tier3s-close-cleanup.md|\
+        qdistro/tests/integration/permissions-gui/60-vmapps-manifest-catalogue.md|\
+        tests/integration/permissions-gui/60-vmapps-manifest-catalogue.md)
             return 0 ;;
         *)
             return 1 ;;
