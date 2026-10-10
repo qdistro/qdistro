@@ -15,8 +15,10 @@ podman build --layers --ignorefile .oss-scanner/Dockerfile.dockerignore -f .oss-
 bash .oss-scanner/check-offline.sh localhost/qdistro/oss-scanner:local
 ```
 
-Docker also works; set `CONTAINER_ENGINE=docker` for the offline check. The
-Docker builder automatically uses the Dockerfile-specific ignore file;
+Docker also works; use `DOCKER_BUILDKIT=1 docker build -f
+.oss-scanner/Dockerfile -t qdistro/oss-scanner:local .` and set
+`CONTAINER_ENGINE=docker` for the offline check. BuildKit automatically
+uses the Dockerfile-specific ignore file; the legacy Docker builder does not.
 Podman receives it explicitly. This excludes local run logs and VM disks
 from the source context.
 The check tests network isolation, reinstalls both extension dependency sets from
