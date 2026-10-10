@@ -59,6 +59,20 @@ in `spec/29` . Reasons:
  `<vsock model='virtio'/>` and assigned CID. Linux-only guest
  per spec/00.
 - `qdistro-tier5-cleanup.sh` — destroy + undefine helper.
+- `vmapps-scan.py` — guest-base .desktop scanner. Reads
+  `usr/{local/,}share/applications` inside the base qcow2 via
+  libguestfs (read-only), applies XDG precedence/filtering, maps
+  desktop IDs onto the stable `tier5/<appId>` keys, and publishes the
+  catalogue manifest (`/usr/share/qdistro/vmapps/base.json`) atomically.
+  Requires a guest `foot` binary whenever the catalogue is non-empty —
+  foot is the launcher fallback and operator escape hatch.
+  `build-guest-image.sh` runs it after customizing the base and leaves
+  `qdistro-tier5-base.json` beside the qcow2.
+- `vmapps-reconcile.sh` — the `qdistro-tier5-vmapps-scan.service`
+  ExecStart: identity-samples the base, removes the manifest when the
+  base is absent, stale-publishes when admin cannot read it, takes a
+  fast path on a fresh valid manifest, and retries scans boundedly on
+  mid-scan replacement or failure. Always exits 0.
 - `loopback-bridge.sh` — same wrapper but using vsock CID=1
  loopback for in-VM smoke tests (no actual nested guest needed;
  exercises the data path).
