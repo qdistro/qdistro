@@ -25,7 +25,7 @@ Requires:       qdbrowser
 # Runtime substrate (subset of scripts/vm/install-deps.sh QDISTRO_PKGS
 # that a desktop needs; test-VM tooling like libvirt/bats/ydotool stays out)
 Requires:       weston
-Requires:       noctalia-qs
+Requires:       qdistro-quickshell
 Requires:       greetd
 Requires:       dbus-1
 Requires:       pipewire

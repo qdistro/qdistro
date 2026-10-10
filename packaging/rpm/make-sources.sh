@@ -44,9 +44,32 @@ for line in $specs; do
     for sub in $subs; do
         [ -d "$repo/$sub" ] || { echo "missing $repo/$sub" >&2; exit 1; }
     done
+    excludes=(--exclude='*__pycache__*' --exclude='.pytest_cache'
+              --exclude='node_modules')
+    for sub in $subs; do
+        # Build output lives at <component>/build{,-*} (meson per AGENTS.md).
+        # Do NOT exclude '*/build' at any depth: quickshell-vendored's
+        # src/src/build is an upstream *source* dir that add_subdirectory
+        # needs — stripping it broke the qdistro-quickshell rpmbuild.
+        excludes+=(--exclude="${sub}/build" --exclude="${sub}/build-*"
+                   --exclude="${sub}/builddir" --exclude="${sub}/builddir-*"
+                   --exclude="${sub}/dist" --exclude="${sub}/dist-*")
+    done
+    # Nested output dirs the component-root rules cannot see: the vendored
+    # wrappers default to <vendored>/src/build{,-*}. A '<vendored>/build-*/*'
+    # pattern guts stray root-level build dirs (build-rpm, build-prod)
+    # without eating the build-*.sh source scripts — 'build-*' unqualified
+    # would also match those files. Empty dir entries are harmless.
+    excludes+=(--exclude='qdshell/quickshell-vendored/src/build'
+               --exclude='qdshell/quickshell-vendored/src/build-*'
+               --exclude='qdshell/quickshell-vendored/build-*/*'
+               --exclude='qdwin/libweston-vendored/src/build'
+               --exclude='qdwin/libweston-vendored/src/build-*'
+               --exclude='qdwin/libweston-vendored/build-*/*'
+               --exclude='qdwin/libweston-vendored/prefix'
+               --exclude='qdwin/libweston-vendored/prefix-*')
     tar -C "$repo" --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-        --exclude='*/build' --exclude='*__pycache__*' --exclude='.pytest_cache' \
-        --exclude='node_modules' \
+        "${excludes[@]}" \
         "${transforms[@]}" \
         -czf "$out/${name}-${ver}.tar.gz" $subs
     echo "wrote $out/${name}-${ver}.tar.gz"
