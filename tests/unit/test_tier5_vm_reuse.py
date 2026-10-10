@@ -398,19 +398,66 @@ def test_locked_decision_refuses_unverifiable_defined_state():
 
 def test_create_domain_reverifies_binding_before_start():
     # ensures: an already-defined domain is re-bound-checked inside
-    #          create_domain — a transient dominfo outage at the
+    #          create_domain — a transient query outage at the
     #          decision layer cannot route into `virsh start` on a
     #          stopped foreign guest (sol r8)
     body = _section("create_domain")
     assert "domain_defined_state; _ds=$?" in body
     # define happens ONLY on confirmed absence (rc 1)
-    assert body.index("1)  _create_domain_define") \
-        < body.index("0)  if")
+    assert '[ "$_ds" -eq 1 ] && _create_domain_define' in body
     # a defined domain must carry our binding before start
     assert '[ "$(domain_appid)" != "$POLICY_KEY" ]' in body
     assert "refusing to start it" in body
     # unverifiable state refuses outright
     assert "cannot determine state" in body
+
+
+def test_overlay_reuse_requires_a_provable_owner():
+    # ensures: an overlay outliving its domain cannot be booted under a
+    #          new app identity — with no definition to carry the
+    #          binding, the disk's own <disk>.appid sidecar (stamped at
+    #          create, removed with the overlay) plus a OUR-base
+    #          backing check is the only proof; anything else refuses
+    #          (sol r12)
+    body = _section("create_domain")
+    assert '"$DISK.appid"' in body
+    assert '_side=$(cat "$DISK.appid"' in body
+    assert "refusing to boot an unproven disk" in body
+    # the sidecar gate only fires when the domain is CONFIRMED ABSENT —
+    # a defined-ours domain's own binding is the stronger record
+    gate = body[body.index('if [ -f "$DISK" ]'):body.index("qemu-img create")]
+    assert '[ "$_ds" -eq 1 ]' in gate
+    assert '"backing-filename"' in gate
+    # the sidecar is stamped at create and removed everywhere the
+    # overlay is removed (teardown, reaper, cleanup helper)
+    assert 'mv -f "$DISK.appid.$$" "$DISK.appid"' in body
+    assert 'rm -f "$DISK" "$DISK.appid"' in SPAWN
+    assert 'rm -f "$overlay" "$overlay.appid"' in SPAWN
+    assert 'rm -f "$DISK" "$DISK.appid"' in CLEANUP
+    # teardown's confirmed-absent-at-claim path gates the unlink on the
+    # sidecar too — a domain that was already gone never vouched for
+    # the disk, so the sidecar is the only owner record there as well
+    body = _section("cleanup")
+    assert "_claim_ds=$_ds" in body
+    assert "overlay owner unproven" in body
+    assert '_claim_ds" -eq 1' in body
+
+
+def test_reaper_preserves_owned_orphan_overlays():
+    # ensures: a nonempty <overlay>.appid sidecar is an owner record —
+    #          the reaper reaps only overlays with no owner record, or
+    #          whose bound appId the CURRENT manifest no longer
+    #          publishes (a retired app's disk is provably stale); an
+    #          unreadable manifest is ambiguity -> preserve (sol r12)
+    reaper = SPAWN[SPAWN.index("orphan-overlay reaper"):
+                   SPAWN.index("reaped orphan overlay")]
+    assert '_side=$(cat "$overlay.appid"' in reaper
+    assert "VMAPPS_MANIFEST" in reaper
+    assert 'grep -qF "\\"$_side\\"" "$VMAPPS_MANIFEST"' in reaper
+    # the ownership gate sits between confirmed-absent and the rm
+    assert reaper.index('_side=$(cat') < reaper.index('rm -f "$overlay"')
+    # sidecar removal rides along with the overlay rm
+    assert 'rm -f "$overlay" "$overlay.appid"' in reaper
 
 
 def test_cleanup_unlink_requires_confirmed_dead():

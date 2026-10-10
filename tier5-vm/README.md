@@ -144,14 +144,23 @@ silently merge:
 - At catalogue load, `_dropDomainCollisions` drops BOTH rows whose
   derived names collide, and `launch()` has no manifest-supplied name
   path — the appId is the only identity.
-- The domain records its bound appId in `<metadata>` at define time.
-  Adoption verifies bound == `--policy-key`: a LIVE domain bound to
-  another (or no) app is refused (the wrapper exits with REAP=0 — it
-  never tears down a guest it does not own), and a defined foreign
-  domain is refused outright rather than reclaimed — confirmed qemu
-  death proves no live guest is killed, but it does not make the
+- The domain records its bound appId in `<metadata>` at define time,
+  and the overlay gets the same binding in a `<disk>.appid` sidecar
+  stamped at create — if the definition is ever lost, the disk keeps
+  its own owner record. Adoption verifies bound == `--policy-key`: a
+  LIVE domain bound to another (or no) app is refused (the wrapper
+  exits with REAP=0 — it never tears down a guest it does not own), a
+  defined foreign domain is refused outright rather than reclaimed,
+  and an overlay whose domain is gone is reused only when its sidecar
+  names our appId AND its backing file is our base — confirmed qemu
+  death proves no live guest is killed, but it does not make a
   foreign definition or disk ours; the owner relaunches under its own
   name and an admin removes a genuinely stale squatter deliberately.
+  The teardown unlink applies the same rule when the domain was
+  already absent at claim time, and the orphan reaper reaps only
+  unproven overlays (no sidecar) or retired-app disks (sidecar appId
+  no longer in the current manifest); an owned orphan is preserved
+  for its app's next launch.
   "Live" is decided by `qemu_pids_for_domain` alone —
   a pgrep on libvirt's `-name guest=<vm>` argv token narrowed to real
   qemu via `/proc/<pid>/comm`, with a distinct cannot-determine rc.
@@ -183,7 +192,9 @@ silently merge:
   scan or a foreign binding; the orphan reaper takes the target's own
   hold before judging, touches only overlays whose domain is
   CONFIRMED ABSENT (it never undefines — a defined-but-dead domain
-  has an owner record the reaper cannot adjudicate), and re-verifies
+  has an owner record the reaper cannot adjudicate) AND whose disk
+  carries no live owner record (no sidecar, or a sidecar appId the
+  current manifest no longer publishes), and re-verifies
   death after a settle; and every
   overlay `rm` — in teardown, reaper, and
   `qdistro-tier5-cleanup.sh` — is preceded by confirmed-absent

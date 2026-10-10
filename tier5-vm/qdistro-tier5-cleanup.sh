@@ -143,7 +143,7 @@ if [ -f "$DISK" ]; then
     fi
     qemu_pids_for_domain; _lv=$?
     if [ "$_lv" -eq 1 ]; then
-        rm -f "$DISK"
+        rm -f "$DISK" "$DISK.appid"
         echo "[tier5-cleanup] removed $DISK"
     else
         echo "[tier5-cleanup] FAIL: $VM_NAME qemu live or unverifiable" >&2

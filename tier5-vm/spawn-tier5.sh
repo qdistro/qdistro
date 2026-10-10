@@ -361,6 +361,9 @@ else
     # be shared across admins.
     DISK_DIR="${TIER5_DISK_DIR:-$ADMIN_HOME/.local/share/libvirt/images}"
     DISK="$DISK_DIR/$VM_NAME.qcow2"
+    # The published app catalogue — the reaper uses it to tell an OWNED
+    # orphan (sidecar appId still published) from a retired app's disk.
+    VMAPPS_MANIFEST="${VMAPPS_MANIFEST:-/usr/share/qdistro/vmapps/base.json}"
     if [ ! -f "$DISK_BASE" ]; then
         echo "[tier5] FAIL: base disk $DISK_BASE missing — run tier5/build-guest-image.sh" >&2
         exit 3
@@ -428,6 +431,20 @@ else
             # to do (sol r11). Unverifiable queries skip the same way.
             domain_defined_state "$base"; _ds=$?
             if [ "$_ds" -ne 1 ]; then exec {hfd}>&-; continue; fi
+            # Owner record: a nonempty <overlay>.appid sidecar means a
+            # catalogue app may still claim this disk — an OWNED
+            # orphan, not waste (its app adopts it on next launch).
+            # Reap only when the sidecar is absent/empty (no owner
+            # ever recorded) or names an appId the CURRENT manifest no
+            # longer publishes (retired app — provably stale). An
+            # unreadable manifest is ambiguity: preserve (sol r12).
+            _side=$(cat "$overlay.appid" 2>/dev/null) || _side=
+            if [ -n "$_side" ]; then
+                if [ ! -r "$VMAPPS_MANIFEST" ] \
+                    || grep -qF "\"$_side\"" "$VMAPPS_MANIFEST"; then
+                    exec {hfd}>&-; continue
+                fi
+            fi
             # Settle + re-verify: an out-of-band `virsh create` could
             # still be exec'ing a qemu under this name. With no
             # definition AND the per-target hold held, no cooperating
@@ -439,7 +456,7 @@ else
                 echo "[tier5] orphan $base came alive during reap — keeping overlay" >&2
             fi
             if [ "$_lv" -ne 1 ]; then exec {hfd}>&-; continue; fi
-            rm -f "$overlay" 2>/dev/null || true
+            rm -f "$overlay" "$overlay.appid" 2>/dev/null || true
             exec {hfd}>&-
             echo "[tier5] reaped orphan overlay $overlay" >&2
         done
@@ -857,6 +874,7 @@ cleanup() {
             # carry our binding, confirmed-absent has no owner to
             # protect, and an unverifiable state keeps everything.
             domain_defined_state; _ds=$?
+            _claim_ds=$_ds   # the teardown below reuses $_ds
             _bound=""
             [ "$_ds" -eq 0 ] && _bound=$(domain_appid)
             if [ "$_ds" -eq 0 ] && [ "$_bound" != "$POLICY_KEY" ]; then
@@ -881,7 +899,18 @@ cleanup() {
                     # (sol r7).
                     domain_is_live; _lv=$?
                     if [ "$_lv" -eq 1 ]; then
-                        rm -f "$DISK" 2>/dev/null || true
+                        # If the domain was already ABSENT at claim
+                        # time, no definition ever vouched for this
+                        # overlay — its sidecar is the disk's only
+                        # owner record (sol r12). A defined-and-ours
+                        # domain above already proved the binding.
+                        if [ "$_claim_ds" -eq 1 ] && [ -f "$DISK" ] \
+                            && [ "$(cat "$DISK.appid" 2>/dev/null)" != "$POLICY_KEY" ]; then
+                            domain_reaped=0
+                            echo "[tier5] WARN: keeping $DISK — overlay owner unproven" >&2
+                        else
+                            rm -f "$DISK" "$DISK.appid" 2>/dev/null || true
+                        fi
                     else
                         domain_reaped=0
                         echo "[tier5] WARN: keeping $DISK — $VM_NAME live or unverifiable" >&2
@@ -1021,29 +1050,70 @@ fi
 # one is (re)created under a short EXCLUSIVE upgrade that serializes
 # against a racing creator or an exiting wrapper's teardown claim.
 create_domain() {
-    # Linked-clone disk per VM if missing.
-    if [ ! -f "$DISK" ]; then
-        if ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$DISK" >/dev/null 2>&1; then
-            echo "[tier5] FAIL: qemu-img create -b $DISK_BASE failed at $DISK" >&2
-            exit 4
-        fi
-    fi
-
-    # Define only on CONFIRMED absence. An already-defined domain must
-    # be OURS before we may start it — the decision layer checked the
+    # Defined-state FIRST: it decides both overlay provenance and
+    # whether a define is needed. An already-defined domain must be
+    # OURS before we may start it — the decision layer checked the
     # binding, but a transient query outage could have hidden a
     # foreign domain then (sol r8); an unverifiable query refuses.
     domain_defined_state; _ds=$?
     case "$_ds" in
-        1)  _create_domain_define ;;
         0)  if [ "$(domain_appid)" != "$POLICY_KEY" ]; then
                 echo "[tier5] FAIL: existing domain $VM_NAME is bound to" >&2
                 echo "        another app — refusing to start it" >&2
                 REAP=0; exit 3
             fi ;;
+        1)  ;;  # confirmed absent — define below, disk needs its own record
         *)  echo "[tier5] FAIL: cannot determine state of $VM_NAME — refusing" >&2
             REAP=0; exit 3 ;;
     esac
+
+    # Linked-clone disk per VM. An EXISTING overlay is reusable only
+    # with a provable owner: while the domain is defined-and-ours its
+    # binding is the record; with the domain absent the disk needs its
+    # own — the <disk>.appid sidecar stamped at create. An overlay
+    # without a matching sidecar could be ANOTHER app's guest disk
+    # left under this name — refuse rather than boot it under our
+    # binding (sol r12). The backing-file check is the same provenance
+    # question: a file under this name that does not clone OUR base is
+    # never ours to boot.
+    if [ -f "$DISK" ]; then
+        if [ "$_ds" -eq 1 ]; then
+            _side=$(cat "$DISK.appid" 2>/dev/null) || _side=
+            _back=$(run_as_admin qemu-img info --output=json "$DISK" \
+                2>/dev/null \
+                | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
+            if [ "$_side" != "$POLICY_KEY" ] || [ "$_back" != "$DISK_BASE" ]; then
+                echo "[tier5] FAIL: overlay $DISK bound to" >&2
+                echo "        '${_side:-<unbound>}' / backing '${_back:-<unknown>}'" >&2
+                echo "        — refusing to boot an unproven disk" >&2
+                REAP=0; exit 3
+            fi
+        elif [ ! -f "$DISK.appid" ]; then
+            # Defined-ours pre-sidecar guest: backfill the disk's owner
+            # record so a later definition loss still proves it ours.
+            printf '%s\n' "$POLICY_KEY" > "$DISK.appid" 2>/dev/null \
+                && chmod 0600 "$DISK.appid" 2>/dev/null \
+                || true
+        fi
+    else
+        if ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$DISK" >/dev/null 2>&1; then
+            echo "[tier5] FAIL: qemu-img create -b $DISK_BASE failed at $DISK" >&2
+            exit 4
+        fi
+        # Stamp the binding the domain will carry — if the definition
+        # is ever lost, the sidecar is the disk's own owner record.
+        if ! { printf '%s\n' "$POLICY_KEY" > "$DISK.appid.$$" \
+                && mv -f "$DISK.appid.$$" "$DISK.appid" \
+                && chmod 0600 "$DISK.appid"; }; then
+            rm -f "$DISK" "$DISK.appid.$$" 2>/dev/null
+            echo "[tier5] FAIL: could not stamp binding sidecar $DISK.appid" >&2
+            exit 4
+        fi
+    fi
+
+    # Define only on CONFIRMED absence (the same verdict that gated the
+    # overlay provenance above).
+    [ "$_ds" -eq 1 ] && _create_domain_define
 
     # Start if not live. The qemu oracle decides — a false "shut off"
     # domstate must not push `virsh start` at an already-live domain,
