@@ -78,8 +78,9 @@ that does not provide prebuilt application container images or nested VM support
   are built too. Debug info and frame pointers are retained. Native component
   build directories are `<component>/build-oss`. libweston/Quickshell retain
   their own build directories under their vendored source trees.
-* `bash .oss-scanner/test.sh`: scanner headless lane. Optional groups are
-  `smoke`, `root`, `native`, `apps`, `extensions`. Tests run as UID 1001 with a
+* `bash .oss-scanner/test.sh`: default smoke checks (focused Python, native
+  components and both extensions). Optional groups are `all`, `root`, `native`,
+  `apps`, `extensions`; `all` runs the broader headless diagnostic lane. Tests run as UID 1001 with a
   private D-Bus session and offscreen Qt. Failures propagate to the exit code.
 * `bash .oss-scanner/build-sanitized.sh qdwin`: optional separate ASan/UBSan
   native build; also accepts `daemons`. Vendored dependencies
@@ -91,7 +92,11 @@ that does not provide prebuilt application container images or nested VM support
   `meson test -C qdwin/build-oss --list` and equivalent daemon/shell commands.
 * Package versions: `/opt/scanner-rpms.txt`. Build parallelism defaults to two.
 
-The root suite is batched using the same generator as qci. The desktop
+The optional root suite is batched using the same generator as qci.
+Experimental isolation probe tests require a non-permissive host
+`kernel.yama.ptrace_scope`; the helper Debian VM defaults to 0 and fails four
+checks. A full-suite failure is not evidence of a vulnerability by itself.
+Use focused tests with their documented prerequisites and retain failure logs. The desktop
 shell's integration lane is excluded; native, Python, QML and JavaScript
 checks still run. Browser tests use
 one process per file. qdterm's printer-coupled test is excluded exactly as in

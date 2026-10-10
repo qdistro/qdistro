@@ -30,7 +30,7 @@ those GC tests without an equivalent environment adjustment.
 The check tests network isolation, reinstalls both extension dependency sets from
 the image's npm cache offline, touches native sources to force recompilation,
 rebuilds the SIP binding, configures native Meson builds from scratch, runs
-every headless group and exercises ASan/UBSan logic/frame-parser tests. It does not mount host dependencies.
+smoke checks and exercises ASan/UBSan logic/frame-parser tests. It does not mount host dependencies.
 Logs go to `ci/runs/oss-scanner-local/` by default. Any failure makes the check exit nonzero; independent test groups continue
 to collect evidence. Each check resolves its image tag to an immutable ID
 and records that ID, inspection metadata and the final exit code.
@@ -51,10 +51,25 @@ for template GC queries. This needs user namespaces but no image downloads.
 The libvirt client is present for absent-domain helper tests; no VM daemon,
 guest disk or host libvirt socket is provided.
 
-`test.sh smoke` runs during image construction. `test.sh all` runs the scanner headless lane. It excludes the desktop
+`test.sh` defaults to `smoke`, the same check run during image construction.
+It covers 98 focused Python tests, native component tests and both extension
+suites/builds. `check-offline.sh IMAGE` validates offline dependency restoration,
+rebuilds, these smoke checks and selected sanitizer tests. Full qci is not a
+scanner preparation gate.
+
+`test.sh all` runs the optional broader headless diagnostic lane. To include it
+in local offline validation, use `check-offline.sh IMAGE all` explicitly. This lane It excludes the desktop
 shell's integration lane and the terminal's printer-dependent test; it does
 not run the VM/GUI/release gates. See `threat_model.md` for
 component priorities, severity guidance and runtime limitations.
+The optional full lane includes host-dependent tests. An earlier complete
+offline run failed four experimental isolation probe tests because the Debian
+VM had `kernel.yama.ptrace_scope=0`; those tests require a non-permissive value.
+These failures remain recorded and are not counted as passes. Nested Podman
+queries also require the syscall permissions described above. Choose focused
+test groups or individual tests appropriate to the available runtime; actual
+installed-system checks belong in a qdistro VM.
+
 Independent steps have qci's 600-second timeout, configurable through
 `OSS_SCANNER_TEST_TIMEOUT`; the large root suite has qci's separate
 1800-second budget (`OSS_SCANNER_ROOT_TEST_TIMEOUT`). The large terminal suite

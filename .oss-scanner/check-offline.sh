@@ -4,6 +4,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 engine=${CONTAINER_ENGINE:-podman}
 image=${1:-localhost/qdistro/oss-scanner:local}
+test_group=${2:-smoke}
+case "$test_group" in smoke|all|root|native|apps|extensions) ;;
+    *) echo "usage: $0 [IMAGE [smoke|all|root|native|apps|extensions]]" >&2; exit 2;;
+esac
 logs=${OSS_SCANNER_LOG_DIR:-ci/runs/oss-scanner-local}
 mkdir -p "$logs"
 # Resolve once: a concurrent rebuild of the tag cannot change this check.
@@ -30,7 +34,7 @@ fi
 # Expressions in the script are expanded inside the offline container.
 status=0
 # shellcheck disable=SC2016
-"$engine" run --rm --init --network=none "${runtime_security[@]}" "${limits[@]}" --workdir=/src "$image_id" \
+"$engine" run --rm --init --network=none "${runtime_security[@]}" "${limits[@]}" --env OSS_SCANNER_TEST_GROUP="$test_group" --workdir=/src "$image_id" \
     bash -euo pipefail -c '
         python3 - <<"PYNET"
 import socket
@@ -65,7 +69,7 @@ PYNET
         chown -R scanner:scanner /src
         # Preserve failures, but still collect the independent sanitizer results.
         test_status=0
-        bash .oss-scanner/test.sh all || test_status=1
+        bash .oss-scanner/test.sh "$OSS_SCANNER_TEST_GROUP" || test_status=1
         bash .oss-scanner/shell.sh meson test -C qdwin/build-oss-sanitized \
             --suite logic --print-errorlogs --num-processes 2 || test_status=1
         bash .oss-scanner/shell.sh meson test -C daemons/build-oss-sanitized \
@@ -77,4 +81,4 @@ if [ "$status" != 0 ]; then
     printf 'Offline check failed (exit %s). Log: %s/offline.log\n' "$status" "$logs" >&2
     exit "$status"
 fi
-printf 'Offline rebuild and headless tests passed. Log: %s/offline.log\n' "$logs"
+printf 'Offline rebuild and %s tests passed. Log: %s/offline.log\n' "$test_group" "$logs"

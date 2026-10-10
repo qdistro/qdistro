@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# all is the headless audit lane. VM/GUI/enforcing-SELinux checks are separate.
+# Default to scanner smoke checks; all is optional headless diagnostics.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit
 if [ "${OSS_SCANNER_TEST_INNER:-0}" != 1 ]; then
@@ -25,7 +25,7 @@ run() {
     fi
 }
 pytest_group() { local dir=$1; shift; (cd "$dir" && run python3 -m pytest "$@") || rc=1; }
-group=${1:-all}
+group=${1:-smoke}
 case "$group" in all|smoke|root|native|apps|extensions) ;; *) echo "usage: $0 [all|smoke|root|native|apps|extensions]" >&2; exit 2;; esac
 if [ "$group" = smoke ]; then
     pytest_group . -q tests/unit/test_broker_upload_lineage.py tests/unit/test_broker_subscriber_restart.py tests/unit/test_admin_widgets_logic.py
