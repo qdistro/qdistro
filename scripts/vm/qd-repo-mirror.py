@@ -49,6 +49,14 @@ def die(msg):
     sys.exit(1)
 
 
+def offline():
+    """Same contract as qd_deps_offline in deps-cache.sh: either flag,
+    any truthy spelling."""
+    vals = ("1", "true", "yes", "on")
+    return os.environ.get("QDISTRO_DEPS_OFFLINE", "") in vals or \
+        os.environ.get("QCI_OFFLINE", "") in vals
+
+
 def digest_file(path, algo="sha256"):
     try:
         h = hashlib.new(algo)
@@ -171,20 +179,21 @@ def audit_repo(base, dest):
     never just index entries. The completion marker is invalidated up
     front and republished only after the full audit verifies, so a failed
     or interrupted audit never leaves a stale "complete"."""
+    marker = os.path.join(dest, "mirror.json")
+    if os.path.isfile(marker):
+        # Incomplete until re-proven — invalidate BEFORE any audit failure
+        # can die, or a deleted repomd leaves a stale "complete" behind.
+        os.unlink(marker)
     repomd = os.path.join(dest, "repodata", "repomd.xml")
     if not os.path.isfile(repomd):
         die(f"verify: no repomd.xml under {dest} — mirror was never completed")
-    marker = os.path.join(dest, "mirror.json")
-    if os.path.isfile(marker):
-        os.unlink(marker)
 
     def repair(bad, what):
         if not bad:
             return
         print(f"[repo-mirror] verify: {len(bad)} {what} file(s) "
               f"corrupt/missing, refetching", file=sys.stderr)
-        if os.environ.get("QDISTRO_DEPS_OFFLINE") == "1" or \
-                os.environ.get("QCI_OFFLINE") == "1":
+        if offline():
             die("offline: mirror verify found corrupt/missing files: "
                 + ", ".join(h for h, _s, _a in bad[:10]))
         for href, sha, algo in bad:
@@ -380,10 +389,8 @@ def main():
                    help="re-mirror even when mirror.json marks the repo complete")
     args = p.parse_args()
 
-    if os.environ.get("QDISTRO_DEPS_OFFLINE") == "1" or \
-            os.environ.get("QCI_OFFLINE") == "1":
-        if not args.verify:
-            die("offline mode: repo mirror is the cache warmer — run it online")
+    if offline() and not args.verify:
+        die("offline mode: repo mirror is the cache warmer — run it online")
 
     repos = args.repo or ["oss", "non-oss"]
     dest_root = os.path.join(args.root, "repos")

@@ -18,8 +18,10 @@ FROM registry.opensuse.org/opensuse/tumbleweed:${SNAPSHOT}
 # metadata. The shared helper pins both repos and leaves GPG checks enabled.
 COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier2/
 ARG QDISTRO_REPO_BASE=""
+ARG QDISTRO_DEPS_OFFLINE=""
 ARG QCI_OFFLINE=""
-RUN QDISTRO_REPO_BASE="$QDISTRO_REPO_BASE" QCI_OFFLINE="$QCI_OFFLINE" \
+RUN QDISTRO_REPO_BASE="$QDISTRO_REPO_BASE" \
+    QDISTRO_DEPS_OFFLINE="$QDISTRO_DEPS_OFFLINE" QCI_OFFLINE="$QCI_OFFLINE" \
     /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
 RUN zypper --non-interactive --gpg-auto-import-keys refresh \
  && zypper --non-interactive dup --no-recommends

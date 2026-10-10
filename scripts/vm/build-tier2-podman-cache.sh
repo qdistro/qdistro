@@ -90,6 +90,7 @@ for workload in "${workloads[@]}"; do
         --file "$wcontext/Containerfile.$workload" \
         --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
         --build-arg "QDISTRO_REPO_BASE=${QDISTRO_REPO_BASE:-}" \
+        --build-arg "QDISTRO_DEPS_OFFLINE=${QDISTRO_DEPS_OFFLINE:-}" \
         --build-arg "QCI_OFFLINE=${QCI_OFFLINE:-}" \
         --tag "$tag" \
         --label "org.qdistro.test-snapshot=$QDISTRO_SUBSTRATE_SNAPSHOT" \

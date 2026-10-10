@@ -10,8 +10,11 @@ host_container_run() {
     mounts+=(--volume "$npm_cache:/tmp/qci-npm:rw")
     # The dep cache must resolve to the same root inside the container —
     # the vendored libweston build seeds display-info from it, and the
-    # --network=none rows cannot fetch. Warm it on the host first.
-    deps_root=${QDISTRO_DEPS_CACHE_DIR:-${QDWIN_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/qdistro}}
+    # --network=none rows cannot fetch. Resolve through qd_deps_root so the
+    # mount is exactly what the warmer and the in-container code resolve.
+    # shellcheck source=/dev/null
+    . "$QDISTRO_REPO/scripts/vm/lib/deps-cache.sh"
+    deps_root=$(qd_deps_root) || return
     mkdir -p "$deps_root" || return
     deps_root=$(realpath "$deps_root") || return
     mounts+=(--volume "$deps_root:$deps_root:rw")
