@@ -24,6 +24,9 @@ COPY . /src
 WORKDIR /src
 # Policy tooling and user management install executables in /usr/sbin.
 ENV PATH=/opt/scanner-tools:/opt/scanner-python/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
+# openSUSE's normal /run/tmux path is initialized by systemd-tmpfiles.
+# The scanner is systemd-less; tmux creates private UID-owned sockets in /tmp.
+ENV TMUX_TMPDIR=/tmp
 # Never ship a linked-worktree pointer to host Git metadata. Anthropic's
 # normal clone has a real .git directory, which is retained.
 RUN if test -f .git; then rm .git; fi
