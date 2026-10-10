@@ -128,6 +128,118 @@ qd_display_info_tarball() {
     qd_fetch src "$QDISTRO_DISPLAY_INFO_URL" "$QDISTRO_DISPLAY_INFO_SHA256"
 }
 
+# ---- OCI images -----------------------------------------------------------
+
+# Registry pulls are the one remote op behind every Containerfile build
+# (podman build runs --pull=never everywhere). The cacheable artifact is
+# the digest-keyed saved archive:
+#
+#   oci/<digest-hex>/image.tar        podman save --format oci-archive
+#   oci/<digest-hex>/manifest.txt     ref=<ref>, digest=sha256:...
+#   oci/refs/<ref-hash>.digest        ref -> digest map (offline tag
+#                                   resolution: a tag cannot be resolved
+#                                   without a registry query)
+#
+# qd_oci_ensure <ref> — the image ends up in the local podman store,
+# content-verified, and the archive + ref map are cached so a cold host
+# (or a post-`podman system prune` one) never pulls again. Prints the
+# resolved sha256 digest. Offline: local image or cached archive suffices;
+# else fails closed naming the ref.
+
+# _qd_oci_ref_key <ref> — filesystem-safe ref key for oci/refs/.
+_qd_oci_ref_key() {
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+}
+
+# _qd_oci_digest <ref> — image digest in the local store (.Digest, else .Id).
+_qd_oci_digest() {
+    local d
+    d="$(podman image inspect "$1" --format '{{.Digest}}' 2>/dev/null)"
+    if [ -z "$d" ]; then
+        d="$(podman image inspect "$1" --format '{{.Id}}' 2>/dev/null)"
+        case "$d" in sha256:*) ;; *) d="sha256:$d" ;; esac
+    fi
+    [ -n "$d" ] && printf '%s\n' "$d"
+}
+
+# _qd_oci_save <ref> <digest> — save the archive under a per-digest lock.
+_qd_oci_save() {
+    local ref="$1" digest="$2" hex dir lock tmp
+    hex="${digest#sha256:}"
+    dir="$(qd_deps_root)/oci/$hex"
+    [ -f "$dir/image.tar" ] && return 0
+    install -d "$dir" "$(qd_deps_root)/.locks" || return 1
+    lock="$(qd_deps_root)/.locks/oci-$hex.lock"
+    (
+        flock -x 9
+        [ -f "$dir/image.tar" ] && exit 0
+        tmp="$(mktemp "$dir/.image.XXXXXXXX")" || exit 1
+        if podman save --format oci-archive -o "$tmp" "$ref" >&2; then
+            chmod 0644 "$tmp"
+            mv "$tmp" "$dir/image.tar" || exit 1
+        else
+            rm -f "$tmp"; exit 1
+        fi
+        qd_write_manifest oci "$hex" "$ref" image.tar || exit 1
+    ) 9>"$lock"
+}
+
+qd_oci_ensure() {
+    local ref="$1" root refdir refmap digest archive
+    [ -n "$ref" ] || { _qdc_die "qd_oci_ensure: empty ref"; return 1; }
+    command -v podman >/dev/null || { _qdc_die "qd_oci_ensure: podman required"; return 2; }
+    qd_deps_init || return 1
+    root="$(qd_deps_root)"
+    refdir="$root/oci/refs"
+    refmap="$refdir/$(_qd_oci_ref_key "$ref").digest"
+
+    # 1. Local store hit — still cache the archive when online so the
+    #    warm story survives `podman system prune` and cold hosts.
+    if podman image exists "$ref"; then
+        digest="$(_qd_oci_digest "$ref")" || {
+            _qdc_die "qd_oci_ensure: cannot inspect local image $ref"
+            return 3
+        }
+        install -d "$refdir" || return 1
+        printf '%s\n' "$digest" >"$refmap.tmp" && mv "$refmap.tmp" "$refmap"
+        qd_deps_offline || _qd_oci_save "$ref" "$digest" || return 1
+        printf '%s\n' "$digest"
+        return 0
+    fi
+
+    # 2. Cached archive for this ref — load, never pull.
+    if [ -s "$refmap" ]; then
+        digest="$(cat "$refmap")"
+        archive="$root/oci/${digest#sha256:}/image.tar"
+        if [ -f "$archive" ]; then
+            podman load -i "$archive" >/dev/null 2>&1 || {
+                _qdc_die "qd_oci_ensure: podman load failed for $archive"
+                return 3
+            }
+            printf '%s\n' "$digest"
+            return 0
+        fi
+    fi
+
+    # 3. Cold — offline fails closed naming the ref.
+    if qd_deps_offline; then
+        _qdc_die "offline: no cached OCI archive for $ref (need oci/<digest>/image.tar + refs map)"
+        return 1
+    fi
+    podman pull --quiet "$ref" >&2 || {
+        _qdc_die "qd_oci_ensure: podman pull $ref failed"
+        return 3
+    }
+    digest="$(_qd_oci_digest "$ref")" || {
+        _qdc_die "qd_oci_ensure: cannot inspect pulled image $ref"
+        return 3
+    }
+    install -d "$refdir" || return 1
+    printf '%s\n' "$digest" >"$refmap.tmp" && mv "$refmap.tmp" "$refmap"
+    _qd_oci_save "$ref" "$digest" || return 1
+    printf '%s\n' "$digest"
+}
+
 # ---- guest transport (qd-serve) -----------------------------------------
 
 # Guests cannot see the host filesystem: slirp reaches the host at

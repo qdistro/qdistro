@@ -274,3 +274,133 @@ runq() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"src/"*"$other_sha"* ]] || [[ "$output" == *offline* ]]
 }
+
+# ---- OCI images (qd_oci_ensure) -------------------------------------------
+# A PATH-shimmed fake podman backs every assertion — no real registry, no
+# real image store. FAKE_PODMAN_DIR/images/<sha256-of-ref> marks a local
+# image; calls.log records every invocation so "no pull" is checkable.
+
+oci_setup_fake() {
+    mkdir -p "$WORK/bin"
+    cat > "$WORK/bin/podman" <<'POD'
+#!/bin/bash
+d="$FAKE_PODMAN_DIR"; mkdir -p "$d/images"
+echo "podman $*" >> "$d/calls.log"
+enc() { printf '%s' "$1" | sha256sum | awk '{print $1}'; }
+case "$1 $2" in
+    "image exists")
+        [ -f "$d/images/$(enc "$3")" ] && exit 0 || exit 1 ;;
+    "image inspect")
+        r="$3"
+        [ -f "$d/images/$(enc "$r")" ] || exit 1
+        echo "sha256:$(enc "$r")"; exit 0 ;;
+esac
+case "$1" in
+    pull)
+        r="${!#}"
+        [ -f "$d/block-pull" ] && { echo "FAKE: pull attempted" >&2; exit 99; }
+        printf 'ref=%s\n' "$r" > "$d/images/$(enc "$r")"
+        echo "sha256:$(enc "$r")"; exit 0 ;;
+    save)
+        out=""; r=""
+        shift
+        while [ $# -gt 0 ]; do
+            case "$1" in -o) out="$2"; shift 2 ;; *) r="$1"; shift ;; esac
+        done
+        [ -f "$d/images/$(enc "$r")" ] || exit 1
+        printf 'ref=%s\n' "$r" > "$out"; exit 0 ;;
+    load)
+        arc="${!#}"
+        r="$(sed -n 's/^ref=//p' "$arc" 2>/dev/null)"
+        [ -n "$r" ] || exit 1
+        printf 'ref=%s\n' "$r" > "$d/images/$(enc "$r")"; exit 0 ;;
+esac
+exit 2
+POD
+    chmod +x "$WORK/bin/podman"
+    export FAKE_PODMAN_DIR="$WORK/podman"
+    mkdir -p "$FAKE_PODMAN_DIR"
+    REF="registry.test/opensuse/tumbleweed:20990101"
+    REF_SHA="$(printf '%s' "$REF" | sha256sum | awk '{print $1}')"
+    runoci() {
+        env PATH="$WORK/bin:$PATH" FAKE_PODMAN_DIR="$FAKE_PODMAN_DIR" \
+            QDISTRO_DEPS_CACHE_DIR="$WORK/cache" "$@" \
+            bash -c ". '$LIB'; qd_oci_ensure '$REF'"
+    }
+}
+
+oci_img_present() {
+    local s; s="$(printf '%s' "$REF" | sha256sum | awk '{print $1}')"
+    mkdir -p "$FAKE_PODMAN_DIR/images"
+    printf 'ref=%s\n' "$REF" > "$FAKE_PODMAN_DIR/images/$s"
+}
+
+@test "qd_oci_ensure cold: pulls, saves digest archive, maps the ref" {
+    oci_setup_fake
+    run runoci
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = "sha256:$REF_SHA" ]
+    [ -f "$WORK/cache/oci/$REF_SHA/image.tar" ]
+    grep -q "url=$REF" "$WORK/cache/oci/$REF_SHA/manifest.txt"
+    local refkey
+    refkey="$(printf '%s' "$REF" | sha256sum | awk '{print $1}')"
+    grep -qx "sha256:$REF_SHA" "$WORK/cache/oci/refs/$refkey.digest"
+    grep -q 'pull' "$FAKE_PODMAN_DIR/calls.log"
+    grep -q 'save' "$FAKE_PODMAN_DIR/calls.log"
+}
+
+@test "qd_oci_ensure warm: local image, no pull, archive still ensured once" {
+    oci_setup_fake
+    oci_img_present
+    run runoci
+    [ "$status" -eq 0 ]
+    ! grep -q 'pull' "$FAKE_PODMAN_DIR/calls.log"
+    [ -f "$WORK/cache/oci/$REF_SHA/image.tar" ]   # saved once, online
+    # Second run: everything warm — no pull, no save.
+    : > "$FAKE_PODMAN_DIR/calls.log"
+    run runoci
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = "sha256:$REF_SHA" ]
+    ! grep -q 'pull\|save\|load' "$FAKE_PODMAN_DIR/calls.log"
+}
+
+@test "qd_oci_ensure offline: cached archive loads without a pull" {
+    oci_setup_fake
+    run runoci   # warm the cache online first
+    [ "$status" -eq 0 ]
+    # Simulate `podman system prune`: image gone from the local store.
+    rm -f "$FAKE_PODMAN_DIR/images/$REF_SHA"
+    : > "$FAKE_PODMAN_DIR/calls.log"
+    touch "$FAKE_PODMAN_DIR/block-pull"           # a pull would be a bug
+    export QDISTRO_DEPS_OFFLINE=1
+    run runoci
+    unset QDISTRO_DEPS_OFFLINE
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = "sha256:$REF_SHA" ]
+    grep -q 'load' "$FAKE_PODMAN_DIR/calls.log"
+    ! grep -q 'pull' "$FAKE_PODMAN_DIR/calls.log"
+    oci_img_present   # load restored the image marker (fake side effect check)
+    [ -f "$FAKE_PODMAN_DIR/images/$REF_SHA" ]
+}
+
+@test "qd_oci_ensure offline: local image returns digest, zero podman save/pull" {
+    oci_setup_fake
+    oci_img_present
+    touch "$FAKE_PODMAN_DIR/block-pull"
+    export QDISTRO_DEPS_OFFLINE=1
+    run runoci
+    unset QDISTRO_DEPS_OFFLINE
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = "sha256:$REF_SHA" ]
+    ! grep -q 'pull\|save\|load' "$FAKE_PODMAN_DIR/calls.log"
+}
+
+@test "qd_oci_ensure offline: nothing cached fails closed naming the ref" {
+    oci_setup_fake
+    export QDISTRO_DEPS_OFFLINE=1
+    run runoci
+    unset QDISTRO_DEPS_OFFLINE
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"$REF"* ]]
+    [[ "$output" == *offline* ]]
+}
