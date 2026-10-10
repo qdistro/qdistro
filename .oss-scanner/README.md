@@ -41,6 +41,9 @@ guest disk or host libvirt socket is provided.
 `test.sh smoke` runs during image construction. `test.sh all` is the full
 headless audit lane, not the VM/GUI/release gate. See `threat_model.md` for
 component priorities, severity guidance and runtime limitations.
+Independent steps have qci's 600-second timeout, configurable through
+`OSS_SCANNER_TEST_TIMEOUT`. A timeout or crash fails the check; remaining
+groups and sanitizer tests still run so their results can be inspected.
 
 The native build follows the sequence used by the small GitHub VM-image
 workflow, but retains development tools and build outputs instead of producing

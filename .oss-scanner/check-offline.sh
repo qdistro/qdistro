@@ -52,10 +52,13 @@ PYNET
         bash .oss-scanner/build-sanitized.sh qdwin
         bash .oss-scanner/build-sanitized.sh daemons
         chown -R scanner:scanner /src
-        bash .oss-scanner/test.sh all
+        # Preserve failures, but still collect the independent sanitizer results.
+        test_status=0
+        bash .oss-scanner/test.sh all || test_status=1
         bash .oss-scanner/shell.sh meson test -C qdwin/build-oss-sanitized \
-            --suite logic --print-errorlogs --num-processes 2
+            --suite logic --print-errorlogs --num-processes 2 || test_status=1
         bash .oss-scanner/shell.sh meson test -C daemons/build-oss-sanitized \
-            --print-errorlogs --num-processes 2
+            --print-errorlogs --num-processes 2 || test_status=1
+        exit "$test_status"
     ' > "$logs/offline.log" 2>&1
 printf 'Offline rebuild and headless tests passed. Log: %s/offline.log\n' "$logs"
