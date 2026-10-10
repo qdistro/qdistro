@@ -540,6 +540,10 @@ def test_appid_outside_policy_key_charset_is_dropped(tmp_path: Path) -> None:
     _write(root, f"{SHARE_APPS}/foot.desktop", _desktop("Foot", "foot"))
     _write(root, f"{SHARE_APPS}/my app.desktop", _desktop("Bad", "eviltool"))
     _write(root, f"{SHARE_APPS}/evil+tool.desktop", _desktop("Bad2", "eviltool"))
+    # Trailing newline in the id ("evil\n.desktop" → appId "tier5/evil\n"):
+    # re.match(...$) accepts it, the wrapper's `[[ =~ ]]` does not — the
+    # scanner must use fullmatch semantics to agree (sol r5).
+    _write(root, f"{SHARE_APPS}/evil\n.desktop", _desktop("Bad3", "eviltool"))
     res = _scan(root, base, out)
     assert res.returncode == 0, res.stderr
     ids = [r["appId"] for r in _manifest(out)["apps"]]

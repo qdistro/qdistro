@@ -97,8 +97,10 @@ BUILTIN_DENYLIST = {"footclient", "foot-server"}
 
 # The spawn wrapper's --policy-key / domain-binding charset — keep in
 # sync with the [[ =~ ]] rule in spawn-tier5.sh. Rows whose derived
-# appId violates it are dropped before publication.
-_APP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+# appId violates it are dropped before publication. Checked with
+# fullmatch: re.match(...$) would accept a trailing '\n' that the
+# wrapper's `[[ =~ ]]` rejects.
+_APP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}")
 
 # Exec field codes the launcher side provides at activation time — we
 # have no file/URL to substitute, so the token is dropped entirely.
@@ -526,7 +528,7 @@ def select_apps(
         # would otherwise reach launch() and die at the wrapper, or
         # worse, alias another app's binding (sol r4). Drop and log
         # rather than publish an unusable row.
-        if not _APP_ID_RE.match(app_id):
+        if not _APP_ID_RE.fullmatch(app_id):
             log(f"{desktop_id}: appId {app_id!r} outside the policy-key "
                 f"charset — dropped")
             continue

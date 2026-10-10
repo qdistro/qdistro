@@ -148,11 +148,16 @@ silently merge:
   Adoption verifies bound == `--policy-key`: a RUNNING domain bound to
   another (or no) app is refused (the wrapper exits with REAP=0 — it
   never tears down a guest it does not own), and a foreign domain is
-  reclaimed under the exclusive hold only after `domstate` confirms a
-  terminal state (`shut off`/`crashed`); a failed or ambiguous state
-  query fails closed — the wrapper never runs `virsh destroy` against a
-  foreign guest. This covers collisions ACROSS catalogue reloads,
-  where the running guest outlives the manifest that created it.
+  reclaimed under the exclusive hold only when its backing qemu is
+  proven dead — liveness comes from `qemu_pids_for_domain` (procfs
+  `guest=<name>` match, verified via `/proc/<pid>/comm`), never from
+  `domstate`, which nested-virt libvirt can report as "shut off" for a
+  live qemu; a terminal `domstate` stays on as a belt. The overlay is
+  unlinked only after a post-undefine liveness re-check, so an
+  out-of-band `virsh start` in the probe gap can't lose its disk. The
+  same oracle guards the startup orphan-overlay reaper. This covers
+  collisions ACROSS catalogue reloads, where the running guest outlives
+  the manifest that created it.
 - `launch()` also requires the row's appId to be in the CURRENT
   catalogue, so a stale provider row cannot adopt a guest it no longer
   owns.

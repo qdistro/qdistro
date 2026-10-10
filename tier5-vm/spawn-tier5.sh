@@ -254,6 +254,28 @@ run_as_admin() {
         "$@"
 }
 
+# qemu_pids_for_domain [name] — print the pid(s) of the qemu process(es)
+# backing a domain (default $VM_NAME), or nothing. This is the ONLY
+# reliable liveness oracle here: on a nested-virt host libvirt's
+# domstate lies (reports "shut off" while qemu is still ALIVE — the
+# failure mode commit 8ac0a39 was written for). libvirt launches the
+# qemu:///session qemu with `-name guest=<domain>,debug-threads=on`, so
+# we match on `guest=<name>,`. pgrep runs through run_as_admin so it can
+# see the admin-owned session qemu. Candidates are narrowed to REAL
+# qemu processes by /proc/<pid>/comm (truncated to 15 chars, e.g.
+# "qemu-system-x86"); this also discards the run_as_admin wrapper chain
+# (runuser/env/pgrep) that carries the same pattern in its own argv and
+# would otherwise self-match. Defined early: the orphan-overlay reaper
+# in --vm bring-up consults it for domains other than $VM_NAME.
+qemu_pids_for_domain() {
+    local name="${1:-$VM_NAME}" p c out=""
+    for p in $(run_as_admin pgrep -f "guest=$name," 2>/dev/null); do
+        c=$(cat "/proc/$p/comm" 2>/dev/null) || continue
+        case "$c" in qemu-system-*|qemu-kvm) out="$out $p" ;; esac
+    done
+    printf '%s' "$out"
+}
+
 # domain_xml_tmpfile is provided by lib/spawn-common.sh (sourced below); it
 # renders into a private 0700 dir under the admin runtime. (A local definition
 # here would be shadowed by that source anyway.)
@@ -329,14 +351,24 @@ else
                     >/dev/null 2>&1; then
                 continue
             fi
-            # Domain still running? Skip — admin may be using it via
-            # an out-of-band virsh start.
+            # Domain still alive? domstate is a DIAGNOSTIC, not an
+            # oracle — nested-virt libvirt reports "shut off" for a live
+            # qemu (see qemu_pids_for_domain). Skip on EITHER signal so
+            # a false reading can't cost a live guest its disk (sol r5).
             if run_as_admin virsh domstate "$base" 2>/dev/null \
-                    | grep -qw running; then
+                    | grep -qw running \
+                || [ -n "$(qemu_pids_for_domain "$base")" ]; then
                 continue
             fi
-            # Orphan: undefine any stopped domain + unlink overlay.
+            # Orphan: undefine any stopped domain + unlink overlay — but
+            # re-verify liveness after undefine: an out-of-band `virsh
+            # start` in the probe→undefine gap makes the domain
+            # transient-running; its overlay must survive our rm.
             run_as_admin virsh undefine "$base" >/dev/null 2>&1 || true
+            if [ -n "$(qemu_pids_for_domain "$base")" ]; then
+                echo "[tier5] orphan $base came alive during reap — keeping overlay" >&2
+                continue
+            fi
             rm -f "$overlay" 2>/dev/null || true
             echo "[tier5] reaped orphan overlay $overlay" >&2
         done
@@ -517,24 +549,6 @@ host_mem_avail_mb() {  # host MemAvailable in MiB, or "" if unreadable
     kb=$(grep -E '^MemAvailable:' /proc/meminfo 2>/dev/null | grep -oE '[0-9]+' | head -1)
     [ -n "$kb" ] || return 0
     printf '%s' $((kb / 1024))
-}
-
-# qemu_pids_for_domain — print the pid(s) of the qemu process(es) backing the
-# current domain, or nothing. Robust on a nested-virt host where libvirt's
-# domstate lies (reports "shut off" while qemu is still ALIVE). libvirt launches
-# the qemu:///session qemu with `-name guest=<domain>,debug-threads=on`, so we
-# match on `guest=$VM_NAME,`. pgrep runs through run_as_admin so it can see the
-# admin-owned session qemu. Candidates are then narrowed to REAL qemu processes
-# by /proc/<pid>/comm (truncated to 15 chars, e.g. "qemu-system-x86"); this also
-# discards the run_as_admin wrapper chain (runuser/env/pgrep) that carries the
-# same pattern in its own argv and would otherwise self-match.
-qemu_pids_for_domain() {
-    local p c out=""
-    for p in $(run_as_admin pgrep -f "guest=$VM_NAME," 2>/dev/null); do
-        c=$(cat "/proc/$p/comm" 2>/dev/null) || continue
-        case "$c" in qemu-system-*|qemu-kvm) out="$out $p" ;; esac
-    done
-    printf '%s' "$out"
 }
 
 domain_is_defined() {
@@ -1076,12 +1090,17 @@ else
         if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 \
                 && [ "$(domain_appid)" != "$POLICY_KEY" ]; then
             # Domain bound to another (or no) app squatting our name.
-            # Confirm a TERMINAL state before reclaiming — a failed or
-            # falsely-"shut off" domstate must never lead us to undefine
-            # (let alone destroy) a live foreign guest; unknown states
-            # fail closed (nested-KVM domstate is documented flaky,
-            # sol r4). No virsh destroy: a confirmed-terminal domain
+            # Liveness is decided by the backing qemu process, NEVER by
+            # domstate — nested-virt libvirt reports "shut off" for a
+            # LIVE qemu (qemu_pids_for_domain/8ac0a39, sol r5). Require
+            # BOTH no qemu pids AND a terminal domstate; anything else
+            # fails closed. No virsh destroy: a dead-qemu domain
             # undefines directly.
+            if [ -n "$(qemu_pids_for_domain)" ]; then
+                echo "[tier5] FAIL: foreign domain $VM_NAME has a live" >&2
+                echo "        qemu (domstate unreliable) — refusing to reclaim" >&2
+                REAP=0; exit 3
+            fi
             _fst=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null \
                     | tr -d '[:space:]')
             case "$_fst" in
@@ -1094,6 +1113,14 @@ else
             if ! run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1; then
                 echo "[tier5] FAIL: cannot undefine foreign domain $VM_NAME" >&2
                 REAP=0; exit 5
+            fi
+            # An out-of-band `virsh start` in the probe→undefine gap
+            # leaves the foreign guest transient-RUNNING; its overlay
+            # must survive our rm (sol r5).
+            if [ -n "$(qemu_pids_for_domain)" ]; then
+                echo "[tier5] FAIL: foreign domain $VM_NAME started during" >&2
+                echo "        reclaim — keeping its overlay" >&2
+                REAP=0; exit 3
             fi
             rm -f "$DISK" 2>/dev/null || true
         fi

@@ -169,19 +169,43 @@ def test_adoption_verifies_bound_appid():
 
 
 def test_stopped_foreign_domain_is_reclaimed_not_adopted():
-    # ensures: a foreign domain is only reclaimed after domstate confirms
-    #          a TERMINAL state — an unknown/false state fails closed and
-    #          no virsh destroy ever runs against another app's guest
-    #          (nested-KVM domstate is documented flaky, sol r4)
+    # ensures: a foreign domain is reclaimed only when its backing qemu
+    #          is proven DEAD — domstate alone can report "shut off" for
+    #          a live qemu under nested KVM, so liveness comes from
+    #          qemu_pids_for_domain with a terminal domstate as belt
+    #          (sol r5). No virsh destroy ever runs against a foreign
+    #          guest, and a post-undefine liveness recheck protects the
+    #          overlay from an out-of-band start in the probe gap.
     assert "reclaiming stopped foreign domain" in SPAWN
     start = SPAWN.index('if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 \\\n                && [ "$(domain_appid)" != "$POLICY_KEY" ]')
     end = SPAWN.index("create_domain\n    fi\n    flock -s 9")
     reclaim = SPAWN[start:end]
+    # qemu-pid liveness CALL precedes the domstate query AND is repeated
+    # between undefine and rm (comment text mentions both names, so
+    # anchor on the call sites, not bare identifiers)
+    pidcall = '"$(qemu_pids_for_domain)"'
+    domcall = 'virsh domstate "$VM_NAME"'
+    assert reclaim.count(pidcall) >= 2
+    assert reclaim.index(pidcall) < reclaim.index(domcall)
+    assert reclaim.index(pidcall, reclaim.index(domcall)) \
+        < reclaim.index('rm -f "$DISK"')
     assert "shutoff|crashed" in reclaim
     assert "refusing to reclaim" in reclaim
     assert 'virsh destroy "$VM_NAME"' not in reclaim
     assert 'virsh undefine "$VM_NAME"' in reclaim
     assert 'rm -f "$DISK"' in reclaim
+
+
+def test_orphan_reaper_uses_qemu_liveness_not_domstate():
+    # ensures: the startup orphan-overlay reaper cannot delete a live
+    #          guest's disk on a false "shut off" — it skips on EITHER
+    #          domstate=running OR a backing qemu pid, and re-verifies
+    #          liveness between undefine and rm (sol r5)
+    reaper = SPAWN[SPAWN.index("orphan-overlay reaper"):
+                   SPAWN.index("reaped orphan overlay")]
+    assert 'qemu_pids_for_domain "$base"' in reaper
+    assert "domstate" in reaper
+    assert "came alive during reap" in SPAWN
 
 
 def test_foreign_refusal_never_joins_the_lock_session_early():
