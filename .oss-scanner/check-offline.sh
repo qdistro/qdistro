@@ -17,13 +17,20 @@ limits=()
 if [ "${OSS_SCANNER_RESOURCE_LIMITS:-1}" = 1 ]; then
     limits=(--cpus=2 --memory=8g)
 fi
+runtime_security=(--security-opt=label=disable --cap-add=SYS_PTRACE)
+# Docker's default seccomp profile blocks the user namespaces needed by
+# the real, empty Podman image-store queries in GC tests. The scanner VM
+# uses a privileged container; this local hook only relaxes the syscall filter.
+if [ "${engine##*/}" = docker ]; then
+    runtime_security+=(--security-opt=seccomp=unconfined)
+fi
 # Match qci's headless fixture environment on SELinux hosts. Container labels
 # otherwise identify stub trusted peers as hostile container_t processes.
 # Actual enforcing-SELinux validation belongs in disposable qdistro VMs.
 # Expressions in the script are expanded inside the offline container.
 status=0
 # shellcheck disable=SC2016
-"$engine" run --rm --init --network=none --security-opt=label=disable --cap-add=SYS_PTRACE "${limits[@]}" --workdir=/src "$image_id" \
+"$engine" run --rm --init --network=none "${runtime_security[@]}" "${limits[@]}" --workdir=/src "$image_id" \
     bash -euo pipefail -c '
         python3 - <<"PYNET"
 import socket

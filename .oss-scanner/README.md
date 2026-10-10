@@ -21,6 +21,12 @@ Docker also works; use `DOCKER_BUILDKIT=1 docker build -f
 uses the Dockerfile-specific ignore file; the legacy Docker builder does not.
 Podman receives it explicitly. This excludes local run logs and VM disks
 from the source context.
+The Docker offline hook disables its default seccomp filter so GC tests can
+query the real empty Podman store using nested user namespaces. It retains
+the network and resource limits and does not request privileged mode.
+Anthropic's scanner and `tools/check --qemu` use privileged containers;
+plain `tools/check` uses Docker's default filter, so its shell cannot run
+those GC tests without an equivalent environment adjustment.
 The check tests network isolation, reinstalls both extension dependency sets from
 the image's npm cache offline, touches native sources to force recompilation,
 rebuilds the SIP binding, configures native Meson builds from scratch, runs
