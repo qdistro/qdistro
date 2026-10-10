@@ -125,6 +125,10 @@ model.
 Defaults:
 
 - New permission scope → default-deny, require admin approval.
+  GUI-visible cross-silo features (clipboard offers, window handoff)
+  are broker-gated scopes too — the broker decides, qdshell applies
+  the secctx identity (e.g. `ClipboardGate`), and the compositor
+  stays mechanism-only with no policy logic.
 - New cross-uid signal → broker mediation, audit log entry per
   decision.
 - New daemon → SELinux policy module added to `selinux/`. Permissive
@@ -151,7 +155,8 @@ Defaults:
   one scenario, executed by a graphic-aware
   test runner (human or LLM) following the playbook step by step.
   The sanctioned runner is pinned via `QCI_AGENT_CMD`; see
-  [dev.md](dev.md).
+  [dev.md](dev.md). The full gate vocabulary and what each gate runs
+  is in dev.md's gate tour (and `ci/README.md`).
 
 GUI tests MUST run inside a VM. Bad input injection on the host has
 killed prior development sessions by closing the developer's
@@ -178,7 +183,12 @@ Driver tools live in `scripts/vm/`:
 
 - `vm-exec <name> <cmd>` — run a shell command in the VM via
   qemu-guest-agent (the command is JSON-encoded with `jq --arg`, so
-  embedded quotes are safe).
+  embedded quotes are safe). It runs as **root** with no login
+  session; for commands that need admin's uid and real session
+  (`systemctl --user`, `qdlocker.sock`, `qdshell.service`, …) use the
+  `vm_run_admin` helper in `tests/integration/vm/helpers.bash`, or
+  `runuser -u admin --` / `systemctl --user --machine=admin@.host`
+  inside the guest.
 - `vm-gui <name> <action>` — input injection: ydotool for typing and
   key chords where available, xdotool through XWayland otherwise.
   For anything the in-guest tools don't cover, use
