@@ -488,9 +488,13 @@
         While locked, qdwin refuses all request_* on the interface
         (raises `locked` error) and stops emitting per-toplevel events.
         Exception: the session-config snapshots `set_pointer_config` and
-        `set_key_repeat` are dropped silently (logged, no error) while
-        locked, because the shell pushes them unconditionally at startup
-        and a shell restarted during a lock must not be killed for it.
+        `set_key_repeat` and the focus-injection requests
+        `set_keyboard_focus` / `set_keyboard_focus_v2` are dropped
+        silently (logged, no error) while locked, because the shell
+        issues them reactively without checking lock state and a shell
+        restarted during a lock must not be killed for it. The request
+        is still refused — nothing is focused behind the lock screen,
+        and no selection is cleared.
         The shell uses this to swap to the lock UI layer-shell surface.
       </description>
       <arg name="locked" type="uint"/>

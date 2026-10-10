@@ -1566,6 +1566,23 @@ qdwin_maybe_promote_lock_toplevel(struct qdwin *qdwin,
 	if (qdwin->lock_toplevel && qdwin->lock_toplevel != tl)
 		qdwin_demote_lock_toplevel(qdwin, "replace-lock-toplevel");
 
+	/* A locker may attach a raw lock surface and only then produce its
+	 * locker-UI toplevel. Overwriting lock_surface/lock_view here
+	 * without first releasing the attach leaves the surface-destroy/
+	 * commit listeners — links embedded in this struct — armed on the
+	 * old surface, leaks the dedicated view, and lets the stale
+	 * lock_resource's late destructor tear down the promoted state.
+	 * Destroying the resource performs the whole release (listener
+	 * unlink + dedicated-view destroy + field clears);
+	 * reattach_in_progress suppresses the spurious fail-secure flap,
+	 * same as the attach path's own replacement sequence. */
+	if (qdwin->lock_resource && !qdwin->lock_view_is_toplevel &&
+	    qdwin->lock_surface) {
+		qdwin->lock_resource_reattach_in_progress = 1;
+		wl_resource_destroy(qdwin->lock_resource);
+		qdwin->lock_resource_reattach_in_progress = 0;
+	}
+
 	qdwin->lock_toplevel = tl;
 	qdwin->lock_surface =
 		weston_desktop_surface_get_surface(tl->desktop_surface);
@@ -5766,6 +5783,24 @@ qdwin_stream_resource_destroyed(struct wl_resource *resource)
 	free(s);
 }
 
+/* Compositor-teardown drain. Tombstone streams (terminated, unlisted)
+ * are client-owned and stay reachable only through their resource — the
+ * destructor above is already safe on released state. Listed streams are
+ * still active: neutralize the resource's user_data so its late
+ * destructor no-ops, release the server side (unlinks + revokes), and
+ * free the struct. Runs while seats/outputs are still alive. */
+static void
+qdwin_view_streams_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_view_stream *s, *tmp;
+	wl_list_for_each_safe(s, tmp, &qdwin->view_streams, link) {
+		if (s->resource)
+			wl_resource_set_user_data(s->resource, NULL);
+		qdwin_view_stream_release_server_state(s);
+		free(s);
+	}
+}
+
 static void
 qdwin_stream_handle_destroy(struct wl_client *client,
 			    struct wl_resource *resource)
@@ -6659,6 +6694,19 @@ qdwin_panel_resource_destroyed(struct wl_resource *resource)
 	qdwin_panels_on_output_change(qdwin);
 }
 
+/* Compositor-teardown drain. wl_resource_destroy runs the destructor
+ * above: it drops the panel's view + surface listeners, unlinks it, and
+ * recomputes the exclusive-zone work area while qdwin is still alive.
+ * Must run before free(qdwin) or a late client destroy would run the
+ * same body against freed qdwin. */
+static void
+qdwin_panels_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_panel *p, *tmp;
+	wl_list_for_each_safe(p, tmp, &qdwin->panels, link)
+		wl_resource_destroy(p->resource);
+}
+
 static void
 qdwin_handle_attach_panel(struct wl_client *client,
 			  struct wl_resource *resource,
@@ -6933,6 +6981,17 @@ qdwin_notification_resource_destroyed(struct wl_resource *resource)
 	free(n);
 }
 
+/* Compositor-teardown drain: the destructor above removes the bubble's
+ * view + surface listeners and unlinks it — exactly what a client-side
+ * destroy would do, run while qdwin is still alive. */
+static void
+qdwin_notifications_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_notification *n, *tmp;
+	wl_list_for_each_safe(n, tmp, &qdwin->notifications, link)
+		wl_resource_destroy(n->resource);
+}
+
 static void
 qdwin_handle_attach_notification(struct wl_client *client,
 				 struct wl_resource *resource,
@@ -7092,6 +7151,17 @@ qdwin_launcher_resource_destroyed(struct wl_resource *resource)
 	    qdwin->overlay_grab_active &&
 	    qdwin->overlay_grab_role == 0)
 		qdwin_overlay_grab_end(qdwin);
+}
+
+/* Compositor-teardown drain: the destructor above drops view + listeners
+ * and ends a launcher-role overlay grab while qdwin is still alive. Runs
+ * after the stage-2 grab pass, so overlay_grab_active is already 0. */
+static void
+qdwin_launchers_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_launcher *ln, *tmp;
+	wl_list_for_each_safe(ln, tmp, &qdwin->launchers, link)
+		wl_resource_destroy(ln->resource);
 }
 
 /* §6.6 S3/S4 keybinding handlers. The compositor owns the key grab
@@ -8308,16 +8378,23 @@ qdwin_handle_set_keyboard_focus(struct wl_client *client,
 	 * workspace, set_workspace_name, ...). */
 	if (!qdwin_shell_require_bound(qdwin, resource))
 		return;
-	/* findings F1: refuse focus redirection while locked, matching
-	 * request_fullscreen/tile/maximize/etc. which already post ERROR_LOCKED.
-	 * The locker routes input via its overlay keyboard grab
-	 * (qdwin_overlay_grab_start, role=2), NOT through set_keyboard_focus, so
-	 * gating here cannot break unlock; it removes the inconsistency whereby
-	 * the shell could steer focus to a background app while the screen is
-	 * locked (a latent lock-bypass if grab handling ever changes). */
+	/* findings F1: refuse focus redirection while locked. The refusal is a
+	 * logged, NON-fatal drop like set_pointer_config/set_key_repeat (see
+	 * D6 in test_popup_grab_hardening.py), NOT the ERROR_LOCKED that
+	 * request_fullscreen/tile/maximize post: focus injection is reactive,
+	 * best-effort intent the shell and test drivers emit without checking
+	 * lock state, so a shell restarted during a lock (or any injectFocus
+	 * landing after qdlocker's idle threshold) must not lose its whole
+	 * binding — after which every later call, including the eventual
+	 * legitimate focus restore, dies with it. The lock invariant is
+	 * unchanged: nothing is focused behind the lock screen, and a dropped
+	 * request leaves no deferred intent to replay at unlock. The locker
+	 * routes input via its overlay keyboard grab
+	 * (qdwin_overlay_grab_start, role=2), NOT through set_keyboard_focus,
+	 * so gating here cannot break unlock. */
 	if (qdwin->locked) {
-		wl_resource_post_error(resource, QDWIN_SHELL_V1_ERROR_LOCKED,
-				       "locked");
+		weston_log("qdwin: set_keyboard_focus refused while locked "
+			   "(dropped, non-fatal)\n");
 		return;
 	}
 	struct weston_seat *seat = NULL;
@@ -8434,10 +8511,12 @@ qdwin_handle_set_keyboard_focus_v2(struct wl_client *client,
 	 * bound shell may inject silo-aware keyboard focus / clear selections. */
 	if (!qdwin_shell_require_bound(qdwin, resource))
 		return;
-	/* findings F1: refuse focus redirection while locked (see v1). */
+	/* findings F1: refuse focus redirection while locked — logged,
+	 * NON-fatal drop like v1 (see the comment there for why the refusal
+	 * is a drop, not ERROR_LOCKED). */
 	if (qdwin->locked) {
-		wl_resource_post_error(resource, QDWIN_SHELL_V1_ERROR_LOCKED,
-				       "locked");
+		weston_log("qdwin: set_keyboard_focus_v2 refused while locked "
+			   "(dropped, non-fatal)\n");
 		return;
 	}
 	struct weston_seat *seat = NULL;
@@ -9752,6 +9831,11 @@ static void
 qdwin_shell_resource_destroy(struct wl_resource *resource)
 {
 	struct qdwin *qdwin = wl_resource_get_user_data(resource);
+	/* The compositor-teardown drain neutralizes user_data before
+	 * free(qdwin); a late client disconnect must no-op, not run the
+	 * unbind body against freed qdwin. */
+	if (!qdwin)
+		return;
 	if (qdwin->shell_resource == resource) {
 		struct weston_output *output;
 		/* v32: shell loss is authority loss. Revoke every live RDP seat
@@ -9999,6 +10083,10 @@ static void
 qdwin_locker_resource_destroy(struct wl_resource *resource)
 {
 	struct qdwin *qdwin = wl_resource_get_user_data(resource);
+	/* NULL after the compositor-teardown drain neutralizes user_data;
+	 * a late client disconnect must no-op, not deref freed qdwin. */
+	if (!qdwin)
+		return;
 	if (qdwin->locker_resource == resource) {
 		/* Demote any promoted lock toplevel before zeroing identity
 		 * fields — after this point qdwin_toplevel_is_locker_ui can
@@ -11999,6 +12087,18 @@ qdwin_ext_ws_manager_resource_destroy(struct wl_resource *resource)
 	free(mgr);
 }
 
+/* Compositor-teardown drain: wl_resource_destroy runs the destructor
+ * above, which unlinks the manager and NULLs every group/handle
+ * back-pointer so the client-owned handle resources outlive us without
+ * dangling. */
+static void
+qdwin_ext_ws_managers_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_ext_ws_manager *mgr, *tmp;
+	wl_list_for_each_safe(mgr, tmp, &qdwin->ext_ws_managers, link)
+		wl_resource_destroy(mgr->resource);
+}
+
 /* Find the wl_output protocol object that `client` has bound for `output`,
  * or NULL if it hasn't bound that output's global yet. wl_output resources
  * live on the driving weston_head's resource_list. */
@@ -13166,6 +13266,17 @@ qdwin_om_manager_resource_destroy(struct wl_resource *resource)
 	free(mgr);
 }
 
+/* Compositor-teardown drain: wl_resource_destroy runs the destructor
+ * above, which unlinks the manager and NULLs every head/mode back-
+ * pointer so client-owned output-management resources can't deref it. */
+static void
+qdwin_om_managers_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_om_manager *mgr, *tmp;
+	wl_list_for_each_safe(mgr, tmp, &qdwin->om_managers, link)
+		wl_resource_destroy(mgr->resource);
+}
+
 static void
 bind_output_manager(struct wl_client *client, void *data,
 		    uint32_t version, uint32_t id)
@@ -13570,6 +13681,63 @@ qdwin_on_output_resized(struct wl_listener *listener, void *data)
  * later run its resource-destroy handler against a freed struct qdwin
  * and unlink through a freed list head, so drain them explicitly. */
 static void qdwin_idle_inhibitors_destroy_all(struct qdwin *qdwin);
+/* Compositor-teardown drain helpers — defined next to each object family
+ * far below; qdwin_destroy() calls them so no server-owned pointer, list
+ * link, listener, grab, or resource destructor can reach freed qdwin. */
+static void qdwin_output_boundary_cancel_state(struct qdwin *qdwin,
+					       struct weston_output *removed);
+static void qdwin_toplevels_destroy_all(struct qdwin *qdwin);
+static void qdwin_nested_toplevels_destroy_all(struct qdwin *qdwin);
+static void qdwin_view_streams_destroy_all(struct qdwin *qdwin);
+static void qdwin_panels_destroy_all(struct qdwin *qdwin);
+static void qdwin_notifications_destroy_all(struct qdwin *qdwin);
+static void qdwin_launchers_destroy_all(struct qdwin *qdwin);
+static void qdwin_idle_notifications_destroy_all(struct qdwin *qdwin);
+static void qdwin_fractional_scales_destroy_all(struct qdwin *qdwin);
+static void qdwin_activation_tokens_destroy_all(struct qdwin *qdwin);
+static void qdwin_primary_seats_destroy_all(struct qdwin *qdwin);
+static void qdwin_layer_surfaces_destroy_all(struct qdwin *qdwin);
+static void qdwin_ext_ws_managers_destroy_all(struct qdwin *qdwin);
+static void qdwin_om_managers_destroy_all(struct qdwin *qdwin);
+static void qdwin_secctx_clients_destroy_all(struct qdwin *qdwin);
+
+/* wl_client_for_each_resource iterator: clear user_data on every
+ * qdwin-* binding resource whose resource destructor binds `struct
+ * qdwin *` from user_data. There are three such destructors but FOUR
+ * classes: qdwin_lock_surface_resource_destroyed is installed on both
+ * qdwin_lock_surface_v1 (deprecated shell path) and
+ * qdwin_locker_surface_v1 (locker attach path). The claimed resources
+ * are tracked in qdwin->*_resource, but a client may bind a global or
+ * create a surface without ever claiming a role, and such a resource
+ * keeps user_data==qdwin until client disconnect. If it outlives the
+ * compositor teardown, its late destructor would compare fields of the
+ * freed qdwin — enumerate and neutralize them all. */
+static enum wl_iterator_result
+qdwin_neutralize_binding_resource(struct wl_resource *resource, void *data)
+{
+	const char *cls = wl_resource_get_class(resource);
+	(void)data;
+	if (cls &&
+	    (strcmp(cls, qdwin_shell_v1_interface.name) == 0 ||
+	     strcmp(cls, qdwin_locker_v1_interface.name) == 0 ||
+	     strcmp(cls, qdwin_lock_surface_v1_interface.name) == 0 ||
+	     strcmp(cls, qdwin_locker_surface_v1_interface.name) == 0))
+		wl_resource_set_user_data(resource, NULL);
+	return WL_ITERATOR_CONTINUE;
+}
+
+/* Walk every client resource on the display and run the neutralizer.
+ * wl_client_for_each / wl_client_for_each_resource are the only public
+ * enumeration points; neither mutates the lists being walked here. */
+static void
+qdwin_neutralize_binding_resources(struct qdwin *qdwin)
+{
+	struct wl_client *client;
+	wl_client_for_each(client,
+		wl_display_get_client_list(qdwin->compositor->wl_display))
+		wl_client_for_each_resource(
+			client, qdwin_neutralize_binding_resource, NULL);
+}
 
 static void
 qdwin_destroy(struct wl_listener *listener, void *data)
@@ -13577,6 +13745,19 @@ qdwin_destroy(struct wl_listener *listener, void *data)
 	struct qdwin *qdwin = wl_container_of(listener, qdwin,
 					      destroy_listener);
 	(void)data;
+
+	/* Stage 1 — sever every reach-back path that could fire into a
+	 * dying qdwin BEFORE anything below ends a grab: the default input
+	 * grabs' focus/motion/button callbacks read qdwin_singleton, and
+	 * weston_*_end_grab() runs them SYNCHRONOUSLY. The display global
+	 * filter also carries data=qdwin; a bind dispatched during later
+	 * teardown must not reach the freed struct. */
+	if (qdwin_singleton == qdwin)
+		qdwin_singleton = NULL;
+	if (qdwin->compositor->wl_display)
+		wl_display_set_global_filter(qdwin->compositor->wl_display,
+					     NULL, NULL);
+
 	qdwin_idle_inhibitors_destroy_all(qdwin);
 	if (qdwin->background) {
 		weston_shell_utils_curtain_destroy(qdwin->background);
@@ -13610,8 +13791,91 @@ qdwin_destroy(struct wl_listener *listener, void *data)
 	qdwin_activation_pending_free_all(qdwin);
 	qdwin_data_offer_pending_free_all(qdwin);
 	qdwin_data_source_wraps_free_all(qdwin);
-	if (qdwin->desktop)
-		weston_desktop_destroy(qdwin->desktop);
+
+	/* Stage 2 — end interactive grabs while the seats that own them are
+	 * still alive. Reuses the output-loss boundary routine with
+	 * removed==NULL: it dismisses toplevel + layer popups (whose teardown
+	 * ends pointer grabs), ends the move/switcher/overlay grabs and every
+	 * stream confine grab, deactivates input methods and revokes their
+	 * grabs, cancels non-default seat grabs, and clears foci + selections.
+	 * The end_grab focus callbacks are already suppressed by the NULLed
+	 * singleton. Must run while qdwin->toplevels / view_streams /
+	 * layer_surfaces / input_methods are still populated. */
+	qdwin_output_boundary_cancel_state(qdwin, NULL);
+
+	/* Stage 3 — drain every qdwin-owned object family while the things
+	 * they point at (desktop surfaces, views, seats, wl_surfaces) are
+	 * still alive. Toplevels first: per-toplevel dependents (popup,
+	 * move-grab, view_streams, chrome) resolve against live views, and
+	 * the drain also destroys the libweston desktop surfaces that would
+	 * otherwise call api.surface_removed after qdwin is freed. Nested
+	 * toplevels next (their destructor expects proxy_tl edges already
+	 * broken by the toplevel drain). The rest are independent. */
+	qdwin_toplevels_destroy_all(qdwin);
+	qdwin_nested_toplevels_destroy_all(qdwin);
+	qdwin_view_streams_destroy_all(qdwin);
+	qdwin_panels_destroy_all(qdwin);
+	qdwin_notifications_destroy_all(qdwin);
+	qdwin_launchers_destroy_all(qdwin);
+	qdwin_hotkeys_purge(qdwin);
+	qdwin_idle_notifications_destroy_all(qdwin);
+	qdwin_fractional_scales_destroy_all(qdwin);
+	qdwin_activation_tokens_destroy_all(qdwin);
+	qdwin_primary_seats_destroy_all(qdwin);
+	qdwin_layer_surfaces_destroy_all(qdwin);
+	qdwin_ext_ws_managers_destroy_all(qdwin);
+	qdwin_om_managers_destroy_all(qdwin);
+	qdwin_secctx_clients_destroy_all(qdwin);
+
+	/* Stage 4 — neutralize EVERY binding resource whose destructor
+	 * binds user_data as `struct qdwin *`, not only the claimed ones:
+	 * unclaimed qdwin_shell_v1/qdwin_locker_v1 bindings and
+	 * lock-surface resources of either class keep user_data==qdwin
+	 * until client disconnect and their late destructors would
+	 * otherwise read freed memory. The enumeration walks every client
+	 * resource; resources are client-owned and outlive us, and
+	 * clearing their user_data makes the late destructor (shell/
+	 * locker unbind, lock surface teardown) a no-op instead of a
+	 * use-after-free. Then drop our own lock-surface listeners and
+	 * the dedicated lock view. */
+	if (qdwin->shell_background)
+		wl_resource_destroy(qdwin->shell_background->resource);
+	qdwin_neutralize_binding_resources(qdwin);
+	qdwin->shell_resource = NULL;
+	qdwin->shell_bound = 0;
+	qdwin->locker_resource = NULL;
+	qdwin->lock_resource = NULL;
+	if (qdwin->lock_surface) {
+		wl_list_remove(&qdwin->lock_surface_commit.link);
+		wl_list_remove(&qdwin->lock_surface_destroy.link);
+		qdwin->lock_surface = NULL;
+	}
+	if (qdwin->lock_view && !qdwin->lock_view_is_toplevel)
+		weston_view_destroy(qdwin->lock_view);
+	qdwin->lock_view = NULL;
+	qdwin->lock_view_is_toplevel = 0;
+	qdwin->lock_toplevel = NULL;
+	qdwin->active_input_proxy = NULL;
+
+	/* The libweston desktop is intentionally NOT destroyed. There is no
+	 * public API to enumerate its surviving desktop surfaces (they hang
+	 * off per-client lists, not the desktop), and any late dsurface
+	 * destroy — e.g. an xdg_popup, or an added toplevel whose qdwin
+	 * surface_added allocation failed — still runs implementation code
+	 * that dereferences surface->desktop (api.surface_removed for added
+	 * surfaces). The tl drain above severed every dsurface->tl link, so
+	 * our api callback early-returns on !tl without dereferencing the
+	 * freed qdwin; leaking the ~one struct keeps that callback's
+	 * desktop->api / desktop->user_data reads valid until the process
+	 * exits. Freeing it here would be a use-after-free window we cannot
+	 * close from the public API.
+	 *
+	 * The retained desktop->user_data==qdwin does leave one unsafe
+	 * route: api.surface_added still receives the freed pointer, so
+	 * this teardown is only correct for TERMINAL shutdown — no client
+	 * request dispatch may run after this point (weston's destroy
+	 * listener ordering guarantees it). */
+	qdwin->desktop = NULL;
 	if (qdwin->shell_global)
 		wl_global_destroy(qdwin->shell_global);
 	if (qdwin->locker_global)
@@ -15559,6 +15823,18 @@ qdwin_layer_surface_resource_destroy(struct wl_resource *resource)
 		qdwin_panels_on_output_change(qdwin);
 }
 
+/* Compositor-teardown drain: wl_resource_destroy runs the destructor
+ * above — it removes the surface listeners, destroys the view, drains
+ * the layer popups (ending their grabs), unlinks, and recomputes the
+ * exclusive-zone work area — all while qdwin is still alive. */
+static void
+qdwin_layer_surfaces_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_layer_surface *ls, *tmp;
+	wl_list_for_each_safe(ls, tmp, &qdwin->layer_surfaces, link)
+		wl_resource_destroy(ls->resource);
+}
+
 /* --- manager (zwlr_layer_shell_v1) --- */
 
 static void
@@ -15848,6 +16124,18 @@ qdwin_idle_notification_resource_destroy(struct wl_resource *resource)
 		wl_event_source_remove(n->timer);
 	wl_list_remove(&n->link);
 	free(n);
+}
+
+/* Compositor-teardown drain. Each notification owns a wl_event_source
+ * (the internal-mode timeout timer) and a link in qdwin->idle_
+ * notifications — both must go before the list head is freed. The
+ * destructor above is NULL-safe, so wl_resource_destroy is enough. */
+static void
+qdwin_idle_notifications_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_idle_notification *n, *tmp;
+	wl_list_for_each_safe(n, tmp, &qdwin->idle_notifications, link)
+		wl_resource_destroy(n->resource);
 }
 
 static int
@@ -17201,6 +17489,17 @@ qdwin_fractional_scale_resource_destroy(struct wl_resource *resource)
 	}
 	wl_list_remove(&fs->link);
 	free(fs);
+}
+
+/* Compositor-teardown drain: the destructor above removes the surface
+ * listeners and unlinks — run while the tracked surfaces are still
+ * alive so the removes hit real signal lists. */
+static void
+qdwin_fractional_scales_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_fractional_scale *fs, *tmp;
+	wl_list_for_each_safe(fs, tmp, &qdwin->fractional_scales, link)
+		wl_resource_destroy(fs->resource);
 }
 
 static const struct wp_fractional_scale_v1_interface
@@ -19438,10 +19737,42 @@ qdwin_primary_seat_seat_destroyed(struct wl_listener *l, void *data)
 	wl_list_init(&pseat->seat_destroy_listener.link);
 	if (pseat->current_source)
 		qdwin_primary_seat_clear_selection(pseat, 1);
-	wl_list_for_each_safe(device, tmp, &pseat->devices, link)
+	/* Device resources are client-owned and outlive the seat: unlink
+	 * each link now — leaving it on pseat->devices makes the late
+	 * qdwin_primary_device_resource_destroy wl_list_remove write
+	 * through the freed head. */
+	wl_list_for_each_safe(device, tmp, &pseat->devices, link) {
 		device->pseat = NULL;
+		wl_list_remove(&device->link);
+		wl_list_init(&device->link);
+	}
 	wl_list_remove(&pseat->link);
 	free(pseat);
+}
+
+/* Compositor-teardown drain: same teardown as the seat-destroyed path
+ * above — drop the seat listener, send the source-cancelled callback for
+ * a held selection, detach devices (their resources are client-owned and
+ * outlive the seat), then unlink + free. Runs while seats are still
+ * alive so clear_selection's sends marshal. */
+static void
+qdwin_primary_seats_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_primary_seat *pseat, *tmp;
+	struct qdwin_primary_device *device, *dtmp;
+	wl_list_for_each_safe(pseat, tmp, &qdwin->primary_seats, link) {
+		wl_list_remove(&pseat->seat_destroy_listener.link);
+		wl_list_init(&pseat->seat_destroy_listener.link);
+		if (pseat->current_source)
+			qdwin_primary_seat_clear_selection(pseat, 1);
+		wl_list_for_each_safe(device, dtmp, &pseat->devices, link) {
+			device->pseat = NULL;
+			wl_list_remove(&device->link);
+			wl_list_init(&device->link);
+		}
+		wl_list_remove(&pseat->link);
+		free(pseat);
+	}
 }
 
 /* ------------------------------------------------------------------
@@ -20020,6 +20351,99 @@ qdwin_nested_toplevel_resource_destroy(struct wl_resource *resource)
 	free(t->pw_node);
 	free(t->input_sink);
 	free(t);
+}
+
+/* Compositor-teardown drain: nested toplevels. wl_resource_destroy runs
+ * the destructor above, which breaks the proxy_tl/proxy_nested_owner
+ * edge before freeing — the toplevel drain normally emptied proxy_tl
+ * already, so this mostly frees the protocol objects themselves. */
+static void
+qdwin_nested_toplevels_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_nested_toplevel *t, *tmp;
+	wl_list_for_each_safe(t, tmp, &qdwin->nested_toplevels, link)
+		wl_resource_destroy(t->resource);
+}
+
+/* weston_desktop_surface_destroy() is not public libweston API (it lives
+ * in the desktop-internal surface.c) but it IS an exported symbol in the
+ * vendored libweston qdwin runs against. Resolve it soft like the other
+ * internal helpers above so qdwin still links/loads against an unpatched
+ * libweston; the drain then falls back to severing the dsurface->tl link
+ * and running qdwin_surface_removed directly. */
+typedef void (*qdwin_desktop_surface_destroy_fn)(
+	struct weston_desktop_surface *surface);
+
+static qdwin_desktop_surface_destroy_fn
+qdwin_desktop_surface_destroy_sym(void)
+{
+	static qdwin_desktop_surface_destroy_fn fn;
+	static int looked_up;
+	if (!looked_up) {
+		fn = (qdwin_desktop_surface_destroy_fn)dlsym(
+			RTLD_DEFAULT, "weston_desktop_surface_destroy");
+		looked_up = 1;
+	}
+	return fn;
+}
+
+/* Compositor-teardown drain: qdwin->toplevels. Two shapes share the list:
+ * dsurface-backed toplevels (xdg + xwayland) and nested proxies
+ * (desktop_surface == NULL). Both MUST be gone before free(qdwin): every
+ * added dsurface fires api.surface_removed -> qdwin_surface_removed when
+ * libweston tears the client's surfaces down — a callback that reads
+ * qdwin->lock_toplevel / qdwin->toplevels on entry.
+ *
+ * dsurface path: weston_desktop_surface_destroy() runs the implementation
+ * destroy, which fires api.surface_removed -> qdwin_surface_removed —
+ * i.e. the dsurface dies through the SAME teardown a client destroy would
+ * take (release_dependents, chrome detach, view destroy, unlink, free).
+ * With no dlsym resolution (unpatched libweston), we run the identical
+ * qdwin-side teardown synchronously; qdwin_surface_removed severs the
+ * dsurface->tl link itself, so the late callback early-returns on !tl.
+ *
+ * Proxy path: break BOTH ownership edges before freeing — the surviving
+ * qdwin_nested_toplevel's resource destructor calls
+ * qdwin_nested_proxy_destroy(t->proxy_tl), which would otherwise be a
+ * call into freed memory. */
+static void
+qdwin_toplevels_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_toplevel *tl, *tmp;
+	qdwin_desktop_surface_destroy_fn dsurf_destroy =
+		qdwin_desktop_surface_destroy_sym();
+	wl_list_for_each_safe(tl, tmp, &qdwin->toplevels, link) {
+		if (tl->desktop_surface) {
+			if (dsurf_destroy)
+				dsurf_destroy(tl->desktop_surface);
+			else
+				/* Runs the full qdwin-side teardown (dependents,
+				 * chrome, view, unlink, free) and severs
+				 * dsurface->user_data last — the late real
+				 * destroy then early-returns on !tl. Do NOT
+				 * clear user_data first: that is the lookup
+				 * the callback itself depends on. */
+				qdwin_surface_removed(tl->desktop_surface,
+						      qdwin);
+		} else if (tl->is_nested_proxy) {
+			if (tl->proxy_nested_owner) {
+				tl->proxy_nested_owner->proxy_tl = NULL;
+				tl->proxy_nested_owner = NULL;
+			}
+			qdwin_nested_proxy_destroy(tl);
+		} else {
+			/* Neither flag is expected to be unset; do not let a
+			 * stray entry keep a link into a list head that is
+			 * about to be freed. */
+			weston_log("qdwin: WARN: toplevel handle=%u is neither "
+				   "dsurface-backed nor proxy; unlinking\n",
+				   tl->handle);
+			wl_list_remove(&tl->link);
+			free(tl->cached_title);
+			free(tl->cached_app_id);
+			free(tl);
+		}
+	}
 }
 
 static void
@@ -20685,6 +21109,20 @@ qdwin_activation_token_free(struct qdwin_activation_token *t)
 	free(t->token);
 	free(t->app_id);
 	free(t);
+}
+
+/* Compositor-teardown drain. Each live token unlinks from
+ * qdwin->activation_tokens, removes its requesting-surface listener,
+ * severs the token resource's back-reference, drops pending-activation
+ * refs, and frees — all of which must happen while qdwin is still alive.
+ * Runs after qdwin_activation_pending_free_all(), so the drop-refs pass
+ * walks an already-empty list. */
+static void
+qdwin_activation_tokens_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_activation_token *t, *tmp;
+	wl_list_for_each_safe(t, tmp, &qdwin->activation_tokens, link)
+		qdwin_activation_token_free(t);
 }
 
 static struct qdwin_activation_token *
@@ -22913,6 +23351,27 @@ qdwin_secctx_client_on_destroy(struct wl_listener *l, void *data)
 	free(sc->peer_exe);
 	free(sc->peer_selinux_label);
 	free(sc);
+}
+
+/* Compositor-teardown drain: each accepted-client tag keeps a
+ * client_destroy_listener armed on its wl_client and a link in
+ * qdwin->secctx_clients — the listener would otherwise fire (or the
+ * unlink write would land) after the list head is freed. Runs the same
+ * removal + free sequence as the destroy listener above. */
+static void
+qdwin_secctx_clients_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_secctx_client *sc, *tmp;
+	wl_list_for_each_safe(sc, tmp, &qdwin->secctx_clients, link) {
+		wl_list_remove(&sc->client_destroy_listener.link);
+		wl_list_remove(&sc->link);
+		free(sc->sandbox_engine);
+		free(sc->app_id);
+		free(sc->instance_id);
+		free(sc->peer_exe);
+		free(sc->peer_selinux_label);
+		free(sc);
+	}
 }
 
 /* Option-B identity capture helpers. Read /proc/<pid>/stat field 22
