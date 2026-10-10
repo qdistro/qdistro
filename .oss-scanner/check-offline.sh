@@ -14,9 +14,12 @@ limits=()
 if [ "${OSS_SCANNER_RESOURCE_LIMITS:-1}" = 1 ]; then
     limits=(--cpus=2 --memory=8g)
 fi
+# Match qci's headless fixture environment on SELinux hosts. Container labels
+# otherwise identify stub trusted peers as hostile container_t processes.
+# Actual enforcing-SELinux validation belongs in disposable qdistro VMs.
 # Expressions in the script are expanded inside the offline container.
 # shellcheck disable=SC2016
-"$engine" run --rm --init --network=none --cap-add=SYS_PTRACE "${limits[@]}" --workdir=/src "$image" \
+"$engine" run --rm --init --network=none --security-opt=label=disable --cap-add=SYS_PTRACE "${limits[@]}" --workdir=/src "$image" \
     bash -euo pipefail -c '
         python3 - <<"PYNET"
 import socket

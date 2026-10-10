@@ -21,6 +21,9 @@ the image's npm cache offline, touches native sources to force recompilation,
 rebuilds the SIP binding, configures native Meson builds from scratch, runs
 every headless group and exercises ASan/UBSan logic/frame-parser tests. It does not mount host dependencies.
 Logs go to `ci/runs/oss-scanner-local/` by default. Every failing step is fatal.
+As in qci's host runner, local headless checks disable container SELinux
+labeling because fixtures use container processes as simulated trusted peers.
+This does not exercise deployed SELinux enforcement; use the VM lane for that.
 The runtime requests 2 CPUs and 8 GB RAM. If rootless container resource
 controllers are unavailable, `OSS_SCANNER_RESOURCE_LIMITS=0` permits testing
 network isolation and dependencies without claiming that memory envelope.
