@@ -13677,13 +13677,15 @@ static void qdwin_secctx_clients_destroy_all(struct qdwin *qdwin);
 
 /* wl_client_for_each_resource iterator: clear user_data on every
  * qdwin-* binding resource whose resource destructor binds `struct
- * qdwin *` from user_data (qdwin_shell_v1, qdwin_locker_v1,
- * qdwin_lock_surface_v1 — the only three). The claimed resources are
- * tracked in qdwin->*_resource, but a client may bind a global or
- * create a lock surface without ever claiming a role, and such a
- * resource keeps user_data==qdwin until client disconnect. If it
- * outlives the compositor teardown, its late destructor would compare
- * fields of the freed qdwin — enumerate and neutralize them all. */
+ * qdwin *` from user_data. There are three such destructors but FOUR
+ * classes: qdwin_lock_surface_resource_destroyed is installed on both
+ * qdwin_lock_surface_v1 (deprecated shell path) and
+ * qdwin_locker_surface_v1 (locker attach path). The claimed resources
+ * are tracked in qdwin->*_resource, but a client may bind a global or
+ * create a surface without ever claiming a role, and such a resource
+ * keeps user_data==qdwin until client disconnect. If it outlives the
+ * compositor teardown, its late destructor would compare fields of the
+ * freed qdwin — enumerate and neutralize them all. */
 static enum wl_iterator_result
 qdwin_neutralize_binding_resource(struct wl_resource *resource, void *data)
 {
@@ -13692,7 +13694,8 @@ qdwin_neutralize_binding_resource(struct wl_resource *resource, void *data)
 	if (cls &&
 	    (strcmp(cls, qdwin_shell_v1_interface.name) == 0 ||
 	     strcmp(cls, qdwin_locker_v1_interface.name) == 0 ||
-	     strcmp(cls, qdwin_lock_surface_v1_interface.name) == 0))
+	     strcmp(cls, qdwin_lock_surface_v1_interface.name) == 0 ||
+	     strcmp(cls, qdwin_locker_surface_v1_interface.name) == 0))
 		wl_resource_set_user_data(resource, NULL);
 	return WL_ITERATOR_CONTINUE;
 }
@@ -13800,14 +13803,15 @@ qdwin_destroy(struct wl_listener *listener, void *data)
 
 	/* Stage 4 — neutralize EVERY binding resource whose destructor
 	 * binds user_data as `struct qdwin *`, not only the claimed ones:
-	 * unclaimed qdwin_shell_v1/qdwin_locker_v1/lock-surface bindings
-	 * keep user_data==qdwin until client disconnect and their late
-	 * destructors would otherwise read freed memory. The enumeration
-	 * walks every client resource; resources are client-owned and
-	 * outlive us, and clearing their user_data makes the late
-	 * destructor (shell/locker unbind, lock surface teardown) a no-op
-	 * instead of a use-after-free. Then drop our own lock-surface
-	 * listeners and the dedicated lock view. */
+	 * unclaimed qdwin_shell_v1/qdwin_locker_v1 bindings and
+	 * lock-surface resources of either class keep user_data==qdwin
+	 * until client disconnect and their late destructors would
+	 * otherwise read freed memory. The enumeration walks every client
+	 * resource; resources are client-owned and outlive us, and
+	 * clearing their user_data makes the late destructor (shell/
+	 * locker unbind, lock surface teardown) a no-op instead of a
+	 * use-after-free. Then drop our own lock-surface listeners and
+	 * the dedicated lock view. */
 	if (qdwin->shell_background)
 		wl_resource_destroy(qdwin->shell_background->resource);
 	qdwin_neutralize_binding_resources(qdwin);

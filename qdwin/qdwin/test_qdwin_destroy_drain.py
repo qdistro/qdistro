@@ -274,9 +274,14 @@ def check_binding_neutralizer(source):
     if err:
         return fail(err)
     flat = _flat(body)
+    # Four classes share the three qdwin-user_data destructors:
+    # qdwin_lock_surface_resource_destroyed is installed on BOTH
+    # qdwin_lock_surface_v1 (shell path) and qdwin_locker_surface_v1
+    # (locker attach path).
     for iface in ("qdwin_shell_v1_interface.name",
                   "qdwin_locker_v1_interface.name",
-                  "qdwin_lock_surface_v1_interface.name"):
+                  "qdwin_lock_surface_v1_interface.name",
+                  "qdwin_locker_surface_v1_interface.name"):
         if iface not in flat:
             return fail(f"neutralizer does not cover {iface} — an "
                         "unclaimed binding of that class keeps freed-qdwin "

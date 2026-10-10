@@ -409,7 +409,10 @@ struct qdwin {
 	struct qdwin_toplevel *lock_toplevel;
 	struct weston_view *lock_view;
 	struct weston_surface *lock_surface;
+	struct wl_listener lock_surface_commit, lock_surface_destroy;
 	int lock_view_is_toplevel;
+	int lock_resource_is_locker;
+	int lock_resource_reattach_in_progress;
 	int nested_mode, locked;
 	struct wl_resource *shell_resource, *locker_resource, *lock_resource;
 	int shell_bound;
@@ -518,6 +521,8 @@ static const struct wl_interface qdwin_locker_v1_interface =
 	{ .name = "qdwin_locker_v1" };
 static const struct wl_interface qdwin_lock_surface_v1_interface =
 	{ .name = "qdwin_lock_surface_v1" };
+static const struct wl_interface qdwin_locker_surface_v1_interface =
+	{ .name = "qdwin_locker_surface_v1" };
 
 static int probe_event_source_remove(struct wl_event_source *s)
 { event_source_remove_calls++; s->removed = 1; return 0; }
@@ -682,6 +687,7 @@ SPLICED = [
     "qdwin_neutralize_binding_resource",
     "qdwin_neutralize_binding_resources",
     "qdwin_primary_device_resource_destroy",
+    "qdwin_lock_surface_resource_destroyed",
     "qdwin_shell_resource_destroy",
     "qdwin_locker_resource_destroy",
     "qdwin_proxy_pointer_track_focus",
@@ -1479,12 +1485,19 @@ static int case_unclaimed_bindings(void)
 	struct wl_resource *ulk =
 		res_new(q, qdwin_locker_resource_destroy);
 	ulk->class_name = "qdwin_locker_v1";
-	struct wl_resource *lsr = res_new(q, NULL);
+	/* BOTH lock-surface classes share qdwin_lock_surface_resource_destroyed
+	 * — four classes, three destructor functions (sol impl r3 P1). */
+	struct wl_resource *lsr =
+		res_new(q, qdwin_lock_surface_resource_destroyed);
 	lsr->class_name = "qdwin_lock_surface_v1";
+	struct wl_resource *lks =
+		res_new(q, qdwin_lock_surface_resource_destroyed);
+	lks->class_name = "qdwin_locker_surface_v1";
 	struct wl_resource *foreign = res_new(q, NULL);
 	foreign->class_name = "wl_data_device";
 	/* Foreign first: the walk must cover the whole list. */
 	wl_list_insert(&client->resource_list, &foreign->link);
+	wl_list_insert(&client->resource_list, &lks->link);
 	wl_list_insert(&client->resource_list, &lsr->link);
 	wl_list_insert(&client->resource_list, &ulk->link);
 	wl_list_insert(&client->resource_list, &unclaimed->link);
@@ -1494,19 +1507,27 @@ static int case_unclaimed_bindings(void)
 	CHECK(claimed->user_data == NULL &&
 	      unclaimed->user_data == NULL &&
 	      ulk->user_data == NULL &&
-	      lsr->user_data == NULL,
+	      lsr->user_data == NULL &&
+	      lks->user_data == NULL,
 	      "a qdwin-class binding kept its freed-qdwin user_data");
 	CHECK(foreign->user_data == q,
 	      "neutralizer touched a foreign resource");
 
 	/* Late disconnect after free(q): every qdwin-class destructor must
 	 * no-op; under ASan a surviving user_data would deref freed q. */
+	int side_effects = demote_calls + repaint_calls + kbd_end_grab_calls;
 	free(q);
 	qdwin_shell_resource_destroy(claimed);
 	qdwin_shell_resource_destroy(unclaimed);
 	qdwin_locker_resource_destroy(ulk);
+	qdwin_lock_surface_resource_destroyed(lsr);
+	qdwin_lock_surface_resource_destroyed(lks);
+	CHECK(demote_calls + repaint_calls + kbd_end_grab_calls ==
+	      side_effects,
+	      "a neutralized destructor ran teardown work on freed qdwin");
 
-	free(claimed); free(unclaimed); free(ulk); free(lsr); free(foreign);
+	free(claimed); free(unclaimed); free(ulk);
+	free(lsr); free(lks); free(foreign);
 	free(client);
 	comp.wl_display = NULL;
 	return 0;
