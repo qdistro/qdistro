@@ -91,6 +91,7 @@ install -d "$(dirname "$CLOUD_CACHE")" "$IMG"
 . "$SCRIPT_DIR/lib/opensuse-cloud-image.sh"
 download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" \
     || { echo "[scratch] ERROR: base cloud image failed openSUSE signature/digest verification; refusing to build on an unverified root image" >&2; exit 4; }
+qd_write_manifest cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$CLOUD_URL" "$(basename "$CLOUD_URL")"
 
 # A rolling cloud URL can move ahead of the pinned history repositories even
 # when only its signed checksum changes. zypper install then cannot add

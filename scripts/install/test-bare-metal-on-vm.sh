@@ -97,23 +97,26 @@ prep_image() {
     local dest="$IMG_DIR/qdistro-baremetal-test-$distro.qcow2"
 
     if [ "$distro" = "tumbleweed" ]; then
-        # J25: this shared the legacy flat cache with the baseweed builders;
-        # now resolves the newest openSUSE-signed dated image and stores it
-        # content-keyed under the deps cache (cloud/<sha256>/<name>).
+        # J25: pinned-substrate fetch (same source of truth as the baseweed
+        # builders) stored content-keyed under the deps cache —
+        # cloud/<sha256>/<upstream-name>.qcow2 with signature sidecars.
+        # `floor` mode: an aged pin still verifies a warm cache offline
+        # (gpgv+sha256sum are local); only a cold fetch needs upstream.
         # shellcheck source=../vm/lib/opensuse-cloud-image.sh
+        . "$SCRIPT_DIR/../vm/lib/test-substrate.sh"
         . "$SCRIPT_DIR/../vm/lib/opensuse-cloud-image.sh"
         . "$SCRIPT_DIR/../vm/lib/deps-cache.sh"
-        local tw_dir tw_name resolved tw_sha
-        tw_dir="$(dirname "$url")"
-        tw_name="$(basename "$url" | sed 's/-Snapshot20[0-9]*\.qcow2$//; s/\.qcow2$//')"
-        resolved="$(resolve_latest_cloud_image "$tw_dir" "$tw_name")" \
-            || { log "[$distro] ERROR: could not resolve latest signed cloud image"; return 1; }
-        url="${resolved%% *}"; tw_sha="${resolved##* }"
+        qdistro_load_test_substrate floor \
+            || { log "[$distro] ERROR: could not load test substrate"; return 1; }
+        url="$QDISTRO_SUBSTRATE_CLOUD_URL"
+        local tw_sha="$QDISTRO_SUBSTRATE_CLOUD_SHA256"
         cache="$(qd_path cloud "$tw_sha" "$(basename "$url")")"
-        # Adopt the shared flat cache file if it happens to hold these bytes.
+        # Adopt the legacy flat caches if either happens to hold these bytes.
         qd_adopt cloud "$tw_sha" "$CACHE_DIR/tumbleweed-cloud-base.qcow2" "$url" || true
+        qd_adopt cloud "$tw_sha" "$CACHE_DIR/cloud/$tw_sha.qcow2" "$url" || true
         download_verified_cloud_image "$url" "$cache" "$tw_sha" \
             || { log "[$distro] ERROR: cloud image failed openSUSE signature/digest verification"; return 1; }
+        qd_write_manifest cloud "$tw_sha" "$url" "$(basename "$url")"
     elif [ ! -s "$cache" ]; then
         # NOTE (J25): the ubuntu base is not openSUSE-signed and has no
         # verification helper yet — a separate follow-up. Transport is https.
@@ -205,7 +208,8 @@ start_vm() {
 }
 
 stage_sources_in_vm() {
-    local distro="$1" name="qdistro-baremetal-test-$distro"
+    local distro="$1" name
+    name="qdistro-baremetal-test-$distro"
     local stage; stage=$(mktemp -d)
     log "[$distro] tarring the monorepo..."
     # One tree: qdistro's root content with qdwin/, qdshell/, ... in-tree.
@@ -243,7 +247,8 @@ httpd.serve_forever()
 }
 
 run_installer_in_vm() {
-    local distro="$1" name="qdistro-baremetal-test-$distro"
+    local distro="$1" name
+    name="qdistro-baremetal-test-$distro"
     log "[$distro] running bare-metal-install.sh in VM..."
     local cmd
     # --profile=dev: this is a DISPOSABLE VM test harness that fetches
@@ -260,7 +265,8 @@ run_installer_in_vm() {
 }
 
 verify_vm() {
-    local distro="$1" name="qdistro-baremetal-test-$distro"
+    local distro="$1" name
+    name="qdistro-baremetal-test-$distro"
     log "[$distro] verifying install..."
     local checks=(
         "id admin"

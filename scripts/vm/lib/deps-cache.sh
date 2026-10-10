@@ -69,9 +69,29 @@ qd_path() {
     esac
 }
 
+# _qdc_entry_candidates <dir> — print artifact-looking regular files:
+# not manifest.txt, not dotfiles, not sidecar/lock suffixes. Fallback for
+# entries written by callers that keep no manifest (osci-managed classes).
+_qdc_entry_candidates() {
+    local f base
+    for f in "$1"/*; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f")"
+        case "$base" in
+            manifest.txt|.*|*.sha256|*.asc|*.sig|*.lock) continue ;;
+        esac
+        printf '%s\n' "$f"
+    done
+}
+
+# Manifests are the canonical record of the artifact name when present.
+_qdc_manifest_basename() {
+    [ -f "$1/manifest.txt" ] && sed -n 's/^basename=//p' "$1/manifest.txt" | head -1
+}
+
 # qd_has <class> <sha256> [basename] — 0 iff the artifact file is present
-# and non-empty. With no basename, true iff the entry dir holds at least one
-# artifact file (anything that is not manifest.txt or a dotfile).
+# and non-empty. With no basename, resolves the canonical artifact name
+# (manifest first, then a filtered scan that excludes sidecars/locks).
 qd_has() {
     local class="$1" key="$2" base="${3:-}" dir f
     dir="$(qd_path "$class" "$key")" || return 1
@@ -79,24 +99,28 @@ qd_has() {
         [ -s "$dir/$base" ]; return
     fi
     [ -d "$dir" ] || return 1
-    for f in "$dir"/*; do
-        [ -f "$f" ] || continue
-        case "$(basename "$f")" in manifest.txt|.*) continue ;; esac
+    base="$(_qdc_manifest_basename "$dir")"
+    if [ -n "$base" ]; then
+        [ -s "$dir/$base" ]; return
+    fi
+    while IFS= read -r f; do
         [ -s "$f" ] && return 0
-    done
+    done < <(_qdc_entry_candidates "$dir")
     return 1
 }
 
 # qd_entry_name <class> <sha256> — print the stored artifact's basename
-# (first non-manifest, non-dotfile regular file in the entry dir).
+# (manifest first, then the filtered scan).
 qd_entry_name() {
-    local class="$1" key="$2" dir f
+    local class="$1" key="$2" dir base f
     dir="$(qd_path "$class" "$key")" || return 1
-    for f in "$dir"/*; do
-        [ -f "$f" ] || continue
-        case "$(basename "$f")" in manifest.txt|.*) continue ;; esac
+    base="$(_qdc_manifest_basename "$dir")"
+    if [ -n "$base" ] && [ -f "$dir/$base" ]; then
+        printf '%s\n' "$base"; return 0
+    fi
+    while IFS= read -r f; do
         basename "$f"; return 0
-    done
+    done < <(_qdc_entry_candidates "$dir")
     _qdc_die "qd_entry_name: no artifact under $dir"; return 1
 }
 
@@ -107,6 +131,18 @@ _qdc_write_manifest() {
     printf 'class=%s\nurl=%s\nsha256=%s\nbasename=%s\nfetched_at=%s\n' \
         "$class" "$url" "$key" "$base" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         > "$dir/manifest.txt" || return 1
+}
+
+# qd_write_manifest <class> <sha256> <url> <basename>
+# Public manifest writer for callers that store artifacts through their own
+# verified path (e.g. the openSUSE signature-verified cloud download), so
+# every entry — qd_fetch-created or externally managed — has the canonical
+# record. Idempotent; overwrites.
+qd_write_manifest() {
+    local class="$1" key="$2" url="$3" base="$4" dir
+    dir="$(qd_path "$class" "$key")" || return 1
+    [ -d "$dir" ] || { _qdc_die "qd_write_manifest: no entry dir $dir"; return 1; }
+    _qdc_write_manifest "$dir" "$class" "$url" "$key" "$base"
 }
 
 # qd_store_file <class> <sha256> <srcfile> <url> [basename]
@@ -138,22 +174,34 @@ qd_store_file() {
 # is nothing to adopt; a corrupt legacy file is left in place with a
 # warning (the caller's normal verified-fetch path then replaces it).
 qd_adopt() {
-    local class="$1" key="$2" legacy="$3" url="$4" dir base side suffix
+    local class="$1" key="$2" legacy="$3" url="$4" dir base suffix stored lock_fd rc
     dir="$(qd_path "$class" "$key")" || return 1
     qd_has "$class" "$key" && return 0
     [ -s "$legacy" ] || return 0
     # canonical basename is the UPSTREAM artifact name, not the legacy one —
     # e.g. openSUSE signature verification binds the signed checksum to it
     base="$(basename "${url%%\?*}")"
-    if stored="$(qd_store_file "$class" "$key" "$legacy" "$url" "$base")"; then
-        for suffix in .sha256 .sha256.asc .asc .sig; do
-            [ -s "$legacy$suffix" ] && mv -f "$legacy$suffix" "$dir/$base$suffix"
-        done
-        echo "[deps-cache] adopted legacy $legacy -> $stored" >&2
-        return 0
+
+    # Same per-key flock as qd_fetch — adoption and fetch must not interleave
+    # stores into the same entry.
+    qd_deps_init || return 1
+    exec {lock_fd}>"$(qd_deps_root)/.locks/${class}-${key}.lock" || return 1
+    flock -x "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+
+    rc=0
+    if ! qd_has "$class" "$key" && [ -s "$legacy" ]; then  # recheck under the lock
+        if stored="$(qd_store_file "$class" "$key" "$legacy" "$url" "$base")"; then
+            for suffix in .sha256 .sha256.asc .asc .sig; do
+                [ -s "$legacy$suffix" ] && { mv -f "$legacy$suffix" "$dir/$base$suffix" || true; }
+            done
+            echo "[deps-cache] adopted legacy $legacy -> $stored" >&2
+        else
+            echo "[deps-cache] WARNING: legacy cache $legacy does not match key $key; left in place, will refetch" >&2
+        fi
     fi
-    echo "[deps-cache] WARNING: legacy cache $legacy does not match key $key; left in place, will refetch" >&2
-    return 0
+
+    flock -u "$lock_fd"; exec {lock_fd}>&-
+    return "$rc"
 }
 
 # qd_verify <class> <sha256> — re-hash the stored artifact against its key.
@@ -179,7 +227,7 @@ qd_verify() {
 # signature (cloud qcow2) keep the signature-verified helpers; this is the
 # generic digest-only path.
 qd_fetch() {
-    local class="$1" url="$2" key="$3" base dir lock_fd tmp dest rc
+    local class="$1" url="$2" key="$3" base dir lock_fd tmp dest rc stored entry
     base="${4:-$(basename "${url%%\?*}")}"  # separate line: $-expansion in a
     # local decl evaluates against the OUTER scope, not the new locals
     dir="$(qd_path "$class" "$key")" || return 1
@@ -187,6 +235,12 @@ qd_fetch() {
 
     if [ -s "$dest" ]; then
         printf '%s\n' "$dest"; return 0
+    fi
+    # Content-keyed warm hit: same digest under a different basename (e.g.
+    # floating vs dated name for identical bytes) resolves, no re-fetch.
+    if qd_has "$class" "$key"; then
+        entry="$(qd_entry_name "$class" "$key")" || return 1
+        printf '%s\n' "$dir/$entry"; return 0
     fi
 
     qd_deps_offline && {
@@ -229,14 +283,18 @@ qd_fetch() {
 # Digest is not checked (the artifact's own verify path covers content);
 # presence is. Prints the sidecar path. Skips if already present.
 qd_fetch_sidecar() {
-    local class="$1" key="$2" url="$3" suffix="$4" dir base side dest
+    local class="$1" key="$2" url="$3" suffix="$4" dir base side dest tmp
     base="$(basename "${url%%\?*}")"
     dir="$(qd_path "$class" "$key")" || return 1
     side="$base$suffix"; dest="$dir/$side"
     [ -s "$dest" ] && { printf '%s\n' "$dest"; return 0; }
     qd_deps_offline && { _qdc_die "offline: missing sidecar $class/$key/$side"; return 1; }
     [ -d "$dir" ] || { _qdc_die "qd_fetch_sidecar: artifact entry absent, fetch it first ($dir)"; return 1; }
-    wget -q -O "$dest" "$url$suffix" || { rm -f "$dest"; _qdc_die "download failed: $url$suffix"; return 1; }
+    # tmp+mv: a partial sidecar is never visible at the final path, and a
+    # failed fetch removes only our own temp — never a live one.
+    tmp="$dest.partial.$$"
+    wget -q -O "$tmp" "$url$suffix" || { rm -f "$tmp"; _qdc_die "download failed: $url$suffix"; return 1; }
+    mv -f "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
     printf '%s\n' "$dest"
 }
 

@@ -78,6 +78,13 @@ CLOUD_URL="$QDISTRO_SUBSTRATE_CLOUD_URL"
 # shellcheck source=lib/opensuse-cloud-image.sh
 . "$SCRIPT_DIR/lib/opensuse-cloud-image.sh"
 
+# Every download_verified_cloud_image path goes through here so the entry
+# keeps its manifest.txt (the osci helper manages signature sidecars only).
+cloud_fetch_verified() {
+    download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" \
+        && qd_write_manifest cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$CLOUD_URL" "$(basename "$CLOUD_URL")"
+}
+
 BASE="$(qdistro_substrate_base_path admin "$IMG")"
 BAKED="$(qdistro_substrate_base_path baked "$IMG")"
 PARTIAL="$BAKED.partial"
@@ -264,7 +271,7 @@ if [ "$NETWORK_PROBE_ONLY" -eq 1 ]; then
         echo "[bake] tier-5 network probe skipped (QDWIN_SKIP_TIER5_BAKE=1)"
     else
         # Authenticate before qemu-img or libguestfs opens any probe disk.
-        download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" || {
+        cloud_fetch_verified || {
             echo "[bake] FAIL: tier-5 cloud cache could not be authenticated; refusing to open it" >&2
             exit 6
         }
@@ -281,7 +288,7 @@ fi
 # unless the caller explicitly requested the documented tier-5-free variant.
 if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
     install -d "$(dirname "$CLOUD_CACHE")"
-    download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" || {
+    cloud_fetch_verified || {
         echo "[bake] FAIL: tier-5 cloud cache could not be authenticated" >&2
         exit 6
     }
@@ -395,7 +402,7 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
     # baked into every --from-baked overlay, so bake ONLY when it verifies.
     # Gating on the helper's EXIT STATUS — not `[ -s cache ]` — means a
     # stale/unverified pre-existing cache the helper refused is never baked in.
-    if download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256"; then
+    if cloud_fetch_verified; then
         # J25 (fail-closed): the customized derivative (tier5-base-customized.qcow2)
         # is bound to THIS verified cloud digest via a provenance stamp. Reuse it
         # only when the stamp matches; otherwise rebuild from the verified base so

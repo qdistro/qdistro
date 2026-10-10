@@ -157,6 +157,52 @@ runq() {
     [ -s "$output" ]
 }
 
+@test "sidecar-only entry does not count as a cached artifact" {
+    # Regression: a sidecar/lock file beside a missing artifact must not
+    # satisfy qd_has — qd_adopt and qd_offline_check gate on it.
+    local dir="$WORK/cache/blob/$GOOD_SHA"
+    mkdir -p "$dir"
+    printf 'deadbeef  blob.bin' > "$dir/blob.bin.sha256"
+    : > "$dir/blob.bin.lock"
+    printf 'class=blob\nsha256=%s\nbasename=blob.bin\n' "$GOOD_SHA" > "$dir/manifest.txt"
+    runq "qd_has blob '$GOOD_SHA'";                       [ "$status" -eq 1 ]
+    runq "qd_entry_name blob '$GOOD_SHA'";                [ "$status" -ne 0 ]
+    runq "printf '%s\n' 'blob $GOOD_SHA -' | qd_offline_check"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"MISSING blob"* ]]
+}
+
+@test "qd_fetch resolves same digest under a different basename without fetching" {
+    runq "qd_fetch blob '$URL/blob.bin' '$GOOD_SHA'"
+    [ "$status" -eq 0 ]
+    rm "$WORK/src/blob.bin"
+    # A URL whose basename differs from the stored artifact's: the content
+    # key (sha256) must still warm-hit and return the stored name.
+    runq "qd_fetch blob '$URL/other-name.bin' '$GOOD_SHA'"
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = "$WORK/cache/blob/$GOOD_SHA/blob.bin" ]
+}
+
+@test "qd_adopt moves a legacy file + sidecars under the upstream basename" {
+    printf 'legacy bytes' > "$WORK/src/legacy.img"
+    printf 'sig' > "$WORK/src/legacy.img.sha256"
+    printf 'ascsig' > "$WORK/src/legacy.img.sha256.asc"
+    local sha; sha="$(sha256sum "$WORK/src/legacy.img" | awk '{print $1}')"
+    runq "qd_adopt cloud '$sha' '$WORK/src/legacy.img' 'https://example.test/dir/upstream.img'"
+    [ "$status" -eq 0 ]
+    [ -s "$WORK/cache/cloud/$sha/upstream.img" ]
+    [ -s "$WORK/cache/cloud/$sha/upstream.img.sha256" ]
+    [ -s "$WORK/cache/cloud/$sha/upstream.img.sha256.asc" ]
+    [ ! -e "$WORK/src/legacy.img" ]
+    grep -Fxq "basename=upstream.img" "$WORK/cache/cloud/$sha/manifest.txt"
+    # A wrong-digest legacy file is left in place with a warning.
+    printf 'other' > "$WORK/src/wrong.img"
+    runq "qd_adopt cloud '$BAD_SHA' '$WORK/src/wrong.img' 'https://example.test/x.img'"
+    [ "$status" -eq 0 ]
+    [ -e "$WORK/src/wrong.img" ]
+    [ ! -d "$WORK/cache/cloud/$BAD_SHA" ]
+}
+
 @test "root honors QDISTRO_DEPS_CACHE_DIR then QDWIN_CACHE_DIR then XDG default" {
     run env -u QDISTRO_DEPS_CACHE_DIR QDWIN_CACHE_DIR=/alt bash -c ". '$LIB'; qd_deps_root"
     [ "$output" = "/alt" ]
