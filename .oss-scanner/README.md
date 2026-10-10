@@ -32,6 +32,12 @@ reset affinity inherited from the host. For example, use
 `podman run --rm --network=none --entrypoint=taskset IMAGE -c 0,1 bash`.
 Choose CPUs from the container's allowed set; verify with `os.sched_getaffinity`.
 
+Tests use ordinary UID 1001, outside qdistro's reserved admin UID 1000.
+`setup-runtime.sh` provides nested UID/GID ranges and an empty VFS Podman store
+for template GC queries. This needs user namespaces but no image downloads.
+The libvirt client is present for absent-domain helper tests; no VM daemon,
+guest disk or host libvirt socket is provided.
+
 `test.sh smoke` runs during image construction. `test.sh all` is the full
 headless audit lane, not the VM/GUI/release gate. See `threat_model.md` for
 component priorities, severity guidance and runtime limitations.

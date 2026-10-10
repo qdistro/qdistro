@@ -37,7 +37,9 @@ Do not infer stronger guarantees from the word "isolation" alone.
 
 The checkout is `/src`. Dependencies and npm downloads are installed during
 image construction. There is no network during the audit. Do not invoke the
-bootstrap installer, `qci full`, Podman, libvirt or distro-image builders here.
+bootstrap installer, `qci full`, VM provisioning or distro-image builders here.
+The image includes an empty VFS Podman store for GC membership-query tests;
+that does not provide prebuilt silo/workload images or nested VM support.
 
 * `bash .oss-scanner/build.sh`: incremental native rebuild as root. Production
   vendored libweston, vendored Quickshell, qdwin, daemons and qdshell are built;
@@ -46,7 +48,7 @@ bootstrap installer, `qci full`, Podman, libvirt or distro-image builders here.
   build directories are `<component>/build-oss`. libweston/Quickshell retain
   their own build directories under their vendored source trees.
 * `bash .oss-scanner/test.sh`: complete headless lane. Optional groups are
-  `smoke`, `root`, `native`, `apps`, `extensions`. Tests run as UID 1000 with a
+  `smoke`, `root`, `native`, `apps`, `extensions`. Tests run as UID 1001 with a
   private D-Bus session and offscreen Qt. Failures propagate to the exit code.
 * `bash .oss-scanner/build-sanitized.sh qdwin`: optional separate ASan/UBSan
   native build; also accepts `daemons`. Vendored dependencies

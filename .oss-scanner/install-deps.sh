@@ -8,7 +8,7 @@ zypper -n install --no-recommends "${packages[@]}" \
     "${py}-setproctitle" "${py}-Pygments" "${py}-mcp" \
     "${py}-dbus_next" "${py}-pytest-asyncio" "${py}-pytest-timeout" \
     "${py}-tomli" myspell-en_US rage-encryption btrfsprogs \
-    clang gdb strace valgrind curl ca-certificates jq shadow util-linux
+    clang gdb strace valgrind curl ca-certificates jq shadow util-linux libvirt-client
 python3 -m venv --system-site-packages /opt/scanner-python
 mkdir -p /opt/scanner-tools
 # Vendored wrappers call ninja without a job limit. Bound all Ninja builds,

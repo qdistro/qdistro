@@ -25,11 +25,12 @@ ENV PATH=/opt/scanner-tools:/opt/scanner-python/bin:/usr/local/bin:/usr/bin:/usr
 RUN if test -f .git; then rm .git; fi
 RUN bash .oss-scanner/build.sh
 RUN bash ci/containers/prepare-host.sh
-RUN useradd -m -u 1000 -s /bin/bash scanner \
+RUN useradd -m -u 1001 -s /bin/bash scanner \
  && chown -R scanner:scanner /src \
  && git config --system --add safe.directory /src \
  && rpm -qa | sort > /opt/scanner-rpms.txt
 # Keep build directories, development headers, generated protocols and npm
 # caches: the offline agent must be able to rebuild and write reproducers.
+RUN bash .oss-scanner/setup-runtime.sh
 RUN bash .oss-scanner/test.sh smoke
 CMD ["bash"]
