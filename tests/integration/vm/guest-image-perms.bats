@@ -104,6 +104,34 @@ SHIM
 
     export PATH="$SHIMS:$PATH"
 
+    # vmapps-scan stub (tier5 only, vmapps-dynamic): the builder scans the
+    # fresh base for the VM-app catalogue sidecar. The real scanner needs
+    # guestfish + a real qcow2; log the argv, write the --out file, and
+    # succeed. Overridable per-invocation via the VMAPPS_SCANNER env pair.
+    cat >"$SHIMS/vmapps-scan-stub" <<'SHIM'
+#!/bin/bash
+printf 'vmapps-scan' >>"$CMDLOG"
+out=""; prev=""
+for a in "$@"; do
+    printf ' %s' "$a" >>"$CMDLOG"
+    [ "$prev" = "--out" ] && out="$a"
+    prev="$a"
+done
+printf '\n' >>"$CMDLOG"
+[ -n "$out" ] && printf '{}\n' >"$out"
+exit 0
+SHIM
+    # PATH already carries the shims here, so `chmod` is the logging
+    # stub — go through the real binary to make these executable.
+    /usr/bin/chmod +x "$SHIMS/vmapps-scan-stub"
+    cat >"$SHIMS/vmapps-scan-fail" <<'SHIM'
+#!/bin/bash
+printf 'vmapps-scan-fail\n' >>"$CMDLOG"
+exit 7
+SHIM
+    /usr/bin/chmod +x "$SHIMS/vmapps-scan-fail"
+    export VMAPPS_SCANNER="$SHIMS/vmapps-scan-stub"
+
     # Fake qdwin + qdistro source trees so tier4's prereq checks pass.
     FAKE_QDWIN="$TMP/qdwin"
     FAKE_QDISTRO="$TMP/qdistro"
@@ -204,6 +232,25 @@ run_t5b() {
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
     ! vc_has_rootpw    || { echo "hardened mode must NOT bake a password" >&2; cat "$CMDLOG" >&2; return 1; }
     chmod_on_dest 640 "$DEST5" || { echo "dest not chmod 0640" >&2; cat "$CMDLOG" >&2; return 1; }
+}
+
+@test "tier5: post-build sidecar scan publishes <dest>.json at 0640" {
+    run_t5
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    # The scanner ran against the built qcow2 with the sidecar --out.
+    grep -Eq "^vmapps-scan --base $DEST5 --out ${DEST5%.qcow2}.json$" "$CMDLOG" \
+        || { echo "scanner did not run with --base/--out sidecar" >&2; cat "$CMDLOG" >&2; return 1; }
+    chmod_on_dest 640 "${DEST5%.qcow2}.json" \
+        || { echo "sidecar not chmod 0640" >&2; cat "$CMDLOG" >&2; return 1; }
+    # And the image carries foot (scanner's required escape hatch).
+    grep '^virt-customize ' "$CMDLOG" | grep -Eq -- '--install [^ ]*foot' \
+        || { echo "foot missing from --install set" >&2; cat "$CMDLOG" >&2; return 1; }
+}
+
+@test "tier5: sidecar scan failure fails the build" {
+    run_t5 "VMAPPS_SCANNER=$SHIMS/vmapps-scan-fail"
+    [ "$status" -eq 4 ] || { echo "expected exit 4, got $status" >&2; echo "$output" >&2; return 1; }
+    [[ "$output" == *"vmapps manifest scan failed"* ]]
 }
 
 # ---- tier-5b ---------------------------------------------------------------

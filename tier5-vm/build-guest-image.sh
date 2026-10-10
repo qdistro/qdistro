@@ -253,7 +253,7 @@ REPO_ARGS=()
 [ -n "${REPO_CMD:-}" ] && REPO_ARGS=(--run-command "$REPO_CMD")
 virt-customize -a "$BASE_QCOW" \
     "${REPO_ARGS[@]}" \
-    --install waypipe,wayland-utils,qemu-guest-agent,kbd,alsa-utils,weston,MozillaFirefox,baobab,gnome-text-editor,nautilus,gnome-calculator,libqt5-qtwayland,qt6-wayland,kcalc,dolphin,konsole,kate,fontconfig,dejavu-fonts,liberation-fonts,cantarell-fonts,google-noto-sans-fonts,google-noto-serif-fonts,google-noto-sans-mono-fonts,google-noto-coloremoji-fonts,google-noto-sans-cjk-fonts \
+    --install waypipe,wayland-utils,qemu-guest-agent,kbd,alsa-utils,weston,MozillaFirefox,baobab,gnome-text-editor,nautilus,gnome-calculator,libqt5-qtwayland,qt6-wayland,kcalc,dolphin,konsole,kate,foot,fontconfig,dejavu-fonts,liberation-fonts,cantarell-fonts,google-noto-sans-fonts,google-noto-serif-fonts,google-noto-sans-mono-fonts,google-noto-coloremoji-fonts,google-noto-sans-cjk-fonts \
     --run-command 'systemctl enable qemu-guest-agent.service' \
     `# The host drives the tier-5 publisher via qga guest-exec. Current` \
     `# Tumbleweed ships qemu-guest-agent 11.x with guest-exec BLOCKED by` \
@@ -293,6 +293,29 @@ virt-sparsify --in-place "$BASE_QCOW" 2>/dev/null || true
 # Move into place.
 install -d "$(dirname "$DEST")"
 mv "$BASE_QCOW" "$DEST"
+
+# Dynamic VM-app catalogue (vmapps-dynamic): scan the freshly built
+# base's desktop entries and publish the manifest sidecar next to the
+# qcow2. qdshell's VMApps service reads this catalogue (staged into the
+# host image at /usr/share/qdistro/vmapps/base.json) instead of the old
+# hardcoded list, so the launcher only offers apps the base actually
+# ships — and a rebuilt base automatically republishes. The scanner
+# requires a guest foot binary (installed above) when the catalogue is
+# non-empty; a failure here fails the build since a base without its
+# manifest would wedge image/config.sh's staged-base check.
+SIDECAR="${DEST%.qcow2}.json"
+SCANNER="${VMAPPS_SCANNER:-$(cd "$(dirname "$0")" && pwd)/vmapps-scan.py}"
+echo "[tier5-build] scanning guest base for the VM-app catalogue..."
+"$SCANNER" --base "$DEST" --out "$SIDECAR" || {
+    echo "[tier5-build] FAIL: vmapps manifest scan failed" >&2
+    exit 4
+}
+chmod 0640 "$SIDECAR"
+if getent group libvirt >/dev/null 2>&1; then
+    chown root:libvirt "$SIDECAR"
+else
+    chown root:root "$SIDECAR"
+fi
 # Base image is sensitive (may contain a baked debug password); keep it
 # non-world-readable (0640), mirroring the Tier-4 overlay — but the owner
 # group must include the session-libvirt user, because spawn-tier5.sh
