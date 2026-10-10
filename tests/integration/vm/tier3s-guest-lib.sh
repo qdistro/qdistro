@@ -75,6 +75,101 @@ as_admin() {   # the same scrubbed admin environment the spawn and cleanup use
 }
 pm() { as_admin podman "$@"; }   # PLAIN podman: no --runtime, no --root, no runtime flags
 
+# Reach admin's --user manager from this root context. Prefer machined;
+# fall back to a login shell (PAM-populates XDG_RUNTIME_DIR + DBUS).
+t3s_adm_uctl() {
+    systemctl --user --machine=admin@.host "$@" 2>/dev/null \
+        || runuser -l admin -c "systemctl --user $*" 2>/dev/null
+}
+
+# t3s_locker_status — live qdlocker ctrl `status` line, or empty.
+t3s_locker_status() {
+    as_admin python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(2)
+try:
+    s.connect("/run/user/1000/qdlocker.sock")
+    s.sendall(b"status\n")
+    sys.stdout.write(s.recv(1024).decode("utf-8", "replace"))
+except Exception:
+    pass
+' 2>/dev/null
+}
+
+# t3s_comp_last_lock — newest compositor locked_changed=0/1 for this
+# compositor invocation (empty if none).
+t3s_comp_last_lock() {
+    local since
+    since=$(t3s_adm_uctl show qdwin-compositor.service -p ActiveEnterTimestamp --value)
+    journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service \
+        --no-pager -o cat --since "${since:-1 hour ago}" 2>/dev/null \
+        | sed -n 's/.*locked_changed=\([01]\).*/\1/p' | tail -1
+}
+
+# t3s_guard_idle_locker — keep qdlocker from taking the keyboard on a
+# headless multi-minute GUI driver. IPC injectFocus is not user activity,
+# so the stock 300s idle timeout fires during setup and qdwin then posts
+# ERROR_LOCKED on set_keyboard_focus (correct product behaviour; a real
+# session has input that resets the timer). Same QDLOCKER_IDLE_MS drop-in
+# as tiered-isolation.bats and ci/lib/gates/gui.sh suppress_idle_lock.
+# If the session is already locked, type the baked-admin password so
+# focus injection can proceed. Changes no assertion: it keeps the
+# session in the unlocked state the focus/clipboard checks presuppose.
+t3s_guard_idle_locker() {
+    local d=/etc/systemd/user/qdlocker.service.d reply i last
+    faillock --user admin --reset 2>/dev/null || true
+    install -d -m 0755 -o 0 -g 0 /etc/qdistro || true
+    : > /etc/qdistro/locker-ctrl-introspection
+    chown 0:0 /etc/qdistro/locker-ctrl-introspection
+    chmod 0644 /etc/qdistro/locker-ctrl-introspection
+    install -d -m 0755 "$d"
+    printf '[Service]\nEnvironment=QDLOCKER_IDLE_MS=86400000\n' \
+        > "$d/99-qci-no-idle-lock.conf"
+    t3s_adm_uctl daemon-reload || true
+    # Restart a running locker so it re-reads QDLOCKER_IDLE_MS. try-restart
+    # (not start) when dormant: starting a locker with no compositor turns
+    # Restart=always into a crash-loop (gui.sh suppress_idle_lock).
+    if t3s_adm_uctl is-active qdlocker.service >/dev/null; then
+        t3s_adm_uctl restart qdlocker.service || true
+    else
+        t3s_adm_uctl try-restart qdlocker.service || true
+    fi
+    reply=""
+    for i in $(seq 1 20); do
+        reply=$(t3s_locker_status)
+        case "$reply" in *locked=*) break ;; esac
+        sleep 0.5
+    done
+    case "$reply" in
+        *locked=False*)
+            pass "qdlocker idle-auto-lock held off (unlocked)"
+            return 0
+            ;;
+        *locked=True*)
+            info "qdlocker was locked; typing the admin password to unlock"
+            t3s_adm_uctl start ydotoold.service || true
+            as_admin env YDOTOOL_SOCKET=/run/user/1000/ydotool.sock \
+                ydotool type "Pa_ssw0rd45" >/dev/null 2>&1 || true
+            as_admin env YDOTOOL_SOCKET=/run/user/1000/ydotool.sock \
+                ydotool key 28:1 28:0 >/dev/null 2>&1 || true
+            for i in $(seq 1 20); do
+                reply=$(t3s_locker_status)
+                case "$reply" in *locked=False*) break ;; esac
+                sleep 0.5
+            done
+            ;;
+    esac
+    case "$reply" in
+        *locked=False*)
+            pass "qdlocker idle-auto-lock held off (unlocked after password)"
+            return 0
+            ;;
+    esac
+    last=$(t3s_comp_last_lock)
+    is "qdlocker idle-auto-lock held off (unlocked)" "${last:-0}" "0"
+}
+
 # --- Model A silo identity (Phase C2, CONTRACT.md D4) -----------------------
 # Every tier3s silo owns a dedicated host account `qt3s-<silo>` (spawn 3b
 # creates it on the first launch); its uid is the guest workload uid and owns

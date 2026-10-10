@@ -135,21 +135,22 @@ is "qdshell is up" "$(as_admin systemctl --user is-active qdshell.service 2>/dev
 # locked. The stock idle_timeout_s is 300s — a multi-minute driver can be
 # locked mid-run even on a fresh worker (reproduced on a preserved VM:
 # the lock fired between poll cycles and every later focus check
-# failed). Widen the locker's idle window for the test duration and
-# restore it afterwards; this changes NO assertion — it keeps the session
-# in the state the focus semantics under test presuppose.
+# failed). t3s_guard_idle_locker holds the idle window off and unlocks
+# if setup already locked; this changes NO assertion — it keeps the
+# session in the state the focus semantics under test presuppose.
 [ -f "$LOCKER_CONF" ] && cp "$LOCKER_CONF" "$WORK/locker.conf.bak"
-printf 'idle_timeout_s = 7200\n' > "$LOCKER_CONF"
-as_admin systemctl --user restart qdlocker.service > /dev/null 2>&1
-# scoped to the CURRENT compositor invocation — a boot's journal can hold
-# an earlier locked_changed=1 from a previous session.
-comp_since=$(as_admin systemctl --user show qdwin-compositor.service \
-    -p ActiveEnterTimestamp --value 2>/dev/null)
-last_lock=$(journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service \
-    --no-pager -o cat --since "${comp_since:-1 hour ago}" 2>/dev/null \
-    | sed -n 's/.*locked_changed=\([01]\).*/\1/p' | tail -1)
+t3s_guard_idle_locker
+# Live locker status is the authority (the compositor journal can still
+# end on locked_changed=1 from setup even after an unlock). Empty
+# journal means this compositor invocation never locked.
+_lock_st=$(t3s_locker_status)
+case "$_lock_st" in
+    *locked=False*) _lock_got=0 ;;
+    *locked=True*)  _lock_got=1 ;;
+    *)              _lock_got=$(t3s_comp_last_lock); _lock_got=${_lock_got:-0} ;;
+esac
 is "compositor not locked (focus injection requires an unlocked session)" \
-    "${last_lock:-0}" "0"
+    "$_lock_got" "0"
 is "clipboard-source helper installed" \
     "$(command -v qdistro-test-clipboard-source 2>/dev/null)" "/usr/bin/qdistro-test-clipboard-source"
 is "profile is dev" "$(sed -n 's/^QDISTRO_PROFILE=//p' /etc/qdistro/profile | tail -1)" dev
