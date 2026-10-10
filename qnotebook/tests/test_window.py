@@ -40,6 +40,28 @@ def test_loads_initial_page(win):
     assert win._current_page is not None
 
 
+def test_closed_window_does_not_query_notebook_model_on_font_change(win, qapp, monkeypatch):
+    from PyQt6.QtGui import QFont
+
+    model = win.model
+    original_row_count = model.rowCount
+    queries = []
+
+    def row_count(*args):
+        queries.append(args)
+        return original_row_count(*args)
+
+    assert win.close()
+    assert win.index is None
+    monkeypatch.setattr(model, "rowCount", row_count)
+    font = QFont(win.tree.font())
+    font.setPointSizeF(font.pointSizeF() + 1)
+    win.tree.setFont(font)
+    win.tree.doItemsLayout()
+    qapp.processEvents()
+    assert not queries, "closed windows must not lay out released notebook resources"
+
+
 def test_load_page_by_name(win):
     win.load_page("Other")
     assert win._current_page == "Other"

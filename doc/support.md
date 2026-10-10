@@ -47,16 +47,11 @@ Please **do not** paste vault contents, private keys, or full unredacted logs.
 Do **not** open a public issue for a vulnerability. Security reports go through a
 private channel so a fix can ship before the details are public.
 
-> **Security contact:** `security@qdistro.org` *(placeholder — the published
-> address/key is finalized at the v1 release; until then, contact a maintainer
-> directly rather than posting details).*
-
-If GitHub's **private vulnerability reporting** is enabled on
-`qdistro/qdistro`, the *Security → Report a vulnerability* button there is the
-preferred channel — it is private by construction and keeps the report attached
-to the repo. It is not enabled yet as of this writing, so check for the button
-before relying on it; if it is absent, a direct maintainer contact is the
-working path. Do not fall back to a public issue.
+**Security contact:** [jan@kotek.net](mailto:jan@kotek.net).
+See the repository's [security reporting policy](../SECURITY.md) for reporting
+instructions. If GitHub's **Security → Report a vulnerability** button is
+available, it is another private channel. Otherwise, email the address above.
+Do not fall back to a public issue.
 
 What we consider in scope follows the [threat model](threat-model.md): accidental
 cross-silo leaks, escape from a tier's confinement, broker/approval bypass,

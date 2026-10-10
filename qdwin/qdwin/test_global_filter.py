@@ -242,24 +242,59 @@ def check_filter_is_installed(source):
     with the canonical callback — without this the policy is dead code and every
     silo sees everything. Presence alone is not enough: a `#if 0`-dead install, a
     later override (`(display, NULL, NULL)`), or a macro-aliased callback would
-    leave the raw call visible while installing no/another filter."""
+    leave the raw call visible while installing no/another filter.
+
+    The ONE sanctioned exception: qdwin_destroy clears the filter with
+    `(display, NULL, NULL)` before free(qdwin) — the filter's data pointer is
+    the dying qdwin, so a bind dispatched during teardown would otherwise reach
+    freed memory. That clear is pinned to live inside qdwin_destroy and to
+    detach with NULL,NULL — any OTHER second call is still a violation."""
     code = _strip_comments(source)
     calls = list(re.finditer(
         r"wl_display_set_global_filter\s*\(([^;]*)\)\s*;", code, re.DOTALL))
-    if len(calls) != 1:
+    installs = []
+    teardown_clears = []
+    destroy_body, derr = _function_body(
+        source, r"qdwin_destroy\s*\(\s*struct wl_listener \*listener",
+        "qdwin_destroy")
+    if derr:
+        return fail(derr)
+    destroy_flat = re.sub(r"\s+", "", destroy_body)
+    for m in calls:
+        args = re.sub(r"\s+", "", m.group(1))
+        if args == "ec->wl_display,qdwin_secctx_global_filter,qdwin":
+            installs.append(m)
+        elif args.endswith(",NULL,NULL"):
+            # The detach may only live inside qdwin_destroy. Call sites are
+            # matched positionally against the flattened body.
+            needle = "wl_display_set_global_filter(" + args + ");"
+            if needle not in destroy_flat:
+                return fail(
+                    "a wl_display_set_global_filter(..., NULL, NULL) call "
+                    "exists outside qdwin_destroy — clearing the canonical "
+                    "filter during normal operation would expose every "
+                    "gated global to every silo.")
+            teardown_clears.append(m)
+        else:
+            return fail(
+                f"unexpected wl_display_set_global_filter args `{args}` — "
+                "the only permitted calls are the canonical install "
+                "(ec->wl_display, qdwin_secctx_global_filter, qdwin) and the "
+                "qdwin_destroy teardown detach (..., NULL, NULL).")
+    if len(installs) != 1:
         return fail(
-            f"qdwin.c has {len(calls)} wl_display_set_global_filter(...) call(s) "
-            "(expected exactly 1) — a duplicate/override (e.g. a later "
-            "`(display, NULL, NULL)`) could clear the canonical filter; none "
-            "leaves the visibility matrix uninstalled.")
-    args = re.sub(r"\s+", "", calls[0].group(1))
-    if args != "ec->wl_display,qdwin_secctx_global_filter,qdwin":
+            f"qdwin.c has {len(installs)} canonical filter installs "
+            "(expected exactly 1) — a duplicate/override could clear or "
+            "replace the canonical filter; none leaves the visibility "
+            "matrix uninstalled.")
+    if len(teardown_clears) != 1:
         return fail(
-            f"wl_display_set_global_filter args are `{args}`, expected "
-            "`ec->wl_display,qdwin_secctx_global_filter,qdwin` — a different "
-            "display, callback, or data pointer would install a different/no "
-            "filter.")
-    if _inside_any_conditional(code, calls[0].start()):
+            f"qdwin.c has {len(teardown_clears)} teardown filter clears "
+            "(expected exactly 1, inside qdwin_destroy) — the filter's data "
+            "is the qdwin pointer, so a bind dispatched after free(qdwin) "
+            "would reach freed memory.")
+    args = re.sub(r"\s+", "", installs[0].group(1))
+    if _inside_any_conditional(code, installs[0].start()):
         return fail(
             "the wl_display_set_global_filter install is inside a preprocessor "
             "conditional (`#if`/`#ifdef`/...) — it may be compiled out (`#if 0`, "
@@ -273,18 +308,20 @@ def check_filter_is_installed(source):
         "qdwin.c (filter install)")
     if rc:
         return rc
-    # `wl_display_set_global_filter` must appear EXACTLY ONCE — the single direct
-    # call above. A second reference (a function-pointer capture `fp =
-    # wl_display_set_global_filter`, or a `#define SYN wl_display_set_global_filter`
-    # synonym called as `SYN(display, NULL, NULL)`) could clear/replace the filter
-    # while the one direct canonical call stays intact.
+    # `wl_display_set_global_filter` may appear AT MOST TWICE — the canonical
+    # install and the qdwin_destroy detach, both verified above. A third
+    # reference (a function-pointer capture `fp = wl_display_set_global_filter`,
+    # or a `#define SYN wl_display_set_global_filter` synonym called as
+    # `SYN(display, NULL, NULL)`) could clear/replace the filter while the two
+    # sanctioned direct calls stay intact.
     n_tok = len(re.findall(r"\bwl_display_set_global_filter\b", code))
-    if n_tok != 1:
+    if n_tok != 2:
         return fail(
             f"`wl_display_set_global_filter` appears {n_tok} times in qdwin.c "
-            "(expected exactly 1, the canonical install) — a second reference "
-            "(function-pointer capture or macro synonym) could clear or replace "
-            "the filter, leaving gated globals visible.")
+            "(expected exactly 2: the canonical install + the qdwin_destroy "
+            "detach) — a third reference (function-pointer capture or macro "
+            "synonym) could clear or replace the filter, leaving gated "
+            "globals visible.")
     return 0
 
 

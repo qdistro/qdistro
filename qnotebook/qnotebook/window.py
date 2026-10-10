@@ -2991,6 +2991,10 @@ class MainWindow(QMainWindow):
             _versioning.wait_for_pending_commits(-1)
         except Exception:
             pass
+        # Closed windows can still receive application-wide font/style events.
+        # Detach the view before its notebook resources are released so a
+        # delayed tree layout cannot traverse obsolete model indexes.
+        self.tree.setModel(None)
         if self.index:
             self.index.close()
             self.index = None

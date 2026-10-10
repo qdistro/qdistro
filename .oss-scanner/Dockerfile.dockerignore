@@ -1,0 +1,3 @@
+# Local evidence and disposable VM disks are not project source.
+ci/runs
+.worktrees

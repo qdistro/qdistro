@@ -9,9 +9,10 @@ them. Each check states the user-visible compositor behavior it protects:
   D6 — the trusted shell's mutating popup / selection / input-config requests
        are refused while the screen is locked, consistent with fullscreen/tile
        (the lock screen owns the display; set_display_power is the exception).
-       Popups refuse FATALLY (post_error); the two input-preference
-       snapshots refuse with a logged non-fatal drop so a shell restarted
-       during a lock is not crash-looped — see D6_DROP_HANDLERS; a deny's
+       Popups refuse FATALLY (post_error); the reactive, best-effort
+       requests (input-preference snapshots, focus injection) refuse with a
+       logged non-fatal drop so a shell restarted during a lock is not
+       crash-looped — see D6_DROP_HANDLERS; a deny's
        clear_selection is deferred to unlock — see D6_DEFER_HANDLERS.
   D7 — qdwin_shell_v1.show_popup requires a valid input grab serial (like an
        xdg_popup grab) before it installs a compositor-wide pointer grab, and
@@ -105,15 +106,23 @@ D6_FATAL_HANDLERS = (
     "qdwin_handle_show_popup",
 )
 
-# Handlers whose locked gate is a logged, NON-fatal DROP. This is a deliberate,
+# Handlers whose locked gate is a logged, NON-fatal DROP of a request the
+# shell emits reactively, without checking lock state. This is a deliberate,
 # enumerated exception, not a weakening: qdshell pushes both input-preference
 # snapshots unconditionally during connect-and-bind, so a shell that (re)starts
 # while the session is locked (shell crash + systemd Restart during a lock) was
 # killed by the fatal error on every respawn, crash-looped into
 # StartLimitBurst=start-limit-hit, and never recovered even after unlock
-# (qdlocker/tests/gui/06-shell-crash-survives.md). The lock invariant is
-# unchanged — the config is still refused, so nothing mutates behind the lock —
-# only the *answer* is a log line instead of a protocol kill.
+# (qdlocker/tests/gui/06-shell-crash-survives.md). The two set_keyboard_focus
+# handlers are the same class: injectFocus is best-effort intent issued
+# reactively by the shell and by test drivers, and a lock firing mid-burst
+# (qdlocker's 300 s idle threshold inside a VM test window) used to unbind
+# the shell on every attempt — after which even the legitimate post-unlock
+# focus restore could not arrive. The lock invariant is unchanged — the
+# request is still refused BEFORE any side effect (selection clear, focus
+# redirect, silo tracking write) — only the *answer* is a log line instead
+# of a protocol kill, and a dropped request leaves no stale intent to
+# replay at unlock.
 #
 # Keeping these in a separate, explicitly-named tuple is the point: a future
 # refactor that downgrades one of the FATAL handlers to a drop has to move it
@@ -121,6 +130,8 @@ D6_FATAL_HANDLERS = (
 D6_DROP_HANDLERS = (
     "qdwin_handle_set_pointer_config",
     "qdwin_handle_set_key_repeat",
+    "qdwin_handle_set_keyboard_focus",
+    "qdwin_handle_set_keyboard_focus_v2",
 )
 
 # Handlers whose locked gate DEFERS the request to unlock. clear_selection
@@ -225,14 +236,22 @@ def check_d6_locked_gate(source):
             # A drop handler must NOT post the fatal error (that is the
             # regression it exists to prevent) and must log the refusal, so the
             # drop is observable in the compositor log rather than silent.
+            # The lock branch must be exactly "log, then return": a dropped
+            # `return` would let a locked request reach the mutation code
+            # below and silently defeat the lock.
             if "QDWIN_SHELL_V1_ERROR_LOCKED" in body:
                 return fail(f"D6: {name} is a non-fatal DROP handler but still "
                             f"posts ERROR_LOCKED")
-            locked_at = body.find("qdwin->locked")
-            if "weston_log" not in body[locked_at:]:
-                return fail(f"D6: {name} drops while locked without logging "
-                            f"the refusal (weston_log after the gate)")
-            gate = locked_at
+            drop_branch = re.search(
+                r"if\s*\(\s*qdwin->locked\s*\)\s*\{\s*"
+                r"weston_log\s*\([^;]*\)\s*;\s*return\s*;\s*\}",
+                body)
+            if not drop_branch:
+                return fail(f"D6: {name} lock branch must be exactly "
+                            f"'if (qdwin->locked) {{ weston_log(...); "
+                            f"return; }}' (a drop without return reaches "
+                            f"the mutation path while locked)")
+            gate = body.find("qdwin->locked")
         # the gate must precede any state mutation; require_bound must come first
         rb = body.find("qdwin_shell_require_bound")
         if rb == -1 or gate < rb:
