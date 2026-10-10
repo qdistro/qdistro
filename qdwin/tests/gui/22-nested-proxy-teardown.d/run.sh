@@ -338,15 +338,43 @@ qd22_s3_launch() {
       >/dev/null
 }
 
+# Monotonic seconds for readiness budgets: /proc/uptime, not bash SECONDS
+# (wall clock; jumps with NTP/suspend) -- same convention as
+# scripts/vm/vm-exec's monotonic_s.
+qd22_mono_s() {
+    local u
+    read -r u _ < /proc/uptime 2>/dev/null || return 1
+    printf '%s\n' "${u%%.*}"
+}
+
 # Acknowledge ownership (the published group pid) before anything can fail.
+#
+# The budget is a READINESS BUDGET, not a hard wall-clock bound: each poll is
+# a vm-exec RPC whose own transport time is unbounded, so the budget only
+# stops scheduling NEW polls. It exists because pid publication can lag
+# under host load -- the detached `setsid sh` launcher is starved behind the
+# gate's own VMs, and a nominal 10s (40x0.25s) lapsed repeatedly on this
+# host (selftest qdwin-gui22-runner rows, 2026-10-09/10) -- not because a
+# hung launcher should be waited on longer. The failure path still prints
+# the launcher log so a real launch failure and a starvation timeout are
+# distinguishable.
+QD22_S3_ACK_BUDGET_S=${QD22_S3_ACK_BUDGET_S:-30}
 qd22_s3_ack() {
     PROBE_PID=
-    for _ in $(seq 1 40); do
+    local start now
+    start=$(qd22_mono_s) || { echo "cannot read /proc/uptime for the ack readiness budget"; return 1; }
+    PROBE_PID=$("$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_PID 2>/dev/null")
+    [ -n "$PROBE_PID" ] && return 0
+    while :; do
+        # Sleep first, then check the deadline before scheduling another
+        # vm-exec RPC: a delayed sleep must not start a poll past the budget.
+        sleep 0.25
+        now=$(qd22_mono_s) || { echo "lost /proc/uptime mid-poll; readiness not established"; return 1; }
+        [ $((now - start)) -ge "$QD22_S3_ACK_BUDGET_S" ] && break
         PROBE_PID=$("$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_PID 2>/dev/null")
         [ -n "$PROBE_PID" ] && return 0
-        sleep 0.25
     done
-    echo "probe never published its pid within 10s; launcher output:"
+    echo "probe never published its pid within ${QD22_S3_ACK_BUDGET_S}s (readiness budget); launcher output:"
     "$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_LAUNCH_LOG 2>&1"
     return 1
 }
@@ -356,15 +384,24 @@ qd22_s3_ack() {
 # The probe prints it only once the seat HAS a pointer and it is about to wait
 # for the click (qdwin-nested-probe.c); an rc= first means it exited without
 # one, so stop waiting as soon as either appears.
+QD22_S3_TARGET_BUDGET_S=${QD22_S3_TARGET_BUDGET_S:-30}
 qd22_s3_target() {
     TARGET=
-    for _ in $(seq 1 40); do
+    local start now
+    start=$(qd22_mono_s) || { echo "cannot read /proc/uptime for the target readiness budget"; return 1; }
+    TARGET=$("$QDWIN_VM_EXEC" "$VMNAME" "grep -m1 '^CLICK_TARGET ' $QD22_LOG 2>/dev/null")
+    [ -n "$TARGET" ] && return 0
+    while :; do
+        # Sleep first, then check the deadline before scheduling another
+        # vm-exec RPC: a delayed sleep must not start a poll past the budget.
+        sleep 0.5
+        now=$(qd22_mono_s) || { echo "lost /proc/uptime mid-poll; readiness not established"; return 1; }
+        [ $((now - start)) -ge "$QD22_S3_TARGET_BUDGET_S" ] && break
         TARGET=$("$QDWIN_VM_EXEC" "$VMNAME" "grep -m1 '^CLICK_TARGET ' $QD22_LOG 2>/dev/null")
         [ -n "$TARGET" ] && return 0
         "$QDWIN_VM_EXEC" "$VMNAME" "grep -q '^rc=' $QD22_LOG" && break
-        sleep 0.5
     done
-    echo "probe never printed CLICK_TARGET; probe log:"
+    echo "probe never printed CLICK_TARGET within ${QD22_S3_TARGET_BUDGET_S}s (readiness budget); probe log:"
     "$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_LOG; echo '--- launcher:'; cat $QD22_LAUNCH_LOG"
     return 1
 }
