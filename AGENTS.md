@@ -32,7 +32,8 @@ likely to touch:
 - `session_manager/` — silo/session lifecycle behind a D-Bus interface.
 - `tier2/`, `tier3/`, `tier3s/` — the container/uid isolation launch paths;
   `tier3s/` is the **experimental, dev-only** gVisor (`runsc`) paravirt tier
-  with its own `README.md`/`CONTRACT.md`.
+  with its own `README.md`/`CONTRACT.md`. It sits beside tier 3, *below* the
+  VM tiers (no KVM boundary), and never ships on release images.
 - `image/` — the kiwi tester-image build (runs the bootstrap installer chain
   in a VM); `packaging/` — the RPM + Agama installer track.
 - `scripts/install/` — `qdistro-bootstrap.sh` and the installer chain;
@@ -111,7 +112,13 @@ sanctioned visual driver pinned explicitly in `QCI_AGENT_CMD`; see
   ci/bin/qci-host-run bash -c 'cd qdlocker && python3 -m pytest -q tests/unit'
   ci/bin/qci-host-run bash -c 'cd qdgreeter && python3 -m pytest -q tests'
   ci/bin/qci-host-run bash -c 'cd qdfileman && python3 -m pytest -q'
+  ci/bin/qci-host-run bash -c 'cd qdterm && python3 -m pytest -q tests'
   ```
+
+  Other Python components follow the same pattern (`cd <dir> && python3 -m
+  pytest`); native components (qdwin, qdshell, daemons) have no pytest row —
+  their cheap feedback is the meson build through `qci-host-run` (dev.md's
+  LSP section).
 - **Review before merge.** Get the change reviewed (diff + gate evidence)
   before it lands on `main`.
 - **The live checkout on `main` is merge-only.** Agents never edit it
@@ -157,7 +164,9 @@ git fetch origin 'refs/heads/legacy/multirepo/*:refs/remotes/origin/legacy/multi
 git log origin/legacy/multirepo/qdwin -- qdwin/qdwin.c   # path WITHOUT the leading qdwin/
 ```
 
-`git blame` on `main` stops at a component's import commit. When bisecting,
+`git blame` on `main` stops at a component's import commit — root content
+(broker, daemons, session_manager, tests, ci, doc, scripts, image) blames
+cleanly through the migration; only the ten component dirs truncate. When bisecting,
 `git bisect skip` the migration range listed in MIGRATION.md (components
 present but the tree still wired for the old sibling layout).
 
