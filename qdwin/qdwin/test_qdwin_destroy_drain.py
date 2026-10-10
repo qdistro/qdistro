@@ -316,6 +316,32 @@ def check_primary_device_unlink(source):
     return 0
 
 
+def check_promote_releases_attach(source):
+    body, err = _function_body(
+        source, r"qdwin_maybe_promote_lock_toplevel\s*\(",
+        "qdwin_maybe_promote_lock_toplevel")
+    if err:
+        return fail(err)
+    flat = _flat(body)
+    # Attach-then-promote: a locker can attach a raw lock surface and
+    # only then produce its locker-UI toplevel. Taking over
+    # lock_surface/lock_view without first releasing the attach leaves
+    # the listeners (links embedded in struct qdwin) armed on the old
+    # surface — the later toplevel drain clears the promoted fields, so
+    # nothing ever unlinks them — and lets the stale lock_resource's
+    # late destructor reset the promoted state mid-session.
+    if "wl_resource_destroy(qdwin->lock_resource)" not in flat:
+        return fail("promote does not release a prior raw lock-surface "
+                    "attach — its listeners stay armed on the old "
+                    "surface forever")
+    if "qdwin->lock_resource_reattach_in_progress=1" not in flat:
+        return fail("promote releases the prior attach without "
+                    "suppressing the fail-secure flap")
+    r = _require_before(body, "wl_resource_destroy(qdwin->lock_resource)",
+                        "qdwin->lock_toplevel=tl", "promote-release-order")
+    return r
+
+
 def check_nested_drain_edges(source):
     body, err = _function_body(
         source, r"qdwin_nested_toplevel_resource_destroy\s*\(",
@@ -359,6 +385,7 @@ def main():
         lambda: check_toplevel_drain(source),
         lambda: check_sym_helper(source),
         lambda: check_nested_drain_edges(source),
+        lambda: check_promote_releases_attach(source),
     ):
         r = check()
         if r:

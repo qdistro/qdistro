@@ -1566,6 +1566,23 @@ qdwin_maybe_promote_lock_toplevel(struct qdwin *qdwin,
 	if (qdwin->lock_toplevel && qdwin->lock_toplevel != tl)
 		qdwin_demote_lock_toplevel(qdwin, "replace-lock-toplevel");
 
+	/* A locker may attach a raw lock surface and only then produce its
+	 * locker-UI toplevel. Overwriting lock_surface/lock_view here
+	 * without first releasing the attach leaves the surface-destroy/
+	 * commit listeners — links embedded in this struct — armed on the
+	 * old surface, leaks the dedicated view, and lets the stale
+	 * lock_resource's late destructor tear down the promoted state.
+	 * Destroying the resource performs the whole release (listener
+	 * unlink + dedicated-view destroy + field clears);
+	 * reattach_in_progress suppresses the spurious fail-secure flap,
+	 * same as the attach path's own replacement sequence. */
+	if (qdwin->lock_resource && !qdwin->lock_view_is_toplevel &&
+	    qdwin->lock_surface) {
+		qdwin->lock_resource_reattach_in_progress = 1;
+		wl_resource_destroy(qdwin->lock_resource);
+		qdwin->lock_resource_reattach_in_progress = 0;
+	}
+
 	qdwin->lock_toplevel = tl;
 	qdwin->lock_surface =
 		weston_desktop_surface_get_surface(tl->desktop_surface);

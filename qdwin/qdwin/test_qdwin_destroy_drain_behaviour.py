@@ -56,6 +56,12 @@ Cases:
  14. Unclaimed bindings: the stage-4 enumeration neutralizes EVERY
      qdwin-class resource on the display (claimed or not); a late
      disconnect after free(qdwin) hits the NULL guard.
+ 15. Attach → promote → drain → late raw-surface destroy: promoting a
+     locker-UI toplevel must release a prior raw lock-surface attach
+     (resource + listeners + dedicated view) before overwriting
+     lock_surface/lock_view; otherwise the toplevel drain clears the
+     promoted fields and the original surface's listeners stay armed
+     into freed qdwin.
 """
 
 from pathlib import Path
@@ -125,9 +131,13 @@ struct weston_coord_global { int placeholder; };
 struct wl_display { struct wl_list client_list; };
 struct wl_event_source { int removed; };
 struct weston_desktop_surface { void *user_data; int destroyed; };
-struct weston_surface { struct wl_signal destroy_signal; };
+struct weston_surface {
+	struct wl_signal destroy_signal;
+	struct wl_signal commit_signal;
+};
 struct weston_view { int destroyed; struct weston_surface *surface; };
 struct weston_curtain { int destroyed; };
+struct weston_layer { int placeholder; };
 struct weston_output { const char *name; struct wl_list link; };
 struct weston_mode { int placeholder; };
 struct weston_head { int placeholder; };
@@ -409,6 +419,7 @@ struct qdwin {
 	struct qdwin_toplevel *lock_toplevel;
 	struct weston_view *lock_view;
 	struct weston_surface *lock_surface;
+	struct weston_layer lock_layer;
 	struct wl_listener lock_surface_commit, lock_surface_destroy;
 	int lock_view_is_toplevel;
 	int lock_resource_is_locker;
@@ -622,6 +633,37 @@ static void qdwin_data_offer_pending_free_all(struct qdwin *q)
 { (void)q; offer_free_calls++; }
 static void qdwin_demote_lock_toplevel(struct qdwin *q, const char *cause)
 { (void)q; (void)cause; demote_calls++; }
+
+/* Lock-attach/promote collaborators — the probe pins the
+ * attach → promote → drain → late-surface-destroy transition (sol impl
+ * r4 P1): promoting a locker-UI toplevel must release a prior raw
+ * lock-surface attach before taking over lock_surface/lock_view. */
+static int locker_ui_result, move_to_layer_calls, curtain_bottom_calls;
+static int set_fullscreen_calls, install_curtain_calls, place_calls;
+static int lock_send_dismissed_calls, lock_surface_destroy_calls;
+static int lock_surface_commit_calls;
+static struct weston_surface *dsurf_surface_result;
+static int qdwin_toplevel_is_locker_ui(struct qdwin *q,
+				     struct qdwin_toplevel *tl)
+{ (void)q; (void)tl; return locker_ui_result; }
+static struct weston_surface *
+weston_desktop_surface_get_surface(struct weston_desktop_surface *d)
+{ (void)d; return dsurf_surface_result; }
+static void qdwin_toplevel_move_to_layer(struct qdwin_toplevel *tl,
+					 struct weston_layer *layer)
+{ (void)tl; (void)layer; move_to_layer_calls++; }
+static void qdwin_lock_curtain_to_bottom(struct qdwin *q)
+{ (void)q; curtain_bottom_calls++; }
+static void qdwin_toplevel_set_fullscreen(struct qdwin *q,
+					 struct qdwin_toplevel *tl,
+					 bool fs, struct weston_output *o)
+{ (void)q; (void)tl; (void)fs; (void)o; set_fullscreen_calls++; }
+static void qdwin_install_lock_curtain(struct qdwin *q)
+{ (void)q; install_curtain_calls++; }
+static void qdwin_lock_surface_place(struct qdwin *q)
+{ (void)q; place_calls++; }
+static void qdwin_lock_surface_v1_send_dismissed(struct wl_resource *r)
+{ (void)r; lock_send_dismissed_calls++; }
 static void qdwin_primary_seat_clear_selection(
 	struct qdwin_primary_seat *ps, int cancel)
 { (void)cancel; ps->current_source = NULL; clear_selection_calls++; }
@@ -688,6 +730,9 @@ SPLICED = [
     "qdwin_neutralize_binding_resources",
     "qdwin_primary_device_resource_destroy",
     "qdwin_lock_surface_resource_destroyed",
+    "qdwin_lock_surface_destroyed_cb",
+    "qdwin_lock_surface_commit_cb",
+    "qdwin_maybe_promote_lock_toplevel",
     "qdwin_shell_resource_destroy",
     "qdwin_locker_resource_destroy",
     "qdwin_proxy_pointer_track_focus",
@@ -720,6 +765,16 @@ static void harness_client_destroyed(struct wl_listener *l, void *d)
 {
 	client_destroyed_notify_calls++;
 	qdwin_secctx_client_on_destroy(l, d);
+}
+static void harness_lock_surface_destroyed(struct wl_listener *l, void *d)
+{
+	lock_surface_destroy_calls++;
+	qdwin_lock_surface_destroyed_cb(l, d);
+}
+static void harness_lock_surface_commit(struct wl_listener *l, void *d)
+{
+	lock_surface_commit_calls++;
+	qdwin_lock_surface_commit_cb(l, d);
 }
 
 static struct weston_compositor comp;
@@ -818,8 +873,13 @@ static void reset_counters(void)
 	repaint_calls = serial_calls = send_modifiers_calls = 0;
 	proxy_for_view_calls = focus_handler_calls = dsurf_destroy_calls = 0;
 	seat_destroyed_notify_calls = client_destroyed_notify_calls = 0;
+	locker_ui_result = move_to_layer_calls = curtain_bottom_calls = 0;
+	set_fullscreen_calls = install_curtain_calls = place_calls = 0;
+	lock_send_dismissed_calls = lock_surface_destroy_calls = 0;
+	lock_surface_commit_calls = 0;
 	pick_result = NULL;
 	proxy_for_view_result = NULL;
+	dsurf_surface_result = NULL;
 }
 
 /* 1: fallback path — no dlsym symbol → real surface_removed teardown. */
@@ -1533,6 +1593,99 @@ static int case_unclaimed_bindings(void)
 	return 0;
 }
 
+/* 15: attach → promote → drain → late raw-surface destroy (sol impl r4
+ * P1). A locker attaches a raw lock surface (listeners armed on it,
+ * dedicated view created, lock_resource live) and only then produces
+ * its locker-UI toplevel. Promoting used to overwrite lock_surface/
+ * lock_view without releasing the attach: the toplevel drain later
+ * cleared the promoted fields, stage 4 saw lock_surface==NULL, and the
+ * original surface's listeners stayed armed into freed qdwin. */
+static int case_lock_attach_promote(void)
+{
+	reset_counters();
+	struct qdwin *q = q_new();
+
+	/* Attach state: raw surface + dedicated view + armed listeners +
+	 * a live lock_resource, exactly as attach_lock_surface leaves it. */
+	struct weston_surface *surf = calloc(1, sizeof *surf);
+	wl_signal_init(&surf->destroy_signal);
+	wl_signal_init(&surf->commit_signal);
+	struct wl_resource *lkres =
+		res_new(q, qdwin_lock_surface_resource_destroyed);
+	lkres->class_name = "qdwin_locker_surface_v1";
+	q->lock_resource = lkres;
+	q->lock_resource_is_locker = 1;
+	q->lock_surface = surf;
+	q->lock_view_is_toplevel = 0;
+	q->lock_view = calloc(1, sizeof *q->lock_view);
+	struct weston_view *dedicated = q->lock_view;
+	wl_list_init(&q->lock_surface_commit.link);
+	wl_list_init(&q->lock_surface_destroy.link);
+	q->lock_surface_commit.notify = harness_lock_surface_commit;
+	q->lock_surface_destroy.notify = harness_lock_surface_destroyed;
+	wl_signal_add(&surf->commit_signal, &q->lock_surface_commit);
+	wl_signal_add(&surf->destroy_signal, &q->lock_surface_destroy);
+
+	/* The listeners really are armed: a commit on the attached
+	 * surface runs the real callback body. */
+	wl_signal_emit(&surf->commit_signal, NULL);
+	CHECK(lock_surface_commit_calls == 1 && place_calls == 1,
+	      "attached-surface commit listener was never armed");
+
+	/* Promote: a locker-UI toplevel arrives and is promoted. */
+	struct qdwin_toplevel *tl = tl_new(q, 21);
+	struct weston_desktop_surface *ds = dsurf_new(tl);
+	struct weston_view *tlv = tl->view;
+	struct weston_surface *tlsurf = calloc(1, sizeof *tlsurf);
+	wl_signal_init(&tlsurf->destroy_signal);
+	tlv->surface = tlsurf;
+	tl->desktop_surface = ds;
+	locker_ui_result = 1;
+	dsurf_surface_result = tlsurf;
+
+	qdwin_maybe_promote_lock_toplevel(q, tl, "test");
+
+	/* Releasing the attach destroys its resource: the destructor
+	 * unlinks both listeners from the raw surface and tears down the
+	 * dedicated view — all under the reattach flag, so the
+	 * fail-secure flap stays quiet. */
+	CHECK(lkres->destroyed,
+	      "promote did not release the attached lock resource");
+	CHECK(q->lock_resource == NULL,
+	      "stale lock_resource survived promote");
+	CHECK(dedicated->destroyed,
+	      "dedicated lock view leaked at promote");
+	CHECK(demote_calls == 0 && install_curtain_calls == 0,
+	      "promote's attach release fired the fail-secure flap");
+	CHECK(q->lock_toplevel == tl && q->lock_view == tlv &&
+	      q->lock_surface == tlsurf && q->lock_view_is_toplevel == 1,
+	      "promote did not install the toplevel lock state");
+
+	/* Stage 3: the toplevel drain destroys the promoted toplevel and
+	 * clears the promoted lock fields — the original raw surface's
+	 * listeners must already be gone, or nothing would remove them. */
+	probe_dsurf_destroy = NULL;
+	qdwin_toplevels_destroy_all(q);
+	CHECK(q->lock_toplevel == NULL && q->lock_surface == NULL &&
+	      q->lock_view == NULL && q->lock_view_is_toplevel == 0,
+	      "toplevel drain did not clear the promoted lock state");
+	free(q);
+
+	/* The ORIGINAL attached surface dies last. Its listeners were
+	 * unlinked at promote, so neither emit can reach freed qdwin —
+	 * under ASan a surviving link aborts on the container_of deref,
+	 * and the harness counters prove quiet without it. */
+	wl_signal_emit(&surf->destroy_signal, NULL);
+	wl_signal_emit(&surf->commit_signal, NULL);
+	CHECK(lock_surface_destroy_calls == 0 &&
+	      lock_surface_commit_calls == 1,
+	      "an attached-surface listener fired into freed qdwin");
+
+	free(lkres); free(ds); free(tlv); free(tlsurf);
+	free(surf); free(dedicated);
+	return 0;
+}
+
 int main(void)
 {
 	memset(&comp, 0, sizeof comp);
@@ -1553,7 +1706,8 @@ int main(void)
 	if ((r = case_grab_suppression())) return r;
 	if ((r = case_full_pass())) return r;
 	if ((r = case_unclaimed_bindings())) return r;
-	printf("destroy-drain behaviour: 13 cases OK\n");
+	if ((r = case_lock_attach_promote())) return r;
+	printf("destroy-drain behaviour: 14 cases OK\n");
 	return 0;
 }
 """
