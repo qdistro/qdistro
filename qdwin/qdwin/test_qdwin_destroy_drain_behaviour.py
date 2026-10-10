@@ -1604,6 +1604,11 @@ static int case_lock_attach_promote(void)
 {
 	reset_counters();
 	struct qdwin *q = q_new();
+	/* locked must be real: without it the resource destructor's
+	 * fail-secure branch cannot execute at all, and the suppression
+	 * assertion below would pass even if the reattach flag were
+	 * dropped (sol impl r5). */
+	q->locked = 1;
 
 	/* Attach state: raw surface + dedicated view + armed listeners +
 	 * a live lock_resource, exactly as attach_lock_surface leaves it. */
@@ -1627,9 +1632,11 @@ static int case_lock_attach_promote(void)
 	wl_signal_add(&surf->destroy_signal, &q->lock_surface_destroy);
 
 	/* The listeners really are armed: a commit on the attached
-	 * surface runs the real callback body. */
+	 * surface runs the real callback body — place + the locked
+	 * curtain re-bottom + repaint. */
 	wl_signal_emit(&surf->commit_signal, NULL);
-	CHECK(lock_surface_commit_calls == 1 && place_calls == 1,
+	CHECK(lock_surface_commit_calls == 1 && place_calls == 1 &&
+	      curtain_bottom_calls == 1,
 	      "attached-surface commit listener was never armed");
 
 	/* Promote: a locker-UI toplevel arrives and is promoted. */
@@ -1657,6 +1664,8 @@ static int case_lock_attach_promote(void)
 	      "dedicated lock view leaked at promote");
 	CHECK(demote_calls == 0 && install_curtain_calls == 0,
 	      "promote's attach release fired the fail-secure flap");
+	CHECK(q->lock_resource_reattach_in_progress == 0,
+	      "reattach-in-progress left set after promote");
 	CHECK(q->lock_toplevel == tl && q->lock_view == tlv &&
 	      q->lock_surface == tlsurf && q->lock_view_is_toplevel == 1,
 	      "promote did not install the toplevel lock state");
