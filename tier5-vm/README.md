@@ -158,8 +158,10 @@ silently merge:
   name and an admin removes a genuinely stale squatter deliberately.
   The teardown unlink applies the same rule when the domain was
   already absent at claim time, and the orphan reaper reaps only
-  unproven overlays (no sidecar) or retired-app disks (sidecar appId
-  no longer in the current manifest); an owned orphan is preserved
+  unproven overlays (no sidecar) or retired-app disks — retirement
+  needs an exact appId parse of a NON-stale manifest; the readable
+  empty manifest the reconciler publishes on scan failure is
+  ambiguity, not proof an app retired. An owned orphan is preserved
   for its app's next launch.
   "Live" is decided by `qemu_pids_for_domain` alone —
   a pgrep on libvirt's `-name guest=<vm>` argv token narrowed to real
@@ -194,7 +196,7 @@ silently merge:
   CONFIRMED ABSENT (it never undefines — a defined-but-dead domain
   has an owner record the reaper cannot adjudicate) AND whose disk
   carries no live owner record (no sidecar, or a sidecar appId the
-  current manifest no longer publishes), and re-verifies
+  current non-stale manifest no longer publishes), and re-verifies
   death after a settle; and every
   overlay `rm` — in teardown, reaper, and
   `qdistro-tier5-cleanup.sh` — is preceded by confirmed-absent

@@ -326,6 +326,34 @@ domain_defined_state() {
     return 1
 }
 
+# manifest_app_state <appId> — rc 0 = the CURRENT non-stale catalogue
+# publishes this appId; rc 1 = the catalogue parses, is fresh, and does
+# NOT publish it (a retired app — its disk is provably stale); rc 2 =
+# cannot determine. The reconciler publishes a READABLE empty manifest
+# carrying a "stale" marker on scan failure — that is ambiguity, never
+# proof an app retired (sol r13). Must stay defined before the startup
+# reaper.
+manifest_app_state() {
+    python3 - "$VMAPPS_MANIFEST" "$1" <<'PY'
+import json, sys
+mpath, side = sys.argv[1], sys.argv[2]
+try:
+    with open(mpath) as f:
+        doc = json.load(f)
+except Exception:
+    sys.exit(2)
+if not isinstance(doc, dict) or doc.get("stale"):
+    sys.exit(2)
+apps = doc.get("apps")
+if not isinstance(apps, list):
+    sys.exit(2)
+for row in apps:
+    if isinstance(row, dict) and row.get("appId") == side:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 # domain_xml_tmpfile is provided by lib/spawn-common.sh (sourced below); it
 # renders into a private 0700 dir under the admin runtime. (A local definition
 # here would be shadowed by that source anyway.)
@@ -431,19 +459,21 @@ else
             # to do (sol r11). Unverifiable queries skip the same way.
             domain_defined_state "$base"; _ds=$?
             if [ "$_ds" -ne 1 ]; then exec {hfd}>&-; continue; fi
-            # Owner record: a nonempty <overlay>.appid sidecar means a
-            # catalogue app may still claim this disk — an OWNED
-            # orphan, not waste (its app adopts it on next launch).
-            # Reap only when the sidecar is absent/empty (no owner
-            # ever recorded) or names an appId the CURRENT manifest no
-            # longer publishes (retired app — provably stale). An
-            # unreadable manifest is ambiguity: preserve (sol r12).
-            _side=$(cat "$overlay.appid" 2>/dev/null) || _side=
-            if [ -n "$_side" ]; then
-                if [ ! -r "$VMAPPS_MANIFEST" ] \
-                    || grep -qF "\"$_side\"" "$VMAPPS_MANIFEST"; then
+            # Owner record: a nonempty <overlay>.appid sidecar binds
+            # this disk to an app — an OWNED orphan, not waste (its
+            # app adopts it on next launch). Reap only when there is
+            # no sidecar (no owner ever recorded) or the sidecar names
+            # an appId the CURRENT non-stale manifest no longer
+            # publishes (retired app). An unreadable sidecar, an
+            # empty one, or an unverifiable manifest verdict are all
+            # ambiguity: preserve (sol r12/r13).
+            if [ -f "$overlay.appid" ]; then
+                if ! _side=$(cat "$overlay.appid" 2>/dev/null) \
+                        || [ -z "$_side" ]; then
                     exec {hfd}>&-; continue
                 fi
+                manifest_app_state "$_side"; _ms=$?
+                [ "$_ms" -eq 1 ] || { exec {hfd}>&-; continue; }
             fi
             # Settle + re-verify: an out-of-band `virsh create` could
             # still be exec'ing a qemu under this name. With no

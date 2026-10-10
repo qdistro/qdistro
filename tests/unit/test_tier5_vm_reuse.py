@@ -446,18 +446,41 @@ def test_overlay_reuse_requires_a_provable_owner():
 def test_reaper_preserves_owned_orphan_overlays():
     # ensures: a nonempty <overlay>.appid sidecar is an owner record —
     #          the reaper reaps only overlays with no owner record, or
-    #          whose bound appId the CURRENT manifest no longer
-    #          publishes (a retired app's disk is provably stale); an
-    #          unreadable manifest is ambiguity -> preserve (sol r12)
+    #          whose bound appId the CURRENT non-stale manifest no
+    #          longer publishes (a retired app's disk is provably
+    #          stale). A stale-marker manifest (the reconciler
+    #          publishes a READABLE empty one on scan failure), an
+    #          unparseable one, an unreadable sidecar, or an
+    #          unverifiable verdict are all ambiguity -> preserve
+    #          (sol r12/r13)
     reaper = SPAWN[SPAWN.index("orphan-overlay reaper"):
                    SPAWN.index("reaped orphan overlay")]
-    assert '_side=$(cat "$overlay.appid"' in reaper
-    assert "VMAPPS_MANIFEST" in reaper
-    assert 'grep -qF "\\"$_side\\"" "$VMAPPS_MANIFEST"' in reaper
+    assert 'manifest_app_state "$_side"; _ms=$?' in reaper
+    assert '[ "$_ms" -eq 1 ]' in reaper
+    # an unreadable OR empty sidecar preserves — only a MISSING file
+    # counts as "no owner"
+    assert '[ -f "$overlay.appid" ]' in reaper
     # the ownership gate sits between confirmed-absent and the rm
-    assert reaper.index('_side=$(cat') < reaper.index('rm -f "$overlay"')
+    assert reaper.index('manifest_app_state') \
+        < reaper.index('rm -f "$overlay"')
     # sidecar removal rides along with the overlay rm
     assert 'rm -f "$overlay" "$overlay.appid"' in reaper
+
+
+def test_manifest_app_state_is_exact_parse_with_stale_ambiguity():
+    # ensures: retirement is decided by an EXACT appId match in a
+    #          parsed, non-stale manifest — never a quoted substring
+    #          (could appear in another field) and never a stale
+    #          manifest the reconciler publishes READABLE on scan
+    #          failure (sol r13)
+    body = _section("manifest_app_state")
+    assert "json.load" in body
+    assert 'doc.get("stale")' in body
+    assert 'row.get("appId") == side' in body
+    assert "sys.exit(2)" in body
+    assert "sys.exit(1)" in body
+    # grep-based substring matching would be imprecise
+    assert "grep" not in body
 
 
 def test_cleanup_unlink_requires_confirmed_dead():
@@ -528,6 +551,14 @@ def test_cleanup_helper_requires_absent_definition_for_unlink():
     assert tail.index("domain_defined_state") \
         < tail.index("qemu_pids_for_domain")
     assert tail.index("qemu_pids_for_domain") < tail.index('rm -f "$DISK"')
+    # an orphan disk has no definition to carry the binding — the rm
+    # additionally requires tier-5 provenance (backing == our base)
+    # and surfaces the sidecar's bound appId (sol r13)
+    assert '"backing-filename"' in tail
+    assert "not a tier-5 overlay" in tail
+    assert '"$DISK.appid"' in tail
+    assert tail.index('"backing-filename"') \
+        < tail.index('rm -f "$DISK"')
     # undefine failure is surfaced, not swallowed into "not present"
     assert "WARN: undefine" in CLEANUP
 

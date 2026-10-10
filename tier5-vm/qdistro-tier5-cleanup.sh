@@ -12,6 +12,7 @@ ADMIN_USER="${TIER5_ADMIN_USER:-admin}"
 ADMIN_HOME_DEFAULT="$(getent passwd "$ADMIN_USER" 2>/dev/null | cut -d: -f6)"
 DISK_DIR="${TIER5_DISK_DIR:-$ADMIN_HOME_DEFAULT/.local/share/libvirt/images}"
 DISK="$DISK_DIR/$VM_NAME.qcow2"
+DISK_BASE="${TIER5_BASE_DISK:-/var/lib/libvirt/images/qdistro-tier5-base.qcow2}"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "[tier5-cleanup] FAIL: must run as root" >&2
@@ -141,10 +142,29 @@ if [ -f "$DISK" ]; then
         echo "        — keeping $DISK" >&2
         exit 5
     fi
+    # Orphan disk: no definition carries the appId binding, so
+    # provenance is the file itself — it must clone OUR base to be a
+    # tier-5 artifact at all (sol r13). The sidecar's bound appId is
+    # surfaced for the admin — the tool deliberately cleans ownerless
+    # orphans, so a missing sidecar warns but proceeds; an unreadable
+    # backing is ambiguity -> keep the disk.
+    _back=$(run_as_admin qemu-img info --output=json "$DISK" \
+        2>/dev/null \
+        | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
+    if [ "$_back" != "$DISK_BASE" ]; then
+        echo "[tier5-cleanup] FAIL: $DISK is not a tier-5 overlay" >&2
+        echo "        (backing '${_back:-<unknown>}') — keeping it" >&2
+        exit 5
+    fi
+    if ! _side=$(cat "$DISK.appid" 2>/dev/null) || [ -z "$_side" ]; then
+        _side="<unbound>"
+        echo "[tier5-cleanup] WARN: $DISK has no appId sidecar —" >&2
+        echo "        unowned orphan" >&2
+    fi
     qemu_pids_for_domain; _lv=$?
     if [ "$_lv" -eq 1 ]; then
         rm -f "$DISK" "$DISK.appid"
-        echo "[tier5-cleanup] removed $DISK"
+        echo "[tier5-cleanup] removed $DISK (bound to '$_side')"
     else
         echo "[tier5-cleanup] FAIL: $VM_NAME qemu live or unverifiable" >&2
         echo "        — keeping $DISK" >&2
