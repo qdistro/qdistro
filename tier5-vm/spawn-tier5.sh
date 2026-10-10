@@ -294,15 +294,14 @@ qemu_pids_for_domain() {
 }
 
 # domain_is_live [name] — is the guest ACTUALLY alive? rc: 0 live,
-# 1 confirmed dead, 2 cannot determine. domstate is only a hint —
-# nested-virt libvirt reports "shut off" for a LIVE qemu — so EITHER
-# "running" OR a backing qemu pid means live, and "dead" requires a
-# clean qemu-pid scan.
+# 1 confirmed dead, 2 cannot determine. The qemu-pid scan is the ONLY
+# authority: domstate can lie in BOTH directions under nested virt —
+# "shut off" for a live qemu, and stale "running" for a dead one —
+# so it is not consulted here at all (a stale-running belt would wedge
+# the session watch on a dead guest, sol r8). No backing qemu process
+# IS death — libvirt cannot run a VM without one.
 domain_is_live() {
     local name="${1:-$VM_NAME}"
-    if run_as_admin virsh domstate "$name" 2>/dev/null | grep -qw running; then
-        return 0
-    fi
     qemu_pids_for_domain "$name" >/dev/null
     case $? in 0) return 0 ;; 2) return 2 ;; esac
     return 1
@@ -1007,10 +1006,21 @@ create_domain() {
         fi
     fi
 
-    # Define domain if absent.
-    if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-        _create_domain_define
-    fi
+    # Define only on CONFIRMED absence. An already-defined domain must
+    # be OURS before we may start it — the decision layer checked the
+    # binding, but a transient dominfo outage could have hidden a
+    # foreign domain then (sol r8); an unverifiable query refuses.
+    domain_defined_state; _ds=$?
+    case "$_ds" in
+        1)  _create_domain_define ;;
+        0)  if [ "$(domain_appid)" != "$POLICY_KEY" ]; then
+                echo "[tier5] FAIL: existing domain $VM_NAME is bound to" >&2
+                echo "        another app — refusing to start it" >&2
+                REAP=0; exit 3
+            fi ;;
+        *)  echo "[tier5] FAIL: cannot determine state of $VM_NAME — refusing" >&2
+            REAP=0; exit 3 ;;
+    esac
 
     # Start if not live. The qemu oracle decides — a false "shut off"
     # domstate must not push `virsh start` at an already-live domain,
@@ -1198,8 +1208,17 @@ else
         echo "[tier5] FAIL: cannot determine liveness of $VM_NAME — refusing" >&2
         REAP=0; exit 3
     else
-        if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 \
-                && [ "$(domain_appid)" != "$POLICY_KEY" ]; then
+        # Foreign-binding check needs a PRECISE defined-state: a dominfo
+        # outage must not be read as "no domain" — create_domain would
+        # then skip define and `virsh start` a stopped foreign guest the
+        # moment the query recovers (sol r8).
+        domain_defined_state; _ds=$?
+        if [ "$_ds" -eq 2 ]; then
+            echo "[tier5] FAIL: cannot determine whether $VM_NAME" >&2
+            echo "        is defined — refusing to create over it" >&2
+            REAP=0; exit 3
+        fi
+        if [ "$_ds" -eq 0 ] && [ "$(domain_appid)" != "$POLICY_KEY" ]; then
             # Domain bound to another (or no) app squatting our name,
             # and confirmed DEAD by the qemu oracle above. domstate
             # stays on as a belt: it must also read terminal. No virsh
@@ -1304,32 +1323,29 @@ echo "[tier5] lifecycle[$POLICY_KEY]: method=$SHUTDOWN_METHOD grace=${SHUTDOWN_G
 # In loopback mode, waypipe-client has --oneshot and exits when the
 # server disconnects; wait for it directly.
 if [ "$MODE" = "vm" ]; then
-    # Poll for an EXPLICIT terminal state. A transient runuser/virsh query
-    # failure (e.g. virtqemud "End of file ... I/O error" under audit-backlog
-    # churn from this very poll) must NOT be read as "domain stopped": the old
-    # `grep -qw running` exited the loop on ANY non-"running" output, so a single
-    # blip declared a HEALTHY guest stopped and tore it down (perm-gui 20/21
-    # cold-start failed every run for this reason). Treat empty/error output as
-    # transient and ride it out; only an explicit terminal state ends the wait.
+    # Session watch: the loop ends when the guest is confirmed dead OR
+    # the published app exits. A transient runuser/virsh query failure
+    # (e.g. virtqemud "End of file ... I/O error" under audit-backlog
+    # churn from this very poll) must NOT be read as "domain stopped":
+    # the old `grep -qw running` shape exited on ANY non-"running"
+    # domstate output, so a single blip declared a HEALTHY guest
+    # stopped and tore it down (perm-gui 20/21 cold-start failed every
+    # run for this reason).
     exec_gone=0
     while :; do
-        d_state=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '[:space:]')
-        case "$d_state" in
-            running|paused|idle|pmsuspended) ;;
-            *)  # Anything not explicitly live — a terminal claim, empty
-                # output, a query blip — is verified by the qemu oracle:
-                # only a CONFIRMED-dead verdict ends the session watch.
-                # Breaking on an ambiguous signal would hand a
-                # possibly-live guest (and its still-running app) to
-                # teardown's destroy+kill (sol r7). A live verdict or an
-                # unverifiable scan both keep waiting; a truly dead
-                # guest yields confirmed-dead as soon as the scan can
-                # run, and a persistently broken oracle just keeps this
-                # harmless watch going — the app-exit watch below is the
-                # primary session-end signal anyway.
-                domain_is_live; _lv=$?
-                [ "$_lv" -eq 1 ] && break ;;
-        esac
+        # Liveness comes ONLY from the qemu oracle — domstate is not
+        # consulted: it can lie in both directions under nested virt
+        # ("shut off" for a live qemu — the original perm-gui 20/21
+        # cold-start killer — and stale "running" for a dead one, which
+        # would wedge this watch). Only a CONFIRMED-dead verdict ends
+        # the session watch: breaking on ambiguity would hand a
+        # possibly-live guest to teardown's destroy+kill (sol r7). A
+        # truly dead guest yields confirmed-dead as soon as the scan
+        # can run; a persistently broken oracle just keeps this
+        # harmless watch going — the app-exit watch below is the
+        # primary session-end signal anyway (sol r8).
+        domain_is_live; _lv=$?
+        [ "$_lv" -eq 1 ] && break
         # Session-on-done: each session publishes ONE app; once that app exits
         # (e.g. its last window was closed -> request_close -> the app quit)
         # this wrapper's work is done. Watch the published process via the

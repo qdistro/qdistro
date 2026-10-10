@@ -67,7 +67,10 @@ def test_liveness_decisions_use_the_qemu_oracle():
     # the match requires the discrete `-name guest=` argv token
     assert '"-name guest=$name,"' in body
     live = _section("domain_is_live")
-    assert "domstate" in live and "qemu_pids_for_domain" in live
+    # the oracle alone is the liveness authority — no domstate hint can
+    # override it in either direction (sol r8)
+    assert "virsh domstate" not in live
+    assert "qemu_pids_for_domain" in live
     # adopt, reclaim, idle-window, wait-loop, and the early check all
     # consume the oracle
     assert SPAWN.count("domain_is_live") >= 6
@@ -197,7 +200,7 @@ def test_stopped_foreign_domain_is_reclaimed_not_adopted():
     #          settle + post-undefine liveness recheck protects the
     #          overlay from an out-of-band start in the probe gap.
     assert "reclaiming stopped foreign domain" in SPAWN
-    start = SPAWN.index('if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 \\\n                && [ "$(domain_appid)" != "$POLICY_KEY" ]')
+    start = SPAWN.index('if [ "$_ds" -eq 0 ] && [ "$(domain_appid)" != "$POLICY_KEY" ]')
     end = SPAWN.index("create_domain\n    fi\n    flock -s 9")
     reclaim = SPAWN[start:end]
     assert "shutoff|crashed" in reclaim
@@ -333,19 +336,62 @@ def test_qemu_scan_unreadable_comm_is_uncertain_not_dead():
 
 
 def test_wait_loop_breaks_only_on_confirmed_dead():
-    # ensures: an ambiguous domstate (empty, blip, or a terminal CLAIM)
-    #          can never end the session watch — breaking would hand a
-    #          possibly-live guest to teardown's destroy+kill. Only a
-    #          confirmed-dead oracle verdict breaks; unverifiable scans
-    #          keep waiting (sol r7)
+    # ensures: neither an ambiguous nor a LYING domstate can end or
+    #          wedge the session watch — the loop consults the qemu
+    #          oracle every iteration (a stale "running" claim for a
+    #          dead guest cannot hide it), breaks only on
+    #          confirmed-dead, and keeps waiting on live or
+    #          unverifiable scans (sol r7/r8)
     loop = SPAWN[SPAWN.index("exec_gone=0\n    while :; do"):
                  SPAWN.index("wait loop ended")]
-    # no miss-budget break remains anywhere in the loop
-    assert 'misses=$((misses + 1))' not in loop
-    assert "[ \"$misses\" -ge" not in loop
-    # the single break path is the confirmed-dead verdict
+    # domstate is not consulted in the watch at all — it can go stale
+    # "running" for a dead guest and wedge the loop (sol r8)
+    assert "virsh domstate" not in loop
+    # the oracle runs every iteration and only rc1 breaks
     assert "domain_is_live; _lv=$?" in loop
     assert '[ "$_lv" -eq 1 ] && break' in loop
+
+
+def test_domain_is_live_is_qemu_oracle_only():
+    # ensures: a stale "running" domstate cannot mark a dead guest live —
+    #          liveness is the qemu-pid scan alone, and domstate is
+    #          never consulted (it lies in both directions under
+    #          nested virt, sol r8)
+    body = _section("domain_is_live")
+    assert "domstate" not in body
+    assert "qemu_pids_for_domain" in body
+
+
+def test_locked_decision_refuses_unverifiable_defined_state():
+    # ensures: a dominfo outage cannot slip a stopped foreign domain
+    #          past the binding check — the locked decision requires a
+    #          precise defined-state, and an unverifiable query refuses
+    #          to create (sol r8)
+    decision = SPAWN[SPAWN.index("timed out waiting for the"):
+                     SPAWN.index("create_domain\n    fi\n    flock -s 9")]
+    assert "domain_defined_state; _ds=$?" in decision
+    assert '[ "$_ds" -eq 2 ]' in decision
+    assert "refusing to create over it" in decision
+    # the foreign check only fires on a DEFINED result (rc 0)
+    assert '[ "$_ds" -eq 0 ] && [ "$(domain_appid)" != "$POLICY_KEY" ]' \
+        in decision
+
+
+def test_create_domain_reverifies_binding_before_start():
+    # ensures: an already-defined domain is re-bound-checked inside
+    #          create_domain — a transient dominfo outage at the
+    #          decision layer cannot route into `virsh start` on a
+    #          stopped foreign guest (sol r8)
+    body = _section("create_domain")
+    assert "domain_defined_state; _ds=$?" in body
+    # define happens ONLY on confirmed absence (rc 1)
+    assert body.index("1)  _create_domain_define") \
+        < body.index("0)  if")
+    # a defined domain must carry our binding before start
+    assert '[ "$(domain_appid)" != "$POLICY_KEY" ]' in body
+    assert "refusing to start it" in body
+    # unverifiable state refuses outright
+    assert "cannot determine state" in body
 
 
 def test_cleanup_unlink_requires_confirmed_dead():
@@ -380,6 +426,21 @@ def test_create_domain_fails_closed_on_unverifiable_liveness():
     # the refuse path preserves everything — no teardown authorization
     refuse = body[body.index("cannot determine liveness"):]
     assert "REAP=0" in refuse
+
+
+def test_cleanup_helper_serializes_on_the_domain_hold():
+    # ensures: the standalone cleanup tool cannot tear down a domain a
+    #          live wrapper owns nor race a spawn between its checks
+    #          and the unlink — it claims the domain's hold file
+    #          exclusively (bounded), and refuses while a session holds
+    #          it (sol r8)
+    assert 'HOLD_FILE="$HOLD_DIR/hold-$VM_NAME"' in CLEANUP
+    assert 'exec 9>>"$HOLD_FILE"' in CLEANUP
+    assert "flock -w 5 -x 9" in CLEANUP
+    # the lock precedes every teardown step
+    assert CLEANUP.index("flock -w 5 -x 9") \
+        < CLEANUP.index('virsh dominfo "$VM_NAME"')
+    assert "live wrapper session holds" in CLEANUP
 
 
 def test_cleanup_helper_requires_absent_definition_for_unlink():

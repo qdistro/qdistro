@@ -50,6 +50,27 @@ qemu_pids_for_domain() {
     printf '%s' "$out"
 }
 
+# Serialize on the domain's own hold file — the same flock protocol the
+# spawn wrappers use. A live wrapper holds a shared fd9 lock for its
+# whole session, so our bounded EXCLUSIVE claim either wins (no wrapper
+# owns this domain — we may tear down) or loses (a live session holds
+# it — refuse rather than destroy a guest mid-session). It also closes
+# the check→unlink window below: while we hold EX no spawn can pass its
+# hold and start/define the domain under our feet (sol r8).
+HOLD_DIR="${TIER5_HOLD_DIR:-/run/qdistro-tier5}"
+HOLD_FILE="$HOLD_DIR/hold-$VM_NAME"
+install -d -m 0700 "$HOLD_DIR" 2>/dev/null || true
+[ -f "$HOLD_FILE" ] || install -m 0600 /dev/null "$HOLD_FILE" 2>/dev/null
+if ! exec 9>>"$HOLD_FILE"; then
+    echo "[tier5-cleanup] FAIL: cannot open $HOLD_FILE" >&2
+    exit 2
+fi
+if ! flock -w 5 -x 9 2>/dev/null; then
+    echo "[tier5-cleanup] FAIL: a live wrapper session holds $VM_NAME" >&2
+    echo "        — stop the wrapper first, or let its own teardown run" >&2
+    exit 4
+fi
+
 # Teardown itself is best-effort against our own domain; only the FINAL
 # gate below (confirmed-absent definition + confirmed-dead qemu) may
 # unlink the overlay. A dominfo failure is read precisely — "not found"
