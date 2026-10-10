@@ -469,10 +469,70 @@ class QdistroPolkitAgent(dbus.service.Object):
             # fails with a D-Bus error and the auth denies, fail-closed.
             # activate_name_owner also starts an activatable broker, as
             # the previous get_object-on-well-known-name did.
+            #
+            # activate_name_owner is the one blocking call left on the
+            # shared connection from a worker thread: it is bounded by
+            # the 25 s D-Bus default and runs once per broker lifetime.
+            # Everything that can wait longer goes through _call_dbus.
             owner = str(self._sysbus.activate_name_owner(QDISTRO_BROKER_BUS))
             obj = self._sysbus.get_object(owner, QDISTRO_BROKER_OBJ)
             self._broker = dbus.Interface(obj, QDISTRO_BROKER_BUS)
         return self._broker
+
+    def _call_dbus(self, method, *args, timeout: float):
+        """Issue a proxy method call and wait for its reply OFF the bus.
+
+        Worker threads must not use dbus-python's synchronous call path:
+        send_with_reply_and_block parks the caller inside libdbus
+        holding the connection's io path for the call's whole duration,
+        and while any thread holds it the GLib main loop cannot service
+        that connection -- incoming traffic makes its watch handler
+        block in _dbus_connection_acquire_io_path, and its own
+        synchronous calls queue behind the blocker. WaitForDecision
+        legitimately waits up to _WAIT_TIMEOUT_S on a human; parked on
+        the shared system bus it froze every logind watch and
+        reconcile() for the full 900 s. Observed live in the VM gate
+        twice: one stray NetworkManager.network-control BeginAuth
+        stalled the A->B->A session re-registration -- first as an
+        idle-callback bug, then again after the auth driver moved to a
+        worker thread but kept blocking calls.
+
+        call_async keeps ALL transport I/O on the main-loop thread; the
+        worker parks on a Python Event instead, so the loop stays free
+        to service registration and signal watches. Replies and the
+        bus-level timeout's local NoReply are delivered by the main
+        loop's dispatch to the handlers below. The padded Event bound
+        covers a wedged main loop. The proxy API does not expose the
+        pending call for cancellation; a late reply is discarded once
+        the pending call expires.
+
+        MUST NOT be called from the main-loop thread: dispatch cannot
+        run while the loop's thread sleeps in Event.wait, so the wait
+        would deadlock on its own reply. The one main-loop caller
+        (CancelAuthentication) issues its call fire-and-forget.
+        """
+        done = threading.Event()
+        box: dict = {}
+
+        def _ok(*reply) -> None:
+            box["reply"] = reply
+            done.set()
+
+        def _err(error) -> None:
+            box["error"] = error
+            done.set()
+
+        method(*args, reply_handler=_ok, error_handler=_err,
+               timeout=timeout)
+        if not done.wait(timeout + 30):
+            raise dbus.DBusException(
+                "no reply to broker call; the main loop is not "
+                "dispatching",
+                name="org.freedesktop.DBus.Error.NoReply")
+        if "error" in box:
+            raise box["error"]
+        reply = box["reply"]
+        return reply[0] if len(reply) == 1 else reply
 
     def _file_request(self, qdistro_action: str, details: dict,
                       cookie: str, identities):
@@ -496,7 +556,8 @@ class QdistroPolkitAgent(dbus.service.Object):
         """
         iface = self._broker_iface()
         try:
-            return iface, int(iface.RequestPolkitAuth(
+            return iface, int(self._call_dbus(
+                iface.RequestPolkitAuth,
                 qdistro_action, details, str(cookie), identities,
                 timeout=_REQUEST_TIMEOUT_S))
         except dbus.DBusException as e:
@@ -507,7 +568,8 @@ class QdistroPolkitAgent(dbus.service.Object):
             # is being restarted underneath us.
             self._broker = None
             iface = self._broker_iface()
-            return iface, int(iface.RequestPolkitAuth(
+            return iface, int(self._call_dbus(
+                iface.RequestPolkitAuth,
                 qdistro_action, details, str(cookie), identities,
                 timeout=_REQUEST_TIMEOUT_S))
 
@@ -531,8 +593,8 @@ class QdistroPolkitAgent(dbus.service.Object):
         for candidate in (iface, None):
             try:
                 target = candidate or self._broker_iface()
-                target.CancelPolkitAuth(str(cookie),
-                                        timeout=_REQUEST_TIMEOUT_S)
+                self._call_dbus(target.CancelPolkitAuth, str(cookie),
+                                timeout=_REQUEST_TIMEOUT_S)
                 return
             except Exception as e:  # noqa: BLE001
                 last = e
@@ -572,7 +634,8 @@ class QdistroPolkitAgent(dbus.service.Object):
             # whole time. Same generous cutoff as the media exec client.
             # `iface` is the same unique-name-bound proxy that filed the
             # request: rid only exists on that broker instance.
-            return bool(iface.WaitForDecision(rid, timeout=_WAIT_TIMEOUT_S))
+            return bool(self._call_dbus(iface.WaitForDecision, rid,
+                                        timeout=_WAIT_TIMEOUT_S))
         except dbus.DBusException as e:
             self._broker = None
             syslog.syslog(
@@ -615,7 +678,8 @@ class QdistroPolkitAgent(dbus.service.Object):
             # request, so this announce is its only binding.
             if not self._is_cancelled(str(cookie)):
                 try:
-                    self._broker_iface().AnnouncePolkitAuth(
+                    self._call_dbus(
+                        self._broker_iface().AnnouncePolkitAuth,
                         str(cookie), timeout=_REQUEST_TIMEOUT_S)
                 except Exception as e:  # noqa: BLE001
                     syslog.syslog(
@@ -658,13 +722,20 @@ class QdistroPolkitAgent(dbus.service.Object):
                           f"{'allow' if allowed else 'deny'} ({reason})")
             ok_cb()
             return False
-        # Not GLib.idle_add: _drive blocks for the duration of the auth
+        # Not GLib.idle_add: _drive runs for the duration of the auth
         # (broker WaitForDecision waits on a human, up to _WAIT_TIMEOUT_S;
         # the PAM prompt and fprint verify block too), and an idle callback
         # runs ON the main loop — one stray BeginAuth (an unrelated package
         # asking for auth_admin) parked the loop for its whole timeout and
-        # froze session registration in the VM run. A worker thread leaves
-        # the loop free to service registration and signal watches.
+        # froze session registration in the VM run. A worker thread alone
+        # did not finish that fix: _drive's calls were still dbus-python
+        # synchronous calls on the shared connection, and a thread parked
+        # in send_with_reply_and_block holds the connection's io path —
+        # the loop's own watch handler then blocked behind it and the
+        # SAME stray NetworkManager BeginAuth froze registration again.
+        # Worker thread + _call_dbus for every broker call leaves the
+        # loop free: the worker waits on a Python Event while all
+        # transport I/O stays on the main-loop thread.
         threading.Thread(target=_drive, daemon=True).start()
 
     # -- method dispatch ---------------------------------------------------
@@ -713,16 +784,29 @@ class QdistroPolkitAgent(dbus.service.Object):
         self._note_cancelled(str(cookie))
         # Forward the cancel to the broker: it decides the matching
         # queued request deny so the admin prompt does not linger and
-        # this auth's WaitForDecision waiter releases.
+        # this auth's WaitForDecision waiter releases. Fire-and-forget
+        # async, not _call_dbus: this handler runs ON the main loop (a
+        # polkitd call on the registration connection) where Event.wait
+        # would deadlock on its own reply, and a synchronous call would
+        # park the whole loop for up to _REQUEST_TIMEOUT_S. The local
+        # tombstone above already protects the worker; the forward only
+        # needs to reach the bus.
         syslog.syslog(syslog.LOG_INFO, f"polkit cancel: {cookie}")
-        try:
-            self._broker_iface().CancelPolkitAuth(
-                str(cookie), timeout=_REQUEST_TIMEOUT_S)
-        except Exception as e:  # noqa: BLE001
+
+        def _cancel_failed(e) -> None:
             syslog.syslog(
                 syslog.LOG_WARNING,
                 f"could not forward polkit cancel to the broker: {e}; "
-                f"the queued request stays until decided or reaped")
+                "the queued request stays until decided or reaped")
+
+        try:
+            self._broker_iface().CancelPolkitAuth(
+                str(cookie),
+                reply_handler=lambda *_a: None,
+                error_handler=_cancel_failed,
+                timeout=_REQUEST_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001
+            _cancel_failed(e)
 
     # -- polkit reply --
     def _respond(self, cookie: str, identities) -> None:
@@ -747,8 +831,8 @@ class QdistroPolkitAgent(dbus.service.Object):
         for _attempt in (1, 2):
             iface = self._broker_iface()
             try:
-                iface.AnnouncePolkitAuth(
-                    str(cookie), timeout=_REQUEST_TIMEOUT_S)
+                self._call_dbus(iface.AnnouncePolkitAuth,
+                                str(cookie), timeout=_REQUEST_TIMEOUT_S)
             except dbus.DBusException as e:
                 if e.get_dbus_name() in _BROKER_OWNER_LOSS:
                     last = e
@@ -764,8 +848,9 @@ class QdistroPolkitAgent(dbus.service.Object):
                     f"could not re-announce polkit cookie to the "
                     f"broker: {e}; the respond relay may be refused")
             try:
-                iface.RespondPolkitAuth(
-                    str(cookie), identities, timeout=_REQUEST_TIMEOUT_S)
+                self._call_dbus(iface.RespondPolkitAuth,
+                                str(cookie), identities,
+                                timeout=_REQUEST_TIMEOUT_S)
                 return
             except dbus.DBusException as e:
                 if e.get_dbus_name() in _BROKER_OWNER_LOSS:
