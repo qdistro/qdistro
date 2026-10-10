@@ -363,12 +363,16 @@ qd22_s3_ack() {
     PROBE_PID=
     local start now
     start=$(qd22_mono_s) || { echo "cannot read /proc/uptime for the ack readiness budget"; return 1; }
+    PROBE_PID=$("$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_PID 2>/dev/null")
+    [ -n "$PROBE_PID" ] && return 0
     while :; do
-        PROBE_PID=$("$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_PID 2>/dev/null")
-        [ -n "$PROBE_PID" ] && return 0
+        # Sleep first, then check the deadline before scheduling another
+        # vm-exec RPC: a delayed sleep must not start a poll past the budget.
+        sleep 0.25
         now=$(qd22_mono_s) || { echo "lost /proc/uptime mid-poll; readiness not established"; return 1; }
         [ $((now - start)) -ge "$QD22_S3_ACK_BUDGET_S" ] && break
-        sleep 0.25
+        PROBE_PID=$("$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_PID 2>/dev/null")
+        [ -n "$PROBE_PID" ] && return 0
     done
     echo "probe never published its pid within ${QD22_S3_ACK_BUDGET_S}s (readiness budget); launcher output:"
     "$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_LAUNCH_LOG 2>&1"
@@ -385,13 +389,17 @@ qd22_s3_target() {
     TARGET=
     local start now
     start=$(qd22_mono_s) || { echo "cannot read /proc/uptime for the target readiness budget"; return 1; }
+    TARGET=$("$QDWIN_VM_EXEC" "$VMNAME" "grep -m1 '^CLICK_TARGET ' $QD22_LOG 2>/dev/null")
+    [ -n "$TARGET" ] && return 0
     while :; do
+        # Sleep first, then check the deadline before scheduling another
+        # vm-exec RPC: a delayed sleep must not start a poll past the budget.
+        sleep 0.5
+        now=$(qd22_mono_s) || { echo "lost /proc/uptime mid-poll; readiness not established"; return 1; }
+        [ $((now - start)) -ge "$QD22_S3_TARGET_BUDGET_S" ] && break
         TARGET=$("$QDWIN_VM_EXEC" "$VMNAME" "grep -m1 '^CLICK_TARGET ' $QD22_LOG 2>/dev/null")
         [ -n "$TARGET" ] && return 0
         "$QDWIN_VM_EXEC" "$VMNAME" "grep -q '^rc=' $QD22_LOG" && break
-        now=$(qd22_mono_s) || { echo "lost /proc/uptime mid-poll; readiness not established"; return 1; }
-        [ $((now - start)) -ge "$QD22_S3_TARGET_BUDGET_S" ] && break
-        sleep 0.5
     done
     echo "probe never printed CLICK_TARGET within ${QD22_S3_TARGET_BUDGET_S}s (readiness budget); probe log:"
     "$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_LOG; echo '--- launcher:'; cat $QD22_LAUNCH_LOG"
