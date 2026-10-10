@@ -1448,6 +1448,34 @@ test('proxy-destroy-behaviour',
   ],
 )
 
+# Compositor-teardown drain: qdwin_destroy must sever reach-back paths
+# (singleton, global filter) before ending grabs, drain every qdwin-owned
+# object family before neutralizing the client-owned bindings, and leave
+# the libweston desktop object alive (late dsurface destroys still fire
+# api.surface_removed; every dsurface->tl link is severed so it returns
+# early). free(qdwin) is last.
+test('qdwin-destroy-drain',
+  python3,
+  suite: 'source_invariant',
+  args: [
+    files('qdwin/test_qdwin_destroy_drain.py'),
+  ],
+)
+
+# Behavioural companion: splices the real drain helpers and every family
+# destructor, heap-allocates the qdwin fixture, runs the drains, frees it,
+# then fires the late paths (dsurface destroy, resource destructors,
+# wl_signal emits, synchronous grab-focus callbacks) — under ASan any
+# touch of the freed struct aborts the probe.
+# Skips (77) without cc/wayland-server.
+test('qdwin-destroy-drain-behaviour',
+  python3,
+  suite: 'source_invariant',
+  args: [
+    files('qdwin/test_qdwin_destroy_drain_behaviour.py'),
+  ],
+)
+
 # Primary-selection D1 lifetime invariant: stale offer resources must be made
 # inert before their source is freed, otherwise a later receive() can deref a
 # destroyed source before the cross-silo gate runs.
