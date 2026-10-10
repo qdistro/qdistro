@@ -74,7 +74,7 @@ def verify(manifest, release, config, profile, snapshot_conf):
         if line.startswith("SOURCE "):
             fields = line.split()
             if len(fields) != 4 or fields[1] not in REPOS or fields[1] in sources or fields[3] != "clean":
-                raise ValueError(f"image must have exactly one clean source per component: {line}")
+                raise ValueError(f"image must have exactly one clean SOURCE line per repository: {line}")
             sources[fields[1]] = fields[2]
         elif "=" in line:
             key, value = line.split("=", 1)

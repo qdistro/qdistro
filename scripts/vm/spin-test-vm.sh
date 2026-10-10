@@ -8,8 +8,10 @@
 #   3. clone-baseweed.sh --from-kiwi or --from-baked
 #      (QDISTRO_VM_BASE=baked by default; kiwi and auto remain explicit)
 #   4. tarball + HTTP-stage the monorepo (one tarball)
-#   5. fresh-vm-bootstrap.sh in VM      (build qdwin, build daemons,
-#                                        install broker + qdshell)
+#   5. fresh-vm-bootstrap.sh in VM      (install the native build —
+#                                        Podman-built for the baked
+#                                        base, guest-built otherwise —
+#                                        broker + qdshell)
 #   6. systemctl start greetd-qdwin.service
 #   7. ping ctrl-socket; print PASS/FAIL + VM name
 #

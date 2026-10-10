@@ -46,8 +46,9 @@ NotifyAccess=main
 TimeoutStartSec=120
 # ROOT, as the launch SUPERVISOR only: spawn-tier3s.sh creates the control
 # record and the root-owned owning scope (qdistro-tier3s-<token>.scope,
-# BindsTo= + Before= this unit), and drops every podman, broker and binding
-# call to admin. podman and runsc never run as root. No fallback: a refused
+# BindsTo= + Before= this unit), drops broker and binding calls to admin and
+# every podman call to the qt3s-<silo> account. Apart from the probe's
+# hash-verified `runsc --version`, podman and runsc never run as root. No fallback: a refused
 # launch exits 2 and this unit fails visibly (paravirt O6).
 User=root
 ExecStart=/usr/libexec/qdistro/qdistro-tier3s-silo-launch %i

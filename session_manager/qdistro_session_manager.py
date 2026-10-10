@@ -612,8 +612,9 @@ def validate_silo_uid(uid: int, kind: str) -> int:
     tier2-template silo's uid is the launch-owner admin uid (rootless podman
     runs as admin). A fake/silo uid on a tier2-template row, or admin's uid on
     a tier3-user row, is rejected — the loader must not smuggle the wrong
-    privilege semantics in. A tier3s silo is admin-owned like tier 2 (rootless
-    podman as admin, --userns=keep-id; tier3s/CONTRACT.md §6)."""
+    privilege semantics in. A tier3s silo is admin-owned like tier 2 (the row
+    records the launch-owner admin uid; podman and runsc calls run as the
+    qt3s-<silo> account, --userns=keep-id; tier3s/CONTRACT.md §6)."""
     if kind == KIND_TIER3S:
         if int(uid) != ADMIN_UID:
             raise BadArgument(
@@ -5767,8 +5768,9 @@ class _SiloStore:
                       claim) -> None:
         """Phase 2 of a tier3s stop (tier3s/CONTRACT.md §6), lock-free like
         the tier-2 branch and with the same fail-closed verdict: STOPPED only
-        when the stop completed, the unit is inactive, admin's podman has no
-        qdistro-tier3s-<name> and no control record of the unit survives.
+        when the stop completed, the unit is inactive, the silo accounts'
+        podman stores have no qdistro-tier3s-<name>, and no control record of
+        the unit survives.
 
         The unit's ExecStop/ExecStopPost run qdistro-tier3s-cleanup. If that
         teardown failed (the record is preserved, the unit is now
