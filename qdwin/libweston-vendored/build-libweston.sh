@@ -152,10 +152,32 @@ prepare_pinned_git_subproject "display-info"
 # silently degrades to distro libweston. Detect the mismatch and reconfigure
 # from scratch; on any doubt, wipe (a clean rebuild is always correct, just
 # slower). Delete the build dir by hand to force a profile/option change.
+#
+# Matching source is not enough. The in-tree build dir is bind-mounted into
+# the qci host container, so a ninja file configured on the host records
+# host-only implicit inputs (openSUSE's glibc-devel-static turns libm into
+# /usr/lib64/libm.a, an ld script the container image does not ship). ninja
+# then fails immediately with "missing and no known rule to make it". Dry-run
+# the graph and wipe when those inputs are gone.
 reuse_build=0
 if [[ -f "$BUILD/build.ninja" && -f "$BUILD/meson-info/meson-info.json" ]]; then
     if grep -Fq "\"source\": \"$(realpath "$SRC")\"" "$BUILD/meson-info/meson-info.json"; then
         reuse_build=1
+        ninja_dry_log=$(mktemp)
+        if [[ ${#NINJA_TARGETS[@]} -gt 0 ]]; then
+            ninja_dry_rc=0
+            ninja -C "$BUILD" -n "${NINJA_TARGETS[@]}" >"$ninja_dry_log" 2>&1 || ninja_dry_rc=$?
+        else
+            ninja_dry_rc=0
+            ninja -C "$BUILD" -n >"$ninja_dry_log" 2>&1 || ninja_dry_rc=$?
+        fi
+        if [[ "$ninja_dry_rc" -ne 0 ]]; then
+            echo "note: libweston build dir $BUILD cannot dry-run ninja" \
+                 "(stale implicit inputs) — wiping and reconfiguring:" >&2
+            sed 's/^/  /' "$ninja_dry_log" >&2
+            reuse_build=0
+        fi
+        rm -f "$ninja_dry_log"
     else
         echo "note: libweston build dir $BUILD was configured against a" \
              "different source tree (not $SRC) — wiping and reconfiguring" >&2
