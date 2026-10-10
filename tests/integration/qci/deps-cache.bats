@@ -99,13 +99,51 @@ runq() {
     [ -s "$output" ]
 }
 
-@test "qd_path rejects traversal and malformed keys" {
+@test "qd_path rejects traversal, reserved names and malformed keys" {
     runq "qd_path blob '$GOOD_SHA' '../evil'"
     [ "$status" -ne 0 ]
     runq "qd_path blob 'notasha' 'x'"
     [ "$status" -ne 0 ]
     runq "qd_path 'bad class' '$GOOD_SHA' 'x'"
     [ "$status" -ne 0 ]
+    # containment: dot-path classes and metadata/lock/tmp basenames are refused
+    runq "qd_path '..' '$GOOD_SHA' 'x'";          [ "$status" -ne 0 ]
+    runq "qd_path '.' '$GOOD_SHA' 'x'";           [ "$status" -ne 0 ]
+    runq "qd_path 'a/b' '$GOOD_SHA' 'x'";         [ "$status" -ne 0 ]
+    runq "qd_path blob '$GOOD_SHA' 'manifest.txt'"; [ "$status" -ne 0 ]
+    runq "qd_path blob '$GOOD_SHA' '.hidden'";    [ "$status" -ne 0 ]
+    runq "qd_path blob '$GOOD_SHA' 'x.lock'";     [ "$status" -ne 0 ]
+    # reserved basename rejected BEFORE any store — a manifest.txt-named
+    # artifact can never be overwritten by its own manifest write
+    runq "qd_fetch blob '$URL/blob.bin' '$GOOD_SHA' manifest.txt"
+    [ "$status" -ne 0 ]
+}
+
+@test "hostile manifest basename cannot escape the entry dir" {
+    # A manifest naming ../anything is ignored; resolution falls through
+    # to the filtered entry scan instead of escaping the cache root.
+    local dir="$WORK/cache/blob/$GOOD_SHA"
+    mkdir -p "$dir"
+    printf 'real' > "$dir/real.bin"
+    printf 'class=blob\nbasename=../MANIFEST\n' > "$dir/manifest.txt"
+    runq "qd_entry_name blob '$GOOD_SHA'"
+    [ "$status" -eq 0 ]; [ "$output" = "real.bin" ]
+    # qd_has with an explicit traversal basename is refused outright
+    runq "qd_has blob '$GOOD_SHA' '../MANIFEST'"; [ "$status" -ne 0 ]
+}
+
+@test "osci helper refuses network branches under offline mode" {
+    # The signature-verified cloud path shares the offline contract: a
+    # missing entry fails closed naming the cache, warm verification
+    # stays local. Exercised directly (fixture crypto not needed — the
+    # failure must precede any download attempt).
+    local osci="$REPO_ROOT/scripts/vm/lib/opensuse-cloud-image.sh"
+    run env QDISTRO_DEPS_OFFLINE=1 bash -c \
+        ". '$osci'; download_verified_cloud_image 'http://127.0.0.1:1/x.qcow2' '$WORK/cache/cloud/x/x.qcow2' 2>&1"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"offline:"* ]]
+    # Nothing was fetched or created at the artifact path.
+    [ ! -e "$WORK/cache/cloud/x/x.qcow2" ]
 }
 
 @test "qd_has and qd_entry_name resolve the stored artifact" {
@@ -200,7 +238,10 @@ runq() {
     runq "qd_adopt cloud '$BAD_SHA' '$WORK/src/wrong.img' 'https://example.test/x.img'"
     [ "$status" -eq 0 ]
     [ -e "$WORK/src/wrong.img" ]
-    [ ! -d "$WORK/cache/cloud/$BAD_SHA" ]
+    # no artifact is stored (the dir may hold just the artifact .lock —
+    # lockfiles persist deliberately; qd_has ignores lock-only entries)
+    [ ! -f "$WORK/cache/cloud/$BAD_SHA/x.img" ]
+    runq "qd_has cloud '$BAD_SHA'";   [ "$status" -eq 1 ]
 }
 
 @test "root honors QDISTRO_DEPS_CACHE_DIR then QDWIN_CACHE_DIR then XDG default" {

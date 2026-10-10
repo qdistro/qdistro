@@ -58,14 +58,26 @@ qd_deps_init() {
 # qd_path <class> <sha256> [basename]
 # Print the canonical cache path for an artifact. With no basename, resolves
 # to the entry directory (which also holds manifest.txt and sidecars).
+# _qdc_valid_basename <name> — a basename may never be a metadata name
+# (manifest.txt would have _qdc_write_manifest overwrite the artifact
+# itself), a dotfile, a lock, a staging tmp, or anything with a slash.
+_qdc_valid_basename() {
+    case "$1" in
+        ''|.|..|manifest.txt|.*|*.lock|*.partial.*|*/*) return 1 ;;
+    esac
+    return 0
+}
+
 qd_path() {
     local class="$1" key="$2" base="${3:-}"
-    case "$class" in *[!a-z0-9._-]*|'') _qdc_die "qd_path: bad class '$class'"; return 1 ;; esac
+    case "$class" in
+        .|..|*/*|*[!a-z0-9._-]*|'') _qdc_die "qd_path: bad class '$class'"; return 1 ;;
+    esac
     [[ "$key" =~ ^[0-9a-f]{64}$ ]] || { _qdc_die "qd_path: bad sha256 key '$key'"; return 1; }
     case "$base" in
         '') printf '%s/%s/%s\n' "$(qd_deps_root)" "$class" "$key" ;;
-        */*|'..'*) _qdc_die "qd_path: bad basename '$base'"; return 1 ;;
-        *) printf '%s/%s/%s/%s\n' "$(qd_deps_root)" "$class" "$key" "$base" ;;
+        *) _qdc_valid_basename "$base" || { _qdc_die "qd_path: bad basename '$base'"; return 1; }
+           printf '%s/%s/%s/%s\n' "$(qd_deps_root)" "$class" "$key" "$base" ;;
     esac
 }
 
@@ -85,8 +97,13 @@ _qdc_entry_candidates() {
 }
 
 # Manifests are the canonical record of the artifact name when present.
+# A manifest basename that fails the artifact-name rules is ignored (a
+# corrupt/hostile manifest cannot escape the entry dir via ../).
 _qdc_manifest_basename() {
-    [ -f "$1/manifest.txt" ] && sed -n 's/^basename=//p' "$1/manifest.txt" | head -1
+    local base
+    [ -f "$1/manifest.txt" ] || return 0
+    base="$(sed -n 's/^basename=//p' "$1/manifest.txt" | head -1)"
+    _qdc_valid_basename "$base" && printf '%s\n' "$base" || return 0
 }
 
 # qd_has <class> <sha256> [basename] — 0 iff the artifact file is present
@@ -96,6 +113,7 @@ qd_has() {
     local class="$1" key="$2" base="${3:-}" dir f
     dir="$(qd_path "$class" "$key")" || return 1
     if [ -n "$base" ]; then
+        _qdc_valid_basename "$base" || { _qdc_die "qd_has: bad basename '$base'"; return 1; }
         [ -s "$dir/$base" ]; return
     fi
     [ -d "$dir" ] || return 1
@@ -145,9 +163,26 @@ qd_write_manifest() {
     _qdc_write_manifest "$dir" "$class" "$url" "$key" "$base"
 }
 
+# _qdc_promote <src> <dest> — move src into place at dest atomically:
+# always lands first at a hidden tmp name inside dest's own directory
+# (mktemp), then renames. A same-fs mv is a rename; a cross-fs mv/cp
+# copies into the hidden name — either way nothing partial is ever
+# visible at the final path. src is consumed on success.
+_qdc_promote() {
+    local src="$1" dest="$2" staged
+    staged="$(mktemp "$(dirname "$dest")/.promote.XXXXXXXX")" || return 1
+    if ! mv -f "$src" "$staged" 2>/dev/null && ! cp -f "$src" "$staged"; then
+        rm -f "$staged"; return 1
+    fi
+    if ! mv -f "$staged" "$dest"; then rm -f "$staged"; return 1; fi
+    [ ! -e "$src" ] || rm -f "$src"
+    return 0
+}
+
 # qd_store_file <class> <sha256> <srcfile> <url> [basename]
-# Verify srcfile's sha256 against the key, then atomically promote it into
-# the cache (adopt: mv when possible so a 700 MB image is not copied).
+# Verify srcfile's sha256 against the key, then promote it into the cache
+# (verify-then-promote at the destination, so even a cross-fs adopt is
+# atomic and the promoted bytes are re-verified before becoming visible).
 # Used by qd_fetch after download and by migrations adopting a legacy
 # cache file. Prints the canonical cache path.
 qd_store_file() {
@@ -162,7 +197,15 @@ qd_store_file() {
         return 1
     }
     install -d "$dir" || return 1
-    mv -f "$src" "$dir/$base" 2>/dev/null || { cp -f "$src" "$dir/$base" && rm -f "$src"; } || return 1
+    _qdc_promote "$src" "$dir/$base" || return 1
+    # Re-verify the promoted bytes: a truncated cross-fs copy can never
+    # masquerade as verified content under this key.
+    actual="$(sha256sum "$dir/$base" | awk '{print $1}')" || { rm -f "$dir/$base"; return 1; }
+    [ "$actual" = "$key" ] || {
+        rm -f "$dir/$base"
+        _qdc_die "qd_store_file: promoted copy of $src failed digest re-check; refusing to cache"
+        return 1
+    }
     _qdc_write_manifest "$dir" "$class" "$url" "$key" "$base" || return 1
     printf '%s\n' "$dir/$base"
 }
@@ -174,25 +217,30 @@ qd_store_file() {
 # is nothing to adopt; a corrupt legacy file is left in place with a
 # warning (the caller's normal verified-fetch path then replaces it).
 qd_adopt() {
-    local class="$1" key="$2" legacy="$3" url="$4" dir base suffix stored lock_fd rc
+    local class="$1" key="$2" legacy="$3" url="$4" dir base suffix stored lock_fd art_fd rc
     dir="$(qd_path "$class" "$key")" || return 1
     qd_has "$class" "$key" && return 0
     [ -s "$legacy" ] || return 0
     # canonical basename is the UPSTREAM artifact name, not the legacy one —
     # e.g. openSUSE signature verification binds the signed checksum to it
     base="$(basename "${url%%\?*}")"
+    _qdc_valid_basename "$base" || { _qdc_die "qd_adopt: bad basename '$base'"; return 1; }
 
-    # Same per-key flock as qd_fetch — adoption and fetch must not interleave
-    # stores into the same entry.
+    # Two locks: the per-key deps-cache flock (vs qd_fetch/adopt) AND the
+    # per-artifact $cache.lock the signature-verified cloud helper holds
+    # while publishing into this same entry dir.
     qd_deps_init || return 1
     exec {lock_fd}>"$(qd_deps_root)/.locks/${class}-${key}.lock" || return 1
     flock -x "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+    install -d "$dir" || { flock -u "$lock_fd"; exec {lock_fd}>&-; return 1; }
+    exec {art_fd}>"$dir/$base.lock" || { flock -u "$lock_fd"; exec {lock_fd}>&-; return 1; }
+    flock -x "$art_fd" || { exec {art_fd}>&-; flock -u "$lock_fd"; exec {lock_fd}>&-; return 1; }
 
     rc=0
-    if ! qd_has "$class" "$key" && [ -s "$legacy" ]; then  # recheck under the lock
+    if ! qd_has "$class" "$key" && [ -s "$legacy" ]; then  # recheck under the locks
         if stored="$(qd_store_file "$class" "$key" "$legacy" "$url" "$base")"; then
             for suffix in .sha256 .sha256.asc .asc .sig; do
-                [ -s "$legacy$suffix" ] && { mv -f "$legacy$suffix" "$dir/$base$suffix" || true; }
+                [ -s "$legacy$suffix" ] && { _qdc_promote "$legacy$suffix" "$dir/$base$suffix" || true; }
             done
             echo "[deps-cache] adopted legacy $legacy -> $stored" >&2
         else
@@ -200,6 +248,7 @@ qd_adopt() {
         fi
     fi
 
+    flock -u "$art_fd"; exec {art_fd}>&-
     flock -u "$lock_fd"; exec {lock_fd}>&-
     return "$rc"
 }
@@ -253,7 +302,13 @@ qd_fetch() {
     flock -x "$lock_fd" || { exec {lock_fd}>&-; return 1; }
 
     rc=0
-    if [ ! -s "$dest" ]; then  # recheck under the lock
+    # Full canonical recheck under the lock: an adopt or a differently
+    # named fetch may have populated this digest while we waited.
+    if [ ! -s "$dest" ] && qd_has "$class" "$key"; then
+        entry="$(qd_entry_name "$class" "$key")" || { rc=1; entry=; }
+        [ -n "$entry" ] && dest="$dir/$entry"
+    fi
+    if [ "$rc" -eq 0 ] && [ ! -s "$dest" ]; then
         tmp="$(mktemp -d "$(qd_deps_root)/.partial/${class}-${key:0:12}.XXXXXX")" \
             || { rc=1; }
         if [ "$rc" -eq 0 ]; then
@@ -290,9 +345,10 @@ qd_fetch_sidecar() {
     [ -s "$dest" ] && { printf '%s\n' "$dest"; return 0; }
     qd_deps_offline && { _qdc_die "offline: missing sidecar $class/$key/$side"; return 1; }
     [ -d "$dir" ] || { _qdc_die "qd_fetch_sidecar: artifact entry absent, fetch it first ($dir)"; return 1; }
-    # tmp+mv: a partial sidecar is never visible at the final path, and a
+    # Hidden mktemp + mv: a partial sidecar is never visible at the final
+    # path, $$-based names can't collide across sibling subshells, and a
     # failed fetch removes only our own temp — never a live one.
-    tmp="$dest.partial.$$"
+    tmp="$(mktemp "$dir/.sidecar.XXXXXXXX")" || return 1
     wget -q -O "$tmp" "$url$suffix" || { rm -f "$tmp"; _qdc_die "download failed: $url$suffix"; return 1; }
     mv -f "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
     printf '%s\n' "$dest"
