@@ -58,10 +58,13 @@ groups and sanitizer tests still run so their results can be inspected.
 The original scanner image exposed two notebook failures although project CI
 passed the same product sources: a native crash in the full suite during
 `test_pdf_export_matches_baseline_in_any_live_mode`, and a PDF comparison
-failure when UTC timestamps cross a second boundary. The native crash stops
-in `QTreeViewPrivate::layout`; its cause remains under investigation. The PDF
-test originally recognized offset dates but not UTC `Z` dates. See current
-local validation evidence for the status after correcting that normalizer.
+failure when UTC timestamps cross a second boundary. The native crash stopped
+in `QTreeViewPrivate::layout`. Detaching closed tree views before releasing
+notebook state fixes the reproducing presentation sequence; its regression
+fails against the original code. The PDF test now handles UTC `Z` dates while
+retaining strict comparisons of content. With both fixes, the full notebook
+suite passed 803 tests with one genuine optional-dependency skip in the
+earlier scanner image. Final-image results are recorded separately.
 The corrected terminal run passed 1,610 tests with two intentional skips.
 
 Image construction uses available CPUs on the larger build machine. Offline
