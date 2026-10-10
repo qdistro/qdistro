@@ -252,23 +252,32 @@ private:
 	void setWindow(ProxyWindowBase* window);
 };
 
-class ProxiedWindow: public QQuickWindow {
+class QsQuickWindowBase: public QQuickWindow {
 	Q_OBJECT;
 
 public:
-	explicit ProxiedWindow(ProxyWindowBase* proxy, QWindow* parent = nullptr);
+	explicit QsQuickWindowBase(QWindow* parent = nullptr);
+
+	static void callOnScenegraphInit(std::function<void(QQuickWindow*)> cb);
+
+private slots:
+	void onSceneGraphInitialized();
+};
+
+class ProxiedWindow: public QsQuickWindowBase {
+	Q_OBJECT;
+
+public:
+	explicit ProxiedWindow(ProxyWindowBase* proxy, QWindow* parent = nullptr)
+	    : QsQuickWindowBase(parent)
+	    , mProxy(proxy) {}
 
 	[[nodiscard]] ProxyWindowBase* proxy() const { return this->mProxy; }
 	void setProxy(ProxyWindowBase* proxy) { this->mProxy = proxy; }
 
-	static void callOnScenegraphInit(std::function<void(QQuickWindow*)> cb);
-
 signals:
 	void exposed();
 	void devicePixelRatioChanged();
-
-private slots:
-	void onSceneGraphInitialized();
 
 protected:
 	bool event(QEvent* event) override;

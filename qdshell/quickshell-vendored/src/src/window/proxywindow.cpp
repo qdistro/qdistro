@@ -495,6 +495,10 @@ void ProxyWindowBase::setUpdatesEnabled(bool updatesEnabled) {
 
 	if (this->window != nullptr) {
 		QQuickWindowPrivate::get(this->window)->updatesEnabled = updatesEnabled;
+
+		// The render loop discards expose and update requests while updates are disabled,
+		// which can leave the surface without a valid buffer. Render a frame to recover.
+		if (updatesEnabled) this->window->update();
 	}
 
 	emit this->updatesEnabledChanged();
@@ -612,9 +616,11 @@ void ProxyWindowAttached::setWindow(ProxyWindowBase* window) {
 	emit this->windowChanged();
 }
 
-ProxiedWindow::ProxiedWindow(ProxyWindowBase* proxy, QWindow* parent)
-    : QQuickWindow(parent)
-    , mProxy(proxy) {
+namespace {
+QList<std::function<void(QQuickWindow*)>> SCENEGRAPH_INIT_CALLBACKS; // NOLINT
+}
+
+QsQuickWindowBase::QsQuickWindowBase(QWindow* parent): QQuickWindow(parent) {
 	QObject::connect(
 	    this,
 	    &QQuickWindow::sceneGraphInitialized,
@@ -623,20 +629,16 @@ ProxiedWindow::ProxiedWindow(ProxyWindowBase* proxy, QWindow* parent)
 	);
 }
 
-namespace {
-QList<std::function<void(QQuickWindow*)>> SCENEGRAPH_INIT_CALLBACKS; // NOLINT
-}
-
-void ProxiedWindow::callOnScenegraphInit(std::function<void(QQuickWindow*)> cb) { // NOLINT
-	SCENEGRAPH_INIT_CALLBACKS.emplaceBack(cb);
-}
-
-void ProxiedWindow::onSceneGraphInitialized() {
+void QsQuickWindowBase::onSceneGraphInitialized() {
 	for (auto& cb: SCENEGRAPH_INIT_CALLBACKS) {
 		cb(this);
 	}
 
 	SCENEGRAPH_INIT_CALLBACKS.clear();
+}
+
+void QsQuickWindowBase::callOnScenegraphInit(std::function<void(QQuickWindow*)> cb) { // NOLINT
+	SCENEGRAPH_INIT_CALLBACKS.emplaceBack(cb);
 }
 
 bool ProxiedWindow::event(QEvent* event) {

@@ -1,7 +1,7 @@
 # Vendored Quickshell (qs runtime)
 
-`src/` is upstream [Quickshell](https://quickshell.org) **0.3.0**
-(quickshell-mirror/quickshell tag `v0.3.0`, tarball sha256 in
+`src/` is upstream [Quickshell](https://quickshell.org) **0.3.2**
+(quickshell-mirror/quickshell tag `v0.3.2`, tarball sha256 in
 [VERSION](VERSION)), unpatched.
 
 ## Why vendored

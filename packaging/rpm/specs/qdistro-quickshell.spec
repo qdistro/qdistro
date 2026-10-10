@@ -1,5 +1,5 @@
 Name:           qdistro-quickshell
-Version:        0.3.0
+Version:        0.3.2
 Release:        1%{?dist}
 Summary:        qdistro's vendored upstream Quickshell runtime for qdshell
 License:        LGPL-3.0-only AND BSD-3-Clause
