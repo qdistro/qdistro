@@ -53,6 +53,64 @@ qd_deps_init() {
     fi
 }
 
+# ---- repo mirror ---------------------------------------------------------
+
+# The mirrored TW history repos live at <root>/repos/<snapshot>/tumbleweed/
+# repo/{oss,non-oss}/ — upstream's own layout, so a consumer needs only a
+# different BASE for the same <base>/<snapshot>/tumbleweed/repo/<name>/ URL.
+# qd_repo_base prints the base a caller should use: an explicit
+# QDISTRO_REPO_BASE override, else the local mirror (file://) when complete
+# for both repos, else upstream. Offline with no mirror fails closed.
+
+# qd_repo_dir <snapshot> — local repo root for a snapshot.
+qd_repo_dir() {
+    case "$1" in ''|*[!0-9]*) _qdc_die "qd_repo_dir: bad snapshot '$1'"; return 1 ;; esac
+    printf '%s/repos/%s\n' "$(qd_deps_root)" "$1"
+}
+
+# qd_repo_present <snapshot> <repo> — the mirror COMPLETED for that repo
+# (mirror.json is written only after repodata + every named package
+# verified; a repodata-only tree does not count).
+qd_repo_present() {
+    [ -s "$(qd_repo_dir "$1" 2>/dev/null)/tumbleweed/repo/$2/mirror.json" ]
+}
+
+# qd_repo_base <snapshot> — print the history-base URL to hand to consumers.
+qd_repo_base() {
+    local snap="$1" dir
+    [ -n "${QDISTRO_REPO_BASE:-}" ] && { printf '%s\n' "$QDISTRO_REPO_BASE"; return 0; }
+    dir="$(qd_repo_dir "$snap")" || return 1
+    if qd_repo_present "$snap" oss && qd_repo_present "$snap" non-oss; then
+        printf 'file://%s\n' "$dir"; return 0
+    fi
+    qd_deps_offline && {
+        _qdc_die "offline: no complete repo mirror for snapshot $snap under $dir — warm with qd_repo_mirror"
+        return 1
+    }
+    printf '%s\n' "${QDISTRO_REPO_UPSTREAM:-https://download.opensuse.org/history}"
+}
+
+# qd_repo_mirror <snapshot> [oss|non-oss ...] [-- worker flags]
+# Warm the repo mirror: repomd-verified metadata + checksum-verified RPMs
+# via scripts/vm/qd-repo-mirror.py. Refuses under the offline flags.
+# Bare repo names select repos (default both); anything else (--limit N,
+# --verify, --force, --metadata-only, --base U) passes through to the worker.
+qd_repo_mirror() {
+    local snap="$1" script; shift
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/qd-repo-mirror.py"
+    [ -f "$script" ] || { _qdc_die "repo mirror worker missing: $script"; return 1; }
+    local -a repos=() passthru=()
+    local r
+    for r in "$@"; do
+        case "$r" in
+            oss|non-oss) repos+=(--repo "$r") ;;
+            *) passthru+=("$r") ;;
+        esac
+    done
+    [ "${#repos[@]}" -eq 0 ] && repos=(--repo oss --repo non-oss)
+    python3 "$script" --root "$(qd_deps_root)" --snapshot "$snap" "${repos[@]}" "${passthru[@]}"
+}
+
 # ---- path resolution ----------------------------------------------------
 
 # qd_path <class> <sha256> [basename]

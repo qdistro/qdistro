@@ -110,7 +110,7 @@ systemctl mask greetd.service 2>/dev/null || true
 # runs before $SRC exists, so it cannot source that file).
 qdistro_write_snapshot_repos() {
     local release="${1:-/etc/qdistro/release}"
-    local snap repo_dir
+    local snap repo_dir base
     if [ ! -s "$release" ]; then
         echo "[bootstrap] ERROR: $release missing or empty; cannot pin snapshot repos" >&2
         return 1
@@ -121,6 +121,9 @@ qdistro_write_snapshot_repos() {
         return 1
     fi
     repo_dir="${QDISTRO_ZYPP_REPOS_D:-/etc/zypp/repos.d}"
+    # QDISTRO_REPO_BASE swaps the history base for a local mirror; the
+    # layout below it is upstream's (<base>/<snap>/tumbleweed/repo/<name>/).
+    base="${QDISTRO_REPO_BASE:-https://download.opensuse.org/history}"
     mkdir -p "$repo_dir"
     cat > "$repo_dir/qdistro-snapshot-oss.repo" <<EOF
 [qdistro-snapshot-oss]
@@ -128,7 +131,7 @@ name=qdistro Tumbleweed OSS $snap
 enabled=1
 autorefresh=0
 keeppackages=1
-baseurl=https://download.opensuse.org/history/${snap}/tumbleweed/repo/oss/
+baseurl=$base/${snap}/tumbleweed/repo/oss/
 gpgcheck=1
 EOF
     cat > "$repo_dir/qdistro-snapshot-nonoss.repo" <<EOF
@@ -137,7 +140,7 @@ name=qdistro Tumbleweed NonOSS $snap
 enabled=1
 autorefresh=0
 keeppackages=1
-baseurl=https://download.opensuse.org/history/${snap}/tumbleweed/repo/non-oss/
+baseurl=$base/${snap}/tumbleweed/repo/non-oss/
 gpgcheck=1
 EOF
     chmod 0644 "$repo_dir/qdistro-snapshot-oss.repo" "$repo_dir/qdistro-snapshot-nonoss.repo"

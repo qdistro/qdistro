@@ -66,7 +66,9 @@ snapshot_id() {
 # repo metadata + RPMs open to a MITM substituting a trojaned package; kiwi
 # still verifies the openSUSE repo GPG signatures on top.
 snapshot_repo_args() {
-    local snap="$1" base="https://download.opensuse.org/history/$1/tumbleweed/repo"
+    # QDISTRO_REPO_BASE swaps the history base for a local mirror (file://
+    # deps cache, or a host bridge URL); the layout below it is upstream's.
+    local snap="$1" base="${QDISTRO_REPO_BASE:-https://download.opensuse.org/history}/$1/tumbleweed/repo"
     [[ "$snap" =~ ^[0-9]{8}$ ]] || return 2
     printf '%s\n' --ignore-repos \
         "--add-repo=$base/oss/,rpm-md,Tumbleweed-OSS" \
