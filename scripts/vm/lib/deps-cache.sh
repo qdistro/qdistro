@@ -76,12 +76,14 @@ qd_repo_present() {
 }
 
 # qd_repo_base <snapshot> — print the history-base URL to hand to consumers.
+# The mirror root is <root>/repos (NOT .../repos/<snap>): consumers append
+# /<snap>/tumbleweed/repo/<name>/ just like they do to the upstream base.
 qd_repo_base() {
     local snap="$1" dir
     [ -n "${QDISTRO_REPO_BASE:-}" ] && { printf '%s\n' "$QDISTRO_REPO_BASE"; return 0; }
     dir="$(qd_repo_dir "$snap")" || return 1
     if qd_repo_present "$snap" oss && qd_repo_present "$snap" non-oss; then
-        printf 'file://%s\n' "$dir"; return 0
+        printf 'file://%s/repos\n' "$(qd_deps_root)"; return 0
     fi
     qd_deps_offline && {
         _qdc_die "offline: no complete repo mirror for snapshot $snap under $dir — warm with qd_repo_mirror"
@@ -109,6 +111,91 @@ qd_repo_mirror() {
     done
     [ "${#repos[@]}" -eq 0 ] && repos=(--repo oss --repo non-oss)
     python3 "$script" --root "$(qd_deps_root)" --snapshot "$snap" "${repos[@]}" "${passthru[@]}"
+}
+
+# ---- guest transport (qd-serve) -----------------------------------------
+
+# Guests cannot see the host filesystem: slirp reaches the host at
+# 10.0.2.2, libguestfs/passt at 169.254.2.2. qd_serve_start exports the
+# whole deps root over HTTP on 0.0.0.0 so a guest can use
+# QDISTRO_REPO_BASE=http://<host-addr>:<port>/repos — the same layout as
+# the file:// host base. State lives in the root: .serve.pid/.serve.port
+# are stale-tolerant (a dead pid is re-checked, not trusted).
+
+# qd_serve_start — start (or reuse) the server; print the bound port.
+qd_serve_start() {
+    local root pid_file port_file pid
+    qd_deps_init || return 1
+    root="$(qd_deps_root)"
+    pid_file="$root/.serve.pid" port_file="$root/.serve.port"
+    if [ -s "$pid_file" ] && [ -s "$port_file" ]; then
+        pid="$(cat "$pid_file")"
+        if kill -0 "$pid" 2>/dev/null; then
+            cat "$port_file"; return 0
+        fi
+        rm -f "$pid_file" "$port_file"
+    fi
+    rm -f "$port_file.next"
+    # The server binds port 0 and writes the kernel-assigned port itself —
+    # no pick-then-bind race.
+    python3 - "$root" "$port_file.next" >"$root/.serve.log" 2>&1 <<'PY' &
+import functools, http.server, socketserver, sys
+root, portfile = sys.argv[1], sys.argv[2]
+h = functools.partial(http.server.SimpleHTTPRequestHandler, directory=root)
+with socketserver.TCPServer(("0.0.0.0", 0), h) as s:
+    with open(portfile, "w") as f:
+        f.write(str(s.server_address[1]))
+    s.serve_forever()
+PY
+    pid=$!
+    for _ in $(seq 1 50); do
+        kill -0 "$pid" 2>/dev/null || break
+        [ -s "$port_file.next" ] && break
+        sleep 0.1
+    done
+    if [ ! -s "$port_file.next" ] || ! kill -0 "$pid" 2>/dev/null; then
+        _qdc_die "qd_serve_start: http server failed to start (see $root/.serve.log)"
+        return 1
+    fi
+    mv "$port_file.next" "$port_file"
+    echo "$pid" >"$pid_file"
+    cat "$port_file"
+}
+
+qd_serve_port() {
+    local root pid_file port_file pid
+    root="$(qd_deps_root)"
+    pid_file="$root/.serve.pid" port_file="$root/.serve.port"
+    [ -s "$pid_file" ] && [ -s "$port_file" ] || return 1
+    pid="$(cat "$pid_file")"
+    kill -0 "$pid" 2>/dev/null || return 1
+    cat "$port_file"
+}
+
+qd_serve_stop() {
+    local root pid_file port_file pid
+    root="$(qd_deps_root)"
+    pid_file="$root/.serve.pid" port_file="$root/.serve.port"
+    [ -s "$pid_file" ] || { rm -f "$port_file"; return 0; }
+    pid="$(cat "$pid_file")"
+    kill "$pid" 2>/dev/null || true
+    rm -f "$pid_file" "$port_file"
+}
+
+# qd_serve_guest_base <snapshot> [host-addr] — the QDISTRO_REPO_BASE value
+# for a guest lane: requires the server running and a complete mirror.
+# host-addr defaults to slirp's 10.0.2.2; passt lanes pass 169.254.2.2.
+qd_serve_guest_base() {
+    local snap="$1" host="${2:-10.0.2.2}" port
+    port="$(qd_serve_port)" || {
+        _qdc_die "qd_serve_guest_base: server not running — qd_serve_start first"
+        return 1
+    }
+    if ! qd_repo_present "$snap" oss || ! qd_repo_present "$snap" non-oss; then
+        _qdc_die "qd_serve_guest_base: no complete mirror for $snap — qd_repo_mirror first"
+        return 1
+    fi
+    printf 'http://%s:%s/repos\n' "$host" "$port"
 }
 
 # ---- path resolution ----------------------------------------------------

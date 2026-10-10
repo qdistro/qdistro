@@ -70,6 +70,7 @@ EOF
 }
 
 teardown() {
+    bash -c ". '$DEPS'; qd_serve_stop" 2>/dev/null || true
     kill "$SERVER_PID" 2>/dev/null
     wait "$SERVER_PID" 2>/dev/null || true
 }
@@ -166,7 +167,10 @@ run_mirror() {  # extra args pass through to the worker
     done
     run bash -c ". '$DEPS'; qd_repo_base $SNAP"
     [ "$status" -eq 0 ]
-    [ "$output" = "file://$WORK/cache/repos/$SNAP" ]
+    [ "$output" = "file://$WORK/cache/repos" ]
+    # The returned base + the standard consumer suffix must resolve to a
+    # real mirrored file — guards the snapshot-segment-doubling bug.
+    [ -f "${output#file://}/$SNAP/tumbleweed/repo/oss/mirror.json" ]
     # Explicit override wins.
     run env QDISTRO_REPO_BASE=http://10.0.2.2:9 bash -c ". '$DEPS'; qd_repo_base $SNAP"
     [ "$output" = "http://10.0.2.2:9" ]
@@ -179,6 +183,48 @@ run_mirror() {  # extra args pass through to the worker
     run env QDISTRO_DEPS_OFFLINE=1 bash -c ". '$DEPS'; qd_repo_base $SNAP"
     [ "$status" -ne 0 ]
     [[ "$output" == *"no complete repo mirror"* ]]
+}
+
+@test "qd_serve exports the root; guest base URL serves real mirror files" {
+    # Complete mirror fixture.
+    for r in oss non-oss; do
+        mkdir -p "$WORK/cache/repos/$SNAP/tumbleweed/repo/$r/repodata"
+        printf 'sentinel-%s' "$r" > "$WORK/cache/repos/$SNAP/tumbleweed/repo/$r/mirror.json"
+    done
+    run bash -c ". '$DEPS'; qd_serve_start"
+    [ "$status" -eq 0 ]
+    port="$output"
+    # A guest-visible URL actually serves the mirrored file.
+    run python3 -c "
+import urllib.request
+print(urllib.request.urlopen('http://127.0.0.1:$port/repos/$SNAP/tumbleweed/repo/oss/mirror.json', timeout=5).read().decode())"
+    [ "$status" -eq 0 ]
+    [ "$output" = "sentinel-oss" ]
+    # guest_base composes the QDISTRO_REPO_BASE value for a slirp guest...
+    run bash -c ". '$DEPS'; qd_serve_guest_base $SNAP"
+    [ "$output" = "http://10.0.2.2:$port/repos" ]
+    # ...and a passt one.
+    run bash -c ". '$DEPS'; qd_serve_guest_base $SNAP 169.254.2.2"
+    [ "$output" = "http://169.254.2.2:$port/repos" ]
+    # A second start is idempotent — same port, same server.
+    run bash -c ". '$DEPS'; qd_serve_start"
+    [ "$output" = "$port" ]
+    # Stop kills it; guest_base then fails closed.
+    run bash -c ". '$DEPS'; qd_serve_stop; qd_serve_port"
+    [ "$status" -ne 0 ]
+    run bash -c ". '$DEPS'; qd_serve_guest_base $SNAP"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not running"* ]]
+}
+
+@test "qd_serve_guest_base fails closed with an incomplete mirror" {
+    run bash -c ". '$DEPS'; qd_serve_start" # server up, mirror absent
+    [ "$status" -eq 0 ]
+    run bash -c ". '$DEPS'; qd_serve_guest_base $SNAP"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no complete mirror"* ]]
+    run bash -c ". '$DEPS'; qd_serve_stop"
+    [ "$status" -eq 0 ]
 }
 
 @test "qdistro_substrate_repo_command honours QDISTRO_REPO_BASE" {
