@@ -11,11 +11,15 @@ without a network or host cache mounts.
 From the repository root:
 
 ```sh
-podman build --layers -f .oss-scanner/Dockerfile -t localhost/qdistro/oss-scanner:local .
+podman build --layers --ignorefile .oss-scanner/Dockerfile.dockerignore -f .oss-scanner/Dockerfile -t localhost/qdistro/oss-scanner:local .
 bash .oss-scanner/check-offline.sh localhost/qdistro/oss-scanner:local
 ```
 
 Docker also works; set `CONTAINER_ENGINE=docker` for the offline check. The
+Docker builder automatically uses the Dockerfile-specific ignore file;
+Podman receives it explicitly. This excludes local run logs and VM disks
+from the source context.
+The
 check tests network isolation, reinstalls both extension dependency sets from
 the image's npm cache offline, touches native sources to force recompilation,
 rebuilds the SIP binding, configures native Meson builds from scratch, runs
