@@ -45,7 +45,11 @@ fi
 if [[ "$group" = all || "$group" = apps ]]; then
     for entry in 'sdk/presentation:' 'qdgreeter:tests' 'qdlocker:tests/unit' 'qdfileman:' 'qnotebook:' 'qdterm:--ignore=tests/test_print_terminal.py'; do
         dir=${entry%%:*}; args=${entry#*:}
-        (cd "$dir" && run bash -c "$(host_pytest_cmd all 0 '' "$args -q")") || rc=1
+        step_budget=$step_timeout
+        # The 1611-test terminal suite exceeds qci's 600s default on two CPUs
+        # while still progressing. Keep a finite, separately tunable budget.
+        if [ "$dir" = qdterm ]; then step_budget=${OSS_SCANNER_QDTERM_TEST_TIMEOUT:-1800}; fi
+        (cd "$dir" && step_timeout=$step_budget run bash -c "$(host_pytest_cmd all 0 '' "$args -q")") || rc=1
     done
     (cd qdbrowser && run bash -c "$(host_pytest_cmd 'glob:tests/test_*.py' 1 '' '-q')") || rc=1
 fi
