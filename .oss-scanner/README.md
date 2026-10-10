@@ -58,7 +58,7 @@ rebuilds, these smoke checks and selected sanitizer tests. Full qci is not a
 scanner preparation gate.
 
 `test.sh all` runs the optional broader headless diagnostic lane. To include it
-in local offline validation, use `check-offline.sh IMAGE all` explicitly. This lane It excludes the desktop
+in local offline validation, use `check-offline.sh IMAGE all` explicitly. This lane excludes the desktop
 shell's integration lane and the terminal's printer-dependent test; it does
 not run the VM/GUI/release gates. See `threat_model.md` for
 component priorities, severity guidance and runtime limitations.

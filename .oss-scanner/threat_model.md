@@ -96,9 +96,8 @@ The optional root suite is batched using the same generator as qci.
 Experimental isolation probe tests require a non-permissive host
 `kernel.yama.ptrace_scope`; the helper Debian VM defaults to 0 and fails four
 checks. A full-suite failure is not evidence of a vulnerability by itself.
-Use focused tests with their documented prerequisites and retain failure logs. The desktop
-shell's integration lane is excluded; native, Python, QML and JavaScript
-checks still run. Browser tests use
+Use focused tests with their documented prerequisites and retain failure logs. In the optional `all` lane, the desktop shell's integration tests are
+excluded; native, Python, QML and JavaScript checks still run. Browser tests use
 one process per file. qdterm's printer-coupled test is excluded exactly as in
 qci; runtime printing requires the dedicated VM. Source-invariant and mocked
 backend tests do not demonstrate runtime enforcement. Report skips explicitly.
