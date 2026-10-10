@@ -211,8 +211,11 @@ flock(2) protocol on `/run/qdistro-tier5/hold-<vm_name>` — no daemon:
   (`IDLE_SHUTDOWN_SECS`, low-mem early end): a relaunch adopting during
   the window cancels teardown. The **last lock holder** wins a
   *bounded* exclusive teardown claim (waits out transient holds, gives
-  up on a genuine live session) and runs destroy + undefine + overlay
-  unlink.
+  up on a genuine live session) — then **re-verifies the domain's
+  appId binding** before destroying: the claim proves no wrapper holds
+  the name, not that the domain is still ours, and a replacement bound
+  to another app is left alone. Only then does it run destroy +
+  undefine + overlay unlink.
 - Locks are fd-bound, so a crashed wrapper releases everything; a
   leftover running/defined domain is adopted or reaped by the next
   spawn. `TIER5_KEEP_DOMAIN=1` still leaves the domain untouched for
