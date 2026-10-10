@@ -256,7 +256,9 @@ gui_scenario_requires_qdwin() {
         qdistro/tests/integration/permissions-gui/59-tier3s-close-cleanup.md|\
         tests/integration/permissions-gui/59-tier3s-close-cleanup.md|\
         qdistro/tests/integration/permissions-gui/60-vmapps-manifest-catalogue.md|\
-        tests/integration/permissions-gui/60-vmapps-manifest-catalogue.md)
+        tests/integration/permissions-gui/60-vmapps-manifest-catalogue.md|\
+        qdistro/tests/integration/permissions-gui/61-window-chrome-context-menu.md|\
+        tests/integration/permissions-gui/61-window-chrome-context-menu.md)
             return 0 ;;
         *)
             return 1 ;;
