@@ -177,6 +177,23 @@ const win = fs.readFileSync(
         "an all-colliding catalogue must fall back loudly");
 }
 
+// --- stale rows cannot reach a domain (sol r3) --------------------------
+// ensures: launch() verifies the row's appId is still in the CURRENT
+//          catalogue BEFORE deriving the name — a provider closure that
+//          outlives a catalogue swap can't adopt a guest it no longer
+//          owns. The wrapper enforces the same via the domain's bound
+//          appId; this is the shell-side belt.
+{
+    const launch = service.slice(
+        service.indexOf("function launch(row)"),
+        service.indexOf("// ---- placeholders"));
+    assert.ok(launch.indexOf("root.catalogue") > -1
+        && launch.indexOf("root.catalogue") < launch.indexOf("_vmNameForApp"),
+        "launch must check catalogue membership before naming the domain");
+    assert.ok(launch.includes("not in current catalogue"),
+        "launch must reject appIds dropped from the catalogue");
+}
+
 // --- the vmName bypass stays closed (sol r2 P1) -------------------------
 // ensures: launch() cannot take a manifest-supplied domain name that
 //          would skip the collision guard — appId is the only identity

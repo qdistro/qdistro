@@ -138,6 +138,61 @@ def test_catalogue_drops_domain_collisions_fail_closed():
     assert "no launchable apps" in VMAPS
 
 
+def test_domain_carries_its_bound_appid():
+    # ensures: the domain XML records which appId it belongs to — the
+    #          name alone is not identity across catalogue reloads
+    template = (ROOT / "tier5-vm/domain-template.xml").read_text()
+    assert "<qdistro:appId" in template and "__APP_ID__" in template
+    assert 's|__APP_ID__|$POLICY_KEY|g' in SPAWN
+    assert "domain_appid()" in SPAWN
+    assert "<qdistro:appId" in SPAWN
+
+
+def test_adoption_verifies_bound_appid():
+    # ensures: a running domain is only adopted when its bound appId
+    #          equals our POLICY_KEY — BOTH the fast path and the
+    #          post-exclusive re-check gate on it (sol r3: a guest
+    #          outlives the manifest it came from)
+    decision = SPAWN[SPAWN.index("ADOPTED=0"):]
+    # both adoption sites check the binding before setting ADOPTED
+    assert decision.count('domain_appid)') >= 2
+    assert decision.count("refusing cross-app adoption") >= 2
+    for bound in (i for i in range(len(decision))
+                  if decision.startswith("_bound=$(domain_appid)", i)):
+        assert "ADOPTED=1" in decision[bound:], "binding check lost adopt"
+    # a refusal pins REAP=0: a wrapper that never established ownership
+    # must not tear down the foreign guest on its way out
+    assert decision.count("REAP=0; exit 3") >= 2
+
+
+def test_stopped_foreign_domain_is_reclaimed_not_adopted():
+    # ensures: a STOPPED domain bound to another app is undefined +
+    #          overlay-dropped under the exclusive hold — reclaim, never
+    #          start someone else's guest
+    assert "reclaiming stopped foreign domain" in SPAWN
+    reclaim = SPAWN[SPAWN.index("reclaiming stopped foreign domain"):]
+    assert 'virsh destroy "$VM_NAME"' in reclaim
+    assert 'virsh undefine "$VM_NAME"' in reclaim
+    assert 'rm -f "$DISK"' in reclaim
+    assert reclaim.index("create_domain") > reclaim.index("rm -f")
+
+
+def test_launch_requires_current_catalogue_membership():
+    # ensures: a stale provider row cannot reach a domain its appId no
+    #          longer owns — launch() gates on the CURRENT catalogue
+    #          before deriving the name (sol r3)
+    m = re.search(
+        r"function launch\(row\)\s*\{(?P<body>.*?)\n    \}",
+        VMAPS,
+        re.S,
+    )
+    assert m, "launch(row) not found in VMApps.qml"
+    body = m.group("body")
+    assert "root.catalogue" in body
+    assert "not in current catalogue" in body
+    assert body.index("root.catalogue") < body.index("_vmNameForApp")
+
+
 def test_launch_has_no_manifest_vmname_bypass():
     # ensures: the ONLY domain name source is the deterministic
     #          derivation — a manifest-supplied vmName would skip the

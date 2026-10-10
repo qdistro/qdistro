@@ -349,6 +349,20 @@ Singleton {
             Logger.w("VMApps", "launch: missing appId");
             return;
         }
+        // A provider row can outlive the catalogue it came from. Only
+        // rows still authorized by the CURRENT catalogue may reach a
+        // domain — a stale row could otherwise adopt a guest its appId
+        // no longer owns (the wrapper also enforces this via the
+        // domain's bound appId; this is the shell-side belt, sol r3).
+        let authorized = false;
+        for (const cat of root.catalogue) {
+            if (cat.appId === row.appId) { authorized = true; break; }
+        }
+        if (!authorized) {
+            Logger.w("VMApps", "launch: " + row.appId
+                     + " not in current catalogue — dropped");
+            return;
+        }
         let argv = [];
         try { argv = JSON.parse(row.execArgv); } catch (e) { argv = []; }
         if (argv.length === 0) {

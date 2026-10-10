@@ -652,6 +652,16 @@ reap_domain() {
     return 1
 }
 
+# domain_appid — the appId this domain was bound to at define time (the
+# POLICY_KEY baked into its <metadata>). Empty when the domain is
+# undefined, undumpable, or carries no binding (hand-defined or
+# pre-binding domains): anything but an exact match is FOREIGN.
+domain_appid() {
+    run_as_admin virsh dumpxml "$VM_NAME" 2>/dev/null \
+        | tr -d '\n' \
+        | sed -n 's|.*<qdistro:appId[^>]*>\([^<]*\)</qdistro:appId>.*|\1|p'
+}
+
 # --- teardown ownership -------------------------------------------------
 # REAP is the teardown decision: unset = undecided, 1 = this wrapper is the
 # last lock holder and must destroy+undefine+unlink, 0 = a live session (or
@@ -967,6 +977,7 @@ _create_domain_define() {
         -e "s|__NIC_XML__|$NIC_XML_ESCAPED|g" \
         -e "s|__SERIAL_XML__|$SERIAL_XML_ESCAPED|g" \
         -e "s|__VM_NAME__|$VM_NAME|g" \
+        -e "s|__APP_ID__|$POLICY_KEY|g" \
         -e "s|__MAC__|$NEW_MAC|g" \
         -e "s|__MEM_KIB__|$MEM_KIB|g" \
         -e "s|__CID__|$CID|g" \
@@ -998,8 +1009,23 @@ _create_domain_define() {
 # and a relaunch that adopts in the gap either sees the domain running
 # (keeps it, our EX then waits) or ends up at this same create decision
 # behind us. The re-check under exclusivity always sees a final state.
+# Bound identity: a domain is OURS only when its recorded appId equals
+# our POLICY_KEY exactly. The name alone is not identity — catalogue
+# reloads can retire one appId and publish another that derives the same
+# name, and the running guest outlives the manifest it came from. A
+# RUNNING foreign domain is refused (its sessions may still be live);
+# a STOPPED foreign domain is undefine+overlay-reclaimed under the
+# exclusive hold (no fd9 holder can remain once we hold it). Refusals
+# pin REAP=0: a wrapper that never established ownership must never
+# tear down someone else's guest.
 ADOPTED=0
 if run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
+    _bound=$(domain_appid)
+    if [ "$_bound" != "$POLICY_KEY" ]; then
+        echo "[tier5] FAIL: domain $VM_NAME is bound to app '${_bound:-<unbound>}'," >&2
+        echo "        not '$POLICY_KEY' — refusing cross-app adoption" >&2
+        REAP=0; exit 3
+    fi
     ADOPTED=1
 else
     flock -u 9 2>/dev/null || true
@@ -1009,8 +1035,27 @@ else
     fi
     if run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
         # A racing creator finished while we waited for exclusivity.
+        _bound=$(domain_appid)
+        if [ "$_bound" != "$POLICY_KEY" ]; then
+            echo "[tier5] FAIL: domain $VM_NAME is bound to app '${_bound:-<unbound>}'," >&2
+            echo "        not '$POLICY_KEY' — refusing cross-app adoption" >&2
+            REAP=0; exit 3
+        fi
         ADOPTED=1
     else
+        if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 \
+                && [ "$(domain_appid)" != "$POLICY_KEY" ]; then
+            # Stopped domain bound to another (or no) app squatting our
+            # name: no fd9 holder can remain under our EX, so reclaim —
+            # undefine and drop its overlay before we create ours.
+            echo "[tier5] reclaiming stopped foreign domain $VM_NAME" >&2
+            run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+            if ! run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1; then
+                echo "[tier5] FAIL: cannot undefine foreign domain $VM_NAME" >&2
+                REAP=0; exit 5
+            fi
+            rm -f "$DISK" 2>/dev/null || true
+        fi
         create_domain
     fi
     flock -s 9
