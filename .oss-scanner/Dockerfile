@@ -18,6 +18,8 @@ COPY .oss-scanner/install-deps.sh /recipe/install-deps.sh
 RUN bash /recipe/install-deps.sh
 COPY . /src
 WORKDIR /src
+# Policy tooling and user management install executables in /usr/sbin.
+ENV PATH=/opt/scanner-tools:/opt/scanner-python/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
 # Never ship a linked-worktree pointer to host Git metadata. Anthropic's
 # normal clone has a real .git directory, which is retained.
 RUN if test -f .git; then rm .git; fi
