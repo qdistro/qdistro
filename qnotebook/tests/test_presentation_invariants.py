@@ -213,8 +213,8 @@ _PDF_NORMALIZE = (
     (re.compile(rb"(\ntrailer\n<<.*?/ID \[ <)([0-9a-fA-F]+)(> <)", re.S), _ZERO_FILL),
     (re.compile(rb"(\ntrailer\n<<.*?/ID \[ <[0-9a-fA-F]+> <)([0-9a-fA-F]+)(>)", re.S), _ZERO_FILL),
     (re.compile(rb'(xmpMM:(?:Document|Instance)ID="uuid:)([0-9a-f-]{36})(")'), _ZERO_FILL),
-    (re.compile(rb'(xmp:(?:Create|Modify|Metadata)Date=")([0-9T:+-]{25})(")'), _ZERO_FILL),
-    (re.compile(rb"(/(?:CreationDate|ModDate) \(D:)(\d{14}[+-]\d\d'\d\d')(\))"), _ZERO_FILL),
+    (re.compile(rb'(xmp:(?:Create|Modify|Metadata)Date=")(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:Z|[+-]\d\d:\d\d))(")'), _ZERO_FILL),
+    (re.compile(rb"(/(?:CreationDate|ModDate) \(D:)(\d{14}(?:Z|[+-]\d\d'\d\d'))(\))"), _ZERO_FILL),
 )
 
 
@@ -230,11 +230,13 @@ def _pdf_normalized(path) -> bytes:
     return _normalize_pdf_bytes(data)
 
 
-def test_pdf_normalization_is_scoped_to_volatile_metadata():
+@pytest.mark.parametrize("pdf_zone,xmp_zone", [(b"+02'00'", b"+02:00"), (b"-05'30'", b"-05:30"), (b"Z", b"Z")])
+def test_pdf_normalization_is_scoped_to_volatile_metadata(pdf_zone, xmp_zone):
     def pdf(trailer_id: bytes, other_hex: bytes, other_date: bytes, meta_date: bytes) -> bytes:
         return (
-            b"%PDF-1.4\n1 0 obj\n<<\n/CreationDate (D:" + meta_date + b"+02'00')\n>>\n"
-            b'<x xmp:CreateDate="2026-10-05T10:34:09+02:00" xmpMM:DocumentID="uuid:'
+            b"%PDF-1.4\n1 0 obj\n<<\n/CreationDate (D:" + meta_date + pdf_zone + b")\n/ModDate (D:" + meta_date + pdf_zone + b")\n>>\n"
+            b'<x xmp:CreateDate="' + meta_date[:4] + b"-" + meta_date[4:6] + b"-" + meta_date[6:8]
+            + b"T" + meta_date[8:10] + b":" + meta_date[10:12] + b":" + meta_date[12:14] + xmp_zone + b'" xmpMM:DocumentID="uuid:'
             + trailer_id[:8] + b'-b04a-4d74-9c30-d29c652323f3"/>\n'
             b"2 0 obj\n<< /Font <" + other_hex + b"> /Note (D:" + other_date + b"+02'00') >>\n"
             b"trailer\n<<\n/Size 3 \n/ID [ <" + trailer_id + b"> <" + trailer_id + b"> ]\n>>\n%%EOF\n"
