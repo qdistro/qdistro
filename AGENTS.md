@@ -63,7 +63,9 @@ ci/bin/qci-host-run bash -c 'cd qdlocker && python3 -m pytest -q tests/unit'
 
 The host gate builds qdwin's vendored, patched libweston from current source
 before qdwin and qdshell. Image dependencies are cached by recipe, snapshot,
-and base image ID. npm dependencies are prepared in a separate networked
+and base image ID; the native stage (`qdwin`, `qdshell`, `daemons`, `qsu`,
+`selinux` sources) keys its own archive, so changes there rebuild it and
+re-key the image. npm dependencies are prepared in a separate networked
 container and invalidated when either extension's package files change;
 all test rows run with networking disabled. `QCI_OFFLINE=1` requires a cached
 image and npm dependencies or cached npm downloads.

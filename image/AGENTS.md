@@ -169,7 +169,8 @@ Or through CI: `qci` image gate = resolve `bundle/*.raw.xz` (digest +
 `xz -t` + decompress) → `extract-root.sh` → `verify-contents.sh` →
 `verify.sh --stick` on the **same** decompressed raw (install-test is
 inert without an ISO: no row, not a skip). The full run also compares the
-image's five clean source commits with its captured release manifest, and
+image's one clean source commit (the monorepo SOURCE line) with its
+captured release manifest, and
 checks version against config.xml, snapshot against snapshot.conf, and profile against
 `QDISTRO_PROFILE` (default release; pass `dev` explicitly for a pinned tester).
 Expected/observed identities and the artifact digest are recorded in the run.

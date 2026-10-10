@@ -167,9 +167,11 @@ copy-on-write per test VM). `build-enforcing-baseweed.sh` produces the
 SELinux-enforcing base the enforcing lanes use; qci's per-run goldens
 layer on top of these. `spin-test-vm.sh` chains the pipeline.
 
-Native (C/meson) builds for the VMs come from the rootless Podman
+Native (C/meson) builds for the test VMs come from the rootless Podman
 builder (`scripts/vm/build-native-podman.sh` / `Containerfile.native-builder`),
-not from compilers inside the guest.
+not from compilers inside the guest — `QDISTRO_VM_BASE=kiwi` is the
+exception: its bases are prebuilt images, so their guest installs compile
+in-VM.
 
 Driver tools live in `scripts/vm/`:
 
