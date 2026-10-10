@@ -104,44 +104,88 @@ const win = fs.readFileSync(
         "launch must keep passing appId as the policy key");
 }
 
-// --- collision-freedom is proven behaviorally (sol r1 P1) ---------------
+// --- collision-freedom is proven behaviorally (sol r1/r2 P1) ------------
 // ensures: two DISTINCT catalogue appIds can never share a domain — a
 //          name collision would run the second app inside the first
 //          app's guest, breaking per-app isolation. The real product
 //          functions are evaluated (they are plain JS), not re-derived.
 {
-    const hashSrc = service.slice(
+    const fnSrc = service.slice(
         service.indexOf("function _appIdHash(appId)"),
-        service.indexOf("function _vmNameForApp(appId)"));
-    const nameSrc = service.slice(
-        service.indexOf("function _vmNameForApp(appId)"),
         service.indexOf("function rebuild()"));
-    const make = new Function(
-        hashSrc + "\n" + nameSrc + "\nreturn { _vmNameForApp };");
-    const vmNameForApp = make()._vmNameForApp;
-    assert.strictEqual(typeof vmNameForApp, "function");
+    const make = new Function("Logger",
+        fnSrc + "\nreturn { _vmNameForApp, _dropDomainCollisions };");
+    const { _vmNameForApp, _dropDomainCollisions } =
+        make({ e: () => {}, w: () => {} });
+    assert.strictEqual(typeof _vmNameForApp, "function");
+    assert.strictEqual(typeof _dropDomainCollisions, "function");
 
     // ensures: relaunches of the SAME app still converge on one domain
-    assert.strictEqual(vmNameForApp("tier5/kate"), vmNameForApp("tier5/kate"),
+    assert.strictEqual(_vmNameForApp("tier5/kate"), _vmNameForApp("tier5/kate"),
         "the name must be deterministic per appId");
     // ensures: ids that sanitize alike do not merge into one guest
-    assert.notStrictEqual(vmNameForApp("tier5/foo.bar"),
-        vmNameForApp("tier5/foo-bar"),
+    assert.notStrictEqual(_vmNameForApp("tier5/foo.bar"),
+        _vmNameForApp("tier5/foo-bar"),
         "appIds differing only in punctuation must name different domains");
     // ensures: ids that truncate alike do not merge either — the hash
     //          must cover the FULL appId, not the truncated stub
     const longA = "tier5/" + "a".repeat(60) + ".one";
     const longB = "tier5/" + "a".repeat(60) + ".two";
-    assert.notStrictEqual(vmNameForApp(longA), vmNameForApp(longB),
+    assert.notStrictEqual(_vmNameForApp(longA), _vmNameForApp(longB),
         "appIds sharing the 60-char prefix must name different domains");
+    // ensures: the sol r2 crafted pair — an actual FNV-1a-32 collision —
+    //          no longer maps to one domain under the widened hash
+    const cA = "tier5/" + "a".repeat(60) + "n401yffjhjcw";
+    const cB = "tier5/" + "a".repeat(60) + "da3or7cef5wj";
+    assert.notStrictEqual(_vmNameForApp(cA), _vmNameForApp(cB),
+        "the r2 crafted collision pair must name different domains");
     // ensures: names stay inside the wrapper's validation budget
     for (const id of ["tier5/kate", longA, "weird app (x)!.desktop", "x"]) {
-        const n = vmNameForApp(id);
-        assert.match(n, /^t5-[a-zA-Z0-9_-]+-[0-9a-f]{8}$/,
-            `name '${n}' must be t5-<stub>-<8 hex chars>`);
+        const n = _vmNameForApp(id);
+        assert.match(n, /^t5-[a-zA-Z0-9_-]+-[0-9a-f]{16}$/,
+            `name '${n}' must be t5-<stub>-<16 hex chars>`);
         assert.ok(n.length <= 63,
             `name '${n}' exceeds the wrapper's 63-char budget`);
     }
+
+    // ensures: even if a collision DOES occur (any hash can be forced),
+    //          the catalogue-load guard drops both colliders instead of
+    //          letting one app ride in another's guest — injected nameFn
+    //          forces the collision that proves the drop is fail-closed
+    const forced = _dropDomainCollisions(
+        [{appId: "tier5/firefox"}, {appId: "tier5/evil"}],
+        () => "t5-same");
+    assert.deepStrictEqual(forced, [],
+        "both rows sharing one domain name must be dropped");
+    // ensures: a duplicate row for the SAME appId is not a collision —
+    //          identical app, identical domain, legitimately adopted
+    const dupe = _dropDomainCollisions(
+        [{appId: "tier5/kate"}, {appId: "tier5/kate"}],
+        () => "t5-same");
+    assert.strictEqual(dupe.length, 2,
+        "same appId sharing one domain is adoption, not a collision");
+    // ensures: ordinary distinct names pass through untouched
+    const okRows = [{appId: "tier5/kate"}, {appId: "tier5/firefox"}];
+    assert.strictEqual(
+        _dropDomainCollisions(okRows, _vmNameForApp).length, 2,
+        "distinct names must all remain launchable");
+    // ensures: the guard actually runs at catalogue load and can leave
+    //          the foot fallback when nothing survives
+    assert.ok(service.includes("root._dropDomainCollisions(rows)"),
+        "_loadManifest must run the collision guard");
+    assert.ok(service.includes("no launchable apps"),
+        "an all-colliding catalogue must fall back loudly");
+}
+
+// --- the vmName bypass stays closed (sol r2 P1) -------------------------
+// ensures: launch() cannot take a manifest-supplied domain name that
+//          would skip the collision guard — appId is the only identity
+{
+    const launch = service.slice(
+        service.indexOf("function launch(row)"),
+        service.indexOf("// ---- placeholders"));
+    assert.ok(!launch.includes("row.vmName"),
+        "launch must not accept a manifest-supplied domain name");
 }
 
 console.log(

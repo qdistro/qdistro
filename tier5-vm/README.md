@@ -136,9 +136,13 @@ The wrapper supports two modes:
 
 The domain is the SILO for a catalogue appId: `VMApps.launch()` derives
 `<vm_name>` deterministically from the appId
-(`t5-<sanitized-stub>-<fnv1a8(appId)>` — the hash covers the FULL appId
-so ids that sanitize or truncate alike can never share a guest), so
-every launch of the same app names the same guest. Ownership is a
+(`t5-<sanitized-stub>-<64-bit hash(appId)>` — the hash covers the FULL
+appId and is appended after the truncated stub), so every launch of the
+same app names the same guest. Whatever the hash, isolation cannot
+silently merge: at catalogue load `_dropDomainCollisions` drops BOTH
+rows whose derived names collide, and `launch()` has no
+manifest-supplied name path — the appId is the only identity. Ownership
+is a
 flock(2) protocol on `/run/qdistro-tier5/hold-<vm_name>` — no daemon:
 
 - Each wrapper carries a **shared session hold** (fd9) for its whole

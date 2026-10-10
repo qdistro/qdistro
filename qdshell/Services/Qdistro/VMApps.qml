@@ -143,9 +143,19 @@ Singleton {
                 "execArgv":  r.execArgv,
             });
         }
+        const launchable = root._dropDomainCollisions(rows);
+        if (launchable.length === 0) {
+            Logger.e("VMApps", "manifest left no launchable apps "
+                     + "— foot-only fallback");
+            root._manifestMissing = false;
+            root.catalogue = root._footRows();
+            root.refreshed();
+            return;
+        }
         root._manifestMissing = false;
-        root.catalogue = rows;
-        Logger.i("VMApps", "manifest loaded: " + rows.length + " app(s)");
+        root.catalogue = launchable;
+        Logger.i("VMApps", "manifest loaded: " + launchable.length
+                 + " app(s)");
         root.refreshed();
     }
 
@@ -227,18 +237,24 @@ Singleton {
     // is last out of the idle window. The wrapper validates
     // [a-zA-Z0-9][a-zA-Z0-9_-]{0,62}.
     //
-    // The name is "t5-" + a human-readable stub + "-" + an FNV-1a hash of
-    // the FULL appId. The hash is load-bearing: distinct appIds that
-    // sanitize or truncate alike ("a.b" vs "a-b") must never resolve to
-    // one domain — a collision would run the second app inside the first
-    // app's guest and break per-app isolation (sol r1 P1).
+    // The name is "t5-" + a human-readable stub + "-" + a 64-bit hash of
+    // the FULL appId. The hash narrows collisions to the practically
+    // impossible; the GUARANTEE that two distinct appIds never share a
+    // guest is _dropDomainCollisions() at catalogue load — a collision
+    // would run the second app inside the first app's guest and break
+    // per-app isolation, so colliders are dropped, never launched
+    // (sol r1/r2 P1).
     function _appIdHash(appId) {
-        let h = 0x811c9dc5;
+        // Two independent 32-bit hashes (FNV-1a + djb2-xor) concatenated.
+        let fnv = 0x811c9dc5;
+        let djb = 0x00001505;
         for (let i = 0; i < appId.length; i++) {
-            h ^= appId.charCodeAt(i);
-            h = Math.imul(h, 0x01000193) >>> 0;
+            const c = appId.charCodeAt(i);
+            fnv = Math.imul(fnv ^ c, 0x01000193) >>> 0;
+            djb = (Math.imul(djb, 33) ^ c) >>> 0;
         }
-        return ("0000000" + h.toString(16)).slice(-8);
+        const pad = h => ("0000000" + h.toString(16)).slice(-8);
+        return pad(fnv) + pad(djb);
     }
 
     function _vmNameForApp(appId) {
@@ -246,9 +262,32 @@ Singleton {
         const stub = id.replace(/[^a-zA-Z0-9_-]/g, "-")
                        .replace(/-{2,}/g, "-")
                        .replace(/^-+|-+$/g, "")
-                       .slice(0, 51);
-        // 3 + <=51 + 1 + 8 = <=63, inside the wrapper's name budget.
+                       .slice(0, 43);
+        // 3 + <=43 + 1 + 16 = <=63, inside the wrapper's name budget.
         return "t5-" + (stub || "vmapp") + "-" + _appIdHash(id);
+    }
+
+    // Derive every row's domain name and drop rows whose name is claimed
+    // by a DIFFERENT appId — both colliders go, since catalogue order is
+    // no trust signal (which row is the attacker's?). nameFn is
+    // injectable so the detection is unit-testable under a forced
+    // collision; production passes the real _vmNameForApp.
+    function _dropDomainCollisions(rows, nameFn) {
+        const nf = nameFn || (id => root._vmNameForApp(id));
+        const byName = ({});
+        const bad = new Set();
+        for (const r of rows) {
+            const n = nf(r.appId);
+            if (byName[n] !== undefined && byName[n] !== r.appId) {
+                bad.add(n);
+                Logger.e("VMApps", "domain-name collision " + n
+                         + " claimed by " + byName[n] + " and " + r.appId
+                         + " — both dropped");
+            } else {
+                byName[n] = r.appId;
+            }
+        }
+        return rows.filter(r => !bad.has(nf(r.appId)));
     }
 
     function rebuild() {
@@ -316,7 +355,10 @@ Singleton {
             Logger.w("VMApps", "launch: empty execArgv for " + row.appId);
             return;
         }
-        const vmName = row.vmName || root._vmNameForApp(row.appId);
+        // The ONLY name source is the deterministic derivation — a
+        // manifest-supplied name would bypass _dropDomainCollisions and
+        // could pin two apps to one guest (sol r2 P1).
+        const vmName = root._vmNameForApp(row.appId);
         // Build: pkexec qdistro-tier5-spawn --vm <vmName> --policy-key <appId>
         //        -- <argv...>
         // --policy-key carries the STABLE catalogue appId so the wrapper can

@@ -93,9 +93,10 @@ def test_vmapps_vm_name_is_deterministic_per_appid():
 
 
 def test_vmapps_vm_name_is_collision_resistant():
-    # ensures: distinct appIds can never share a domain (sol r1 P1) —
-    #          the name carries a hash of the FULL appId, appended AFTER
-    #          the truncated stub so truncation cannot lose uniqueness
+    # ensures: distinct appIds can never share a domain (sol r1/r2 P1) —
+    #          the name carries a 64-bit hash of the FULL appId appended
+    #          AFTER the truncated stub, and the catalogue-load guard is
+    #          the hard guarantee: colliders are dropped, never launched
     body = re.search(
         r"function _vmNameForApp\(appId\)\s*\{(?P<body>.*?)\n    \}",
         VMAPS,
@@ -120,6 +121,34 @@ def test_vmapps_vm_name_is_collision_resistant():
     assert "appId.charCodeAt" in h.group("body"), (
         "the hash must iterate the full appId string"
     )
+    assert "pad(fnv) + pad(djb)" in h.group("body"), (
+        "the tag must combine two independent 32-bit hashes — a lone "
+        "32-bit hash is collision-searchable (sol r2)"
+    )
+
+
+def test_catalogue_drops_domain_collisions_fail_closed():
+    # ensures: the hard guarantee — whatever the hash, two appIds that
+    #          derive one domain name are BOTH dropped at catalogue load
+    #          and never reach launch(); an all-colliding manifest falls
+    #          back to foot rather than launching nothing silently
+    assert "function _dropDomainCollisions" in VMAPS
+    assert "byName[n] !== r.appId" in VMAPS
+    assert "root._dropDomainCollisions(rows)" in VMAPS
+    assert "no launchable apps" in VMAPS
+
+
+def test_launch_has_no_manifest_vmname_bypass():
+    # ensures: the ONLY domain name source is the deterministic
+    #          derivation — a manifest-supplied vmName would skip the
+    #          collision guard and pin two apps to one guest (sol r2)
+    m = re.search(
+        r"function launch\(row\)\s*\{(?P<body>.*?)\n    \}",
+        VMAPS,
+        re.S,
+    )
+    assert m, "launch(row) not found in VMApps.qml"
+    assert "row.vmName" not in m.group("body")
 
 
 def test_concurrent_session_logs_are_unique_per_launch():
