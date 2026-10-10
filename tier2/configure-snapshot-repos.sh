@@ -29,11 +29,14 @@ rm -f "$repo_dir"/*.repo
 # without it we fail closed rather than emit an unreachable upstream URL.
 base="${QDISTRO_REPO_BASE:-}"
 if [ -z "$base" ]; then
-    case "${QDISTRO_DEPS_OFFLINE:-${QCI_OFFLINE:-0}}" in
-        1|true|yes|on)
-            echo "tier2-snapshot-repos: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snapshot)" >&2
-            exit 3 ;;
-    esac
+    _v_off=
+    for _v in "${QDISTRO_DEPS_OFFLINE:-}" "${QCI_OFFLINE:-}"; do
+        case "$_v" in 1|true|yes|on) _v_off=1 ;; esac
+    done
+    if [ -n "$_v_off" ]; then
+        echo "tier2-snapshot-repos: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snapshot)" >&2
+        exit 3
+    fi
     base="https://download.opensuse.org/history"
 fi
 

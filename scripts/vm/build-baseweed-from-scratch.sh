@@ -122,11 +122,15 @@ virt-resize --quiet --expand /dev/sda3 "$CLOUD_CACHE" "$PARTIAL" >/dev/null || {
 
 echo "[scratch] customizing: admin user + qga + SELinux + cloud-init mask..."
 qdistro_rpm_cache_import "$PARTIAL"
+repo_cmd="$(qdistro_substrate_repo_command)" || {
+    echo "ERROR: substrate repo command failed (offline without QDISTRO_REPO_BASE?)" >&2
+    exit 3
+}
 virt-customize \
     --memsize 2048 \
     --smp 2 \
     -a "$PARTIAL" \
-    --run-command "$(qdistro_substrate_repo_command)" \
+    --run-command "$repo_cmd" \
     --root-password "password:${VM_PASSWORD}" \
     --run-command 'getent passwd admin >/dev/null || useradd -m -u 1000 -U -s /bin/bash admin' \
     --run-command 'getent group wheel >/dev/null && usermod -aG wheel admin || true' \

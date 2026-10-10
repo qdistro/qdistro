@@ -123,11 +123,14 @@ qdistro_substrate_repo_command() {
     local snap="${QDISTRO_SUBSTRATE_SNAPSHOT:?}" digest="${QDISTRO_SUBSTRATE_CLOUD_SHA256:?}"
     local base="${QDISTRO_REPO_BASE:-}"
     if [ -z "$base" ]; then
-        case "${QDISTRO_DEPS_OFFLINE:-${QCI_OFFLINE:-0}}" in
-            1|true|yes|on)
+        _v_off=
+        for _v in "${QDISTRO_DEPS_OFFLINE:-}" "${QCI_OFFLINE:-}"; do
+            case "$_v" in 1|true|yes|on) _v_off=1 ;; esac
+        done
+        if [ -n "$_v_off" ]; then
                 echo "ERROR: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snap)" >&2
-                return 1 ;;
-        esac
+                return 1
+        fi
         base="https://download.opensuse.org/history"
     fi
     cat <<EOF

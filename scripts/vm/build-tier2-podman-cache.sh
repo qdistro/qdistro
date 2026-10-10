@@ -89,6 +89,8 @@ for workload in "${workloads[@]}"; do
     podman build --pull=never --layers \
         --file "$wcontext/Containerfile.$workload" \
         --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
+        --build-arg "QDISTRO_REPO_BASE=${QDISTRO_REPO_BASE:-}" \
+        --build-arg "QCI_OFFLINE=${QCI_OFFLINE:-}" \
         --tag "$tag" \
         --label "org.qdistro.test-snapshot=$QDISTRO_SUBSTRATE_SNAPSHOT" \
         "$wcontext" >&2

@@ -418,3 +418,22 @@ oci_img_present() {
     [[ "$output" == *"fails sha256"* ]]
     ! grep -q 'load' "$FAKE_PODMAN_DIR/calls.log"
 }
+
+@test "qd_oci_ensure: interrupted save (tar without sidecar) is not a warm hit" {
+    oci_setup_fake
+    run runoci
+    [ "$status" -eq 0 ]
+    rm -f "$FAKE_PODMAN_DIR/images/$REF_SHA"
+    # Simulate an interrupted _qd_oci_save: archive published, no sidecar.
+    rm -f "$WORK/cache/oci/$REF_SHA/image.tar.sha256"
+    export QDISTRO_DEPS_OFFLINE=1
+    run runoci
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no complete cached OCI archive"* ]]
+    ! grep -q 'load' "$FAKE_PODMAN_DIR/calls.log"
+    unset QDISTRO_DEPS_OFFLINE
+    # Online the incomplete state repairs via pull + resave.
+    run runoci
+    [ "$status" -eq 0 ]
+    [ -f "$WORK/cache/oci/$REF_SHA/image.tar.sha256" ]
+}

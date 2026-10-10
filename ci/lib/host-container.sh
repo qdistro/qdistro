@@ -2,12 +2,20 @@
 # Shared launcher for acceptance rows and explicit development commands.
 host_container_run() {
     local image=$1 network=$2; shift 2
-    local git_common name run_path npm_cache
+    local git_common name run_path npm_cache deps_root
     local -a mounts=(--volume "$QDISTRO_REPO:$QDISTRO_REPO:rw") envs=()
     npm_cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}/host-npm
     mkdir -p "$npm_cache" || return
     npm_cache=$(realpath "$npm_cache") || return
     mounts+=(--volume "$npm_cache:/tmp/qci-npm:rw")
+    # The dep cache must resolve to the same root inside the container —
+    # the vendored libweston build seeds display-info from it, and the
+    # --network=none rows cannot fetch. Warm it on the host first.
+    deps_root=${QDISTRO_DEPS_CACHE_DIR:-${QDWIN_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/qdistro}}
+    mkdir -p "$deps_root" || return
+    deps_root=$(realpath "$deps_root") || return
+    mounts+=(--volume "$deps_root:$deps_root:rw")
+    envs+=(--env "QDISTRO_DEPS_CACHE_DIR=$deps_root")
     # Linked-worktree .git files point outside the source mount. Git metadata
     # is read-only: tests may inspect provenance but cannot edit another tree.
     git_common=$(git -C "$QDISTRO_REPO" rev-parse --path-format=absolute --git-common-dir) || return
@@ -44,6 +52,14 @@ host_container_gate() {
         return "$EXIT_BUILD"
     }
     printf '%s\n' "$image" > "$RDIR/host/container-image.txt"
+    # Warm the display-info tarball into the dep cache on the host: the
+    # vendored libweston rows run --network=none inside the container and
+    # must find it already verified there.
+    . "$QDISTRO_REPO/scripts/vm/lib/deps-cache.sh"
+    qd_display_info_tarball >/dev/null || {
+        record_result host deps-warm fail "$EXIT_BUILD" build build /dev/null 'display-info dep-cache warm failed (offline without a warm cache?)'
+        return "$EXIT_BUILD"
+    }
     local network=private
     case "${QCI_OFFLINE:-0}" in 1|true|yes|on) network=none;; esac
     host_container_run "$image" "$network" bash "$QDISTRO_REPO/ci/containers/prepare-host.sh" \

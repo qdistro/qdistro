@@ -40,7 +40,11 @@ qd_deps_root() {
 }
 
 qd_deps_offline() {
-    [ "${QDISTRO_DEPS_OFFLINE:-0}" = 1 ] || [ "${QCI_OFFLINE:-0}" = 1 ]
+    local v
+    for v in "${QDISTRO_DEPS_OFFLINE:-}" "${QCI_OFFLINE:-}"; do
+        case "$v" in 1|true|yes|on) return 0 ;; esac
+    done
+    return 1
 }
 
 # Write/refresh the root MANIFEST (schema marker; cheap, idempotent).
@@ -180,26 +184,37 @@ _qd_oci_digest() {
     [ -n "$d" ] && printf '%s\n' "$d"
 }
 
+# _qd_oci_complete <dir> — a cached archive is usable only when ALL of it
+# landed: the tar, its sha256 sidecar, and the manifest written last.
+# An interrupted save can leave image.tar alone — that state is INCOMPLETE,
+# never a warm hit.
+_qd_oci_complete() {
+    [ -f "$1/image.tar" ] && [ -f "$1/image.tar.sha256" ] \
+        && [ -f "$1/manifest.txt" ]
+}
+
 # _qd_oci_save <ref> <digest> — save the archive under a per-digest lock.
 _qd_oci_save() {
     local ref="$1" digest="$2" hex dir lock tmp
     hex="${digest#sha256:}"
     dir="$(qd_deps_root)/oci/$hex"
-    [ -f "$dir/image.tar" ] && return 0
+    _qd_oci_complete "$dir" && return 0
     install -d "$dir" "$(qd_deps_root)/.locks" || return 1
     lock="$(qd_deps_root)/.locks/oci-$hex.lock"
     (
         flock -x 9
-        [ -f "$dir/image.tar" ] && exit 0
+        _qd_oci_complete "$dir" && exit 0
         tmp="$(mktemp "$dir/.image.XXXXXXXX")" || exit 1
         if podman save --format oci-archive -o "$tmp" "$ref" >&2; then
             chmod 0644 "$tmp"
-            mv "$tmp" "$dir/image.tar" || exit 1
+            mv -f "$tmp" "$dir/image.tar" || exit 1
         else
             rm -f "$tmp"; exit 1
         fi
         ( cd "$dir" && sha256sum image.tar ) > "$dir/.image.tar.sha256.tmp" \
-            && mv "$dir/.image.tar.sha256.tmp" "$dir/image.tar.sha256" || exit 1
+            && mv -f "$dir/.image.tar.sha256.tmp" "$dir/image.tar.sha256" \
+            || exit 1
+        # The manifest lands last — its presence is the completion marker.
         qd_write_manifest oci "$hex" "$ref" image.tar || exit 1
     ) 9>"$lock"
 }
@@ -227,21 +242,19 @@ qd_oci_ensure() {
         return 0
     fi
 
-    # 2. Cached archive for this ref — load, never pull.
+    # 2. Complete cached archive for this ref — verify + load, never pull.
+    #    An interrupted save leaves image.tar without its sidecar/manifest:
+    #    that is NOT a hit — online it repairs via pull+resave, offline it
+    #    fails closed below.
     if [ -s "$refmap" ]; then
         digest="$(cat "$refmap")"
         archive="$root/oci/${digest#sha256:}/image.tar"
-        if [ -f "$archive" ]; then
-            # Verify the archived bytes before load — a corrupt or
-            # substituted archive must not populate the local store under
-            # this ref.
-            if [ -f "$archive.sha256" ]; then
-                ( cd "$(dirname "$archive")" \
-                    && sha256sum -c image.tar.sha256 ) >/dev/null 2>&1 || {
-                    _qdc_die "qd_oci_ensure: cached archive fails sha256 — $archive"
-                    return 3
-                }
-            fi
+        if _qd_oci_complete "$root/oci/${digest#sha256:}"; then
+            ( cd "$(dirname "$archive")" \
+                && sha256sum -c image.tar.sha256 ) >/dev/null 2>&1 || {
+                _qdc_die "qd_oci_ensure: cached archive fails sha256 — $archive"
+                return 3
+            }
             podman load -i "$archive" >/dev/null 2>&1 || {
                 _qdc_die "qd_oci_ensure: podman load failed for $archive"
                 return 3
@@ -257,7 +270,7 @@ qd_oci_ensure() {
 
     # 3. Cold — offline fails closed naming the ref.
     if qd_deps_offline; then
-        _qdc_die "offline: no cached OCI archive for $ref (need oci/<digest>/image.tar + refs map)"
+        _qdc_die "offline: no complete cached OCI archive for $ref (need oci/<digest>/{image.tar,image.tar.sha256,manifest.txt} + refs map)"
         return 1
     fi
     podman pull --quiet "$ref" >&2 || {

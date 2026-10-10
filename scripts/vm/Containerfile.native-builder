@@ -1,6 +1,13 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 ARG SNAPSHOT
+ARG QDISTRO_REPO_BASE=""
+ARG QDISTRO_DEPS_OFFLINE=""
+ARG QCI_OFFLINE=""
 COPY container-native-deps.sh /usr/local/bin/container-native-deps.sh
-RUN QDISTRO_SUBSTRATE_SNAPSHOT="$SNAPSHOT" /bin/bash /usr/local/bin/container-native-deps.sh
+RUN QDISTRO_SUBSTRATE_SNAPSHOT="$SNAPSHOT" \
+    QDISTRO_REPO_BASE="$QDISTRO_REPO_BASE" \
+    QDISTRO_DEPS_OFFLINE="$QDISTRO_DEPS_OFFLINE" \
+    QCI_OFFLINE="$QCI_OFFLINE" \
+    /bin/bash /usr/local/bin/container-native-deps.sh
 LABEL org.qdistro.test-snapshot="$SNAPSHOT"

@@ -11,6 +11,7 @@ qdistro_load_test_substrate
 . "$here/lib/podman-user-bus.sh"
 qdistro_podman_user_bus
 . "$here/lib/native-builder.sh"
+. "$here/lib/deps-cache.sh"
 
 cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}/native-podman/$QDISTRO_SUBSTRATE_SNAPSHOT/$QDISTRO_SUBSTRATE_ARCH
 mkdir -p "$cache"
@@ -49,12 +50,25 @@ builder_image=$(qdistro_ensure_native_builder_image)
 
 mkdir -p "$work/src" "$work/out/stage"
 tar -C "$work/src" -xf "$work/source.tar"
+
+# The vendored libweston build runs --wrap-mode=nodownload inside the
+# container, so the digest-pinned display-info tarball must be staged
+# BEFORE launch — acquired and verified on the host, mounted read-only.
+# The run itself carries no network: everything meson/ninja needs is in
+# the source mount or this tarball.
+di_tarball="$(qd_display_info_tarball)" || {
+    echo "ERROR: display-info tarball unavailable (offline without a warm dep cache?)" >&2
+    exit 3
+}
 echo "[native-podman] building $source_sha against snapshot $QDISTRO_SUBSTRATE_SNAPSHOT ($builder_key)" >&2
-podman run --rm --pull=never \
+podman run --rm --pull=never --network=none \
     --volume "$work/src:/src:rw,Z" \
     --volume "$work/out:/out:rw,Z" \
+    --volume "$di_tarball:/run/display-info.tar.gz:ro,Z" \
     --env "QDISTRO_SUBSTRATE_SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
     --env "QDWIN_EXTRA_MESON_OPTS=${QDWIN_EXTRA_MESON_OPTS:-}" \
+    --env "QDISTRO_DISPLAY_INFO_TARBALL=/run/display-info.tar.gz" \
+    --env "QDISTRO_DISPLAY_INFO_SHA256=$QDISTRO_DISPLAY_INFO_SHA256" \
     --workdir /src "$builder_image" \
     /bin/bash /src/scripts/vm/container-build-native.sh >&2
 

@@ -126,11 +126,14 @@ qdistro_write_snapshot_repos() {
     # Offline without it we fail closed rather than emit an unreachable URL.
     base="${QDISTRO_REPO_BASE:-}"
     if [ -z "$base" ]; then
-        case "${QDISTRO_DEPS_OFFLINE:-${QCI_OFFLINE:-0}}" in
-            1|true|yes|on)
-                echo "[bootstrap] ERROR: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snap)" >&2
-                return 1 ;;
-        esac
+        _v_off=
+        for _v in "${QDISTRO_DEPS_OFFLINE:-}" "${QCI_OFFLINE:-}"; do
+            case "$_v" in 1|true|yes|on) _v_off=1 ;; esac
+        done
+        if [ -n "$_v_off" ]; then
+            echo "[bootstrap] ERROR: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snap)" >&2
+            return 1
+        fi
         base="https://download.opensuse.org/history"
     fi
     mkdir -p "$repo_dir"

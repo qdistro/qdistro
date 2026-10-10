@@ -346,12 +346,16 @@ echo "[bake]   (this is the slow step — typically 10–25 min)"
 #   mode-setting it and the kernel never loads (qci vm-smoke timed out
 #   in vm_provision). Re-applied here so a baked rebuild from an older
 #   admin image without the fix still boots.
+repo_cmd="$(qdistro_substrate_repo_command)" || {
+    echo "ERROR: substrate repo command failed (offline without QDISTRO_REPO_BASE?)" >&2
+    exit 3
+}
 virt-customize \
     --memsize 4096 \
     --smp 4 \
     -a "$PARTIAL" \
     "${LIBGUESTFS_NET_ARGS[@]}" \
-    --run-command "$(qdistro_substrate_repo_command)" \
+    --run-command "$repo_cmd" \
     --run-command 'zypper -n refresh' \
     `# qdshell's runtime is the vendored Quickshell build staged by the` \
     `# native builder — the archived noctalia-qs fork was never a real` \
@@ -447,9 +451,13 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
                 "$TIER5_BUILD_GUEST" \
                 | sed '1d;$d' >"$PUBLISHER_TMP"
             chmod +x "$PUBLISHER_TMP"
+            repo_cmd="$(qdistro_substrate_repo_command)" || {
+                echo "ERROR: substrate repo command failed (offline without QDISTRO_REPO_BASE?)" >&2
+                exit 3
+            }
             virt-customize -a "$BAKED_CACHE.partial" \
                 "${LIBGUESTFS_NET_ARGS[@]}" \
-                --run-command "$(qdistro_substrate_repo_command)" \
+                --run-command "$repo_cmd" \
                 --run-command 'zypper -n refresh' \
                 `# weston provides weston-terminal (the tier-5 cold-start app);` \
                 `# dejavu-fonts gives it a monospace face. Without these the` \

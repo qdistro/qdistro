@@ -135,6 +135,19 @@ def iter_packages(primary_path):
             elem.clear()
 
 
+def safe_href(href):
+    """Repo metadata names files relative to the repo root. An absolute or
+    traversing href is hostile/corrupt metadata — repomd signatures are
+    verified by the CONSUMER (zypper), so nothing protects these host-side
+    writes except this check."""
+    if not href or os.path.isabs(href):
+        die(f"unsafe metadata href: {href!r}")
+    norm = os.path.normpath(href)
+    if norm == "." or norm.startswith(".."):
+        die(f"unsafe metadata href: {href!r}")
+    return norm
+
+
 def load_index(dest):
     try:
         with open(os.path.join(dest, "mirror-index.json")) as f:
@@ -153,59 +166,81 @@ def save_index(dest, index):
 def audit_repo(base, dest):
     """Re-verify a mirror locally; self-heal files still online.
 
-    The audit is driven by repomd.xml + primary metadata — every package
-    the repo NAMES must verify, not just files the index happens to know —
-    so a --limit-truncated or crashed mirror is reported incomplete rather
-    than passing on its partial set. A clean audit on a markerless mirror
-    publishes mirror.json (the content IS complete)."""
+    Two phases: repomd-named metadata FIRST (a missing/corrupt primary can
+    be repaired before it is parsed), then EVERY package primary names —
+    never just index entries. The completion marker is invalidated up
+    front and republished only after the full audit verifies, so a failed
+    or interrupted audit never leaves a stale "complete"."""
     repomd = os.path.join(dest, "repodata", "repomd.xml")
     if not os.path.isfile(repomd):
         die(f"verify: no repomd.xml under {dest} — mirror was never completed")
     marker = os.path.join(dest, "mirror.json")
-    complete = os.path.isfile(marker)
-    if not complete:
-        print("[repo-mirror] verify: no mirror.json — mirror is not marked "
-              "complete; auditing content anyway", file=sys.stderr)
-    bad = []
-    meta = parse_repomd(repomd)
-    for href, sha, algo, _t in meta:
-        local = os.path.join(dest, href)
-        if not (os.path.isfile(local) and digest_file(local, algo) == sha):
-            bad.append((href, sha, algo))
-    # Every RPM named by primary must verify — the index is only a resume
-    # hint, never the audit's source of truth.
-    pkgs = []
-    primary = next((h for h, _s, _a, t in meta if t == "primary"), None)
-    if primary is not None and os.path.isfile(os.path.join(dest, primary)):
-        for href, sha, algo in iter_packages(os.path.join(dest, primary)):
-            pkgs.append(href)
-            local = os.path.join(dest, href)
+    if os.path.isfile(marker):
+        os.unlink(marker)
+
+    def repair(bad, what):
+        if not bad:
+            return
+        print(f"[repo-mirror] verify: {len(bad)} {what} file(s) "
+              f"corrupt/missing, refetching", file=sys.stderr)
+        if os.environ.get("QDISTRO_DEPS_OFFLINE") == "1" or \
+                os.environ.get("QCI_OFFLINE") == "1":
+            die("offline: mirror verify found corrupt/missing files: "
+                + ", ".join(h for h, _s, _a in bad[:10]))
+        for href, sha, algo in bad:
+            fetch(base + "/" + href, os.path.join(dest, href),
+                  want_sha=sha, want_algo=algo)
+        print(f"[repo-mirror] verify: repaired {len(bad)} {what} file(s)",
+              file=sys.stderr)
+
+    def bad_meta():
+        out = []
+        for href, sha, algo, _t in parse_repomd(repomd):
+            local = os.path.join(dest, safe_href(href))
             if not (os.path.isfile(local) and digest_file(local, algo) == sha):
-                bad.append((href, sha, algo))
-    if not bad:
-        print(f"[repo-mirror] verify OK: {len(pkgs)} packages + "
-              f"repodata under {dest}", file=sys.stderr)
-        if not complete and pkgs:
-            manifest = {"schema": 1, "verified_at": time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "packages": len(pkgs), "source": base}
-            tmp = marker + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(manifest, f, indent=2)
-            os.replace(tmp, marker)
-            print("[repo-mirror] verify: content complete — published "
-                  "mirror.json", file=sys.stderr)
-        return
-    print(f"[repo-mirror] verify: {len(bad)} file(s) corrupt/missing, refetching",
-          file=sys.stderr)
-    if os.environ.get("QDISTRO_DEPS_OFFLINE") == "1" or \
-            os.environ.get("QCI_OFFLINE") == "1":
-        die("offline: mirror verify found corrupt/missing files: "
+                out.append((safe_href(href), sha, algo))
+        return out
+
+    # Phase 1: every metadata file repomd names (incl. primary itself).
+    repair(bad_meta(), "metadata")
+    meta = parse_repomd(repomd)  # repomd/primary may have been re-fetched
+    bad = bad_meta()
+    if bad:
+        die("verify: metadata still bad after repair: "
             + ", ".join(h for h, _s, _a in bad[:10]))
-    for href, sha, algo in bad:
-        fetch(base + "/" + href, os.path.join(dest, href),
-              want_sha=sha, want_algo=algo)
-    print(f"[repo-mirror] verify: repaired {len(bad)} file(s)", file=sys.stderr)
+
+    # Phase 2: every package primary names — the index is a resume hint,
+    # never the audit's source of truth.
+    primary = next((h for h, _s, _a, t in meta if t == "primary"), None)
+    if primary is None:
+        die("verify: repomd.xml names no primary metadata")
+    primary_local = os.path.join(dest, safe_href(primary))
+
+    def pkgs():
+        for href, sha, algo in iter_packages(primary_local):
+            yield safe_href(href), sha, algo
+
+    def bad_pkgs():
+        return [(h, s, a) for h, s, a in pkgs()
+                if not (os.path.isfile(os.path.join(dest, h))
+                        and digest_file(os.path.join(dest, h), a) == s)]
+
+    repair(bad_pkgs(), "package")
+    bad = bad_pkgs()
+    if bad:
+        die("verify: packages still bad after repair: "
+            + ", ".join(h for h, _s, _a in bad[:10]))
+
+    total = sum(1 for _ in pkgs())
+    manifest = {"schema": 1, "verified_at": time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "packages": total, "source": base}
+    tmp = marker + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(manifest, f, indent=2)
+    os.replace(tmp, marker)
+    print(f"[repo-mirror] verify OK: {total} packages + repodata under "
+          f"{dest} — mirror.json published", file=sys.stderr)
 
 
 def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
@@ -252,6 +287,7 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
     # 2. every metadata file named by repomd.xml, checksum-verified.
     meta_entries = parse_repomd(repomd_local)
     for href, sha, algo, _type in meta_entries:
+        href = safe_href(href)
         if href == "repodata/repomd.xml":
             continue
         local = os.path.join(dest, href)
@@ -276,6 +312,7 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
     for href, sha, algo in iter_packages(primary_local):
         if limit and fetched >= limit:
             break
+        href = safe_href(href)
         seen.add(href)
         local = os.path.join(dest, href)
         rec = index.get(href)

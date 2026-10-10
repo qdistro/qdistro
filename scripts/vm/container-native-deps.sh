@@ -12,11 +12,14 @@ rm -f /etc/zypp/repos.d/*.repo /etc/zypp/services.d/*.service
 # without it we fail closed rather than emit an unreachable upstream URL.
 base="${QDISTRO_REPO_BASE:-}"
 if [ -z "$base" ]; then
-    case "${QDISTRO_DEPS_OFFLINE:-${QCI_OFFLINE:-0}}" in
-        1|true|yes|on)
-            echo "container-native-deps: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snap)" >&2
-            exit 3 ;;
-    esac
+    _v_off=
+    for _v in "${QDISTRO_DEPS_OFFLINE:-}" "${QCI_OFFLINE:-}"; do
+        case "$_v" in 1|true|yes|on) _v_off=1 ;; esac
+    done
+    if [ -n "$_v_off" ]; then
+        echo "container-native-deps: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snap)" >&2
+        exit 3
+    fi
     base="https://download.opensuse.org/history"
 fi
 cat > /etc/zypp/repos.d/qdistro-snapshot-oss.repo <<EOF

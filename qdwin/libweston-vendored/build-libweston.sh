@@ -227,6 +227,7 @@ if [[ "$reuse_build" -eq 0 ]]; then
     # -Dshell-lua is new in 16 (Lua ≥5.4) and off here.
     meson setup "$BUILD" \
         --prefix="$PREFIX" \
+        --wrap-mode=nodownload \
         "${MESON_OPTS[@]}" \
         -Dshell-desktop=false \
         -Dshell-ivi=false \

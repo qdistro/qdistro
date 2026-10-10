@@ -1,9 +1,20 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 ARG SNAPSHOT
+ARG QDISTRO_REPO_BASE=""
+ARG QDISTRO_DEPS_OFFLINE=""
+ARG QCI_OFFLINE=""
 COPY container-native-deps.sh /recipe/container-native-deps.sh
-RUN QDISTRO_SUBSTRATE_SNAPSHOT="$SNAPSHOT" bash /recipe/container-native-deps.sh
+RUN QDISTRO_SUBSTRATE_SNAPSHOT="$SNAPSHOT" \
+    QDISTRO_REPO_BASE="$QDISTRO_REPO_BASE" \
+    QDISTRO_DEPS_OFFLINE="$QDISTRO_DEPS_OFFLINE" \
+    QCI_OFFLINE="$QCI_OFFLINE" \
+    bash /recipe/container-native-deps.sh
 COPY . /recipe/
-RUN QDISTRO_SUBSTRATE_SNAPSHOT="$SNAPSHOT" bash /recipe/install-host-deps.sh
+RUN QDISTRO_SUBSTRATE_SNAPSHOT="$SNAPSHOT" \
+    QDISTRO_REPO_BASE="$QDISTRO_REPO_BASE" \
+    QDISTRO_DEPS_OFFLINE="$QDISTRO_DEPS_OFFLINE" \
+    QCI_OFFLINE="$QCI_OFFLINE" \
+    bash /recipe/install-host-deps.sh
 ENV PATH=/opt/host-python/bin:/usr/local/bin:/usr/bin:/bin
 LABEL org.qdistro.test-snapshot="$SNAPSHOT"
