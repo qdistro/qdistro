@@ -49,6 +49,8 @@ prepare_pinned_git_subproject() {
     [ -d "$dir" ] || return 0
 
     if [ ! -d "$dir/.git" ]; then
+        # A dep-cache tarball seed is non-git by design — Meson uses it as-is.
+        [ -f "$dir/.qd-tarball-seed" ] && return 0
         echo "note: removing non-git subproject $dir so Meson can honor $wrap" >&2
         rm -rf "$dir"
         return 0
@@ -142,6 +144,45 @@ cd "$SRC"
 # checkout at newer upstream HEAD reports 0.4.0-dev and makes the DRM backend
 # configure fail. Keep the checkout aligned with display-info.wrap before setup.
 prepare_pinned_git_subproject "display-info"
+
+# display-info.wrap is a wrap-git clone of gitlab.freedesktop.org — an
+# unverified network fetch on every cold build, invisible to QCI_OFFLINE.
+# When the verified tarball is staged (deps cache on the host, or
+# QDISTRO_DISPLAY_INFO_TARBALL for guest/container lanes that staged it
+# explicitly), seed subprojects/display-info/ so Meson never reaches the
+# wrap. A real git checkout keeps the alignment path above; offline with
+# nothing warm, qd_fetch fails closed naming the dep.
+seed_display_info() {
+    local dir="$SRC/subprojects/display-info" tarball deps
+    [ -d "$dir/.git" ] && return 0
+    tarball="${QDISTRO_DISPLAY_INFO_TARBALL:-}"
+    if [ -z "$tarball" ]; then
+        deps="$(cd "$HERE/../.." && pwd)/scripts/vm/lib/deps-cache.sh"
+        [ -f "$deps" ] || return 0
+        # shellcheck source=/dev/null
+        . "$deps"
+        tarball="$(qd_display_info_tarball)"
+    fi
+    [ -f "$tarball" ] || {
+        echo "error: display-info tarball not found: $tarball" >&2
+        return 1
+    }
+    rm -rf "$dir"
+    mkdir -p "$dir"
+    tar -xzf "$tarball" -C "$dir" --strip-components=1 || {
+        echo "error: display-info seed extract failed from $tarball" >&2
+        rm -rf "$dir"
+        return 1
+    }
+    [ -f "$dir/meson.build" ] || {
+        echo "error: seeded display-info from $tarball lacks meson.build" >&2
+        rm -rf "$dir"
+        return 1
+    }
+    : > "$dir/.qd-tarball-seed"
+    echo "note: seeded subprojects/display-info from $tarball (wrap-git bypassed)" >&2
+}
+seed_display_info
 
 # Reuse the existing build dir for fast incremental rebuilds, but ONLY when it
 # was configured against *this* source tree. meson bakes the absolute source

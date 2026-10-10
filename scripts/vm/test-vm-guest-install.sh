@@ -112,11 +112,12 @@ unset LD_LIBRARY_PATH
 tvm_log "checked $n staged ELF files"
 
 # ---- 4. Source-built Python apps ---------------------------------------------
-# --no-build-isolation: setuptools comes from the snapshot RPM, not PyPI.
+# --no-index --no-build-isolation: setuptools comes from the snapshot RPM,
+# never PyPI.
 for dir in sdk/presentation qdgreeter qdlocker; do
     tvm_log "pip install $dir..."
     python3 -m pip install --quiet --break-system-packages --no-deps \
-        --no-build-isolation --prefix=/usr "$SRC/$dir"
+        --no-index --no-build-isolation --prefix=/usr "$SRC/$dir"
 done
 # shellcheck source=../../image/lib/pip-app-qml-gate.sh
 . "$SRC/image/lib/pip-app-qml-gate.sh"

@@ -113,6 +113,21 @@ qd_repo_mirror() {
     python3 "$script" --root "$(qd_deps_root)" --snapshot "$snap" "${repos[@]}" "${passthru[@]}"
 }
 
+# ---- vendored-libweston libdisplay-info seed ------------------------------
+
+# weston-16 wants libdisplay-info >=0.2.0 <0.4.0; Tumbleweed ships 0.4.x, so
+# meson's wrap-git fallback (subprojects/display-info.wrap) clones
+# gitlab.freedesktop.org on EVERY cold build — a network fetch invisible to
+# QCI_OFFLINE. qd_display_info_tarball returns the verified, cached 0.2.0
+# source archive; build-libweston.sh seeds subprojects/display-info/ from it
+# so the wrap is never reached.
+QDISTRO_DISPLAY_INFO_URL="${QDISTRO_DISPLAY_INFO_URL:-https://gitlab.freedesktop.org/emersion/libdisplay-info/-/archive/0.2.0/libdisplay-info-0.2.0.tar.gz}"
+QDISTRO_DISPLAY_INFO_SHA256="${QDISTRO_DISPLAY_INFO_SHA256:-f7331fcaf5527251b84c8fb84238d06cd2f458422ce950c80e86c72927aa8c2b}"
+
+qd_display_info_tarball() {
+    qd_fetch src "$QDISTRO_DISPLAY_INFO_URL" "$QDISTRO_DISPLAY_INFO_SHA256"
+}
+
 # ---- guest transport (qd-serve) -----------------------------------------
 
 # Guests cannot see the host filesystem: slirp reaches the host at

@@ -25,7 +25,10 @@ setup() {
     unset QDISTRO_DEPS_OFFLINE QCI_OFFLINE
 
     PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
-    ( cd "$WORK/src" && python3 -m http.server "$PORT" >/dev/null 2>&1 ) &
+    # exec so $! is python's own pid — without it the subshell may fork a
+    # grandchild that survives `kill`, keeps bats' command pipe open and
+    # hangs the whole run.
+    ( cd "$WORK/src" && exec python3 -m http.server "$PORT" >/dev/null 2>&1 </dev/null ) &
     SERVER_PID=$!
     for _ in $(seq 1 50); do
         wget -q -O /dev/null "http://127.0.0.1:$PORT/" && break
@@ -249,4 +252,25 @@ runq() {
     [ "$output" = "/alt" ]
     run env -u QDISTRO_DEPS_CACHE_DIR -u QDWIN_CACHE_DIR HOME=/h bash -c ". '$LIB'; qd_deps_root"
     [ "$output" = "/h/.cache/qdistro" ]
+}
+
+@test "qd_display_info_tarball: warm seed returns path offline, honors env pin override" {
+    local fixture_sha other_sha
+    fixture_sha="$(printf 'fake-ldi-tarball' | sha256sum | awk '{print $1}')"
+    printf 'fake-ldi-tarball' > "$WORK/src/ldi.tgz"
+    # Warm the entry under an overridden pin (no network anywhere).
+    run bash -c ". '$LIB'; qd_store_file src '$fixture_sha' '$WORK/src/ldi.tgz' 'https://example.test/ldi.tgz'"
+    [ "$status" -eq 0 ]
+    # Offline warm hit returns the cached path, never the network.
+    run env QDISTRO_DEPS_OFFLINE=1 QDISTRO_DISPLAY_INFO_SHA256="$fixture_sha" \
+        QDISTRO_DISPLAY_INFO_URL=https://example.test/ldi.tgz \
+        bash -c ". '$LIB'; qd_display_info_tarball"
+    [ "$status" -eq 0 ]
+    [ -f "$output" ]
+    # Offline cold miss fails closed.
+    other_sha="$(printf 'other' | sha256sum | awk '{print $1}')"
+    run env QDISTRO_DEPS_OFFLINE=1 QDISTRO_DISPLAY_INFO_SHA256="$other_sha" \
+        bash -c ". '$LIB'; qd_display_info_tarball"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"src/"*"$other_sha"* ]] || [[ "$output" == *offline* ]]
 }

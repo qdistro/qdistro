@@ -1716,7 +1716,10 @@ pip_install_one() {
     if is_dev; then
         # dev: write into /usr (collides with RPM ownership, but a throwaway
         # VM does not care). --prefix=/usr launchers land in /usr/bin.
+        # --no-index --no-build-isolation: the setuptools backend comes from
+        # the pinned snapshot RPMs, never PyPI.
         python3 -m pip install --break-system-packages --no-deps --prefix=/usr --quiet \
+            --no-index --no-build-isolation \
             "$dir" \
             || fail_or_warn "  pip install $app failed"
         return 0
@@ -1724,6 +1727,7 @@ pip_install_one() {
     # Hardened: isolated /opt/qdistro prefix; no writes into RPM-owned /usr.
     install -d -m 0755 "$QDISTRO_OPT_PREFIX"
     python3 -m pip install --no-deps --prefix="$QDISTRO_OPT_PREFIX" --quiet \
+        --no-index --no-build-isolation \
         "$dir" \
         || { fail_or_warn "  pip install $app -> $QDISTRO_OPT_PREFIX failed"; return 0; }
     # Expose the launcher on PATH via a thin wrapper that sets PYTHONPATH to
@@ -1839,11 +1843,13 @@ pip_install_apps() {
         log "  pip install qdistro-presentation..."
         if is_dev; then
             python3 -m pip install --break-system-packages --no-deps --prefix=/usr --quiet \
+                --no-index --no-build-isolation \
                 "$REPO_ROOT/sdk/presentation" \
                 || fail_or_warn "  pip install qdistro-presentation failed"
         else
             install -d -m 0755 "$QDISTRO_OPT_PREFIX"
             python3 -m pip install --no-deps --prefix="$QDISTRO_OPT_PREFIX" --quiet \
+                --no-index --no-build-isolation \
                 "$REPO_ROOT/sdk/presentation" \
                 || fail_or_warn "  pip install qdistro-presentation -> $QDISTRO_OPT_PREFIX failed"
             launcher="$QDISTRO_OPT_PREFIX/bin/qdistro-presentation-publish"

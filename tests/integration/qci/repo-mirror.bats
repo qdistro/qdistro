@@ -58,7 +58,10 @@ EOF
 EOF
 
     PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
-    ( cd "$WORK/srv" && python3 -m http.server "$PORT" >/dev/null 2>&1 ) &
+    # exec so $! is python's own pid — without it the subshell may fork a
+    # grandchild that survives `kill`, keeps bats' command pipe open and
+    # hangs the whole run.
+    ( cd "$WORK/srv" && exec python3 -m http.server "$PORT" >/dev/null 2>&1 </dev/null ) &
     SERVER_PID=$!
     for _ in $(seq 1 50); do
         wget -q -O /dev/null "http://127.0.0.1:$PORT/" && break
