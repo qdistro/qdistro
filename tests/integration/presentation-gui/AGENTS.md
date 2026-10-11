@@ -35,6 +35,10 @@ frame before asserting on it (`ci/prompts/gui-scenario-agent.md`).
 - DARK / LIGHT means the dominant chrome background is dark with light text,
   or light with dark text. Exact colours are not asserted from pixels; the
   snapshot generation/mode lines are the exact oracle.
+- Accent strips are not the mode oracle. qterminator's focused-terminal
+  title strip paints the snapshot `mPrimary` (pale yellow under the dark
+  palette, indigo under light) on purpose — a small accent band on either
+  mode is correct chrome, not a mode violation.
 - Display scale changes go through qdshell Settings > Display only: qdwin
   rejects output configuration from any other client (F8). The confirm
   dialog reverts after 15 s; move the pointer onto **Keep changes**, then

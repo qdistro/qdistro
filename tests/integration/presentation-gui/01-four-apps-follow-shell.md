@@ -19,6 +19,13 @@ title area background) in the frame you just opened. Page content of
 qdbrowser (`about:blank`, the web view) is CONTENT, not chrome: it does not
 have to follow and must not be graded as chrome.
 
+qterminator paints the narrow title strip of its FOCUSED terminal with the
+snapshot accent (`mPrimary`): pale yellow under the dark palette, indigo
+under light. That ~20 px strip is an accent marker, not the mode oracle —
+it is correct in both modes and must not be failed as "chrome not dark".
+Grade DARK/LIGHT by the window's dominant chrome surface (terminal
+background, menu/tab area, dialog background).
+
 ## Setup
 
 ```bash
