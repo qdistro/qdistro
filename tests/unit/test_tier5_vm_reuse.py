@@ -866,10 +866,11 @@ def test_record_reads_and_unlinks_are_race_bound():
     # ensures: a co-admin with access to the image directory cannot win
     #          a check→use race — owner records are read through an open
     #          fd that binds contents and file-identity to ONE inode
-    #          (_sfid), and every final unlink captures the entry by
-    #          renameat2 onto a random same-dir sibling so only the
-    #          verified inode is removed; a swapped entry is restored,
-    #          never deleted (sol r25/r26/r28)
+    #          (_sfid), and every final unlink captures the entry into
+    #          a verified root-owned private dir so only the proven
+    #          inode is removed and no co-admin swap can substitute it;
+    #          a swapped entry is restored, never deleted
+    #          (sol r25/r26/r28/r29)
     for src in (SPAWN, CLEANUP):
         assert '_read_owner_record()' in src
         assert 'exec {_rfd}< "$_p"' in src
@@ -878,31 +879,37 @@ def test_record_reads_and_unlinks_are_race_bound():
         # mutable path — contents and identity provably share one inode
         assert 'stat -Lc \'%d %i\' "/proc/$$/fd/$_rfd"' in src
         assert '_unlink_verified()' in src
-        # capture is a renameat2(RENAME_NOREPLACE) onto a random
-        # sibling name inside the SAME parent dir through ONE dir fd —
-        # no second directory is created or opened, so there is no
-        # create→open window in which a swapped-in capture dir could
-        # land the rename on foreign ground (sol r28)
+        # capture lands in a private dir created AND opened through
+        # the parent's dir fd (mkdirat/openat + O_NOFOLLOW), and the
+        # opened fd must verify as OUR root-owned 0700 dir before
+        # anything moves in — no create→open window can land the
+        # rename on foreign ground (sol r28), and once bound the
+        # chamber is unreachable to a co-admin, so no stat→unlink
+        # swap is possible on the captured name (sol r29)
         assert 'tempfile.mkdtemp' not in src
         assert 'os.open(_parent,' in src
-        assert 'os.O_DIRECTORY | os.O_NOFOLLOW' in src
-        assert '_rename_noreplace(pfd, _name, pfd, cap)' in src
-        assert 'os.stat(cap, dir_fd=pfd, follow_symlinks=False)' in src
-        assert 'os.unlink(cap, dir_fd=pfd)' in src
+        assert 'os.O_NOFOLLOW' in src
+        assert 'os.mkdir(cap, 0o700, dir_fd=pfd)' in src
+        assert 'dir_fd=pfd)' in src
+        assert '_st.st_uid == os.geteuid()' in src
+        assert '_st.st_mode & 0o777 == 0o700' in src
+        assert 'os.rename(_name, "v", src_dir_fd=pfd,' in src
+        assert 'os.stat("v", dir_fd=tfd,' in src
+        assert 'os.unlink("v", dir_fd=tfd)' in src
         # a foreign capture is restored via link(2) — atomic
         # no-clobber, never overwriting a re-appeared path — and entry
         # types link(2) cannot carry (directories) restore through
         # renameat2(RENAME_NOREPLACE), never a racy check-then-rename
         # (sol r27)
-        assert 'os.link(cap, _name, src_dir_fd=pfd, dst_dir_fd=pfd' \
-            in src
+        assert 'os.link("v", _name, src_dir_fd=tfd,' in src
+        assert 'dst_dir_fd=pfd' in src
         assert '_rename_noreplace' in src
         assert 'ctypes' in src
         # no shell-level path re-resolution remains in the primitive
         assert 'mv -T -- "$_p"' not in src
         # an empty expected-ident can never authorize a removal
         assert '[ -n "$_want" ] || return 1' in src
-        assert 'preserved foreign' in src
+        assert 'preserved' in src
 
 
 def test_no_root_writes_into_admin_controlled_paths():

@@ -124,11 +124,12 @@ _read_owner_record() {
 }
 
 # _unlink_verified <path> <dev-ino> — remove <path> only if it still
-# names the verified inode. Capture is a renameat2(RENAME_NOREPLACE)
-# onto a random sibling name in the SAME directory through the
-# parent's dir fd — no second directory is created or opened, so
-# there is no window to swap one in (sol r28). See spawn-tier5.sh for
-# the full contract.
+# names the verified inode. The entry is captured into a root-owned
+# 0700 dir created AND opened through the parent's dir fd, the opened
+# fd verified as OURS (euid + mode) before anything moves in — no
+# create→open window (sol r28), and a co-admin cannot reach inside
+# the dir to swap the entry between stat and unlink (sol r29). See
+# spawn-tier5.sh for the full contract.
 _unlink_verified() {
     local _p=$1 _want=$2
     [ -n "$_want" ] || return 1
@@ -163,28 +164,65 @@ except OSError:
 rc = 1
 cap = ".t5u-" + os.urandom(8).hex()
 try:
-    if _rename_noreplace(pfd, _name, pfd, cap):
+    try:
+        os.mkdir(cap, 0o700, dir_fd=pfd)
+    except OSError:
+        pass
+    else:
+        tfd = -1
         try:
-            st = os.stat(cap, dir_fd=pfd, follow_symlinks=False)
-        except OSError:
-            st = None
-        if st is not None and stat.S_ISREG(st.st_mode) \
-                and (st.st_dev, st.st_ino) == _want:
-            os.unlink(cap, dir_fd=pfd)
-            rc = 0
-        elif st is not None:
-            restored = False
             try:
-                os.link(cap, _name, src_dir_fd=pfd, dst_dir_fd=pfd,
-                        follow_symlinks=False)
-                os.unlink(cap, dir_fd=pfd)
-                restored = True
+                tfd = os.open(cap,
+                              os.O_RDONLY | os.O_DIRECTORY
+                              | os.O_NOFOLLOW, dir_fd=pfd)
             except OSError:
-                restored = _rename_noreplace(pfd, cap, pfd, _name)
-            if not restored:
-                sys.stderr.write(
-                    "[tier5-cleanup] WARN: preserved foreign"
-                    " entry as %s/%s\n" % (_parent, cap))
+                tfd = -1
+            else:
+                _st = os.fstat(tfd)
+                if not (stat.S_ISDIR(_st.st_mode)
+                        and _st.st_uid == os.geteuid()
+                        and _st.st_mode & 0o777 == 0o700):
+                    os.close(tfd)
+                    tfd = -1
+            if tfd >= 0:
+                try:
+                    os.rename(_name, "v", src_dir_fd=pfd,
+                              dst_dir_fd=tfd)
+                except OSError:
+                    pass
+                else:
+                    try:
+                        st = os.stat("v", dir_fd=tfd,
+                                     follow_symlinks=False)
+                    except OSError:
+                        st = None
+                    if st is not None and stat.S_ISREG(st.st_mode) \
+                            and (st.st_dev, st.st_ino) == _want:
+                        os.unlink("v", dir_fd=tfd)
+                        rc = 0
+                    elif st is not None:
+                        restored = False
+                        try:
+                            os.link("v", _name, src_dir_fd=tfd,
+                                    dst_dir_fd=pfd,
+                                    follow_symlinks=False)
+                            os.unlink("v", dir_fd=tfd)
+                            restored = True
+                        except OSError:
+                            restored = _rename_noreplace(
+                                tfd, "v", pfd, _name)
+                        if not restored:
+                            sys.stderr.write(
+                                "[tier5-cleanup] WARN: preserved"
+                                " foreign entry in %s/%s\n"
+                                % (_parent, cap))
+        finally:
+            if tfd >= 0:
+                os.close(tfd)
+            try:
+                os.rmdir(cap, dir_fd=pfd)
+            except OSError:
+                pass
 finally:
     os.close(pfd)
 sys.exit(rc)
