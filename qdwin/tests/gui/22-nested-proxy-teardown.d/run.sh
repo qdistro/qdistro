@@ -91,6 +91,22 @@ qd22_assert_same_compositor() {   # <id>
     fi
 }
 
+# Poll the compositor journal since <cursor> for the unconditional
+# ground-truth line `qdwin: focus handle=<h> ` (trailing space: the line is
+# `handle=%u (was %u)`). A failed journal READ counts as "not yet" here --
+# the caller's own read afterwards decides read-failure vs absence.
+qd22_wait_focus() {   # <handle> <cursor> [tries]
+    local h=$1 c=$2 n=${3:-20} _
+    for _ in $(seq 1 "$n"); do
+        if qd22_journal_since "$c" \
+            && printf '%s\n' "$QD22_JOURNAL" | grep -q "qdwin: focus handle=$h "; then
+            return 0
+        fi
+        sleep 0.25
+    done
+    return 1
+}
+
 # Reap S3's popup probe. Exit 0 only when nothing of ours can be running.
 #
 # The hard case is a launcher that has been BACKGROUNDED but not yet reached
@@ -207,10 +223,17 @@ qd22_cleanup() {
     if [ -n "${QD22_RUN:-}" ]; then
         qd22_reap_probe || { reaped=failed
             qd22_assert T.0 FAIL "could not reap the popup probe -- it may still hold the shell role"; }
-        # S4's terminal, matched on the per-run title. The bracket stops `pkill -f`
-        # matching the guest-agent shell running it; harmless if S4 never ran.
+        # S1.5's receipt windows and S4's terminal, matched on the per-run
+        # titles. The brackets stop `pkill -f` matching the guest-agent
+        # shell running it; harmless if either never ran. TERM then KILL:
+        # a client blocked in wl_display_dispatch never runs its TERM
+        # handler.
         "$QDWIN_VM_EXEC" "$VMNAME" \
-          "pkill -u admin -f \"qd22-af[t]er-$QD22_RUN\" 2>/dev/null" >/dev/null 2>&1 || true
+          "pkill -TERM -u admin -f \"qd22-s1[ab]-$QD22_RUN\" 2>/dev/null; \
+           pkill -TERM -u admin -f \"qd22-af[t]er-$QD22_RUN\" 2>/dev/null; \
+           sleep 1; \
+           pkill -KILL -u admin -f \"qd22-s1[ab]-$QD22_RUN\" 2>/dev/null; \
+           pkill -KILL -u admin -f \"qd22-af[t]er-$QD22_RUN\" 2>/dev/null" >/dev/null 2>&1 || true
     fi
     # The run record marks an UNCLEAN exit for the next runner; a clean reap
     # retires it (only if it still names this run).
@@ -292,6 +315,369 @@ qd22_on_exit() {
     qd22_cleanup
     qd22_summary; rc=$?
     exit "$rc"
+}
+
+# ------------------------------------------------------------- S1.5 parts
+# Release ordering + pointer receipt for S1. S1 proves liveness only: the
+# probe cannot observe the pointer grab, and a grab leaked past the
+# teardown is invisible to every assertion above -- keyboard input (S4)
+# bypasses pointer grabs entirely. While installed, the move grab's button
+# callback eats EVERY press AND release (none reach the default grab's
+# click-focus pick), and only a RELEASE ends it, so a leaked grab silently
+# swallows exactly one click.
+#
+# The compositor journal carries the grab's whole lifecycle:
+#   qdwin: begin_interactive_move handle=H anchor=(...)   grab started
+#   qdwin: cancelling move-drag handle=H (toplevel/shell gone)
+#                                                       qdwin_move_grab_
+#                                                       end_for ran
+#   qdwin: end_interactive_move handle=H                grab ended by a
+#                                                       button release
+#   qdwin: shell unbound                                probe disconnected
+# The probe is BOTH the advertiser and the bound shell on one wl_client,
+# so a grab the destroy path failed to release is still ended when the
+# probe's own disconnect tears down the shell resource -- but
+# qdwin_shell_resource_destroy clears it INLINE and logs nothing.
+# 'cancelling move-drag' is emitted ONLY by qdwin_move_grab_end_for, and
+# for this proxy the only caller in play is the destroy path
+# (qdwin_toplevel_release_dependents; the other callers -- ordinary
+# desktop-surface removal and the output-boundary teardown -- do not run
+# here). The line's presence therefore attributes the release to the
+# destroy itself; its absence once the probe's 'shell unbound' has been
+# seen means the disconnect's silent clear ended the drag instead.
+
+# Asserts 1.4 (a real drag started) and 1.5 (release ordering). Polls for
+# the probe's 'shell unbound' first -- journald ingestion can lag the
+# probe's exit, so a single read can see an empty window while the whole
+# lifecycle is still in flight. The unbound line is also the lifecycle's
+# end: once it lands, every earlier line has been emitted.
+qd22_s15_ordering() {   # <cursor>
+    local unbound=0 ok=0 _
+    for _ in $(seq 1 40); do
+        if qd22_journal_since "$1"; then
+            ok=1
+            printf '%s\n' "$QD22_JOURNAL" \
+                | grep -qE '^qdwin: shell unbound$' && { unbound=1; break; }
+        fi
+        sleep 0.25
+    done
+    if [ "$ok" != 1 ]; then
+        qd22_assert 1.4 ERROR "could not read the compositor journal -- the grab-ordering assertions were not made"
+        return 0
+    fi
+    if printf '%s\n' "$QD22_JOURNAL" | grep -qE 'qdwin: begin_interactive_move handle=[0-9]+ anchor='; then
+        qd22_assert 1.4 PASS "begin_interactive_move started a live drag on the proxy (anchor line since the step began)"
+    elif printf '%s\n' "$QD22_JOURNAL" | grep -qE 'qdwin: begin_interactive_move handle=[0-9]+ ignored'; then
+        qd22_assert 1.4 ERROR "begin_interactive_move was IGNORED (journal line above) -- the drag never started, so S1's rc=0 did not exercise teardown-under-drag"
+        return 0
+    elif [ "$unbound" = 1 ]; then
+        qd22_assert 1.4 ERROR "the probe reached disconnect but no begin_interactive_move line exists -- the drag never started, so S1's rc=0 did not exercise teardown-under-drag"
+        return 0
+    else
+        qd22_assert 1.4 ERROR "no begin_interactive_move line and no 'shell unbound' within 10s -- cannot tell whether the drag started"
+        return 0
+    fi
+    if [ "$unbound" != 1 ]; then
+        qd22_assert 1.5 ERROR "the probe's 'shell unbound' never appeared -- the release-attribution check could not be made"
+        return 0
+    fi
+    if printf '%s\n' "$QD22_JOURNAL" | grep -q 'qdwin: cancelling move-drag'; then
+        qd22_assert 1.5 PASS "'cancelling move-drag' is in the journal -- qdwin_move_grab_end_for ran at the destroy (the disconnect path clears the grab silently)"
+    else
+        qd22_assert 1.5 FAIL "no 'cancelling move-drag' line -- the destroy path did not release the grab; the probe's own disconnect cleared it silently (qdwin_shell_resource_destroy) or it is still installed (the receipt click below decides)"
+    fi
+}
+
+# Kill the receipt windows by their per-run titles. Nothing more can be
+# waited on when the handles never resolved. TERM first, KILL a second
+# later: qdistro-test-window's TERM handler only clears its run flag while
+# the main loop stays blocked in wl_display_dispatch (agent-click-smoke.sh
+# uses -KILL for the same reason).
+qd22_s15_kill_receipt_windows() {
+    "$QDWIN_VM_EXEC" "$VMNAME" \
+      "pkill -TERM -u admin -f 'qd22-s1[ab]-$QD22_RUN' 2>/dev/null; \
+       sleep 1; \
+       pkill -KILL -u admin -f 'qd22-s1[ab]-$QD22_RUN' 2>/dev/null" >/dev/null 2>&1 || true
+}
+
+# Kill the receipt windows and wait for both `toplevel_removed` lines --
+# they must be gone before S3 grades pixels, since a leftover floating
+# window could sit inside the proxy's frame (assert 1.9).
+qd22_s15_cleanup_receipt_windows() {   # <cursor_recv> <handle_a> <handle_b>
+    qd22_s15_kill_receipt_windows
+    local gone=0 _ ra=0 rb=0
+    for _ in $(seq 1 40); do
+        if qd22_journal_since "$1"; then
+            ra=$(printf '%s\n' "$QD22_JOURNAL" | grep -c "qdwin: toplevel_removed handle=$2\$")
+            rb=$(printf '%s\n' "$QD22_JOURNAL" | grep -c "qdwin: toplevel_removed handle=$3\$")
+            [ "$ra" -ge 1 ] && [ "$rb" -ge 1 ] && { gone=1; break; }
+        fi
+        sleep 0.25
+    done
+    if [ "$gone" = 1 ]; then
+        qd22_assert 1.9 PASS "receipt windows removed (toplevel_removed for handles $2/$3) -- nothing left to occlude S3's frame"
+    else
+        qd22_assert 1.9 ERROR "a receipt window did not die within 10s (A=$2 B=$3) -- it may still occlude S3's frame"
+    fi
+}
+
+# qdwin_mouse_move* discard the QMP reply and virsh exits 0 on a
+# {"error":...} reply, so neither output nor status alone proves an
+# event was accepted. These variants validate the reply body the same
+# way qd22_type does.
+qd22_qmp_input() {   # <events-json>
+    local reply
+    reply=$($QDWIN_VIRSH qemu-monitor-command "$VMNAME" \
+        "{\"execute\": \"input-send-event\", \"arguments\": {\"events\": [$1]}}" 2>&1) \
+        && [[ "$reply" == *'"return"'* ]] && [[ "$reply" != *'"error"'* ]]
+}
+qd22_abs_move() {   # <x> <y> -- reply-checked qdwin_mouse_move
+    local ax=$(( $1 * 32767 / QDWIN_SCREEN_W ))
+    local ay=$(( $2 * 32767 / QDWIN_SCREEN_H ))
+    qd22_qmp_input \
+      "{\"type\":\"abs\",\"data\":{\"axis\":\"x\",\"value\":$ax}}, \
+       {\"type\":\"abs\",\"data\":{\"axis\":\"y\",\"value\":$ay}}"
+}
+qd22_abs_btn() {   # <x> <y> <btn> <down|up> -- reply-checked move+button
+    local ax=$(( $1 * 32767 / QDWIN_SCREEN_W ))
+    local ay=$(( $2 * 32767 / QDWIN_SCREEN_H ))
+    local down=true
+    [ "$4" = up ] && down=false
+    qd22_qmp_input \
+      "{\"type\":\"abs\",\"data\":{\"axis\":\"x\",\"value\":$ax}}, \
+       {\"type\":\"abs\",\"data\":{\"axis\":\"y\",\"value\":$ay}}, \
+       {\"type\":\"btn\",\"data\":{\"button\":\"$3\",\"down\":$down}}"
+}
+# qdwin_click swallows each QMP call's status (its rc is the final
+# sleep's). This variant checks every injection's QMP reply so a FAILED
+# injection is distinguishable from a delivered-but-eaten click --
+# without it the receipt can accuse a consumer of clicks that were
+# never injected.
+# rc 1: the press itself was not delivered (move or button-down failed).
+# rc 2: the press WAS delivered but the release failed -- a pick line may
+# legitimately exist, so rc 2 cannot be read as "nothing was injected".
+qd22_click_checked() {   # <x> <y> [btn]
+    qd22_abs_move "$1" "$2" || return 1
+    sleep 0.05
+    qd22_abs_btn "$1" "$2" "${3:-left}" down || return 1
+    sleep 0.05
+    qd22_abs_btn "$1" "$2" "${3:-left}" up || return 2
+    sleep 0.05
+}
+
+# Resolve one receipt window: its pid (pgrep -f on the per-run title, with
+# the bracket trick against the remote shell's own cmdline, comm filtered
+# to the truncated client name so the launcher's `sh -c` wrapper is
+# excluded), its toplevel handle from the compositor's own
+# `toplevel_added ... pid=` line, and its placed rect from the
+# `mapped ... pos=` line. Echoes "PID HANDLE X Y W H"; return codes split
+# the failure stages for the caller's assert text:
+#   0 ok   1 no client process   2 process but no toplevel_added
+#   3 toplevel but no mapped/pos line   4 journal unreadable at the end
+qd22_s15_resolve_window() {   # <argv-pattern> <cursor>
+    local pat=$1 cur=$2 pid='' h='' g='' _
+    for _ in $(seq 1 40); do
+        [ -z "$pid" ] && pid=$("$QDWIN_VM_EXEC" "$VMNAME" \
+          "for p in \$(pgrep -u admin -f '$pat'); do \
+             [ \"\$(cat /proc/\$p/comm 2>/dev/null)\" = qdistro-test-wi ] && echo \$p; done | head -1")
+        if qd22_journal_since "$cur"; then
+            [ -n "$pid" ] && [ -z "$h" ] && h=$(printf '%s\n' "$QD22_JOURNAL" \
+              | sed -nE "s/.*qdwin: toplevel_added handle=([0-9]+) uid=[0-9]+ pid=$pid( .*)?\$/\\1/p" | tail -1)
+            [ -n "$h" ] && [ -z "$g" ] && g=$(printf '%s\n' "$QD22_JOURNAL" \
+              | sed -nE "s/.*qdwin: mapped handle=$h size=([0-9]+)x([0-9]+) pos=(-?[0-9]+),(-?[0-9]+) .*/\3 \4 \1 \2/p" | tail -1)
+        fi
+        [ -n "$pid" ] && [ -n "$h" ] && [ -n "$g" ] && { echo "$pid $h $g"; return 0; }
+        sleep 0.5
+    done
+    # One authoritative final read before any verdict: --after-cursor
+    # returns the whole window retroactively, so a successful read here
+    # sees every line the polls saw plus anything logged since. Without
+    # it, rc 1/2/3 could rest on a window last read long ago -- a poll
+    # that succeeded early then failed throughout would grade stale
+    # evidence as a product failure.
+    qd22_journal_since "$cur" || return 4
+    [ -n "$pid" ] && [ -z "$h" ] && h=$(printf '%s\n' "$QD22_JOURNAL" \
+      | sed -nE "s/.*qdwin: toplevel_added handle=([0-9]+) uid=[0-9]+ pid=$pid( .*)?\$/\\1/p" | tail -1)
+    [ -n "$h" ] && [ -z "$g" ] && g=$(printf '%s\n' "$QD22_JOURNAL" \
+      | sed -nE "s/.*qdwin: mapped handle=$h size=([0-9]+)x([0-9]+) pos=(-?[0-9]+),(-?[0-9]+) .*/\3 \4 \1 \2/p" | tail -1)
+    [ -n "$pid" ] && [ -n "$h" ] && [ -n "$g" ] && { echo "$pid $h $g"; return 0; }
+    if [ -z "$pid" ]; then return 1; fi
+    if [ -z "$h" ]; then return 2; fi
+    return 3
+}
+
+# Asserts 1.6-1.9: the client-visible receipt. Two ordinary test windows
+# map one AFTER the other -- serialised, never concurrent: autofocus
+# retargets the keyboard to each new toplevel, so B must map LAST for
+# 'focus handle=<B>' to be the stable end state. A slow A mapping after
+# B would steal focus and make the receipt's own click a no-op.
+#
+# The click on A is aimed at a point inside A's rect and OUTSIDE B's
+# (both geoms from the compositor's `mapped` lines -- the probe's unbind
+# resets placement to cascade, and a cascading B can cover A's centre).
+# ONE click, graded on the journal after it:
+#
+#   move-grab swallowed ...    FAIL -- a stale move grab ate the click
+#   end_interactive_move       FAIL -- a live leaked grab ate the click
+#   no click-focus pick        FAIL -- the press never reached the
+#                                     default grab
+#   pick -> not A              FAIL -- mispick
+#   pick -> A, no focus=A      FAIL -- resolved but did not focus
+#     after it
+#   pick -> A, focus=A after   PASS
+#
+# Injection failures (QMP error reply) and an unreadable journal are
+# ERROR. qdwin logs the pick and sets focus synchronously in one press
+# dispatch, so no finer ordering/attribution is graded (see
+# todo/reviews/qd22-s15-loop/ for why the multi-click classifier was cut).
+qd22_s15_receipt() {
+    if ! "$QDWIN_VM_EXEC" "$VMNAME" 'command -v qdistro-test-window >/dev/null 2>&1'; then
+        qd22_assert 1.6 ERROR "qdistro-test-window not installed on the VM -- a core test client (built by qdwin's meson test-client targets), so its absence is a deployment/bake regression; the pointer receipt could not run"
+        return 0
+    fi
+    local win_a="qd22-s1a-$QD22_RUN" win_b="qd22-s1b-$QD22_RUN"
+    local cursor_recv
+    cursor_recv=$(qdwin_apps_journal_cursor)
+    [ -n "$cursor_recv" ] || { qd22_assert 1.6 ERROR "empty compositor journal cursor for the receipt windows"; return 0; }
+    local ra rb pid_a handle_a ax ay aw ah pid_b handle_b bx by bw bh
+    if ! qdwin_apps_launch qd22-s1a "qdistro-test-window --title $win_a --width 520 --height 360"; then
+        qd22_assert 1.6 ERROR "could not launch receipt window A -- see /tmp/qd22-s1a.log in the guest"
+        qd22_s15_kill_receipt_windows
+        return 0
+    fi
+    ra=$(qd22_s15_resolve_window "qd22-s1[a]-$QD22_RUN" "$cursor_recv"); local rrc=$?
+    if [ "$rrc" != 0 ]; then
+        case $rrc in
+            1) qd22_assert 1.6 ERROR "receipt window A never started (no qdistro-test-wi process with title '$win_a') -- see /tmp/qd22-s1a.log in the guest; not a compositor verdict" ;;
+            2) qd22_assert 1.6 FAIL "receipt window A runs but the compositor logged no toplevel_added for it -- an ordinary toplevel must still be admitted after the teardown" ;;
+            3) qd22_assert 1.6 FAIL "receipt window A was admitted (toplevel_added logged) but the compositor never logged its 'mapped ... pos=' line -- an ordinary toplevel must be placed after the teardown" ;;
+            *) qd22_assert 1.6 ERROR "the compositor journal was unreadable throughout window A's resolution -- its admission/mapping evidence cannot be judged" ;;
+        esac
+        qd22_s15_kill_receipt_windows
+        return 0
+    fi
+    read -r pid_a handle_a ax ay aw ah <<<"$ra"
+    if ! qdwin_apps_launch qd22-s1b "qdistro-test-window --title $win_b --width 300 --height 180"; then
+        qd22_assert 1.6 ERROR "could not launch receipt window B -- see /tmp/qd22-s1b.log in the guest"
+        qd22_s15_kill_receipt_windows
+        return 0
+    fi
+    rb=$(qd22_s15_resolve_window "qd22-s1[b]-$QD22_RUN" "$cursor_recv"); local rrc=$?
+    if [ "$rrc" != 0 ]; then
+        case $rrc in
+            1) qd22_assert 1.6 ERROR "receipt window B never started (no qdistro-test-wi process with title '$win_b') -- see /tmp/qd22-s1b.log in the guest; not a compositor verdict" ;;
+            2) qd22_assert 1.6 FAIL "receipt window B runs but the compositor logged no toplevel_added for it -- an ordinary toplevel must still be admitted after the teardown" ;;
+            3) qd22_assert 1.6 FAIL "receipt window B was admitted (toplevel_added logged) but the compositor never logged its 'mapped ... pos=' line -- an ordinary toplevel must be placed after the teardown" ;;
+            *) qd22_assert 1.6 ERROR "the compositor journal was unreadable throughout window B's resolution -- its admission/mapping evidence cannot be judged" ;;
+        esac
+        qd22_s15_kill_receipt_windows
+        return 0
+    fi
+    read -r pid_b handle_b bx by bw bh <<<"$rb"
+    qd22_assert 1.6 PASS "receipt windows mapped after the teardown, handles A=$handle_a B=$handle_b (pids $pid_a/$pid_b)"
+    # The click must cause a TRANSITION: autofocus put the keyboard on B
+    # when it mapped, so B focused is the precondition that makes a later
+    # 'focus handle=<A>' a receipt rather than a no-op. Autofocus can only
+    # fire at map, both windows are mapped, so the LAST focus line is the
+    # stable state -- it must be B's.
+    if ! qd22_wait_focus "$handle_b" "$cursor_recv" 20; then
+        # The poll saw no focus line -- but a poll-time read failure and
+        # a real absence look identical from inside the wait. The final
+        # read is authoritative: --after-cursor returns the whole window
+        # retroactively, so a successful read here settles it either way.
+        if ! qd22_journal_since "$cursor_recv"; then
+            qd22_assert 1.7 ERROR "the compositor journal could not be read after the autofocus wait -- 'autofocus absent' is indistinguishable from unread evidence"
+            qd22_s15_cleanup_receipt_windows "$cursor_recv" "$handle_a" "$handle_b"
+            return 0
+        fi
+        if ! printf '%s\n' "$QD22_JOURNAL" | grep -q "qdwin: focus handle=$handle_b "; then
+            qd22_assert 1.7 FAIL "the second receipt window mapped but autofocus never moved the keyboard to it (no 'focus handle=$handle_b' since map) -- a mapped ordinary toplevel must take focus"
+            qd22_s15_cleanup_receipt_windows "$cursor_recv" "$handle_a" "$handle_b"
+            return 0
+        fi
+    fi
+    sleep 0.3
+    if ! qd22_journal_since "$cursor_recv"; then
+        qd22_assert 1.7 ERROR "could not read the compositor journal for the last-focus check -- the focus order cannot be judged"
+        qd22_s15_cleanup_receipt_windows "$cursor_recv" "$handle_a" "$handle_b"
+        return 0
+    fi
+    local last_focus
+    last_focus=$(printf '%s\n' "$QD22_JOURNAL" \
+      | sed -nE 's/.*qdwin: focus handle=([0-9]+) .*/\1/p' | tail -1)
+    if [ "$last_focus" != "$handle_b" ]; then
+        qd22_assert 1.7 FAIL "the last focus target is '${last_focus:-none}', not B=$handle_b -- focus went somewhere other than the newly-mapped toplevel"
+        qd22_s15_cleanup_receipt_windows "$cursor_recv" "$handle_a" "$handle_b"
+        return 0
+    fi
+    qd22_assert 1.7 PASS "window B holds the last focus ('focus handle=$handle_b') -- A is unfocused, so a click on A must produce a transition"
+    # Aim: the uncovered candidate inside A's rect farthest from B's
+    # centre. B (300x180) is smaller than A (520x360) in BOTH dims, so at
+    # least one corner is always uncovered -- covering all four would
+    # need B wider AND taller than A.
+    local cx_b=$(( bx + bw/2 )) cy_b=$(( by + bh/2 ))
+    local px='' py='' cand cx cy d best_d=-1
+    for cand in "$((ax + aw/2)) $((ay + ah/2))" \
+                "$((ax + 10)) $((ay + 10))" \
+                "$((ax + aw - 10)) $((ay + 10))" \
+                "$((ax + 10)) $((ay + ah - 10))" \
+                "$((ax + aw - 10)) $((ay + ah - 10))"; do
+        cx=${cand% *}; cy=${cand#* }
+        if [ "$cx" -ge "$bx" ] && [ "$cx" -lt $((bx + bw)) ] \
+           && [ "$cy" -ge "$by" ] && [ "$cy" -lt $((by + bh)) ]; then
+            continue
+        fi
+        d=$(( (cx - cx_b) * (cx - cx_b) + (cy - cy_b) * (cy - cy_b) ))
+        if [ "$d" -gt "$best_d" ]; then best_d=$d; px=$cx; py=$cy; fi
+    done
+    if [ -z "$px" ]; then
+        qd22_assert 1.8 ERROR "every aim candidate inside A's rect ($ax,$ay ${aw}x${ah}) is covered by B ($bx,$by ${bw}x${bh}) -- cannot aim the receipt click"
+        qd22_s15_cleanup_receipt_windows "$cursor_recv" "$handle_a" "$handle_b"
+        return 0
+    fi
+    local cursor_click
+    cursor_click=$(qdwin_apps_journal_cursor)
+    [ -n "$cursor_click" ] || { qd22_assert 1.8 ERROR "empty journal cursor for the receipt click"; \
+        qd22_s15_cleanup_receipt_windows "$cursor_recv" "$handle_a" "$handle_b"; return 0; }
+    if ! qd22_click_checked "$px" "$py" left; then
+        qd22_assert 1.8 ERROR "could not inject the receipt click at ($px,$py) (virsh/QMP error) -- undecidable, not a product verdict"
+        qd22_s15_cleanup_receipt_windows "$cursor_recv" "$handle_a" "$handle_b"
+        return 0
+    fi
+    qd22_wait_focus "$handle_a" "$cursor_click" 20 || true
+    if ! qd22_journal_since "$cursor_click"; then
+        qd22_assert 1.8 ERROR "could not read the compositor journal for the receipt click -- pick/focus evidence is unreadable, not absent"
+        qd22_s15_cleanup_receipt_windows "$cursor_recv" "$handle_a" "$handle_b"
+        return 0
+    fi
+    printf '%s\n' "$QD22_JOURNAL" \
+      | grep -E 'click-focus pick|focus handle=|end_interactive_move|move-grab swallowed' \
+      | tail -20 || true
+    # The compositor logs the pick and then the focus change synchronously
+    # in one press dispatch, so "pick -> A, then focus handle=A" is the
+    # whole receipt. The first pick line is the click's; no attribution
+    # beyond that is needed for one injected press.
+    local pick ph pfocus=''
+    pick=$(printf '%s\n' "$QD22_JOURNAL" \
+      | sed -nE 's/.*qdwin: click-focus pick pos=(-?[0-9]+),(-?[0-9]+) -> handle=([0-9]+).*/\1 \2 \3/p' \
+      | head -1)
+    ph=${pick##* }
+    [ -n "$pick" ] && printf '%s\n' "$QD22_JOURNAL" \
+      | sed -n '/qdwin: click-focus pick/,$p' | grep -q "qdwin: focus handle=$handle_a " && pfocus=1
+    if printf '%s\n' "$QD22_JOURNAL" | grep -q 'move-grab swallowed button'; then
+        qd22_assert 1.8 FAIL "a move grab is installed with move_grab_active=0 and ate the click ('move-grab swallowed button' above)"
+    elif printf '%s\n' "$QD22_JOURNAL" | grep -q 'qdwin: end_interactive_move'; then
+        qd22_assert 1.8 FAIL "a move grab outlived the teardown and ate the click ('end_interactive_move' on its release)"
+    elif [ -z "$pick" ]; then
+        qd22_assert 1.8 FAIL "the click at ($px,$py) was accepted by QMP but produced no 'click-focus pick' -- it never reached the default grab (pointer transit was proven at 0.2)"
+    elif [ "$ph" != "$handle_a" ]; then
+        qd22_assert 1.8 FAIL "the click at A's aim point ($px,$py) picked handle=$ph, not A=$handle_a ('$pick')"
+    elif [ -z "$pfocus" ]; then
+        qd22_assert 1.8 FAIL "the click picked A=$handle_a but no 'focus handle=$handle_a' followed it"
+    else
+        qd22_assert 1.8 PASS "the receipt click picked and focused handle=$handle_a at ($px,$py) -- no pointer grab outlived the teardown"
+    fi
+    qd22_s15_cleanup_receipt_windows "$cursor_recv" "$handle_a" "$handle_b"
 }
 
 # ------------------------------------------------------------------ S3 parts
@@ -644,6 +1030,14 @@ esac
 qd22_assert_same_compositor 1.2
 qd22_assert_no_fault 1.3 "$CURSOR"
 
+# S1.5: the pointer oracle S1 alone lacks -- ordering evidence that the
+# move grab was released by the destroy path (not the probe's own
+# disconnect), and a client-visible receipt: the FIRST pointer click
+# after the teardown must still produce a focus transition on an
+# ordinary window. Runs before S2 so no later grab can mask the defect.
+qd22_s15_ordering "$CURSOR"
+qd22_s15_receipt
+
 # ------------------------------------------------------------------ S2
 echo "=== S2: destroy under a LIVE view_stream"
 CURSOR=$(qdwin_apps_journal_cursor)
@@ -764,7 +1158,12 @@ qd22_assert_no_fault 3.6 "$CURSOR"
 echo "=== S4: KEYBOARD input still reaches an ordinary window"
 QD22_TERM_TITLE="qd22-after-$QD22_RUN"
 if ! "$QDWIN_VM_EXEC" "$VMNAME" 'command -v foot >/dev/null 2>&1'; then
-    qd22_assert 4 SKIP "foot not installed (qdwin app deps are opt-in; rerun with QDWIN_APP_DEPS=1) -- with S4 skipped nothing here proves input survived the teardowns"
+    # foot is a CORE test client, always baked into the golden by
+    # fresh-vm-bootstrap.sh ('Core test clients (ALWAYS)' -- it lands in
+    # _core_missing, not the opt-in app-deps set). Its absence is an
+    # image/bake regression and S4's input oracle could not run: ERROR,
+    # never SKIP.
+    qd22_assert 4.0 ERROR "foot not installed -- a CORE test client missing from the golden (fresh-vm-bootstrap.sh _core_missing); S4 could not run"
 else
     CURSOR=$(qdwin_apps_journal_cursor)
     qdwin_apps_become_shell || qd22_abort 4.0 "could not take the shell role back"

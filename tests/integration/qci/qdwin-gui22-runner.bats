@@ -343,6 +343,69 @@ EOF
 }
 
 # ------------------------------------------------------------ structure
+@test "sourcing run.sh as a library also defines the S1.5 parts" {
+    declare -F qd22_s15_ordering qd22_s15_receipt qd22_wait_focus \
+        qd22_s15_resolve_window qd22_click_checked \
+        qd22_s15_kill_receipt_windows qd22_s15_cleanup_receipt_windows >/dev/null
+}
+
+@test "run.sh runs the ordering check and the pointer receipt between S1 and S2" {
+    local s1 ord recv s2
+    s1=$(grep -n 'qd22_probe --destroy-with-move' "$RUNSH" | head -1 | cut -d: -f1)
+    ord=$(grep -n '^qd22_s15_ordering "\$CURSOR"$' "$RUNSH" | head -1 | cut -d: -f1)
+    recv=$(grep -n '^qd22_s15_receipt$' "$RUNSH" | head -1 | cut -d: -f1)
+    s2=$(grep -n 'qd22_probe --destroy-with-stream' "$RUNSH" | head -1 | cut -d: -f1)
+    [ -n "$s1" ] && [ -n "$ord" ] && [ -n "$recv" ] && [ -n "$s2" ]
+    [ "$s1" -lt "$ord" ] && [ "$ord" -lt "$recv" ] && [ "$recv" -lt "$s2" ]
+}
+
+@test "the receipt maps window A fully before launching B (autofocus serialization)" {
+    local la ra lb
+    la=$(grep -n 'qdwin_apps_launch qd22-s1a ' "$RUNSH" | head -1 | cut -d: -f1)
+    ra=$(grep -n 'qd22_s15_resolve_window "qd22-s1\[a\]' "$RUNSH" | head -1 | cut -d: -f1)
+    lb=$(grep -n 'qdwin_apps_launch qd22-s1b ' "$RUNSH" | head -1 | cut -d: -f1)
+    [ -n "$la" ] && [ -n "$ra" ] && [ -n "$lb" ]
+    [ "$la" -lt "$ra" ] && [ "$ra" -lt "$lb" ]
+}
+
+@test "receipt cleanup escalates TERM to KILL (dispatch-blocked clients never run their TERM handler)" {
+    grep -q 'pkill -TERM -u admin -f .qd22-s1\[ab\]' "$RUNSH"
+    grep -q 'pkill -KILL -u admin -f .qd22-s1\[ab\]' "$RUNSH"
+}
+
+@test "the ordering check waits for 'shell unbound' before grading the snapshot" {
+    grep -q "grep -qE '\^qdwin: shell unbound\$'" "$RUNSH"
+}
+
+@test "the receipt grades the stale-grab signature and a missing pick, and checks the injection" {
+    grep -q 'move-grab swallowed button' "$RUNSH"
+    grep -q 'produced no .click-focus pick' "$RUNSH"
+    grep -q 'if ! qd22_click_checked "$px" "$py" left' "$RUNSH"
+}
+
+@test "the click check validates the QMP reply body, not just virsh's exit status" {
+    grep -q '"return"' "$RUNSH"
+    grep -q '"error"' "$RUNSH"
+    grep -q 'qd22_qmp_input' "$RUNSH"
+}
+
+@test "the receipt injects ONE click and grades every FAIL before its PASS" {
+    [ "$(grep -c 'qd22_click_checked "' "$RUNSH")" -eq 1 ]
+    local fp last_fail
+    fp=$(grep -n 'PASS "the receipt click picked and focused' "$RUNSH" | head -1 | cut -d: -f1)
+    last_fail=$(grep -n 'qd22_assert 1.8 FAIL' "$RUNSH" | tail -1 | cut -d: -f1)
+    [ -n "$fp" ] && [ -n "$last_fail" ]
+    [ "$last_fail" -lt "$fp" ]
+}
+
+@test "run.sh records a missing foot (a core test client) as ERROR, never SKIP" {
+    local row
+    row=$(grep -n 'qd22_assert .*foot not installed' "$RUNSH" | head -1)
+    [ -n "$row" ]
+    [[ "$row" == *ERROR* ]]
+    [[ "$row" != *SKIP* ]]
+}
+
 @test "run.sh primes the pointer after taking the shell role and before S1's probe" {
     local take prime s1
     take=$(grep -n '^qdwin_apps_prepare_shell_probe' "$RUNSH" | head -1 | cut -d: -f1)
