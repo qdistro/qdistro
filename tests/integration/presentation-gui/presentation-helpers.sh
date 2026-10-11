@@ -15,6 +15,7 @@
 #   pres_kill_apps              stop every first-party app this file starts
 #   pres_output_scale           integer wl_output scale of Virtual-1
 #   pres_window_handle <name>   qdwin toplevel handle of an app's window
+#   pres_wait_window_front <name> [s]  wait until mapped and focused
 #   pres_focus_app <name>       focus (not raise) an app's window
 #   pres_click_keep_changes     click "Keep changes" in the display confirm
 #                               dialog (call right after Apply)
@@ -121,6 +122,33 @@ pres_window_handle() {
     pres_admin "journalctl --user -u qdwin-compositor.service -b --no-pager 2>/dev/null" \
         | grep -E "qdwin: toplevel_added handle=[0-9]+ uid=1000 pid=$pid( |$)" \
         | tail -n 1 | sed -nE 's/.*handle=([0-9]+).*/\1/p'
+}
+
+# A detached launch returning, or even pgrep finding its PID, does not mean
+# its window has appeared. In particular qdbrowser can finish mapping after
+# the next app has already opened, stealing focus from that app. Wait for the
+# compositor's normal map and the latest focus event before taking a frame or
+# sending keyboard input. Do not try to raise a covered window here.
+pres_wait_window_front() {
+    local name=$1 limit=${2:-40} deadline handle= journal= focus=
+    deadline=$((SECONDS + limit))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        handle=$(pres_window_handle "$name" 2>/dev/null) || handle=
+        if [ -n "$handle" ]; then
+            journal=$(pres_admin "journalctl --user -u qdwin-compositor.service -b --no-pager 2>/dev/null") || journal=
+            if grep -Eq "qdwin: mapped handle=$handle .*\(normal\)" <<<"$journal"; then
+                focus=$(sed -nE 's/.*qdwin: focus handle=([0-9]+).*/\1/p' <<<"$journal" | tail -n 1)
+                if [ "$focus" = "$handle" ]; then
+                    printf 'pres_wait_window_front: %s mapped and focused (handle=%s)\n' "$name" "$handle"
+                    return 0
+                fi
+            fi
+        fi
+        sleep 0.5
+    done
+    printf 'pres_wait_window_front: %s not mapped and focused after %ss (handle=%s, latest_focus=%s)\n' \
+        "$name" "$limit" "${handle:-none}" "${focus:-none}" >&2
+    return 1
 }
 
 # pres_focus_app <name> — FOCUS the app's newest window (qdwin focusWindow).
