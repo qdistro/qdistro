@@ -442,6 +442,9 @@ class QdistroPolkitAgent(dbus.service.Object):
         # relay a response. Bounded — cookies are single-use nonces.
         self._cancel_lock = threading.Lock()
         self._cancelled_cookies: dict[str, None] = {}
+        # cookie -> the Event its worker parks on in _wait_for_decision,
+        # so a cancel releases the worker even if the broker relay fails.
+        self._waiters: dict[str, threading.Event] = {}
 
     def _note_cancelled(self, cookie: str) -> None:
         with self._cancel_lock:
@@ -454,6 +457,12 @@ class QdistroPolkitAgent(dbus.service.Object):
     def _is_cancelled(self, cookie: str) -> bool:
         with self._cancel_lock:
             return cookie in self._cancelled_cookies
+
+    def _wake_waiter(self, cookie: str) -> None:
+        with self._cancel_lock:
+            ev = self._waiters.get(cookie)
+        if ev is not None:
+            ev.set()
 
     # -- broker delegation (the v1 path) ----------------------------------
 
@@ -545,8 +554,7 @@ class QdistroPolkitAgent(dbus.service.Object):
             f"could not retire broker request for cookie "
             f"{_scrub_value(str(cookie))}: {last}")
 
-    @staticmethod
-    def _wait_for_decision(iface, rid: int) -> bool:
+    def _wait_for_decision(self, iface, rid: int, cookie: str) -> bool:
         """WaitForDecision as an async call that the main loop completes.
 
         A blocking call from the auth worker would hold libdbus's I/O path
@@ -557,9 +565,18 @@ class QdistroPolkitAgent(dbus.service.Object):
         NetworkManager network-control auth froze the A->B->A session
         migration even with the auth on a worker thread. An async call
         hands the reply to the main loop and parks only this worker.
+        CancelAuthentication also sets the Event, so a cancel whose broker
+        relay failed still releases the worker (into the retire path).
         """
         done = threading.Event()
         out: dict = {}
+        with self._cancel_lock:
+            if cookie in self._cancelled_cookies:
+                # Cancelled between filing and waiting: retire it too.
+                raise dbus.DBusException(
+                    f"polkit cancelled the session before "
+                    f"WaitForDecision({rid})")
+            self._waiters[cookie] = done
 
         def _reply(decision) -> None:
             out["decision"] = bool(decision)
@@ -569,14 +586,24 @@ class QdistroPolkitAgent(dbus.service.Object):
             out["error"] = e
             done.set()
 
-        iface.WaitForDecision(rid, timeout=_WAIT_TIMEOUT_S,
-                              reply_handler=_reply, error_handler=_error)
-        # dbus-python fails the call itself at _WAIT_TIMEOUT_S; the margin
-        # only bounds a reply that is never dispatched at all.
-        if not done.wait(_WAIT_TIMEOUT_S + 30):
+        try:
+            iface.WaitForDecision(rid, timeout=_WAIT_TIMEOUT_S,
+                                  reply_handler=_reply, error_handler=_error)
+            # dbus-python fails the call itself at _WAIT_TIMEOUT_S; the
+            # margin only bounds a reply that is never dispatched at all.
+            woke = done.wait(_WAIT_TIMEOUT_S + 30)
+        finally:
+            with self._cancel_lock:
+                self._waiters.pop(cookie, None)
+        if not woke:
             raise dbus.DBusException(
                 f"WaitForDecision({rid}) completion never dispatched",
                 name="org.freedesktop.DBus.Error.NoReply")
+        if "error" not in out and "decision" not in out:
+            # Released by CancelAuthentication before the broker answered.
+            raise dbus.DBusException(
+                f"polkit cancelled the session while WaitForDecision({rid}) "
+                f"was pending")
         if "error" in out:
             e = out["error"]
             if isinstance(e, dbus.DBusException):
@@ -611,7 +638,7 @@ class QdistroPolkitAgent(dbus.service.Object):
             # whole time. Same generous cutoff as the media exec client.
             # `iface` is the same unique-name-bound proxy that filed the
             # request: rid only exists on that broker instance.
-            return self._wait_for_decision(iface, rid)
+            return self._wait_for_decision(iface, rid, str(cookie))
         except dbus.DBusException as e:
             self._broker = None
             syslog.syslog(
@@ -750,6 +777,7 @@ class QdistroPolkitAgent(dbus.service.Object):
         # polkitd already abandoned — and the local mark survives even
         # if the broker relay below fails.
         self._note_cancelled(str(cookie))
+        self._wake_waiter(str(cookie))
         # Forward the cancel to the broker: it decides the matching
         # queued request deny so the admin prompt does not linger and
         # this auth's WaitForDecision waiter releases.

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 from typing import ClassVar
 from unittest import mock
 
@@ -252,6 +253,7 @@ def make_agent(monkeypatch):
         a._config = []
         a._cancel_lock = threading.Lock()
         a._cancelled_cookies = {}
+        a._waiters = {}
         monkeypatch.setattr(a, "_broker_iface", lambda: broker)
         return a
     return _make
@@ -302,6 +304,32 @@ class TestBrokerDelegation:
         assert make_agent(broker)._ask_broker("qsu.exec", {}, "cookie1", []) is True
         assert broker.waited[0][1]["async_"], (
             "WaitForDecision was a blocking call from the auth worker")
+
+    def test_cancel_releases_a_parked_wait_without_the_broker(self, make_agent):
+        """CancelAuthentication's broker relay can fail; the worker parked
+        on the async wait must still be released locally (and retire the
+        request) instead of sitting out the 900s wait."""
+        broker = _RecordingBroker()
+        a = make_agent(broker)
+        pending = []
+        broker.WaitForDecision = lambda rid, **kw: pending.append(kw)
+        def no_relay(cookie, **kw):
+            raise _dbus_error("org.freedesktop.DBus.Error.NoReply")
+        broker.CancelPolkitAuth = no_relay
+        result = []
+        t = threading.Thread(target=lambda: result.append(
+            a._ask_broker("qsu.exec", {}, "cookie1", [])))
+        t.start()
+        for _ in range(200):
+            if pending:
+                break
+            time.sleep(0.01)
+        assert pending, "the wait was never issued"
+        a.CancelAuthentication("cookie1")
+        t.join(5)
+        assert not t.is_alive(), "cancel did not release the parked worker"
+        assert result == [False]
+        assert a._waiters == {}
 
     def test_filing_carries_a_bounded_timeout(self, make_agent):
         broker = _RecordingBroker()
@@ -644,6 +672,7 @@ class TestBrokerInstanceBinding:
         a._config = []
         a._cancel_lock = threading.Lock()
         a._cancelled_cookies = {}
+        a._waiters = {}
         return a
 
     def test_the_proxy_is_bound_to_the_unique_owner(self, agent):

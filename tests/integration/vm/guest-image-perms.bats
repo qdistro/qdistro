@@ -238,3 +238,29 @@ run_t5b() {
     ! grep -Eq 'chmod 0644 "\$DEST"' "$T5"
     ! grep -Eq 'chmod 0644 "\$DEST"' "$T5B"
 }
+
+# Without --mirror every builder must take the snapshot-pinned, signature-
+# verified fetch (download_verified_cloud_image on the snapshot.conf URL).
+# Under this file's shims that helper cannot produce a verified entry, so
+# the build has to fail closed before anything is customized.
+@test "builders default to the verified pinned cloud image and fail closed" {
+    local snap url b dest args
+    snap="$(sed -n 's/^snapshot=//p' "$REPO_ROOT/snapshot.conf")"
+    url="$(sed -n 's/^cloud_url=//p' "$REPO_ROOT/snapshot.conf")"
+    [ -n "$snap" ] && [ -n "$url" ]
+    for b in T4 T5 T5B; do
+        : >"$CMDLOG"
+        dest="$TMP/default-$b.qcow2"
+        args=(--force --dest "$dest")
+        [ "$b" = T4 ] && args+=(--qdwin-src "$FAKE_QDWIN" --qdistro-src "$FAKE_QDISTRO")
+        run env -u QCI_OFFLINE -u QDISTRO_REPO_BASE QDISTRO_DEPS_CACHE_DIR="$TMP/deps-$b" \
+            bash "${!b}" "${args[@]}"
+        [ "$status" -ne 0 ] || { echo "$b: default fetch did not fail closed" >&2; return 1; }
+        [[ "$output" == *"FAIL: verified cloud image ($url)"* ]] \
+            || { echo "$b: $output" >&2; return 1; }
+        ! grep -q '^wget .*base\.qcow2' "$CMDLOG" \
+            || { echo "$b: unverified floating base download" >&2; return 1; }
+        ! grep -q '^virt-customize ' "$CMDLOG" || { echo "$b: customized an unverified base" >&2; return 1; }
+        [[ "$url" == *"Snapshot$snap"* ]]
+    done
+}
