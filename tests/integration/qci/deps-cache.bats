@@ -1158,13 +1158,22 @@ SH
     [[ "$output" == *"rc=1 base=unset"* ]]
 }
 
-@test "selftest gate scrubs the offline knobs and repo-cache wiring from its bats" {
-    local repo scrub v
+@test "selftest gate strips the offline knobs and cache wiring from its bats env" {
+    local repo v
+    local -a args=()
     repo="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"
-    # The whole sf_scrub=( ... ) array, across its continuation lines.
-    scrub="$(sed -n '/local -a sf_scrub=(/,/)/p' "$repo/ci/lib/gates/selftest.sh")"
-    [ -n "$scrub" ]
-    for v in QCI_OFFLINE QDISTRO_DEPS_OFFLINE QDISTRO_REPO_BASE _QD_REPO_BASE_WIRED; do
-        grep -Eq -- "-u $v( |\)|\$)" <<<"$scrub" || { echo "selftest does not scrub $v" >&2; return 1; }
+    # shellcheck source=/dev/null
+    . "$repo/ci/lib/gates/selftest.sh"
+    qci_selftest_deps_scrub args
+    run env QCI_OFFLINE=1 QDISTRO_DEPS_OFFLINE=1 QDISTRO_REPO_BASE=http://x/ \
+        _QD_REPO_BASE_WIRED=1 QDISTRO_REPO_PROXY=0 QDISTRO_DEPS_CACHE_DIR=/nonexistent \
+        QDISTRO_SERVE_PORT=21005 KEEP_ME=1 env "${args[@]}" env
+    [ "$status" -eq 0 ]
+    for v in QCI_OFFLINE QDISTRO_DEPS_OFFLINE QDISTRO_REPO_BASE _QD_REPO_BASE_WIRED \
+             QDISTRO_REPO_PROXY QDISTRO_DEPS_CACHE_DIR QDISTRO_SERVE_PORT; do
+        ! grep -q "^$v=" <<<"$output" || { echo "selftest bats would inherit $v" >&2; return 1; }
     done
+    grep -qx 'KEEP_ME=1' <<<"$output"
+    # ...and the gate actually applies it to the nested bats.
+    grep -q '^ *qci_selftest_deps_scrub sf_scrub$' "$repo/ci/lib/gates/selftest.sh"
 }
