@@ -1156,37 +1156,44 @@ def test_registry_domain_binding_requires_recorded_disk():
 
 def test_qemu_signal_fallback_is_domain_bound():
     # ensures: the post-destroy signal path can only ever reach THIS
-    #          domain's qemu — argv tags, open disk fds, and cgroup
-    #          names are all attacker-reproducible, and a pid NUMBER
-    #          can be recycled, so signals go through a pidfd opened
-    #          while the dompid-verified process is still live. A
-    #          dead pinned process fails ESRCH; no exit+reuse window
-    #          can alias a decoy (sol r37/r38/r39)
+    #          domain's qemu — a pid NUMBER can be recycled, so the
+    #          helper runs AS ADMIN, pins the dompid with pidfd_open
+    #          FIRST, then verifies the pinned process itself (its own
+    #          cmdline argv + libvirt parentage) before any signal.
+    #          No scan result or cached boolean authorizes a signal —
+    #          the identity checked is the identity pinned, so no
+    #          exit+reuse window can alias a decoy (sol r37–r40)
     for src in (SPAWN, CLEANUP):
-        assert '_pid_in()' in src
         assert '_destroy_dompid_qemu()' in src
         # the dompid anchor is captured BEFORE destroy, while the
-        # libvirt record still exists, and cross-checked against the
-        # argv-verified name-scan before pinning
+        # libvirt record still exists
         assert 'virsh dompid "$VM_NAME"' in src
-        assert '_pid_in' in src
-        # the process is pinned by a pidfd opened while live, and
-        # signalled through pidfd_send_signal — never kill(2) on a
-        # bare number
-        assert 'pidfd_open' in src
-        assert '424, fd, n' in src          # pidfd_send_signal
-        assert '_sig(15)' in src and '_sig(9)' in src
+        # the helper runs unprivileged — signals are admin's, not
+        # root's (the r40 privilege regression must not come back)
+        assert 'run_as_admin python3 - "$1"' in src
+        assert 'T5_ADMIN_USER' not in src
+        assert '"runuser"' not in src
+        # pin-then-verify: pidfd_open precedes the pinned-process
+        # /proc verification, and signals go through
+        # pidfd_send_signal — never kill(2) on a bare number
+        h = src[src.index('_destroy_dompid_qemu()'):]
+        h = h[:h.index('\nPY\n}')]
+        assert h.index('pidfd_open') < h.index('cmdline')
+        assert '424, fd, n' in h            # pidfd_send_signal
+        assert '_sig(15)' in h and '_sig(9)' in h
+        assert 'guest=' in h and 'PPid:' in h
+        assert "'virtqemud', 'libvirtd'" in h.replace('"', "'")
         assert 'run_as_admin kill' not in src
-        # no number-based signal authority may come back
+        # no number-based signal authority may come back — no scan
+        # result or cached boolean feeds the signal decision
         assert '_pid_holds_path' not in src
         assert '_killable_qemu_pids' not in src
-    # spawn verifies the dompid is a live guest=<name> qemu before
-    # pinning, then destroys+signals through the helper
+        assert '_pok' not in src
+    # spawn captures the anchor before destroy and hands ONLY the
+    # dompid to the helper — verification happens inside, on the pin
     body = _section("reap_domain")
     assert body.index('_dpid=$(run_as_admin virsh dompid') \
-        < body.index('_destroy_dompid_qemu "$VM_NAME" "$_dpid" "$_pok"')
-    assert '_pid_in "$qpids" "$_dpid" && _pok=1' in body
+        < body.index('_destroy_dompid_qemu "$VM_NAME" "$_dpid"')
     # the helper does the same on its destroy path
     assert CLEANUP.index('_dpid=$(run_as_admin virsh dompid') \
-        < CLEANUP.index('_destroy_dompid_qemu "$VM_NAME" "$_dpid" "$_pok"')
-    assert '_pid_in "$_qp" "$_dpid" && _pok=1' in CLEANUP
+        < CLEANUP.index('_destroy_dompid_qemu "$VM_NAME" "$_dpid"')

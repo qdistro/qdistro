@@ -317,51 +317,64 @@ domain_holds_owned_disk() {
         || [ "$(stat -Lc '%d %i' -- "$src" 2>/dev/null)" = "$ident" ]
 }
 
-# _pid_in <scan> <pid> — same contract as spawn-tier5.sh: membership
-# proves the pid is currently a guest=<name> qemu (not a reused pid),
-# nothing more.
-_pid_in() {
-    case " $1 " in *" $2 "*) return 0 ;; esac
-    return 1
-}
-
-# _destroy_dompid_qemu <name> <dompid> <verified 0|1> — same contract
-# as spawn-tier5.sh: `virsh destroy` the domain and, when libvirt
-# named a VERIFIED live qemu pid, make its death stick through a
-# pidfd opened while the process is live. A pid number can be
-# recycled, a pidfd cannot — no exit+reuse window can redirect the
-# signal onto a same-name decoy (sol r39). When the pid cannot be
-# pinned nothing is signalled: the confirmed-dead gate preserves the
-# overlay, fail-closed.
+# _destroy_dompid_qemu <name> <dompid> — same contract as
+# spawn-tier5.sh: `virsh destroy` the domain and, when libvirt named
+# a qemu pid, make its death stick through a pidfd. The whole
+# pin+verify+signal sequence runs AS ADMIN in one python process so
+# the identity verified is the identity pinned: pidfd_open FIRST,
+# then the pinned process's own cmdline must carry a
+# `-name`/`guest=<name>,` argv pair and its parent must be the
+# session libvirt daemon — a spawn relationship a co-admin cannot
+# fabricate (sol r40). A dead, unpinnable, or unverified pin signals
+# nothing: the confirmed-dead gate preserves the overlay.
 _destroy_dompid_qemu() {
-    T5_ADMIN_USER="$ADMIN_USER" T5_RUNTIME="$ADMIN_RUNTIME" \
-        T5_HOME="$ADMIN_HOME" python3 - "$1" "${2:-}" "${3:-0}" <<'PY'
+    run_as_admin python3 - "$1" "${2:-}" <<'PY'
 import ctypes, os, subprocess, sys, time
-name, pid_s, verified = sys.argv[1], sys.argv[2], sys.argv[3]
+name, pid_s = sys.argv[1], sys.argv[2]
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 fd = -1
-if verified == "1" and pid_s.isdigit():
+if pid_s.isdigit():
     try:
         fd = os.pidfd_open(int(pid_s))
     except (AttributeError, OSError):
         fd = libc.syscall(434, int(pid_s), 0)   # pidfd_open
+
 def _sig(n):
     return fd >= 0 and libc.syscall(424, fd, n, None, 0) == 0
-rt = os.environ["T5_RUNTIME"]
-env = ["XDG_RUNTIME_DIR=" + rt, "HOME=" + os.environ["T5_HOME"],
-       "DBUS_SESSION_BUS_ADDRESS=unix:path=" + rt + "/bus",
-       "LIBVIRT_DEFAULT_URI=qemu:///session"]
-subprocess.run(["runuser", "-u", os.environ["T5_ADMIN_USER"], "--",
-                "env"] + env + ["virsh", "destroy", name],
+
+def _pinned_is_domain_qemu():
+    # While the pinned process lives its pid number cannot alias, so
+    # these /proc reads describe exactly the task the fd names.
+    if not _sig(0):
+        return False
+    try:
+        argv = open("/proc/%s/cmdline" % pid_s, "rb").read().split(b"\0")
+    except OSError:
+        return False
+    needle = ("guest=" + name + ",").encode()
+    if not any(a == b"-name" and argv[i + 1].startswith(needle)
+               for i, a in enumerate(argv[:-1])):
+        return False
+    try:
+        ppid = next(int(l.split()[1]) for l in
+                    open("/proc/%s/status" % pid_s)
+                    if l.startswith("PPid:"))
+        comm = open("/proc/%d/comm" % ppid).read().strip()
+    except (OSError, StopIteration):
+        return False
+    return comm in ("virtqemud", "libvirtd")
+
+pinned = fd >= 0 and _pinned_is_domain_qemu()
+subprocess.run(["virsh", "destroy", name],
                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-if fd >= 0:
-    if _sig(0):
-        _sig(15)
-        for _ in range(6):
-            if not _sig(0):
-                break
+if pinned and _sig(0):
+    _sig(15)
+    for _ in range(6):
+        if not _sig(0):
+            break
             time.sleep(0.5)
-        _sig(9)
+    _sig(9)
+if fd >= 0:
     os.close(fd)
 sys.exit(0)
 PY
@@ -437,20 +450,16 @@ if [ "$_ds" -eq 0 ]; then
         exit 3
     fi
     # Capture the domain's own qemu pid BEFORE destroy while its
-    # libvirt record still exists, cross-checked against the
-    # argv-verified name-scan. _destroy_dompid_qemu pins the LIVE pid
-    # with a pidfd so the signal can only ever reach that process —
-    # a recycled number can never alias a decoy (sol r37/r38/r39).
+    # libvirt record still exists. _destroy_dompid_qemu pins the LIVE
+    # pid with a pidfd and verifies the pinned process itself (its own
+    # cmdline + libvirt parentage) — a recycled number can never alias
+    # the pin, and no scan-derived value authorizes the signal
+    # (sol r37/r38/r39/r40).
     _dpid=$(run_as_admin virsh dompid "$VM_NAME" 2>/dev/null) || _dpid=""
-    _pok=0
-    if [ -n "$_dpid" ]; then
-        _qp=$(qemu_pids_for_domain) || true
-        _pid_in "$_qp" "$_dpid" && _pok=1
-    fi
     # destroy can no-op under a lying domstate — the pidfd signal
     # inside finishes it, then the confirmed-dead gate below must
     # pass before touching the overlay.
-    _destroy_dompid_qemu "$VM_NAME" "$_dpid" "$_pok"
+    _destroy_dompid_qemu "$VM_NAME" "$_dpid"
     if ! run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1; then
         echo "[tier5-cleanup] WARN: undefine $VM_NAME failed" >&2
     fi

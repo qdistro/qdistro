@@ -292,18 +292,21 @@ silently merge:
   regex scan would let a manual name like `t5.a` match `t5xa`, and
   a raw substring would match inside a foreign argument; both
   would hand the cleanup helper foreign pids to signal. Even so, the
-  post-destroy signal path signals only the process libvirt itself
-  bound to the domain: the pre-destroy `dompid` is cross-checked
-  against the argv-verified scan, then pinned with a `pidfd` opened
-  while the process is live and signalled through `pidfd_send_signal`.
-  A pid NUMBER can be recycled — a pidfd cannot — so no exit+reuse
-  window can redirect the signal onto a same-name decoy, and a dead
-  pinned process fails ESRCH instead of aliasing a reuser: argv tags,
-  open disk fds, and cgroup names are all attacker-reproducible, and
-  an open disk fd is not process-ownership authority — a same-name
-  decoy is never signalled, and when libvirt cannot name the pid the
-  fallback signals nothing and the confirmed-dead gate preserves the
-  overlay (sol r37/r38/r39).
+  post-destroy signal path runs AS ADMIN and can only ever reach the
+  process libvirt itself bound to the domain: the pre-destroy
+  `dompid` is pinned with `pidfd_open` FIRST, and only then is the
+  pinned process verified — its own `/proc/<pid>/cmdline` (while a
+  process lives, its number cannot alias, so that read describes
+  exactly the pinned task) must carry a `-name`/`guest=<name>,` argv
+  pair and its parent must be the session libvirt daemon, the one
+  spawn relationship a co-admin cannot fabricate. Signals go through
+  `pidfd_send_signal` on the pinned fd: a pid NUMBER can be recycled,
+  a pidfd cannot, and a dead pinned process fails ESRCH instead of
+  aliasing a reuser — no scan result or cached flag authorizes a
+  signal, so no exit+reuse window before or after pinning can
+  redirect it onto a same-name decoy (sol r37–r40). When the pin or
+  the verification fails nothing is signalled and the
+  confirmed-dead gate preserves the overlay.
   `domstate` is not consulted for liveness at all: nested-virt libvirt
   can lie in both directions — "shut off" for a live qemu and stale
   "running" for a dead one — and no backing qemu process means death,
