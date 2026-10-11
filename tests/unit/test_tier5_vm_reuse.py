@@ -538,6 +538,10 @@ def test_create_goes_through_a_recoverable_partial():
     assert 'rm -f "$_stmp"' not in create
     assert create.count('_unlink_verified "$_tmp" "$_tino"') >= 3
     assert create.count('_unlink_verified "$_stmp" "$_sino"') >= 3
+    # the stamped inode must BE the mktemp-claimed one — a swapped
+    # partial name can never get a foreign base-backed qcow2 stamped,
+    # published and booted under our record (sol r32)
+    assert '[ "$_di" != "$_tino" ]' in create
     # the created inode is published as the boot-bound identity
     assert '_bino=$_di' in create
     # the record temp is written AS ADMIN (tee), never reopened by the

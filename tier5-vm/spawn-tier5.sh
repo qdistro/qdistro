@@ -1520,7 +1520,15 @@ _create_overlay_disk() {
     # symlink at a privilege the planter does not hold; as admin the
     # worst a symlink reaches is a file admin could write anyway
     # (sol r24). The -L check is the explicit belt.
-    if [ -z "$_di" ] || [ -z "$_sino" ] || [ -L "$_stmp" ] \
+    #
+    # _di MUST equal _tino: the record's authority is that it binds
+    # the inode OUR mktemp claimed and qemu-img wrote — a swapped
+    # partial name would otherwise let a planted base-backed qcow2 be
+    # stamped, published, and booted under our record (sol r32). On
+    # mismatch the failure cleanup unlinks the name only while it
+    # still binds _tino — a substitute is preserved, never removed.
+    if [ -z "$_di" ] || [ "$_di" != "$_tino" ] || [ -z "$_sino" ] \
+            || [ -L "$_stmp" ] \
             || ! printf '%s %s\n' "$POLICY_KEY" "$_di" \
                 | run_as_admin tee "$_stmp" >/dev/null; then
         _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
