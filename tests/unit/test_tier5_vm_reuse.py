@@ -455,7 +455,7 @@ def test_reaper_preserves_owned_orphan_overlays():
     #          (sol r12/r13)
     reaper = SPAWN[SPAWN.index("orphan-overlay reaper"):
                    SPAWN.index("reaped orphan overlay")]
-    assert 'manifest_app_state "$_side"; _ms=$?' in reaper
+    assert 'manifest_app_state "$_side" "$DISK_BASE"; _ms=$?' in reaper
     assert '[ "$_ms" -eq 1 ]' in reaper
     # an unreadable OR empty sidecar preserves — only a MISSING file
     # counts as "no owner"
@@ -469,18 +469,28 @@ def test_reaper_preserves_owned_orphan_overlays():
 
 def test_manifest_app_state_is_exact_parse_with_stale_ambiguity():
     # ensures: retirement is decided by an EXACT appId match in a
-    #          parsed, non-stale manifest — never a quoted substring
-    #          (could appear in another field) and never a stale
-    #          manifest the reconciler publishes READABLE on scan
-    #          failure (sol r13)
+    #          parsed, non-stale, schema-current manifest whose
+    #          recorded base dev/ino/mtime/size matches the CURRENT
+    #          base — never a quoted substring (could appear in
+    #          another field), never a stale manifest the reconciler
+    #          publishes READABLE on scan failure, and never a
+    #          non-stale manifest left over from a swapped-out base
+    #          (it omits the new base's apps — sol r13/r14)
     body = _section("manifest_app_state")
     assert "json.load" in body
+    assert "os.stat" in body
     assert 'doc.get("stale")' in body
-    assert 'row.get("appId") == side' in body
+    assert 'doc.get("schema") != 1' in body
+    assert "baseDev" in body and "baseIno" in body
+    assert "baseMtime" in body and "baseSize" in body
+    assert '"$DISK_BASE"' in SPAWN[SPAWN.index("manifest_app_state \"$"):]
     assert "sys.exit(2)" in body
-    assert "sys.exit(1)" in body
+    assert 'sys.exit(0 if any(r["appId"] == side for r in apps) else 1)' \
+        in body
     # grep-based substring matching would be imprecise
     assert "grep" not in body
+    # every row must carry a string appId for the list to be trusted
+    assert 'isinstance(r.get("appId"), str)' in body
 
 
 def test_cleanup_unlink_requires_confirmed_dead():

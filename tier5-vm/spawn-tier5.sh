@@ -326,31 +326,39 @@ domain_defined_state() {
     return 1
 }
 
-# manifest_app_state <appId> — rc 0 = the CURRENT non-stale catalogue
-# publishes this appId; rc 1 = the catalogue parses, is fresh, and does
-# NOT publish it (a retired app — its disk is provably stale); rc 2 =
-# cannot determine. The reconciler publishes a READABLE empty manifest
-# carrying a "stale" marker on scan failure — that is ambiguity, never
-# proof an app retired (sol r13). Must stay defined before the startup
-# reaper.
+# manifest_app_state <appId> <base> — rc 0 = the CURRENT non-stale
+# catalogue publishes this appId; rc 1 = a VALID catalogue for THIS
+# base does not publish it (retired app — its disk is provably
+# stale); rc 2 = cannot determine. "Valid" mirrors the scanner's own
+# checks: parses, right schema, no "stale" marker (the reconciler
+# publishes a READABLE empty stale manifest on scan failure — sol
+# r13), well-formed rows, and the recorded base dev/ino/mtime/size
+# matching the CURRENT base file — a base swapped between scans
+# leaves a non-stale manifest that omits the new base's apps, and
+# that must not read as retirement either (sol r14). Must stay
+# defined before the startup reaper.
 manifest_app_state() {
-    python3 - "$VMAPPS_MANIFEST" "$1" <<'PY'
-import json, sys
-mpath, side = sys.argv[1], sys.argv[2]
+    python3 - "$VMAPPS_MANIFEST" "$1" "$2" <<'PY'
+import json, os, sys
+mpath, side, base = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     with open(mpath) as f:
         doc = json.load(f)
+    st = os.stat(base)
 except Exception:
     sys.exit(2)
-if not isinstance(doc, dict) or doc.get("stale"):
+if not isinstance(doc, dict) or doc.get("stale") or doc.get("schema") != 1:
+    sys.exit(2)
+ident = (doc.get("baseDev"), doc.get("baseIno"),
+         doc.get("baseMtime"), doc.get("baseSize"))
+if ident != (st.st_dev, st.st_ino, int(st.st_mtime), st.st_size):
     sys.exit(2)
 apps = doc.get("apps")
-if not isinstance(apps, list):
+if not isinstance(apps, list) or not all(
+        isinstance(r, dict) and isinstance(r.get("appId"), str)
+        for r in apps):
     sys.exit(2)
-for row in apps:
-    if isinstance(row, dict) and row.get("appId") == side:
-        sys.exit(0)
-sys.exit(1)
+sys.exit(0 if any(r["appId"] == side for r in apps) else 1)
 PY
 }
 
@@ -472,7 +480,7 @@ else
                         || [ -z "$_side" ]; then
                     exec {hfd}>&-; continue
                 fi
-                manifest_app_state "$_side"; _ms=$?
+                manifest_app_state "$_side" "$DISK_BASE"; _ms=$?
                 [ "$_ms" -eq 1 ] || { exec {hfd}>&-; continue; }
             fi
             # Settle + re-verify: an out-of-band `virsh create` could

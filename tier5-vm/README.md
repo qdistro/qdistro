@@ -159,10 +159,11 @@ silently merge:
   The teardown unlink applies the same rule when the domain was
   already absent at claim time, and the orphan reaper reaps only
   unproven overlays (no sidecar) or retired-app disks — retirement
-  needs an exact appId parse of a NON-stale manifest; the readable
-  empty manifest the reconciler publishes on scan failure is
-  ambiguity, not proof an app retired. An owned orphan is preserved
-  for its app's next launch.
+  needs an exact appId parse of a manifest that is non-stale,
+  schema-current, and recorded against the CURRENT base (a base swap
+  between scans leaves a non-stale manifest that omits the new
+  base's apps); anything less is ambiguity, not proof an app
+  retired. An owned orphan is preserved for its app's next launch.
   "Live" is decided by `qemu_pids_for_domain` alone —
   a pgrep on libvirt's `-name guest=<vm>` argv token narrowed to real
   qemu via `/proc/<pid>/comm`, with a distinct cannot-determine rc.
