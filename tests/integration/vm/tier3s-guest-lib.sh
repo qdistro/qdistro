@@ -747,10 +747,15 @@ broker_log()  { journalctl -u qdistro-admin-broker.service --no-pager -o cat ${1
 # qs_ipc <target> <method> [args...] — Quickshell IPC as admin. `qs ipc`
 # filters by display connection by default and the runuser session has no
 # wayland of its own: --any-display bypasses the filter (s48's convention);
-# -p selects the qdshell instance.
+# -p selects the qdshell instance. as_admin's env -i leaves the C locale,
+# where Quickshell (snapshot 20261009+) prints a "Detected locale" WARN
+# first; run it UTF-8 and drop Quickshell's own log lines so the first
+# line is the IPC answer (or the real error).
 qs_ipc() {
-    as_admin qs -p /usr/share/quickshell/qdshell ipc --any-display call "$@" 2>&1 | head -1
+    as_admin env LC_ALL=C.UTF-8 qs -p /usr/share/quickshell/qdshell ipc --any-display call "$@" 2>&1 \
+        | qs_strip_log | head -1
 }
+qs_strip_log() { grep -avE $'^(\e\\[[0-9;]*m)? *(DEBUG|INFO|WARN)(\e\\[[0-9;]*m)?:? '; }
 
 # The toplevel handle qdshell recorded for a tier3s silo, from its own
 # journal line "[tier3s] toplevel observed silo=<s> ... handle=<N>". Empty

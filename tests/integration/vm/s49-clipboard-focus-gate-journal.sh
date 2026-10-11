@@ -120,8 +120,9 @@ command -v runuser                       >/dev/null 2>&1 || skip "runuser not av
 # the filter; -p selects the qdshell instance.
 QS_IPC_ARGS=(-p /usr/share/quickshell/qdshell ipc --any-display)
 qs_ipc() {
-    runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
-        qs "${QS_IPC_ARGS[@]}" "$@" 2>&1 | head -1
+    runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" LC_ALL=C.UTF-8 \
+        qs "${QS_IPC_ARGS[@]}" "$@" 2>&1 \
+        | grep -avE $'^(\e\\[[0-9;]*m)? *(DEBUG|INFO|WARN)(\e\\[[0-9;]*m)?:? ' | head -1
 }
 
 # --- 2. tier3 install ran --------------------------------------------
