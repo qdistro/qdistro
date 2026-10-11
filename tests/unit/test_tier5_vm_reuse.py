@@ -526,6 +526,17 @@ def test_create_goes_through_a_recoverable_partial():
     assert '[ -L "$DISK.appid" ]' in create
     assert 'rm -f "$DISK.appid"' not in create
     assert 'rm -f "$DISK"' not in create
+    # every temp's own identity is captured at mktemp time and its
+    # cleanup routes through verified-unlink — a swapped temp name can
+    # never unlink a replacement (sol r26)
+    assert '_tino=$(run_as_admin stat' in create
+    assert '_sino=$(run_as_admin stat' in create
+    assert 'rm -f "$_tmp"' not in create
+    assert 'rm -f "$_stmp"' not in create
+    assert create.count('_unlink_verified "$_tmp" "$_tino"') >= 3
+    assert create.count('_unlink_verified "$_stmp" "$_sino"') >= 3
+    # the created inode is published as the boot-bound identity
+    assert '_bino=$_di' in create
     # the record temp is written AS ADMIN (tee), never reopened by the
     # root shell — a swapped symlink cannot make root truncate a
     # foreign file (sol r24)
@@ -555,8 +566,13 @@ def test_create_goes_through_a_recoverable_partial():
     # is dropped by verified-unlink (sol r25)
     assert '_rino=$(stat -c \'%d %i\' "$DISK"' in rec
     assert '[ "$_rino" = "$_sident" ]' in rec
-    assert '"$_recover" -ef "$DISK"' in rec
+    # the recovered source name is dropped only while it still binds
+    # the recorded inode — never a bare rm on a mutable name (sol r26)
+    assert '_unlink_verified "$_recover" "$_sident"' in rec
+    assert 'rm -f "$_recover"' not in rec
     assert '_unlink_verified "$DISK" "$_rino"' in rec
+    # a recovered disk publishes the record-bound identity for boot
+    assert '_bino=$_sident' in rec
     # teardown, reaper and cleanup all unlink via the rename-capture
     # verified unlink — never a bare check-then-rm on a mutable name
     # (sol r25)
@@ -854,16 +870,28 @@ def test_record_reads_and_unlinks_are_race_bound():
         # mutable path — contents and identity provably share one inode
         assert 'stat -Lc \'%d %i\' "/proc/$$/fd/$_rfd"' in src
         assert '_unlink_verified()' in src
-        # rename captures the entry; verification happens on the
-        # captured inode; a foreign capture is restored with no-clobber
-        assert 'mv -T -- "$_p" "$_v"' in src
-        assert 'mv -n -T -- "$_v" "$_p"' in src
-        assert 'mktemp -d "$(dirname "$_p")/.t5u.XXXXXX"' in src
+        # rename captures the entry into a private same-fs dir and
+        # every subsequent step runs through dir fds bound at open —
+        # the capture dir's own PATH is never re-resolved, so renaming
+        # .t5u.* mid-op cannot redirect the final unlink at a planted
+        # path (sol r26)
+        assert 'tempfile.mkdtemp(prefix=".t5u.", dir=_parent)' in src
+        assert 'os.open(_parent, os.O_RDONLY | os.O_DIRECTORY)' in src
+        assert 'os.open(td, os.O_RDONLY | os.O_DIRECTORY)' in src
+        assert 'os.rename(_name, "v", src_dir_fd=pfd, dst_dir_fd=tfd)' \
+            in src
+        assert 'os.stat("v", dir_fd=tfd, follow_symlinks=False)' in src
+        assert 'os.unlink("v", dir_fd=tfd)' in src
+        # a foreign capture is restored via link(2) — atomic
+        # no-clobber, never overwriting a re-appeared path
+        assert 'os.link("v", _name, src_dir_fd=tfd, dst_dir_fd=pfd' in src
+        # no shell-level path re-resolution remains in the primitive
+        assert 'mv -T -- "$_p"' not in src
         # an empty expected-ident can never authorize a removal
         assert '[ -n "$_want" ] || return 1' in src
         # the temp dir is created NEXT TO the target — rename stays
         # inside one filesystem
-        assert 'preserved foreign entry' in src
+        assert 'preserved foreign' in src
 
 
 def test_no_root_writes_into_admin_controlled_paths():
@@ -894,3 +922,56 @@ def test_no_root_writes_into_admin_controlled_paths():
     assert 'chown "$ADMIN_USER" "$RDP_' not in T4SPAWN
     assert 'run_as_admin tee "$TMP_XML"' in T4SPAWN
     assert T4SPAWN.count("sh -c 'exec >>") >= 2
+
+
+def test_boot_uses_a_pinned_bind_mount_not_the_admin_path():
+    # ensures: the domain opens the VERIFIED inode, never merely the
+    #          verified path — DISK_DIR is admin-writable, so every
+    #          path component under it can be renamed between the
+    #          provenance gate and qemu's open() at start. A bind
+    #          mount pins the inode itself at a path with no
+    #          admin-writable components, and the mounted inode is
+    #          re-verified against the provenance-bound identity
+    #          (sol r26)
+    assert '_bind_mount_disk()' in SPAWN
+    assert 'mount --bind -- "$DISK" "$BOOT_PATH"' in SPAWN
+    # the mount's own inode is re-verified — mount binds whatever
+    # $DISK names AT mount time, so a gate→mount swap refuses here
+    m = _section("_bind_mount_disk")
+    assert 'stat -c \'%d %i\' "$BOOT_PATH"' in m
+    assert 'umount -l "$BOOT_PATH"' in m
+    # BOOT_DIR is root-owned and world-traversable (qemu runs as
+    # admin): no writable component, but the session qemu can open()
+    assert 'TIER5_BOOT_DIR:-/run/qdistro-tier5-boot' in SPAWN
+    assert 'install -d -m 0755 "$BOOT_DIR"' in m
+    # every provenance path publishes the bound inode for the mount
+    body = _section("create_domain")
+    assert body.count('_bino=$_sident') >= 2      # reuse + recovery
+    assert '_bino=$_di' in _section("_create_overlay_disk")
+    # the mount happens between the gate and define/start
+    assert body.index('_bind_mount_disk "$_bino"') \
+        < body.index('virsh start')
+    # the domain XML names the mount path, never the admin path
+    assert 's|__DISK_PATH__|$BOOT_PATH|g' in SPAWN
+    assert 's|__DISK_PATH__|$DISK|g' not in SPAWN
+    # teardown drops the mount with a confirmed-dead domain
+    tail = _section("cleanup")
+    assert '_unmount_boot_disk' in tail
+    # the reaper drops a stale mount when it reaps the overlay
+    reaper = SPAWN[SPAWN.index("orphan-overlay reaper"):
+                   SPAWN.index("swapped during reap")]
+    assert 'umount -l "$BOOT_DIR/$base.qcow2"' in reaper
+    # the standalone helper drops it too
+    assert 'umount -l "$BOOT_PATH"' in CLEANUP
+
+
+def test_tier4_rdp_password_never_enters_argv():
+    # ensures: the RDP secret reaches the admin writer through stdin,
+    #          never through a process argument — a password in argv
+    #          is visible in process listings and /proc to every local
+    #          user (sol r26)
+    assert 'printf \'%s\\n\' "$RDP_PASSWORD" | run_as_admin' in T4SPAWN
+    assert "cat >\"$1\"" in T4SPAWN
+    # no argv-bearing variant survives anywhere in tier4
+    assert '"$RDP_PASSWORD" >"$1"' not in T4SPAWN
+    assert '_ "$RDP_PASSWORD_FILE" "$RDP_PASSWORD"' not in T4SPAWN

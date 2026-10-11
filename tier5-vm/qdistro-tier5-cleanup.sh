@@ -13,6 +13,11 @@ ADMIN_HOME_DEFAULT="$(getent passwd "$ADMIN_USER" 2>/dev/null | cut -d: -f6)"
 DISK_DIR="${TIER5_DISK_DIR:-$ADMIN_HOME_DEFAULT/.local/share/libvirt/images}"
 DISK="$DISK_DIR/$VM_NAME.qcow2"
 DISK_BASE="${TIER5_BASE_DISK:-/var/lib/libvirt/images/qdistro-tier5-base.qcow2}"
+# The spawn boots the overlay through a bind mount under a root-owned
+# dir — drop it here so a deleted overlay's inode is actually freed
+# and no stale mount serves it later (sol r26).
+BOOT_DIR="${TIER5_BOOT_DIR:-/run/qdistro-tier5-boot}"
+BOOT_PATH="$BOOT_DIR/$VM_NAME.qcow2"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "[tier5-cleanup] FAIL: must run as root" >&2
@@ -103,7 +108,9 @@ PY
 # one open fd (a swap can't split the pair), and the unlink captures
 # the entry by rename into a private same-fs dir so only the verified
 # inode is ever removed — a check→rm swap restores the replacement
-# instead of deleting it (sol r25).
+# instead of deleting it (sol r25). Every step runs through dir fds
+# bound at open, so renaming the capture dir mid-op cannot redirect
+# the final unlink at a planted path (sol r26).
 _read_owner_record() {
     _sapp="" _sident="" _sfid=""
     local _p=$1 _rfd
@@ -117,25 +124,67 @@ _read_owner_record() {
 }
 
 _unlink_verified() {
-    local _p=$1 _want=$2 _d _v _got
+    local _p=$1 _want=$2
     [ -n "$_want" ] || return 1
-    _d=$(mktemp -d "$(dirname "$_p")/.t5u.XXXXXX" 2>/dev/null) || return 1
-    _v="$_d/v"
-    if ! mv -T -- "$_p" "$_v" 2>/dev/null; then
-        rmdir "$_d" 2>/dev/null
-        return 1
-    fi
-    _got=$(stat -c '%d %i' "$_v" 2>/dev/null)
-    if [ -L "$_v" ] || [ -z "$_got" ] || [ "$_got" != "$_want" ]; then
-        if mv -n -T -- "$_v" "$_p" 2>/dev/null; then
-            rmdir "$_d" 2>/dev/null
-        else
-            echo "[tier5-cleanup] WARN: preserved foreign entry at $_v" >&2
-        fi
-        return 1
-    fi
-    rm -f "$_v" 2>/dev/null
-    rmdir "$_d" 2>/dev/null
+    T5U_PATH="$_p" T5U_WANT="$_want" python3 - <<'PY'
+import os, stat, sys, tempfile
+
+_p = os.environ["T5U_PATH"]
+_wd, _wi = os.environ["T5U_WANT"].split()
+_want = (int(_wd), int(_wi))
+_parent = os.path.dirname(_p) or "."
+_name = os.path.basename(_p)
+
+pfd = os.open(_parent, os.O_RDONLY | os.O_DIRECTORY)
+rc = 1
+try:
+    td = tempfile.mkdtemp(prefix=".t5u.", dir=_parent)
+    tfd = os.open(td, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            os.rename(_name, "v", src_dir_fd=pfd, dst_dir_fd=tfd)
+        except OSError:
+            pass
+        else:
+            try:
+                st = os.stat("v", dir_fd=tfd, follow_symlinks=False)
+            except OSError:
+                st = None
+            if st is not None and stat.S_ISREG(st.st_mode) \
+                    and (st.st_dev, st.st_ino) == _want:
+                os.unlink("v", dir_fd=tfd)
+                rc = 0
+            else:
+                restored = False
+                try:
+                    os.link("v", _name, src_dir_fd=tfd, dst_dir_fd=pfd,
+                            follow_symlinks=False)
+                    os.unlink("v", dir_fd=tfd)
+                    restored = True
+                except OSError:
+                    try:
+                        os.lstat(_name, dir_fd=pfd)
+                    except OSError:
+                        try:
+                            os.rename("v", _name, src_dir_fd=tfd,
+                                      dst_dir_fd=pfd)
+                            restored = True
+                        except OSError:
+                            pass
+                if not restored:
+                    sys.stderr.write(
+                        "[tier5-cleanup] WARN: preserved foreign"
+                        " entry at %s/v\n" % td)
+    finally:
+        os.close(tfd)
+        try:
+            os.rmdir(os.path.basename(td), dir_fd=pfd)
+        except OSError:
+            pass
+finally:
+    os.close(pfd)
+sys.exit(rc)
+PY
 }
 
 # domain_defined_state — rc 0 defined, 1 CONFIRMED absent, 2 cannot
@@ -298,6 +347,10 @@ if [ -e "$DISK" ] || [ -L "$DISK" ]; then
     fi
     qemu_pids_for_domain; _lv=$?
     if [ "$_lv" -eq 1 ]; then
+        # confirmed dead — the boot mount goes with the domain (it
+        # pins the disk inode at BOOT_PATH; lives in root-owned dir)
+        umount -l "$BOOT_PATH" 2>/dev/null || true
+        rm -f "$BOOT_PATH" 2>/dev/null || true
         # Check→rm is a swap window (sol r25): verified-unlink removes
         # only the inode these checks passed; for the ownerless opt-in
         # path _dino still binds the disk itself, and a sidecar that

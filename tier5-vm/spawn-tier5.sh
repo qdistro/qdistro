@@ -476,30 +476,108 @@ _read_owner_record() {
 # entry so `rm` deletes the replacement (sol r25): rename(2) instead
 # atomically CAPTURES whatever the path names into a root-owned
 # private same-fs dir, we re-verify the captured inode, and unlink it
-# there. A swapped entry fails verification and its name is restored
-# (mv -n — never clobbering a re-appeared path); if restore fails it
-# stays preserved inside our dir and we warn. rc 0 = removed,
-# 1 = kept.
+# there. Every step runs through dir fds bound at open — the capture
+# dir's own PATH is never re-resolved, so even renaming .t5u.* mid-op
+# cannot redirect the final unlink at a planted path (sol r26). A
+# swapped entry fails verification and its name is restored via
+# link(2) — atomic no-clobber, never overwriting a re-appeared path;
+# if restore fails it stays preserved inside our dir and we warn.
+# rc 0 = removed, 1 = kept.
 _unlink_verified() {
-    local _p=$1 _want=$2 _d _v _got
+    local _p=$1 _want=$2
     [ -n "$_want" ] || return 1
-    _d=$(mktemp -d "$(dirname "$_p")/.t5u.XXXXXX" 2>/dev/null) || return 1
-    _v="$_d/v"
-    if ! mv -T -- "$_p" "$_v" 2>/dev/null; then
-        rmdir "$_d" 2>/dev/null
-        return 1
-    fi
-    _got=$(stat -c '%d %i' "$_v" 2>/dev/null)
-    if [ -L "$_v" ] || [ -z "$_got" ] || [ "$_got" != "$_want" ]; then
-        if mv -n -T -- "$_v" "$_p" 2>/dev/null; then
-            rmdir "$_d" 2>/dev/null
-        else
-            echo "[tier5] WARN: preserved foreign entry at $_v" >&2
-        fi
-        return 1
-    fi
-    rm -f "$_v" 2>/dev/null
-    rmdir "$_d" 2>/dev/null
+    T5U_PATH="$_p" T5U_WANT="$_want" python3 - <<'PY'
+import os, stat, sys, tempfile
+
+_p = os.environ["T5U_PATH"]
+_wd, _wi = os.environ["T5U_WANT"].split()
+_want = (int(_wd), int(_wi))
+_parent = os.path.dirname(_p) or "."
+_name = os.path.basename(_p)
+
+pfd = os.open(_parent, os.O_RDONLY | os.O_DIRECTORY)
+rc = 1
+try:
+    td = tempfile.mkdtemp(prefix=".t5u.", dir=_parent)
+    tfd = os.open(td, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            os.rename(_name, "v", src_dir_fd=pfd, dst_dir_fd=tfd)
+        except OSError:
+            pass
+        else:
+            try:
+                st = os.stat("v", dir_fd=tfd, follow_symlinks=False)
+            except OSError:
+                st = None
+            if st is not None and stat.S_ISREG(st.st_mode) \
+                    and (st.st_dev, st.st_ino) == _want:
+                os.unlink("v", dir_fd=tfd)
+                rc = 0
+            else:
+                restored = False
+                try:
+                    os.link("v", _name, src_dir_fd=tfd, dst_dir_fd=pfd,
+                            follow_symlinks=False)
+                    os.unlink("v", dir_fd=tfd)
+                    restored = True
+                except OSError:
+                    try:
+                        os.lstat(_name, dir_fd=pfd)
+                    except OSError:
+                        try:
+                            os.rename("v", _name, src_dir_fd=tfd,
+                                      dst_dir_fd=pfd)
+                            restored = True
+                        except OSError:
+                            pass
+                if not restored:
+                    sys.stderr.write(
+                        "[tier5] WARN: preserved foreign entry at %s/v\n"
+                        % td)
+    finally:
+        os.close(tfd)
+        try:
+            os.rmdir(os.path.basename(td), dir_fd=pfd)
+        except OSError:
+            pass
+finally:
+    os.close(pfd)
+sys.exit(rc)
+PY
+}
+
+# _bind_mount_disk <dev-ino> — serve the verified overlay inode at a
+# path with NO admin-writable components. The admin owns DISK_DIR, so
+# ANY path component under it can be renamed between our provenance
+# gate and qemu's open() at domain start (sol r26). A bind mount pins
+# the inode itself — a later swap of $DISK's name can never substitute
+# a foreign file under the mounted path — and $BOOT_DIR is root-owned
+# (0755: the admin's qemu may traverse but never replace the
+# mountpoint). The mounted inode is re-verified against <dev-ino>
+# because mount binds whatever $DISK names AT mount time: a swap
+# between the gate and mount(8) is caught here, and we refuse.
+# rc 0 = mounted and verified.
+_bind_mount_disk() {
+    local _want=$1
+    install -d -m 0755 "$BOOT_DIR" 2>/dev/null || return 1
+    [ -e "$BOOT_PATH" ] \
+        || install -m 0644 /dev/null "$BOOT_PATH" 2>/dev/null \
+        || return 1
+    # a stale mount serving a dead inode is detached before remounting
+    umount -l "$BOOT_PATH" 2>/dev/null || true
+    mount --bind -- "$DISK" "$BOOT_PATH" 2>/dev/null || return 1
+    [ "$(stat -c '%d %i' "$BOOT_PATH" 2>/dev/null)" = "$_want" ] \
+        || { umount -l "$BOOT_PATH" 2>/dev/null; return 1; }
+}
+
+# _unmount_boot_disk — drop the boot mount and its mountpoint. Both
+# live in the root-owned BOOT_DIR, so plain path ops are safe there.
+# BOOT_PATH is only set in --vm mode — loopback cleanup is a no-op.
+_unmount_boot_disk() {
+    [ -n "${BOOT_PATH:-}" ] || return 0
+    umount -l "$BOOT_PATH" 2>/dev/null || true
+    rm -f "$BOOT_PATH" 2>/dev/null || true
 }
 
 NO_GPU="${TIER5_NO_GPU:-1}"
@@ -519,7 +597,7 @@ if [ "$MODE" = "loopback" ]; then
     PORT="${EXPLICIT_PORT:-${TIER5_PORT:-7777}}"
 else
     # --vm mode: prereqs.
-    for tool in virsh qemu-img flock; do
+    for tool in virsh qemu-img flock mount umount python3; do
         command -v "$tool" >/dev/null || {
             echo "[tier5] FAIL: --vm needs $tool installed" >&2
             exit 2
@@ -533,6 +611,11 @@ else
     # be shared across admins.
     DISK_DIR="${TIER5_DISK_DIR:-$ADMIN_HOME/.local/share/libvirt/images}"
     DISK="$DISK_DIR/$VM_NAME.qcow2"
+    # The domain boots the overlay through a bind mount at a path whose
+    # every component is root-owned — DISK_DIR paths can be renamed by
+    # the admin between our provenance gate and qemu's open (sol r26)
+    BOOT_DIR="${TIER5_BOOT_DIR:-/run/qdistro-tier5-boot}"
+    BOOT_PATH="$BOOT_DIR/$VM_NAME.qcow2"
     # The published app catalogue — the reaper uses it to tell an OWNED
     # orphan (sidecar appId still published) from a retired app's disk.
     VMAPPS_MANIFEST="${VMAPPS_MANIFEST:-/usr/share/qdistro/vmapps/base.json}"
@@ -672,6 +755,10 @@ else
             if _unlink_verified "$overlay" "$_oino"; then
                 _unlink_verified "$overlay.appid" "$_sfid" \
                     2>/dev/null || true
+                # its stale boot mount (a crashed wrapper's leftover)
+                # pins the same inode — drop it with the overlay
+                umount -l "$BOOT_DIR/$base.qcow2" 2>/dev/null || true
+                rm -f "$BOOT_DIR/$base.qcow2" 2>/dev/null || true
                 echo "[tier5] reaped orphan overlay $overlay" >&2
             else
                 echo "[tier5] orphan $base swapped during reap —" >&2
@@ -1126,6 +1213,9 @@ cleanup() {
                     # (sol r7).
                     domain_is_live; _lv=$?
                     if [ "$_lv" -eq 1 ]; then
+                        # confirmed dead — the boot mount goes with the
+                        # domain (it pins the disk inode at BOOT_PATH)
+                        _unmount_boot_disk
                         # The disk unlink needs its own owner record in
                         # EVERY case: the domain's binding vouched for
                         # the path, not the inode — a file swapped in
@@ -1331,9 +1421,14 @@ _create_overlay_disk() {
     # admin so the partial is admin-owned like every overlay here.
     _tmp=$(run_as_admin mktemp "$DISK.partial.XXXXXX" 2>/dev/null) \
         || { echo "[tier5] FAIL: cannot create partial under $DISK_DIR" >&2; exit 4; }
+    # The mktemp'd temp's own identity is captured NOW — every failure
+    # cleanup below removes it only if the path still names the inode
+    # we claimed (_unlink_verified), so a swapped temp name can never
+    # unlink a replacement (sol r26).
+    _tino=$(run_as_admin stat -c '%d %i' "$_tmp" 2>/dev/null)
     if [ -L "$_tmp" ] \
             || ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$_tmp" >/dev/null 2>&1; then
-        rm -f "$_tmp" 2>/dev/null
+        _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
         echo "[tier5] FAIL: qemu-img create -b $DISK_BASE failed at $DISK" >&2
         exit 4
     fi
@@ -1342,15 +1437,18 @@ _create_overlay_disk() {
     # $DISK.appid.$$ path could otherwise overwrite (or on failure
     # unlink) a foreign file/symlink squatting there (sol r22).
     _stmp=$(run_as_admin mktemp "$DISK.appid.tmp.XXXXXX" 2>/dev/null)
+    _sino=$(run_as_admin stat -c '%d %i' "$_stmp" 2>/dev/null)
     # The record write goes through tee AS ADMIN — a root shell
     # reopening the admin-claimed name would write through a swapped
     # symlink at a privilege the planter does not hold; as admin the
     # worst a symlink reaches is a file admin could write anyway
     # (sol r24). The -L check is the explicit belt.
-    if [ -z "$_di" ] || [ -z "$_stmp" ] || [ -L "$_stmp" ] \
+    if [ -z "$_di" ] || [ -z "$_sino" ] || [ -L "$_stmp" ] \
             || ! printf '%s %s\n' "$POLICY_KEY" "$_di" \
                 | run_as_admin tee "$_stmp" >/dev/null; then
-        rm -f "$_tmp" ${_stmp:+"$_stmp"} 2>/dev/null
+        _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
+        [ -n "$_sino" ] \
+            && _unlink_verified "$_stmp" "$_sino" 2>/dev/null || true
         echo "[tier5] FAIL: could not stamp binding sidecar $DISK.appid" >&2
         exit 4
     fi
@@ -1362,7 +1460,8 @@ _create_overlay_disk() {
     # (sol r24); link(2) below fails closed the same way on a record
     # raced in after this check.
     if [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
-        rm -f "$_tmp" "$_stmp" 2>/dev/null
+        _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
+        _unlink_verified "$_stmp" "$_sino" 2>/dev/null || true
         echo "[tier5] FAIL: $DISK.appid holds an unproven record —" >&2
         echo "        preserving it" >&2
         exit 4
@@ -1372,20 +1471,22 @@ _create_overlay_disk() {
     # clobbered between the check and the install (sol r23).
     if ! ln -T "$_stmp" "$DISK.appid" 2>/dev/null \
             || [ ! "$DISK.appid" -ef "$_stmp" ]; then
-        rm -f "$_tmp" "$_stmp" 2>/dev/null
+        _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
+        _unlink_verified "$_stmp" "$_sino" 2>/dev/null || true
         echo "[tier5] FAIL: $DISK.appid appeared during create" >&2
         echo "        — refusing to clobber an unproven record" >&2
         exit 4
     fi
-    rm -f "$_stmp" 2>/dev/null
+    _unlink_verified "$_stmp" "$_sino" 2>/dev/null || true
     if ! ln -T "$_tmp" "$DISK" 2>/dev/null \
             || [ ! "$DISK" -ef "$_tmp" ]; then
-        rm -f "$_tmp" 2>/dev/null
+        _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
         echo "[tier5] FAIL: $DISK appeared during create — refusing" >&2
         echo "        to clobber an unproven file" >&2
         exit 4
     fi
-    rm -f "$_tmp" 2>/dev/null
+    _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
+    _bino=$_di
 }
 
 create_domain() {
@@ -1430,6 +1531,7 @@ create_domain() {
             echo "        — refusing to boot an unproven disk" >&2
             REAP=0; exit 3
         fi
+        _bino=$_sident
     else
         # $DISK absent: a crash between the sidecar stamp and the ln
         # leaves a provable pair — the sidecar binds a $DISK.partial.*
@@ -1470,8 +1572,12 @@ create_domain() {
                     2>/dev/null \
                     | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
                 if [ "$_rino" = "$_sident" ] && [ "$_rback" = "$DISK_BASE" ]; then
-                    [ "$_recover" -ef "$DISK" ] \
-                        && rm -f "$_recover" 2>/dev/null
+                    # drop the redundant partial name — only if it still
+                    # binds the recorded inode (a swapped name is
+                    # restored, never unlinked) (sol r26)
+                    _unlink_verified "$_recover" "$_sident" 2>/dev/null \
+                        || true
+                    _bino=$_sident
                     echo "[tier5] recovered crashed create at $DISK" >&2
                 else
                     # drop only OUR link name, only while it still
@@ -1490,6 +1596,19 @@ create_domain() {
         else
             _create_overlay_disk
         fi
+    fi
+
+    # Boot the VERIFIED inode, not the verified path: the gate above
+    # proved $DISK is ours, but DISK_DIR is admin-writable and a swap
+    # between here and qemu's open() at start would boot a foreign
+    # disk under our binding (sol r26). A bind mount pins the inode
+    # itself at a path no admin can redirect; the mount's own inode is
+    # re-verified against the provenance-bound _bino, so a swap that
+    # lands between the gate and mount(8) refuses here.
+    if ! _bind_mount_disk "$_bino"; then
+        echo "[tier5] FAIL: cannot pin the verified overlay at" >&2
+        echo "        $BOOT_PATH — refusing to boot a swapped disk" >&2
+        REAP=0; exit 3
     fi
 
     # Define only on CONFIRMED absence (the same verdict that gated the
@@ -1555,6 +1674,9 @@ _create_domain_define() {
     fi
     SERIAL_XML_ESCAPED=$(printf '%s' "$SERIAL_XML" | sed 's|[\\/&]|\\&|g')
 
+    # __DISK_PATH__ resolves to the bind-mounted BOOT_PATH — every
+    # component root-owned, the mount pinned to the inode the
+    # provenance gate verified (sol r26).
     sed \
         -e "s|__NIC_XML__|$NIC_XML_ESCAPED|g" \
         -e "s|__SERIAL_XML__|$SERIAL_XML_ESCAPED|g" \
@@ -1563,23 +1685,25 @@ _create_domain_define() {
         -e "s|__MAC__|$NEW_MAC|g" \
         -e "s|__MEM_KIB__|$MEM_KIB|g" \
         -e "s|__CID__|$CID|g" \
-        -e "s|__DISK_PATH__|$DISK|g" \
+        -e "s|__DISK_PATH__|$BOOT_PATH|g" \
         "$TMPL" | run_as_admin tee "$TMP_XML" >/dev/null
 
     if grep -q '__[A-Z_]*__' "$TMP_XML"; then
         echo "[tier5] FAIL: unsubstituted markers in domain XML:" >&2
         grep -o '__[A-Z_]*__' "$TMP_XML" | sort -u >&2
-        rm -f "$TMP_XML"
+        _unlink_verified "$TMP_XML" \
+            "$(stat -c '%d %i' "$TMP_XML" 2>/dev/null)" 2>/dev/null || true
         exit 4
     fi
     # File is already 0600 + admin-owned inside a 0700 admin-owned dir
     # (domain_xml_tmpfile); no world-readable chmod 0644 here.
+    _xino=$(stat -c '%d %i' "$TMP_XML" 2>/dev/null)
     if ! run_as_admin virsh define "$TMP_XML" >/dev/null; then
         echo "[tier5] FAIL: virsh define failed" >&2
-        rm -f "$TMP_XML"
+        _unlink_verified "$TMP_XML" "$_xino" 2>/dev/null || true
         exit 5
     fi
-    rm -f "$TMP_XML"
+    _unlink_verified "$TMP_XML" "$_xino" 2>/dev/null || true
 }
 
 # The decision: adopt a running domain under our shared session hold, or

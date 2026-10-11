@@ -1085,9 +1085,11 @@ if [ "$TIER4_DISPLAY" = "rdp" ]; then
     # (or root chown) on a path inside admin's runtime dir would follow
     # a swapped symlink at a privilege the planter does not hold,
     # leaking the password into — or handing ownership of — a foreign
-    # file (sol r25).
-    run_as_admin sh -c 'umask 077 && printf "%s\n" "$2" >"$1"' \
-        _ "$RDP_PASSWORD_FILE" "$RDP_PASSWORD" \
+    # file (sol r25). The secret itself rides stdin, never argv: a
+    # password in the child's command line is visible in process
+    # listings and /proc to every local user (sol r26).
+    printf '%s\n' "$RDP_PASSWORD" | run_as_admin sh -c \
+        'umask 077 && cat >"$1"' _ "$RDP_PASSWORD_FILE" \
         || { echo "[tier4] FAIL: cannot write RDP password file" >&2; exit 4; }
     RDP_ARGV=("$RDP_CLIENT" "/v:127.0.0.1:$RDP_LOCAL_PORT" "/u:qdistro" "/cert:ignore" "/from-stdin")
     [ "${TIER4_DEBUG:-0}" = "1" ] && RDP_ARGV+=("/log-level:DEBUG")

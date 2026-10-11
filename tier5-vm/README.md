@@ -186,11 +186,24 @@ silently merge:
   itself is foreign construction even when it points at the bound
   inode, so it is preserved rather than unlinked. Every final unlink
   captures the entry by rename into a private same-fs dir and removes
-  only the inode that passed the checks — a swapped replacement is
-  restored, never deleted) — confirmed qemu
+  only the inode that passed the checks — and every step of that
+  capture runs through dir fds bound at open inside one process, so
+  even renaming the capture dir mid-op cannot redirect the unlink at
+  a planted path; a swapped replacement is
+  restored via link(2) (atomic no-clobber), never deleted) — confirmed qemu
   death proves no live guest is killed, but it does not make a
   foreign definition or disk ours; the owner relaunches under its own
   name and an admin removes a genuinely stale squatter deliberately.
+  The domain also never opens the disk through its DISK_DIR path:
+  every component under that admin-writable dir can be renamed
+  between the provenance gate and qemu's open() at start, so the
+  verified inode is bind-mounted at
+  `/run/qdistro-tier5-boot/<vm>.qcow2` — a root-owned path admin can
+  traverse but never redirect — and the domain XML names the mount.
+  The mount's own inode is re-verified against the provenance-bound
+  dev/ino after mount(8), so a swap that lands between the gate and
+  the mount refuses the launch; teardown, the orphan reaper, and the
+  cleanup helper each drop the mount with the overlay.
   The teardown unlink applies the same rule when the domain was
   already absent at claim time, and the orphan reaper reaps only
   retired-app disks — retirement
