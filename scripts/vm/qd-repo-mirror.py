@@ -23,6 +23,7 @@ warm the cache first.
 """
 
 import argparse
+import concurrent.futures
 import fcntl
 import gzip
 import hashlib
@@ -68,8 +69,13 @@ def digest_file(path, algo="sha256"):
     return h.hexdigest()
 
 
-def fetch(url, dest, want_sha=None, want_algo="sha256", retries=3):
-    """Download url to dest via a temp file in dest's dir; verify sha256."""
+def fetch(url, dest, want_sha=None, want_algo="sha256", retries=3,
+          allow_404=False):
+    """Download url to dest via a temp file in dest's dir; verify sha256.
+
+    With allow_404, a persistent HTTP 404 (the file upstream metadata names
+    but never published — some snapshots ship such gaps) returns None
+    instead of dying; every other failure is still fatal."""
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest), prefix=".dl.")
     os.close(fd)
@@ -95,6 +101,9 @@ def fetch(url, dest, want_sha=None, want_algo="sha256", retries=3):
         os.unlink(tmp)
     except OSError:
         pass
+    if allow_404 and isinstance(last, urllib.error.HTTPError) \
+            and last.code == 404:
+        return None
     die(f"download failed after {retries} tries: {url}: {last}")
 
 
@@ -157,17 +166,26 @@ def safe_href(href):
 
 
 def load_index(dest):
+    """-> (files: {href: rec}, absent: {href}).
+
+    absent records packages primary names but upstream persistently 404s —
+    recorded so audits do not count them as local corruption and re-runs do
+    not retry a gap that cannot heal. Legacy index files are a flat
+    {href: rec} dict and load as (dict, empty)."""
     try:
         with open(os.path.join(dest, "mirror-index.json")) as f:
-            return json.load(f)
+            idx = json.load(f)
     except (OSError, ValueError):
-        return {}
+        return {}, set()
+    if isinstance(idx, dict) and ("files" in idx or "absent" in idx):
+        return dict(idx.get("files") or {}), set(idx.get("absent") or [])
+    return idx, set()
 
 
-def save_index(dest, index):
+def save_index(dest, files, absent):
     tmp = os.path.join(dest, ".mirror-index.tmp")
     with open(tmp, "w") as f:
-        json.dump(index, f)
+        json.dump({"files": files, "absent": sorted(absent)}, f)
     os.replace(tmp, os.path.join(dest, "mirror-index.json"))
 
 
@@ -236,10 +254,20 @@ def audit_repo(base, dest, mutate=True):
         for href, sha, algo in iter_packages(primary_local):
             yield safe_href(href), sha, algo
 
+    _files, absent = load_index(dest)
+
     def bad_pkgs():
-        return [(h, s, a) for h, s, a in pkgs()
-                if not (os.path.isfile(os.path.join(dest, h))
-                        and digest_file(os.path.join(dest, h), a) == s)]
+        # The absent exemption covers MISSING files only — a file that is on
+        # disk but hashes wrong is corruption regardless of the record.
+        out = []
+        for h, s, a in pkgs():
+            local = os.path.join(dest, h)
+            if os.path.isfile(local):
+                if digest_file(local, a) != s:
+                    out.append((h, s, a))
+            elif h not in absent:
+                out.append((h, s, a))
+        return out
 
     repair(bad_pkgs(), "package")
     bad = bad_pkgs()
@@ -247,14 +275,38 @@ def audit_repo(base, dest, mutate=True):
         die("verify: packages still bad after repair: "
             + ", ".join(h for h, _s, _a in bad[:10]))
 
+    # Recorded-absent entries get one healing re-probe in the repairing mode —
+    # a snapshot gap is normally permanent, but upstream occasionally fills
+    # one in late. Never in read-only audits.
+    if mutate and absent:
+        pkgmap = {h: (s, a) for h, s, a in pkgs()}
+        healed = 0
+        for href in sorted(absent):
+            sa = pkgmap.get(href)
+            if sa is None:
+                continue
+            if fetch(base + "/" + href, os.path.join(dest, href),
+                     want_sha=sa[0], want_algo=sa[1], retries=1,
+                     allow_404=True) is not None:
+                absent.discard(href)
+                healed += 1
+        if healed:
+            files, _ = load_index(dest)
+            save_index(dest, files, absent)
+            print(f"[repo-mirror] verify: healed {healed} upstream-absent "
+                  f"package(s)", file=sys.stderr)
+
     total = sum(1 for _ in pkgs())
+    if absent:
+        print(f"[repo-mirror] {len(absent)} package(s) upstream-absent "
+              f"(recorded; not local corruption)", file=sys.stderr)
     if not mutate:
-        print(f"[repo-mirror] audit OK: {total} packages + repodata under "
-              f"{dest}", file=sys.stderr)
+        print(f"[repo-mirror] audit OK: {total - len(absent)} packages + "
+              f"repodata under {dest}", file=sys.stderr)
         return
     manifest = {"schema": 1, "verified_at": time.strftime(
         "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "packages": total, "source": base}
+        "packages": total, "absent": len(absent), "source": base}
     tmp = marker + ".tmp"
     with open(tmp, "w") as f:
         json.dump(manifest, f, indent=2)
@@ -264,7 +316,7 @@ def audit_repo(base, dest, mutate=True):
 
 
 def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
-                force, verify, audit):
+                force, verify, audit, jobs):
     src = f"{base}/{snapshot}/tumbleweed/repo/{repo}/"
     dest = os.path.join(dest_root, snapshot, "tumbleweed", "repo", repo)
 
@@ -344,14 +396,16 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
         die(f"{repo}: repomd.xml names no primary metadata")
     primary_local = os.path.join(dest, primary)
 
-    index = load_index(dest)
+    index, absent = load_index(dest)
     new_index, seen = {}, set()
-    fetched = 0
+    missing = []
     for href, sha, algo in iter_packages(primary_local):
-        if limit and fetched >= limit:
+        if limit and len(missing) >= limit:
             break
         href = safe_href(href)
         seen.add(href)
+        if href in absent:
+            continue  # recorded upstream-absent; verify re-probes these
         local = os.path.join(dest, href)
         rec = index.get(href)
         if rec and rec.get("sum") == sha and rec.get("algo", "sha256") == algo \
@@ -360,15 +414,43 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
             new_index[href] = rec
             stats["skipped"] += 1
             continue
-        fetch(src + href, local, want_sha=sha, want_algo=algo)
-        new_index[href] = {"sum": sha, "algo": algo,
-                           "size": os.path.getsize(local)}
-        stats["downloaded"] += 1
-        fetched += 1
-        if stats["downloaded"] % 500 == 0:
-            print(f"[repo-mirror] {repo}: {stats['downloaded']} rpm fetched, "
-                  f"{stats['skipped']} warm", file=sys.stderr)
-            save_index(dest, new_index)  # checkpoint for resume
+        missing.append((href, sha, algo))
+
+    # fetch() is already thread-safe — unique mkstemp + atomic os.replace —
+    # so the download phase parallelizes; index bookkeeping is done by the
+    # main thread as futures complete. A persistent upstream 404 records the
+    # href as absent rather than dying: the snapshot's own publication has
+    # gaps, and an immutable history snapshot will not grow them later.
+    def _one(href, sha, algo):
+        local = os.path.join(dest, href)
+        got = fetch(src + href, local, want_sha=sha, want_algo=algo,
+                    allow_404=True)
+        return href, sha, algo, (None if got is None
+                                 else os.path.getsize(local))
+
+    if missing:
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=jobs, thread_name_prefix="qd-mirror") as pool:
+            futures = [pool.submit(_one, h, s, a) for h, s, a in missing]
+            for fut in concurrent.futures.as_completed(futures):
+                href, sha, algo, size = fut.result()
+                if size is None:
+                    absent.add(href)
+                    stats["absent"] = stats.get("absent", 0) + 1
+                    continue
+                new_index[href] = {"sum": sha, "algo": algo, "size": size}
+                stats["downloaded"] += 1
+                if stats["downloaded"] % 500 == 0:
+                    print(f"[repo-mirror] {repo}: {stats['downloaded']} rpm "
+                          f"fetched, {stats['skipped']} warm, "
+                          f"{stats.get('absent', 0)} upstream-absent",
+                          file=sys.stderr)
+                    save_index(dest, new_index, absent)  # checkpoint
+    if stats.get("absent"):
+        print(f"[repo-mirror] {repo}: {stats['absent']} package(s) "
+              f"upstream-absent (named by primary, 404 at source) — recorded",
+              file=sys.stderr)
+    absent.intersection_update(seen)  # drop records for hrefs primary dropped
     stats["packages"] = len(new_index)
 
     # 4. complete-run cleanup + manifest (skipped under --limit: not done).
@@ -385,10 +467,11 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
         for s in stale:
             os.unlink(s)
         stats["stale_removed"] = len(stale)
-        save_index(dest, new_index)
+        save_index(dest, new_index, absent)
         manifest = {
             "schema": 1, "repo": repo, "snapshot": snapshot, "source": src,
-            "packages": stats["packages"], "finished_at": time.strftime(
+            "packages": stats["packages"], "absent": sorted(absent),
+            "finished_at": time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         tmp = marker + ".tmp"
@@ -419,7 +502,11 @@ def main():
                         "touches mirror.json — for --check preflights")
     p.add_argument("--force", action="store_true",
                    help="re-mirror even when mirror.json marks the repo complete")
+    p.add_argument("--jobs", type=int, default=8,
+                   help="parallel package downloads (default 8)")
     args = p.parse_args()
+    if args.jobs < 1:
+        die("--jobs must be >= 1")
 
     if args.verify and args.audit:
         die("--verify and --audit are mutually exclusive")
@@ -433,7 +520,7 @@ def main():
                     dest_root, limit=args.limit,
                     metadata_only=args.metadata_only,
                     force=args.force, verify=args.verify,
-                    audit=args.audit)
+                    audit=args.audit, jobs=args.jobs)
 
 
 if __name__ == "__main__":

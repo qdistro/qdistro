@@ -361,6 +361,71 @@ print(urllib.request.urlopen('http://127.0.0.1:$port/repos/$SNAP/tumbleweed/repo
     [ "$(cat "$d/noarch/pkg-b-1.0-1.noarch.rpm")" = "rpm-B-bytes" ]
 }
 
+@test "upstream-404 packages are recorded absent, not corruption" {
+    # Rebuild the fixture primary with a third package that never lands on
+    # the server — the snapshot-gap case (metadata names it, upstream 404s).
+    local oss="$SNAP_DIR/oss"
+    local sha_g="$(printf 'ghost-bytes' | sha256sum | awk '{print $1}')"
+    cat > "$WORK/primary.xml" <<EOF
+<metadata xmlns="http://linux.duke.edu/metadata/common" packages="3">
+ <package type="rpm"><name>pkg-a</name><arch>noarch</arch>
+  <checksum type="sha256" pkgid="YES">$(sha256sum "$oss/noarch/pkg-a-1.0-1.noarch.rpm" | awk '{print $1}')</checksum>
+  <location href="noarch/pkg-a-1.0-1.noarch.rpm"/></package>
+ <package type="rpm"><name>pkg-b</name><arch>noarch</arch>
+  <checksum type="sha256" pkgid="YES">$(sha256sum "$oss/noarch/pkg-b-1.0-1.noarch.rpm" | awk '{print $1}')</checksum>
+  <location href="noarch/pkg-b-1.0-1.noarch.rpm"/></package>
+ <package type="rpm"><name>pkg-ghost</name><arch>noarch</arch>
+  <checksum type="sha256" pkgid="YES">$sha_g</checksum>
+  <location href="noarch/pkg-ghost-1.0-1.noarch.rpm"/></package>
+</metadata>
+EOF
+    gzip -c "$WORK/primary.xml" > "$oss/repodata/fixture-primary.xml.gz"
+    local sha_p sha_o
+    sha_p="$(sha256sum "$oss/repodata/fixture-primary.xml.gz" | awk '{print $1}')"
+    sha_o="$(sha256sum "$oss/repodata/other.xml" | awk '{print $1}')"
+    cat > "$oss/repodata/repomd.xml" <<EOF
+<repomd xmlns="http://linux.duke.edu/metadata/repo">
+ <data type="primary">
+  <location href="repodata/fixture-primary.xml.gz"/>
+  <checksum type="sha256">$sha_p</checksum>
+ </data>
+ <data type="other">
+  <location href="repodata/other.xml"/>
+  <checksum type="sha256">$sha_o</checksum>
+ </data>
+</repomd>
+EOF
+
+    run_mirror
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"upstream-absent"* ]]
+    local d="$WORK/cache/repos/$SNAP/tumbleweed/repo/oss"
+    [ -f "$d/mirror.json" ]                       # completes modulo the gap
+    [ ! -f "$d/noarch/pkg-ghost-1.0-1.noarch.rpm" ]
+    grep -q 'pkg-ghost' "$d/mirror-index.json"    # recorded
+    grep -q '"absent"' "$d/mirror.json"
+
+    # Read-only audit passes: recorded-absent is not local corruption.
+    run_mirror --audit
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"upstream-absent"* ]]
+    # ...fully offline too — absent files never need refetching.
+    run env QDISTRO_DEPS_OFFLINE=1 python3 "$MIRROR" --root "$WORK/cache" \
+        --snapshot "$SNAP" --repo oss --base "$BASE" --audit
+    [ "$status" -eq 0 ]
+    # A file missing but NOT recorded-absent still fails the audit.
+    rm -f "$d/noarch/pkg-a-1.0-1.noarch.rpm"
+    run_mirror --audit
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"pkg-a-1.0-1.noarch.rpm"* ]]
+    # An absent-recorded file that lands on disk CORRUPT is still caught —
+    # the exemption covers missing files only.
+    printf 'tampered' > "$d/noarch/pkg-ghost-1.0-1.noarch.rpm"
+    run_mirror --audit
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"pkg-ghost-1.0-1.noarch.rpm"* ]]
+}
+
 @test "--audit is read-only: fails on broken mirror, marker survives" {
     local snap=20260101 repo_dir="$WORK/cache/repos/$snap/tumbleweed/repo/oss"
     mkdir -p "$repo_dir"
