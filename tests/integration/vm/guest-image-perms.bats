@@ -111,6 +111,11 @@ SHIM
     : >"$FAKE_QDWIN/meson.build"
     : >"$FAKE_QDISTRO/daemons/meson.build"
 
+    # --mirror keeps the base fetch on the wget shim: the default pinned
+    # path verifies a real signed image in the deps cache, which this
+    # perms-only test neither needs nor may touch.
+    FAKE_MIRROR="https://example.invalid/base.qcow2"
+
     DEST4="$TMP/out-tier4.qcow2"
     DEST5="$TMP/out-tier5.qcow2"
     DEST5B="$TMP/out-tier5b.qcow2"
@@ -152,18 +157,18 @@ _run_builder() {  # <n-pairs> <pair...> <builder> <builder-args...>
 run_t4() {
     local pairs=("$@")
     _run_builder "${#pairs[@]}" "${pairs[@]}" \
-        "$T4" --force --dest "$DEST4" \
+        "$T4" --force --dest "$DEST4" --mirror "$FAKE_MIRROR" \
         --qdwin-src "$FAKE_QDWIN" --qdistro-src "$FAKE_QDISTRO"
 }
 run_t5() {
     local pairs=("$@")
     _run_builder "${#pairs[@]}" "${pairs[@]}" \
-        "$T5" --force --dest "$DEST5"
+        "$T5" --force --dest "$DEST5" --mirror "$FAKE_MIRROR"
 }
 run_t5b() {
     local pairs=("$@")
     _run_builder "${#pairs[@]}" "${pairs[@]}" \
-        "$T5B" --force --dest "$DEST5B"
+        "$T5B" --force --dest "$DEST5B" --mirror "$FAKE_MIRROR"
 }
 
 # ---- tier-4-guest ----------------------------------------------------------
