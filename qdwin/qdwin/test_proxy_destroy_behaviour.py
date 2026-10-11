@@ -611,7 +611,10 @@ static int scenario_move_only(void)
 	tl = make_proxy(10, &curtain);
 	q.move_grab_active = 1;
 	q.move_grab_handle = tl->handle;
+	/* Installed, as weston_pointer_start_grab() leaves it: end_for only
+	 * ends the move grab while it is still the pointer's grab. */
 	q.move_grab.pointer = &pointer;
+	pointer.grab = &q.move_grab;
 	pointer.focus = &curtain;
 	pick_result = &curtain;
 	q.active_input_proxy = tl;
@@ -829,6 +832,7 @@ QDWIN_FNS = [
     ("struct qdwin_toplevel *", "qdwin_proxy_for_view"),
     ("void", "qdwin_proxy_pointer_track_focus"),
     ("void", "qdwin_proxy_default_grab_focus"),
+    ("void", "qdwin_move_grab_end_if_installed"),
     ("void", "qdwin_move_grab_end_for"),
     ("void", "qdwin_popup_teardown"),
     ("void", "qdwin_popup_resource_destroyed"),

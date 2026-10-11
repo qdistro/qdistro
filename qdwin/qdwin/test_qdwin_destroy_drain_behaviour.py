@@ -692,6 +692,7 @@ SPLICED = [
     "qdwin_view_stream_terminate",
     "qdwin_toplevel_release_dependents",
     "qdwin_popup_teardown",
+    "qdwin_move_grab_end_if_installed",
     "qdwin_move_grab_end_for",
     "qdwin_overlay_grab_end",
     "qdwin_surface_removed",
