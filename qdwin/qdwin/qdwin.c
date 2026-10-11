@@ -15386,8 +15386,15 @@ qdwin_layer_popup_destroy(struct qdwin_layer_popup *lp)
 	 * - lp->grab.pointer is the pointer cached at start time. We must
 	 *   not dereference it if its owning seat was destroyed since (the
 	 *   seat_destroy_listener nulls lp->grab_seat for that case; we
-	 *   skip end_grab and just release our state). */
-	if (lp->grab_active && lp->grab_seat && lp->grab.pointer &&
+	 *   skip end_grab and just release our state).
+	 *
+	 * - Whether to end it is decided by "is ours still the installed
+	 *   grab", NOT by grab_active: weston_pointer_start_grab() replaces
+	 *   a grab without cancelling it (so a replaced grab must be left
+	 *   alone even with grab_active set), and a grab that is still
+	 *   installed must be ended before lp is freed even with grab_active
+	 *   clear, or pointer->grab dangles into the freed popup. */
+	if (lp->grab_seat && lp->grab.pointer &&
 	    lp->grab.pointer->grab == &lp->grab) {
 		struct weston_pointer *p = lp->grab.pointer;
 		lp->popup_resource = NULL;        /* suppresses cancel→dismiss */
@@ -15654,7 +15661,18 @@ static void
 qdwin_layer_popup_grab_cancel(struct weston_pointer_grab *grab)
 {
 	struct qdwin_layer_popup *lp = wl_container_of(grab, lp, grab);
+	/* weston_pointer_cancel_grab() (pointer-device release on VT switch
+	 * or seat teardown, keyboard focus-out) only invokes this callback —
+	 * it does NOT reset pointer->grab. Clearing grab_active alone left
+	 * the grab installed, and the popup the client destroys in answer to
+	 * popup_done was then freed under it. End it ourselves (guarded on it
+	 * still being the installed grab, as qdwin_move_grab_cancel does) and
+	 * drop the cached pointer: the grab is over, and weston may free that
+	 * pointer with its seat right after this cancel. */
 	lp->grab_active = 0;
+	if (grab->pointer && grab->pointer->grab == grab)
+		weston_pointer_end_grab(grab->pointer);
+	grab->pointer = NULL;
 	if (lp->popup_resource) {
 		qdwin_xdg_popup_dismiss_layer_grab_fn dismiss =
 			qdwin_xdg_popup_dismiss_layer_grab_sym();
@@ -19951,12 +19969,11 @@ qdwin_output_boundary_cancel_state(struct qdwin *qdwin,
 		wl_list_for_each_safe(lp, tmp, &ls->popups, link) {
 			/* Send xdg_popup.popup_done through the vendored helper before
 			 * dropping qdwin's wrapper; destroy alone only releases local
-			 * state and would strand the client's popup role. Do NOT call the
-			 * grab's cancel callback directly: that callback deliberately
-			 * leaves pointer->grab installed for libweston's seat-teardown
-			 * caller, so freeing lp afterwards would leave a dangling grab.
-			 * qdwin_layer_popup_destroy sees grab_active and safely ends the
-			 * pointer grab after this one protocol dismissal. */
+			 * state and would strand the client's popup role. Do not call the
+			 * grab's cancel callback here: it would send that dismissal a
+			 * second time. qdwin_layer_popup_destroy ends the pointer grab
+			 * itself whenever it is still installed, after this one protocol
+			 * dismissal. */
 			if (lp->popup_resource) {
 				qdwin_xdg_popup_dismiss_layer_grab_fn dismiss =
 					qdwin_xdg_popup_dismiss_layer_grab_sym();

@@ -62,6 +62,12 @@ Cases:
      lock_surface/lock_view; otherwise the toplevel drain clears the
      promoted fields and the original surface's listeners stay armed
      into freed qdwin.
+ 16. Layer-popup grab cancel (weston_pointer_cancel_grab resets nothing
+     itself): the real cancel ends the still-installed grab, drops its
+     cached pointer and sends popup_done once; the later destroy ends
+     nothing twice. A grab still installed with grab_active clear is
+     ended by destroy anyway; a grab replaced by another grab while
+     grab_active is set is left alone.
 """
 
 from pathlib import Path
@@ -685,6 +691,17 @@ static qdwin_desktop_surface_destroy_fn probe_dsurf_destroy;
 static qdwin_desktop_surface_destroy_fn
 qdwin_desktop_surface_destroy_sym(void)
 { return probe_dsurf_destroy; }
+
+/* The soft-linked xdg_popup.popup_done sender the layer-popup grab cancel
+ * resolves; counted so the probe can pin exactly-once dismissal. */
+typedef void (*qdwin_xdg_popup_dismiss_layer_grab_fn)(
+	struct wl_resource *popup_resource);
+static int layer_popup_done_calls;
+static void probe_layer_popup_done(struct wl_resource *r)
+{ (void)r; layer_popup_done_calls++; }
+static qdwin_xdg_popup_dismiss_layer_grab_fn
+qdwin_xdg_popup_dismiss_layer_grab_sym(void)
+{ return probe_layer_popup_done; }
 """
 
 SPLICED = [
@@ -719,6 +736,7 @@ SPLICED = [
     "qdwin_activation_tokens_destroy_all",
     "qdwin_primary_seat_seat_destroyed",
     "qdwin_primary_seats_destroy_all",
+    "qdwin_layer_popup_grab_cancel",
     "qdwin_layer_popup_destroy",
     "qdwin_layer_surface_resource_destroy",
     "qdwin_layer_surfaces_destroy_all",
@@ -1457,6 +1475,76 @@ static int case_grab_suppression(void)
 	return 0;
 }
 
+/* 16: layer-popup grab cancel ends its own grab; destroy ends a grab iff
+ * it is still installed, whatever grab_active says. */
+static struct qdwin_layer_popup *layer_popup_new(int install)
+{
+	struct qdwin_layer_popup *lp = calloc(1, sizeof *lp);
+	assert(lp);
+	lp->grab_active = 1;
+	lp->grab_seat = &main_seat;
+	lp->grab.pointer = &main_pointer;
+	if (install)
+		main_pointer.grab = &lp->grab;
+	wl_list_init(&lp->link);
+	wl_list_init(&lp->surface_commit_listener.link);
+	wl_list_init(&lp->surface_destroy_listener.link);
+	wl_list_init(&lp->popup_resource_destroy_listener.link);
+	wl_list_init(&lp->seat_destroy_listener.link);
+	return lp;
+}
+
+static int case_layer_popup_grab_cancel(void)
+{
+	reset_counters();
+	layer_popup_done_calls = 0;
+	qdwin_singleton = NULL;
+
+	/* Cancel, as weston_pointer_cancel_grab() runs it: the callback
+	 * alone, with pointer->grab still ours. */
+	struct qdwin_layer_popup *lp = layer_popup_new(1);
+	struct wl_resource *popup_res = res_new(lp, NULL);
+	lp->popup_resource = popup_res;
+	qdwin_layer_popup_grab_cancel(main_pointer.grab);
+	CHECK(main_pointer.grab == &main_pointer.default_grab,
+	      "layer-popup grab cancel left the grab installed");
+	CHECK(end_grab_calls == 1,
+	      "layer-popup grab cancel did not end the grab via end_grab");
+	CHECK(!lp->grab_active, "layer-popup grab cancel left grab_active");
+	CHECK(lp->grab.pointer == NULL,
+	      "layer-popup grab cancel kept a pointer weston may free");
+	CHECK(layer_popup_done_calls == 1,
+	      "layer-popup grab cancel did not send popup_done once");
+	qdwin_layer_popup_destroy(lp);
+	CHECK(end_grab_calls == 1 && layer_popup_done_calls == 1,
+	      "destroy after cancel ended the grab or dismissed again");
+	CHECK(main_pointer.grab == &main_pointer.default_grab,
+	      "destroy after cancel touched the pointer's grab");
+	free(popup_res);
+
+	/* Still installed, flag clear: destroy must end it before free. */
+	reset_counters();
+	lp = layer_popup_new(1);
+	lp->grab_active = 0;
+	qdwin_layer_popup_destroy(lp);
+	CHECK(main_pointer.grab == &main_pointer.default_grab,
+	      "destroy left an installed layer-popup grab pointing at the "
+	      "freed popup because grab_active was clear");
+	CHECK(end_grab_calls == 1,
+	      "destroy did not end the installed layer-popup grab");
+
+	/* Replaced by start_grab (no cancel), flag still set: leave it. */
+	reset_counters();
+	struct weston_pointer_grab foreign = { .pointer = &main_pointer };
+	lp = layer_popup_new(0);
+	main_pointer.grab = &foreign;
+	qdwin_layer_popup_destroy(lp);
+	CHECK(main_pointer.grab == &foreign && end_grab_calls == 0,
+	      "layer-popup destroy ended a grab it did not own");
+	main_pointer.grab = &main_pointer.default_grab;
+	return 0;
+}
+
 /* 13: full pass — populate every family, drain, free, fire late paths. */
 static int case_full_pass(void)
 {
@@ -1757,7 +1845,8 @@ int main(void)
 	if ((r = case_full_pass())) return r;
 	if ((r = case_unclaimed_bindings())) return r;
 	if ((r = case_lock_attach_promote())) return r;
-	printf("destroy-drain behaviour: 14 cases OK\n");
+	if ((r = case_layer_popup_grab_cancel())) return r;
+	printf("destroy-drain behaviour: 15 cases OK\n");
 	return 0;
 }
 """
