@@ -298,15 +298,54 @@ PY
     [ ! -s "$HITS" ]
 }
 
-@test "qd_serve proxy restarts when the offline mode flips" {
-    run bash -c ". '$DEPS'; qd_serve_start"
+@test "qd_serve: an offline caller never replaces a live server; an online caller replaces an offline one" {
+    run bash -c ". '$DEPS'; qd_serve_start >/dev/null; cat \"\$(qd_deps_root)/.serve.pid\""
     [ "$status" -eq 0 ]
-    local p1="$output"
-    run bash -c ". '$DEPS'; qd_serve_start"
-    [ "$output" = "$p1" ]                         # same mode → reused
-    run env QCI_OFFLINE=1 bash -c ". '$DEPS'; qd_serve_start"
-    [ "$status" -eq 0 ]
+    local pid1="$output"
+    # offline caller: reuses the online server (its clients use /offline/)
+    run env QCI_OFFLINE=1 bash -c ". '$DEPS'; qd_serve_start >/dev/null; cat \"\$(qd_deps_root)/.serve.pid\""
+    [ "$output" = "$pid1" ]
+    [ "$(cat "$WORK/cache/.serve.mode")" = online ]
+    bash -c ". '$DEPS'; qd_serve_stop"
+    run env QCI_OFFLINE=1 bash -c ". '$DEPS'; qd_serve_start >/dev/null; cat \"\$(qd_deps_root)/.serve.pid\""
+    local pid2="$output"
     [ "$(cat "$WORK/cache/.serve.mode")" = offline ]
+    # online caller: an offline-started server would 404 its misses — replaced
+    run bash -c ". '$DEPS'; qd_serve_start >/dev/null; cat \"\$(qd_deps_root)/.serve.pid\""
+    [ "$output" != "$pid2" ]
+    [ "$(cat "$WORK/cache/.serve.mode")" = online ]
+}
+
+@test "proxy: /offline/repos is cache-only on an online server (client policy survives a restart)" {
+    start_proxy
+    wget -q -O /dev/null "$PROXY/oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    : > "$HITS"
+    local off="${PROXY/\/repos\//\/offline\/repos\/}"
+    run wget -q -O "$WORK/got" "$off/oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$WORK/got")" = "oss-A-bytes" ]
+    run curl -s -o /dev/null -w '%{http_code}' "$off/oss/noarch/pkg-b-1.0-1.noarch.rpm"
+    [ "$output" = 404 ]
+    [ ! -s "$HITS" ]
+    [ ! -e "$(C oss)/noarch/pkg-b-1.0-1.noarch.rpm" ]
+    # the same miss on /repos/ (online client) still pulls through
+    run wget -q -O /dev/null "$PROXY/oss/noarch/pkg-b-1.0-1.noarch.rpm"
+    [ "$status" -eq 0 ]
+}
+
+@test "proxy: a symlinked repo directory or repodata/ never takes a write outside the cache" {
+    mkdir -p "$WORK/out-repo" "$WORK/out-md" "$(C oss)" "$(dirname "$(C non-oss)")"
+    ln -s "$WORK/out-repo" "$(C non-oss)"               # whole repo dir
+    ln -s "$WORK/out-md" "$(C oss)/repodata"            # metadata dir
+    start_proxy
+    run curl -s -o /dev/null -w '%{http_code}' "$PROXY/non-oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    [ "$output" != 200 ]
+    run curl -s -o /dev/null -w '%{http_code}' "$PROXY/oss/repodata/repomd.xml"
+    [ "$output" != 200 ]
+    [ -z "$(ls -A "$WORK/out-repo")" ]
+    [ -z "$(ls -A "$WORK/out-md")" ]
+    cache_cmd prune --snapshot "$SNAP" --repo non-oss --list /dev/null
+    [ -z "$(ls -A "$WORK/out-repo")" ]
 }
 
 @test "proxy: a multi-chunk package streams cold, byte-exact, and is cached" {

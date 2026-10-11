@@ -333,7 +333,8 @@ qd_oci_ensure() {
 # Guests cannot see the host filesystem: slirp reaches the host at
 # 10.0.2.2, libguestfs/passt at qd_passt_host_addr. qd_serve_start exports the
 # whole deps root over HTTP on 0.0.0.0 so a guest can use
-# QDISTRO_REPO_BASE=http://<host-addr>:<port>/repos — the same layout as
+# QDISTRO_REPO_BASE=http://<host-addr>:<port>/repos (offline: .../offline/repos,
+# cache-only per request) — the same layout as
 # the file:// host base. State lives in the root: .serve.pid/.serve.port
 # are stale-tolerant (a dead pid is re-checked, not trusted).
 
@@ -371,13 +372,15 @@ qd_serve_start() {
         flock -x 9
         if [ -s "$pid_file" ] && [ -s "$port_file" ]; then
             pid="$(cat "$pid_file")"
-            mode=online; qd_deps_offline && mode=offline
-            if kill -0 "$pid" 2>/dev/null \
-                    && [ "$(cat "$root/.serve.mode" 2>/dev/null)" = "$mode" ]; then
+            # Offline clients carry their policy in the URL (/offline/repos),
+            # so any live server serves them safely and an offline caller
+            # never replaces one (that would break a live online build's
+            # misses). Only an online caller replaces a server started
+            # offline — its offline clients keep their /offline/ URLs.
+            if kill -0 "$pid" 2>/dev/null && { qd_deps_offline \
+                    || [ "$(cat "$root/.serve.mode" 2>/dev/null)" = online ]; }; then
                 cat "$port_file"; exit 0
             fi
-            # Dead, or started in the other mode: an online proxy reused by
-            # an offline run would fetch upstream. Replace it.
             kill "$pid" 2>/dev/null || true
             rm -f "$pid_file" "$port_file"
         fi
@@ -440,7 +443,11 @@ qd_serve_guest_base() {
         _qdc_die "qd_serve_guest_base: offline and no cached metadata for $snap — qd-cache-warm first"
         return 1
     fi
-    printf 'http://%s:%s/repos\n' "$host" "$port"
+    if qd_deps_offline; then
+        printf 'http://%s:%s/offline/repos\n' "$host" "$port"
+    else
+        printf 'http://%s:%s/repos\n' "$host" "$port"
+    fi
 }
 
 # qd_repo_wire_container <snapshot> <mountpoint>
@@ -586,7 +593,7 @@ qd_repo_wire_guest() {
     # The host's primary IPv4 reaches the proxy from every transport, so
     # prefer it; the caller's transport is only the routeless fallback.
     # "passt" resolves passt's host mapping and fails loudly without one.
-    host="$(qd_guest_host_addr)"
+    host="$(qd_guest_host_addr)" || host=
     if [ -z "$host" ]; then
         case "${2:-10.0.2.2}" in
             passt) host="$(qd_passt_host_addr)" || return 1 ;;

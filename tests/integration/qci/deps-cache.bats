@@ -681,11 +681,12 @@ fab_mirror() {
     SERVE_STARTED=1
     run env QCI_OFFLINE=1 bash -c ". '$LIB'; qd_repo_wire_guest 20260101 169.254.2.2; echo base=\$QDISTRO_REPO_BASE"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ base=http://192\.0\.2\.10:[0-9]+/repos ]]
+    # the offline policy travels in the URL: cache-only whatever the server mode
+    [[ "$output" =~ base=http://192\.0\.2\.10:[0-9]+/offline/repos$ ]]
     [ "$(cat "$WORK/cache/.serve.mode")" = offline ]
     # the proxy serves the cached tree
     port="$(bash -c '. "$1"; qd_serve_port' _ "$LIB")"
-    wget -q -O - "http://127.0.0.1:$port/repos/20260101/tumbleweed/repo/oss/repodata/repomd.xml" \
+    wget -q -O - "http://127.0.0.1:$port/offline/repos/20260101/tumbleweed/repo/oss/repodata/repomd.xml" \
         | grep -q '<repomd xmlns'
 }
 
@@ -922,15 +923,30 @@ _run_native_builder() {
     ! grep 'podman build' "$PODMAN_LOG" | grep -q 'download.example.org'
 }
 
-@test "a generated guest base is re-derived when the offline mode flips (never a stale online proxy)" {
+@test "a generated guest base is re-derived when the offline mode flips (never a stale online URL)" {
     fab_mirror 20260101
     run bash -c ". '$LIB'
         qd_repo_wire_guest 20260101 10.0.2.2 2>/dev/null
+        p1=\$(qd_serve_port)
         export QCI_OFFLINE=1
         qd_repo_wire_guest 20260101 10.0.2.2 2>/dev/null
-        cat \"\$(qd_deps_root)/.serve.mode\""
+        echo \"\$QDISTRO_REPO_BASE \$( [ \"\$(qd_serve_port)\" = \"\$p1\" ] && echo same-server)\""
     [ "$status" -eq 0 ]
-    [ "$output" = offline ]
+    # offline URL, and the live online server was NOT replaced under its clients
+    [[ "$output" =~ ^http://192\.0\.2\.10:[0-9]+/offline/repos\ same-server$ ]]
+}
+
+@test "qd_repo_wire_guest: failed route discovery under errexit still takes the transport fallback" {
+    mkdir -p "$WORK/fb"; printf '#!/bin/sh\nexit 1\n' > "$WORK/fb/ip"; chmod +x "$WORK/fb/ip"
+    SERVE_STARTED=1
+    run bash -c "set -euo pipefail; export QDISTRO_GUEST_HOST_ADDR=
+        export PATH='$WORK/fb':\"\$PATH\"; . '$LIB'; qd_repo_wire_guest 20260101 10.0.2.2 2>/dev/null; echo base=\$QDISTRO_REPO_BASE"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ base=http://10\.0\.2\.2:[0-9]+/repos$ ]]
+    run bash -c "set -euo pipefail; export QDISTRO_GUEST_HOST_ADDR= QDISTRO_PASST_HOST_ADDR=192.0.2.1
+        export PATH='$WORK/fb':\"\$PATH\"; . '$LIB'; qd_repo_wire_guest 20260101 passt 2>/dev/null; echo base=\$QDISTRO_REPO_BASE"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ base=http://192\.0\.2\.1:[0-9]+/repos$ ]]
 }
 
 @test "qd_repo_wire_container offline ignores an exported external base (either offline flag)" {

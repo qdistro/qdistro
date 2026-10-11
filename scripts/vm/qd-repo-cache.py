@@ -21,9 +21,11 @@ verbatim, so `QDISTRO_REPO_BASE=http://<host>:<port>/repos` (proxy) or
 
 Subcommands:
   serve      HTTP proxy over <root> (the qd_serve server). /repos/... is the
-             pull-through cache; any other path is served statically.
-             Offline (QCI_OFFLINE / QDISTRO_DEPS_OFFLINE): a cache miss is a
-             404 — never an upstream fetch.
+             pull-through cache; nothing else is served. /offline/repos/...
+             is the same tree, cache-only: an offline client's URL keeps it
+             offline whatever mode the server runs in. A server started
+             offline (QCI_OFFLINE / QDISTRO_DEPS_OFFLINE) is cache-only for
+             both. Offline, a cache miss is a 404 — never an upstream fetch.
   metadata   warm (verify) the metadata of a snapshot.
   prefetch   fetch every package of a list (`<repo> <name>.<arch>` lines).
   audit      read-only: metadata verifies AND every listed package is cached
@@ -75,10 +77,16 @@ def die(msg):
     sys.exit(1)
 
 
+_REQ = threading.local()
+
+
 def offline():
-    """Same contract as qd_deps_offline in deps-cache.sh."""
+    """Same contract as qd_deps_offline in deps-cache.sh — or, in the
+    proxy, a request that came in under /offline/repos/ (the client's own
+    offline policy, carried in its URL so no server restart can change it)."""
     vals = ("1", "true", "yes", "on")
-    return os.environ.get("QDISTRO_DEPS_OFFLINE", "") in vals or \
+    return getattr(_REQ, "offline", False) or \
+        os.environ.get("QDISTRO_DEPS_OFFLINE", "") in vals or \
         os.environ.get("QCI_OFFLINE", "") in vals
 
 
@@ -259,31 +267,37 @@ class Repo:
             raise CacheError(f"bad snapshot/repo: {snapshot}/{repo}")
         self.snapshot, self.repo = snapshot, repo
         self.dir = os.path.join(root, "repos", snapshot, "tumbleweed", "repo", repo)
+        # Trusted anchor: <root>/repos may itself be a symlink (another
+        # disk), but nothing below it may resolve elsewhere — not the repo
+        # directory, not repodata/, not a package subdirectory.
+        self.real_dir = os.path.join(os.path.realpath(os.path.join(root, "repos")),
+                                     snapshot, "tumbleweed", "repo", repo)
         self.src = f"{base.rstrip('/')}/{snapshot}/tumbleweed/repo/{repo}/"
         self._pkgs = None
         self._mu = threading.Lock()
 
     def contained(self, href):
         """Local path for href, refusing any path whose resolved location
-        (symlinked dirs included) leaves this repo's cache directory — for
-        writes as much as for reads."""
+        (symlinked dirs included, the repo directory itself too) leaves
+        this repo's cache directory under the trusted root — for writes
+        (packages, metadata, sidecars, locks, markers) as much as reads."""
         local = os.path.join(self.dir, safe_href(href))
-        real_dir = os.path.realpath(self.dir)
-        if not os.path.realpath(local).startswith(real_dir + os.sep):
+        if not os.path.realpath(local).startswith(self.real_dir + os.sep):
             raise CacheError(f"{href}: resolves outside the cache")
         return local
 
     # -- locking: cross-process flock + in-process mutex ------------------
     def _flock(self, name, shared=False):
-        os.makedirs(os.path.dirname(os.path.join(self.dir, name)), exist_ok=True)
-        fd = os.open(os.path.join(self.dir, name), os.O_CREAT | os.O_RDWR, 0o644)
+        path = self.contained(name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
         fcntl.flock(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
         return fd
 
     # -- metadata ----------------------------------------------------------
     @property
     def marker(self):
-        return os.path.join(self.dir, "metadata.json")
+        return self.contained("metadata.json")
 
     def load_marker(self):
         """The metadata.json record, or None (absent, unreadable, or an
@@ -302,7 +316,7 @@ class Repo:
         return self.load_marker() is not None
 
     def repomd(self):
-        return os.path.join(self.dir, "repodata", "repomd.xml")
+        return self.contained("repodata/repomd.xml")
 
     def verified_repomd(self):
         """Parsed repomd entries, after repomd.xml re-hashes to the digest
@@ -335,7 +349,7 @@ class Repo:
 
     def metadata_ok(self, rel):
         exp = self.metadata_expected(rel)
-        local = os.path.join(self.dir, rel)
+        local = self.contained(rel)
         return exp is not None and os.path.isfile(local) \
             and digest_file(local, exp[1]) == exp[0]
 
@@ -350,12 +364,12 @@ class Repo:
         m = self.load_marker()
         for side in SIDECARS:
             sha = m["sidecars"].get(side)
-            local = os.path.join(self.dir, "repodata", side)
+            local = self.contained("repodata/" + side)
             if sha and not (os.path.isfile(local) and digest_file(local) == sha):
                 bad.append(f"repodata/{side}")
         bad += [h for h, s, a, _t in entries
-                if not (os.path.isfile(os.path.join(self.dir, h))
-                        and digest_file(os.path.join(self.dir, h), a) == s)]
+                if not (os.path.isfile(self.contained(h))
+                        and digest_file(self.contained(h), a) == s)]
         return bad
 
     def warm_metadata(self, force=False):
@@ -376,7 +390,7 @@ class Repo:
                 sidecars = {}
                 for side in SIDECARS:
                     # only a genuine 404 means "upstream ships no sidecar"
-                    local = os.path.join(self.dir, "repodata", side)
+                    local = self.contained("repodata/" + side)
                     if fetch(self.src + "repodata/" + side, local) is None:
                         log(f"{self.repo}: no repodata/{side} upstream (ok)")
                         if os.path.lexists(local):
@@ -414,7 +428,7 @@ class Repo:
                               if t == "primary"), None)
                 if entry is None:
                     raise CacheError(f"{self.repo}: repomd names no primary")
-                primary = os.path.join(self.dir, entry[0])
+                primary = self.contained(entry[0])
                 if not os.path.isfile(primary) or digest_file(primary, entry[2]) != entry[1]:
                     raise CacheError(f"{self.repo}: primary does not match repomd")
                 self._pkgs = {h: (s, a, n, ar) for h, s, a, n, ar in
@@ -423,7 +437,7 @@ class Repo:
 
     # -- verified-files index ------------------------------------------------
     def _index_path(self):
-        return os.path.join(self.dir, "cache-index.json")
+        return self.contained("cache-index.json")
 
     def load_index(self):
         try:
@@ -433,7 +447,7 @@ class Repo:
             pass
         # One-time adoption of a pre-proxy mirror-index.json.
         try:
-            with open(os.path.join(self.dir, "mirror-index.json")) as f:
+            with open(self.contained("mirror-index.json")) as f:
                 idx = json.load(f)
             return dict(idx.get("files", idx)) if isinstance(idx, dict) else {}
         except (OSError, ValueError):
@@ -455,7 +469,7 @@ class Repo:
 
     def cached_ok(self, href, sha, algo, idx=None, deep=False):
         """True when the local file is a verified copy of href."""
-        local = os.path.join(self.dir, href)
+        local = self.contained(href)
         if not os.path.isfile(local):
             return False
         if not deep:
@@ -510,11 +524,11 @@ class Repo:
         with self._mu:
             seen = getattr(self, "_used", None)
             if seen is None:
-                seen = self._used = set(read_list_lines(os.path.join(self.dir, "used.txt")))
+                seen = self._used = set(read_list_lines(self.contained("used.txt")))
             if line.strip() in seen:
                 return
             seen.add(line.strip())
-            with open(os.path.join(self.dir, "used.txt"), "a") as f:
+            with open(self.contained("used.txt"), "a") as f:
                 f.write(line)
 
 
@@ -554,7 +568,7 @@ def listed_hrefs(repo, names):
 
 # -- HTTP proxy --------------------------------------------------------------
 
-REPO_PATH = re.compile(r"^/repos/(\d{8})/tumbleweed/repo/(oss|non-oss)/(.+)$")
+REPO_PATH = re.compile(r"^/(offline/)?repos/(\d{8})/tumbleweed/repo/(oss|non-oss)/(.+)$")
 
 
 def make_handler(root, base):
@@ -603,7 +617,8 @@ def make_handler(root, base):
             if not m:
                 self.send_error(404)
                 return
-            snap, name, rel = m.groups()
+            req_offline, snap, name, rel = m.groups()
+            _REQ.offline = bool(req_offline)
             sink = None
             try:
                 rel = safe_href(rel)
@@ -616,7 +631,7 @@ def make_handler(root, base):
                         log(f"{snap}/{name}/{rel}: cached metadata fails its pin — re-warming")
                         repo.warm_metadata(force=True)
                     if repo.metadata_ok(rel):
-                        self._send_file(os.path.join(repo.dir, rel), head)
+                        self._send_file(repo.contained(rel), head)
                     else:
                         self.send_error(404)
                     return
@@ -760,7 +775,7 @@ def cmd_audit(args):
 def cmd_export_list(args):
     lines = set()
     for repo in repos_of(args):
-        lines.update(read_list_lines(os.path.join(repo.dir, "used.txt")))
+        lines.update(read_list_lines(repo.contained("used.txt")))
     if args.merge:
         lines.update(read_list_lines(args.merge))
     sys.stdout.write("".join(f"{ln}\n" for ln in sorted(lines)))
@@ -771,6 +786,8 @@ def cmd_prune(args):
     for repo in repos_of(args):
         if not repo.metadata_present():
             continue
+        if os.path.realpath(repo.dir) != repo.real_dir:
+            raise CacheError(f"{repo.dir}: resolves outside the cache root")
         keep, _gone = listed_hrefs(repo, want[repo.repo])
         keep = set(keep)
         dropped, freed = [], 0
