@@ -145,17 +145,23 @@ silently merge:
   derived names collide, and `launch()` has no manifest-supplied name
   path — the appId is the only identity.
 - The domain records its bound appId in `<metadata>` at define time,
-  and the overlay gets the same binding in a `<disk>.appid` sidecar
-  stamped BEFORE the disk is created — if the definition is ever
-  lost, the disk keeps its own owner record, and a crash between
-  the two leaves only a harmless lone sidecar the next spawn
-  overwrites (a disk without its record would be unrecoverable).
+  and the overlay gets an owner record in a `<disk>.appid` sidecar
+  stamped right after create as `<appId> <dev> <ino>` — bound to the
+  inode it names, so a leftover or planted sidecar can never
+  authorize a different file at the same path. If the definition is
+  ever lost the disk still proves its owner, and a crash between
+  create and stamp leaves an unproven disk the next spawn replaces —
+  never boots — so a crashed create recovers automatically.
   Adoption verifies bound == `--policy-key`: a
   LIVE domain bound to another (or no) app is refused (the wrapper
   exits with REAP=0 — it never tears down a guest it does not own), a
   defined foreign domain is refused outright rather than reclaimed,
   and an overlay whose domain is gone is reused only when its sidecar
-  names our appId AND its backing file is our base — confirmed qemu
+  names our appId, records the disk's own dev/ino, AND its backing
+  file is our base. A sidecar naming another app is a foreign claim —
+  refused; every other unproven disk at our own name is replaced
+  rather than booted, so its contents can never run under our
+  binding — confirmed qemu
   death proves no live guest is killed, but it does not make a
   foreign definition or disk ours; the owner relaunches under its own
   name and an admin removes a genuinely stale squatter deliberately.
@@ -178,8 +184,9 @@ silently merge:
   `t5-<stub>-<16-hex>` as `VMApps._vmNameForApp` derives them — so a
   manually created overlay of our base in the shared image dir is
   never reaped merely because its backing file matches. The shape
-  alone is not proof either: a reaped disk must carry a nonempty
-  `.appid` sidecar that RE-DERIVES to its own name
+  alone is not proof either: a reaped disk must carry an `.appid`
+  sidecar that RE-DERIVES to its own name AND binds the file's own
+  dev/ino — a record copied beside a different disk is not proof —
   (`tier5_derived_name` is a byte-exact port of `_vmNameForApp`,
   pinned by a parity test against the real JS function) — a missing
   or incoherent owner record is preserved, not treated as "no
@@ -188,15 +195,19 @@ silently merge:
   standalone cleanup helper applies the same coherence: a defined
   domain under a t5 name is destroyed only when its binding
   re-derives to that name, and an orphan disk needs a sidecar that
-  does the same — a missing sidecar refuses unless the operator
+  does the same plus the inode match — a missing sidecar refuses
+  unless the operator
   deliberately opts in with `TIER5_CLEANUP_ALLOW_OWNERLESS=1`.
   "Live" is decided by `qemu_pids_for_domain` alone —
   a LITERAL substring scan of the ps table for libvirt's
   `-name guest=<vm>` argv token narrowed to real qemu via
   `/proc/<pid>/comm` AND `/proc/<pid>/cmdline` — the `guest=<name>,`
   token must be the argument right after `-name` in the pid's own
-  argv, so a foreign qemu carrying the string inside another
-  argument never matches — with a distinct cannot-determine rc. A
+  argv, and the argv is walked on its NUL separators (the only
+  delimiter an argument cannot contain — newline-folding would let
+  one crafted arg manufacture the fake pair), so a foreign qemu
+  carrying the string inside another argument never matches — with a
+  distinct cannot-determine rc. A
   regex scan would let a manual name like `t5.a` match `t5xa`, and
   a raw substring would match inside a foreign argument; both
   would hand the cleanup helper foreign pids to signal.

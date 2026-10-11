@@ -365,17 +365,23 @@ def test_qemu_scan_requires_the_name_argv_token():
     #          the argument right after `-name` in the pid's OWN argv.
     #          A foreign qemu carrying the string inside another
     #          argument (file=/tmp/-name guest=t5-x,b.qcow2) must never
-    #          be handed to a caller that signals it (sol r18)
+    #          be handed to a caller that signals it (sol r18). The
+    #          argv walk parses on NUL — the only delimiter an argv
+    #          entry cannot contain: a newline-folding tr would let a
+    #          single crafted arg manufacture the fake pair (sol r19)
     for src, name in ((SPAWN, "spawn"), (CLEANUP, "cleanup")):
         body = re.search(
             r"qemu_pids_for_domain\(\)\s*\{(?P<body>.*?)\n\}",
             src, re.S,
         ).group("body")
-        assert '"/proc/$p/cmdline"' in body, name
-        assert 'p == "-name"' in body, name
+        assert 'cmdline", "rb"' in body, name
+        assert '.split(b"\\0")' in body, name
+        assert 'a == b"-name"' in body, name
+        assert 'argv[i + 1].startswith(needle)' in body, name
+        assert "tr '\\0' '\\n'" not in body, name
         # the argv check sits inside the candidate loop, after comm
         assert body.index('c=$(cat "/proc/$p/comm"') \
-            < body.index('"/proc/$p/cmdline"'), name
+            < body.index('python3 - "$p"'), name
 
 
 def test_wait_loop_breaks_only_on_confirmed_dead():
@@ -436,36 +442,51 @@ def test_create_domain_reverifies_binding_before_start():
     assert "cannot determine state" in body
 
 
-def test_overlay_reuse_requires_a_provable_owner():
-    # ensures: an overlay outliving its domain cannot be booted under a
-    #          new app identity — with no definition to carry the
-    #          binding, the disk's own <disk>.appid sidecar (stamped at
-    #          create, removed with the overlay) plus a OUR-base
-    #          backing check is the only proof; anything else refuses
-    #          (sol r12)
+def test_overlay_reuse_requires_an_inode_bound_owner_record():
+    # ensures: an overlay outliving its domain can be booted only when
+    #          its <disk>.appid sidecar records OUR appId AND the
+    #          dev/ino of THE file it was stamped for — a lone sidecar
+    #          left by a crashed create, or one copied beside a planted
+    #          disk, can never authorize that disk (sol r12/r19). A
+    #          sidecar naming another app is a foreign claim and
+    #          refuses; every other unproven state at our own name is
+    #          REPLACED (rm + fresh create), never booted — a crashed
+    #          create's disk or a plant both resolve to a known-fresh
+    #          overlay (sol r18/r19)
     body = _section("create_domain")
-    assert '"$DISK.appid"' in body
-    assert '_side=$(cat "$DISK.appid"' in body
-    assert "refusing to boot an unproven disk" in body
-    # the sidecar gate only fires when the domain is CONFIRMED ABSENT —
-    # a defined-ours domain's own binding is the stronger record
-    gate = body[body.index('if [ -f "$DISK" ]'):body.index("qemu-img create")]
+    assert 'read -r _sapp _sident' in body
+    assert '[ "$_sapp" = "$POLICY_KEY" ]' in body
+    assert '[ "$_sident" = "$(stat -c \'%d %i\' "$DISK"' in body
+    assert '"backing-filename"' in body
+    assert 'foreign-claimed disk is never ours' in body
+    assert 'unproven — replacing it' in body
+    # the ownership gate only fires when the domain is CONFIRMED
+    # ABSENT — a defined-ours domain's own binding is the stronger
+    # record (and missing-sidecar backfill records dev/ino too)
+    gate = body[body.index('if [ -f "$DISK" ]'):]
     assert '[ "$_ds" -eq 1 ]' in gate
-    assert '"backing-filename"' in gate
-    # the sidecar is stamped at create and removed everywhere the
-    # overlay is removed (teardown, reaper, cleanup helper)
-    assert 'mv -f "$DISK.appid.$$" "$DISK.appid"' in body
-    # the sidecar is stamped BEFORE qemu-img create — a crash between
-    # the two leaves a harmless lone sidecar (the next spawn
-    # overwrites it), not an unproven disk nothing may touch (sol r18)
-    assert body.index('"$DISK.appid.$$"') \
-        < body.index("qemu-img create")
+    assert "printf '%s %s\\n' \"$POLICY_KEY\" \"$_di\"" in gate
+    # the record is stamped AFTER create inside _create_overlay_disk —
+    # it must name the inode it binds, so the create precedes the
+    # stamp; a crash between them leaves an unproven disk the next
+    # spawn replaces (never boots) — automatic recovery, not a brick
+    # (sol r18/r19)
+    create = _section("_create_overlay_disk")
+    assert create.index("qemu-img create") \
+        < create.index('"$DISK.appid.$$"')
+    assert 'stat -c \'%d %i\'' in create
+    # the create-failure path never rm's $DISK itself — a foreign file
+    # could have appeared after the caller's absence check (sol r19)
+    fail = create[create.index("qemu-img create"):
+                  create.index("exit 4")]
+    assert 'rm -f "$DISK"' not in fail
     assert 'rm -f "$DISK" "$DISK.appid"' in SPAWN
     assert 'rm -f "$overlay" "$overlay.appid"' in SPAWN
     assert 'rm -f "$DISK" "$DISK.appid"' in CLEANUP
     # teardown's confirmed-absent-at-claim path gates the unlink on the
     # sidecar too — a domain that was already gone never vouched for
-    # the disk, so the sidecar is the only owner record there as well
+    # the disk, so the inode-bound sidecar is the only owner record
+    # there as well
     body = _section("cleanup")
     assert "_claim_ds=$_ds" in body
     assert "overlay owner unproven" in body
@@ -486,15 +507,16 @@ def test_reaper_preserves_owned_orphan_overlays():
     #          are all ambiguity -> preserve (sol r12/r13)
     reaper = SPAWN[SPAWN.index("orphan-overlay reaper"):
                    SPAWN.index("reaped orphan overlay")]
-    assert 'manifest_app_state "$_side" "$DISK_BASE"; _ms=$?' in reaper
+    assert 'manifest_app_state "$_sapp" "$DISK_BASE"; _ms=$?' in reaper
     assert '[ "$_ms" -eq 1 ]' in reaper
     # the sidecar is REQUIRED, not optional: a missing, unreadable, or
-    # empty one preserves (cat failure OR -z), and it must re-derive
-    # to the disk's own name — a t5-shaped name is only a shape
-    # (sol r17)
-    assert '! _side=$(cat "$overlay.appid"' in reaper
-    assert '[ -z "$_side" ]' in reaper
-    assert '[ "$(tier5_derived_name "$_side")" = "$base" ]' in reaper
+    # empty one preserves, and it must BOTH bind the overlay's own
+    # dev/ino (a copied record is not proof — sol r19) AND re-derive
+    # to the disk's name — a t5-shaped name is only a shape (sol r17)
+    assert 'read -r _sapp _sident' in reaper
+    assert '[ -n "$_sapp" ]' in reaper
+    assert '[ "$_sident" = "$(stat -c \'%d %i\' "$overlay"' in reaper
+    assert '[ "$(tier5_derived_name "$_sapp")" = "$base" ]' in reaper
     # the ownership gate sits between confirmed-absent and the rm
     assert reaper.index('manifest_app_state') \
         < reaper.index('rm -f "$overlay"')
@@ -532,9 +554,11 @@ def test_reaper_reverifies_after_settle():
     assert tail.index("manifest_app_state") \
         < tail.index('rm -f "$overlay"')
     # a sidecar that APPEARED/changed/vanished during the settle is
-    # re-read and re-derived, not assumed (sol r16/r17)
-    assert tail.count('cat "$overlay.appid"') >= 1
-    assert tail.count('tier5_derived_name "$_side"') >= 1
+    # re-read and re-validated, not assumed — inode binding included
+    # (sol r16/r17/r19)
+    assert tail.count('read -r _sapp _sident') >= 1
+    assert tail.count('tier5_derived_name "$_sapp"') >= 1
+    assert tail.count('stat -c \'%d %i\' "$overlay"') >= 1
     # sidecar removal rides along with the overlay rm
     assert 'rm -f "$overlay" "$overlay.appid"' in reaper
 
@@ -706,10 +730,14 @@ def test_owner_records_must_rederive_to_the_artifact_name():
     assert '[[ "$VM_NAME" =~ ^t5- ]]' in head
     assert 'tier5_derived_name "$_bound")" != "$VM_NAME"' in head
     assert "derives a different guest" in head
-    # cleanup: an orphan disk needs a sidecar (or the explicit
-    # ownerless opt-in), and a t5 name demands derivation coherence
+    # cleanup: an orphan disk needs an inode-bound sidecar (or the
+    # explicit ownerless opt-in), and a t5 name demands derivation
+    # coherence — a record copied beside a different disk is refused
+    # even WITH the opt-in (sol r19)
     tail = CLEANUP[CLEANUP.index('if [ -f "$DISK" ]'):]
     assert "TIER5_CLEANUP_ALLOW_OWNERLESS" in tail
-    assert 'tier5_derived_name "$_side")" != "$VM_NAME"' in tail
+    assert 'tier5_derived_name "$_sapp")" != "$VM_NAME"' in tail
+    assert 'stat -c \'%d %i\' "$DISK"' in tail
+    assert "does not bind this" in tail
     assert tail.index("TIER5_CLEANUP_ALLOW_OWNERLESS") \
         < tail.index('rm -f "$DISK"')

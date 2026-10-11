@@ -56,14 +56,24 @@ qemu_pids_for_domain() {
         # And the candidate's OWN argv must carry guest=<name>, as the
         # argument right after `-name` — the ps-line substring alone
         # also matches a foreign qemu carrying it inside another
-        # argument (file=/tmp/-name guest=t5-x,backup.qcow2), which
-        # would hand callers a foreign pid to signal (sol r18).
-        _av=$(tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null) \
-            || { unread=1; continue; }
-        printf '%s\n' "$_av" | T5N="guest=$name," \
-            awk 'p == "-name" && index($0, ENVIRON["T5N"]) == 1 { f=1 }
-                 { p = $0 } END { exit !f }' \
-            && out="$out $p"
+        # argument (file=/tmp/-name guest=t5-x,backup.qcow2) (sol r18).
+        # Parse on NUL — the only delimiter an argv entry cannot
+        # contain: newline-folding via tr lets a single crafted arg
+        # manufacture the fake "-name\nguest=..." pair (sol r19).
+        T5NAME="$name" python3 - "$p" >/dev/null <<'PY'
+import os, sys
+pid = sys.argv[1]
+needle = b"guest=" + os.environ["T5NAME"].encode() + b","
+try:
+    argv = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+except OSError:
+    sys.exit(2)
+sys.exit(0 if any(
+    a == b"-name" and argv[i + 1].startswith(needle)
+    for i, a in enumerate(argv[:-1])) else 1)
+PY
+        _avrc=$?
+        case $_avrc in 0) out="$out $p" ;; 2) unread=1 ;; esac
     done
     [ -n "$out" ] || { [ -n "$unread" ] && return 2; return 1; }
     printf '%s' "$out"
@@ -192,12 +202,13 @@ if [ -f "$DISK" ]; then
     # Orphan disk: no definition carries the appId binding, so
     # provenance is the file itself — it must clone OUR base to be a
     # tier-5 artifact at all (sol r13), and its .appid sidecar is the
-    # owner record. A MISSING sidecar means unproven ownership: refuse
-    # unless the operator explicitly opts in (a deliberate pre-sidecar
-    # orphan cleanup — sol r17). For a t5-namespace name the sidecar
-    # must also re-derive to it — an owner record for a different
-    # guest is incoherent, not proof. An unreadable backing is
-    # ambiguity -> keep the disk.
+    # owner record, stamped as "<appId> <dev> <ino>". A MISSING sidecar
+    # means unproven ownership: refuse unless the operator explicitly
+    # opts in (a deliberate pre-sidecar orphan cleanup — sol r17). A
+    # PRESENT one must bind THIS inode — a record copied beside a
+    # different disk is not proof (sol r19) — and for a t5-namespace
+    # name it must re-derive to it. An unreadable backing or an
+    # incoherent record is ambiguity -> keep the disk.
     _back=$(run_as_admin qemu-img info --output=json "$DISK" \
         2>/dev/null \
         | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
@@ -206,7 +217,9 @@ if [ -f "$DISK" ]; then
         echo "        (backing '${_back:-<unknown>}') — keeping it" >&2
         exit 5
     fi
-    if ! _side=$(cat "$DISK.appid" 2>/dev/null) || [ -z "$_side" ]; then
+    _sapp="" _sident=""
+    read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
+    if [ -z "$_sapp" ]; then
         if [ "${TIER5_CLEANUP_ALLOW_OWNERLESS:-0}" != "1" ]; then
             echo "[tier5-cleanup] FAIL: $DISK has no appId sidecar —" >&2
             echo "        owner unproven; keeping it. To remove a" >&2
@@ -214,19 +227,26 @@ if [ -f "$DISK" ]; then
             echo "        TIER5_CLEANUP_ALLOW_OWNERLESS=1" >&2
             exit 5
         fi
-        _side="<unbound>"
+        _sapp="<unbound>"
         echo "[tier5-cleanup] WARN: $DISK has no appId sidecar —" >&2
         echo "        unowned orphan (explicitly allowed)" >&2
-    elif [[ "$VM_NAME" =~ ^t5- ]] \
-            && [ "$(tier5_derived_name "$_side")" != "$VM_NAME" ]; then
-        echo "[tier5-cleanup] FAIL: $DISK is bound to '$_side'," >&2
-        echo "        which derives a different guest — keeping it" >&2
-        exit 5
+    else
+        if [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ]; then
+            echo "[tier5-cleanup] FAIL: $DISK.appid does not bind this" >&2
+            echo "        disk (copied or stale record) — keeping it" >&2
+            exit 5
+        fi
+        if [[ "$VM_NAME" =~ ^t5- ]] \
+                && [ "$(tier5_derived_name "$_sapp")" != "$VM_NAME" ]; then
+            echo "[tier5-cleanup] FAIL: $DISK is bound to '$_sapp'," >&2
+            echo "        which derives a different guest — keeping it" >&2
+            exit 5
+        fi
     fi
     qemu_pids_for_domain; _lv=$?
     if [ "$_lv" -eq 1 ]; then
         rm -f "$DISK" "$DISK.appid"
-        echo "[tier5-cleanup] removed $DISK (bound to '$_side')"
+        echo "[tier5-cleanup] removed $DISK (bound to '$_sapp')"
     else
         echo "[tier5-cleanup] FAIL: $VM_NAME qemu live or unverifiable" >&2
         echo "        — keeping $DISK" >&2
