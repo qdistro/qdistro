@@ -183,25 +183,37 @@ seed_display_info() {
             rm -f "$snap"; return 1
         }
     fi
+    local rc=0
+    _seed_display_info_extract "$tarball" "$dir" || rc=$?
+    rm -f "${snap:-}"
+    return "$rc"
+}
+
+# _seed_display_info_extract <tarball> <dir> — every step checked explicitly
+# (it runs in a || context, where set -e is off), so the caller's cleanup of
+# the private tarball copy always runs.
+_seed_display_info_extract() {
+    local tarball="$1" dir="$2"
     [ -f "$tarball" ] || {
         echo "error: display-info tarball not found: $tarball" >&2
-        rm -f "${snap:-}"; return 1
+        return 1
     }
-    rm -rf "$dir"
-    mkdir -p "$dir"
+    rm -rf "$dir" && mkdir -p "$dir" || {
+        echo "error: cannot prepare $dir" >&2
+        return 1
+    }
     tar -xzf "$tarball" -C "$dir" --strip-components=1 || {
         echo "error: display-info seed extract failed from $tarball" >&2
         rm -rf "$dir"
-        rm -f "${snap:-}"; return 1
+        return 1
     }
     [ -f "$dir/meson.build" ] || {
         echo "error: seeded display-info from $tarball lacks meson.build" >&2
         rm -rf "$dir"
-        rm -f "${snap:-}"; return 1
+        return 1
     }
-    : > "$dir/.qd-tarball-seed"
+    : > "$dir/.qd-tarball-seed" || return 1
     echo "note: seeded subprojects/display-info (wrap-git bypassed)" >&2
-    rm -f "${snap:-}"
 }
 seed_display_info
 
