@@ -867,9 +867,9 @@ def test_record_reads_and_unlinks_are_race_bound():
     #          a check→use race — owner records are read through an open
     #          fd that binds contents and file-identity to ONE inode
     #          (_sfid), and every final unlink captures the entry by
-    #          rename into a private same-fs dir so only the verified
-    #          inode is removed; a swapped entry is restored, never
-    #          deleted (sol r25)
+    #          renameat2 onto a random same-dir sibling so only the
+    #          verified inode is removed; a swapped entry is restored,
+    #          never deleted (sol r25/r26/r28)
     for src in (SPAWN, CLEANUP):
         assert '_read_owner_record()' in src
         assert 'exec {_rfd}< "$_p"' in src
@@ -878,32 +878,30 @@ def test_record_reads_and_unlinks_are_race_bound():
         # mutable path — contents and identity provably share one inode
         assert 'stat -Lc \'%d %i\' "/proc/$$/fd/$_rfd"' in src
         assert '_unlink_verified()' in src
-        # rename captures the entry into a private same-fs dir and
-        # every subsequent step runs through dir fds bound at open —
-        # the capture dir's own PATH is never re-resolved, so renaming
-        # .t5u.* mid-op cannot redirect the final unlink at a planted
-        # path (sol r26)
-        assert 'tempfile.mkdtemp(prefix=".t5u.", dir=_parent)' in src
-        assert 'os.open(_parent, os.O_RDONLY | os.O_DIRECTORY)' in src
-        assert 'os.open(td, os.O_RDONLY | os.O_DIRECTORY)' in src
-        assert 'os.rename(_name, "v", src_dir_fd=pfd, dst_dir_fd=tfd)' \
-            in src
-        assert 'os.stat("v", dir_fd=tfd, follow_symlinks=False)' in src
-        assert 'os.unlink("v", dir_fd=tfd)' in src
+        # capture is a renameat2(RENAME_NOREPLACE) onto a random
+        # sibling name inside the SAME parent dir through ONE dir fd —
+        # no second directory is created or opened, so there is no
+        # create→open window in which a swapped-in capture dir could
+        # land the rename on foreign ground (sol r28)
+        assert 'tempfile.mkdtemp' not in src
+        assert 'os.open(_parent,' in src
+        assert 'os.O_DIRECTORY | os.O_NOFOLLOW' in src
+        assert '_rename_noreplace(pfd, _name, pfd, cap)' in src
+        assert 'os.stat(cap, dir_fd=pfd, follow_symlinks=False)' in src
+        assert 'os.unlink(cap, dir_fd=pfd)' in src
         # a foreign capture is restored via link(2) — atomic
         # no-clobber, never overwriting a re-appeared path — and entry
         # types link(2) cannot carry (directories) restore through
         # renameat2(RENAME_NOREPLACE), never a racy check-then-rename
         # (sol r27)
-        assert 'os.link("v", _name, src_dir_fd=tfd, dst_dir_fd=pfd' in src
+        assert 'os.link(cap, _name, src_dir_fd=pfd, dst_dir_fd=pfd' \
+            in src
         assert '_rename_noreplace' in src
         assert 'ctypes' in src
         # no shell-level path re-resolution remains in the primitive
         assert 'mv -T -- "$_p"' not in src
         # an empty expected-ident can never authorize a removal
         assert '[ -n "$_want" ] || return 1' in src
-        # the temp dir is created NEXT TO the target — rename stays
-        # inside one filesystem
         assert 'preserved foreign' in src
 
 

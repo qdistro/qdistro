@@ -473,21 +473,23 @@ _read_owner_record() {
 
 # _unlink_verified <path> <dev-ino> — remove <path> only if it still
 # names the verified inode. A check→rm window lets a co-admin swap the
-# entry so `rm` deletes the replacement (sol r25): rename(2) instead
-# atomically CAPTURES whatever the path names into a root-owned
-# private same-fs dir, we re-verify the captured inode, and unlink it
-# there. Every step runs through dir fds bound at open — the capture
-# dir's own PATH is never re-resolved, so even renaming .t5u.* mid-op
-# cannot redirect the final unlink at a planted path (sol r26). A
+# entry so `rm` deletes the replacement (sol r25): instead we
+# atomically CAPTURE whatever the path names onto a random sibling
+# name in the SAME directory via renameat2(RENAME_NOREPLACE), re-verify
+# the captured inode, and unlink it there (sol r26). Everything runs
+# through the parent's dir fd — no second directory is ever created
+# or opened, so there is no create→open window in which a swapped-in
+# capture dir could land the rename on foreign ground (sol r28). A
 # swapped entry fails verification and its name is restored via
 # link(2) — atomic no-clobber, never overwriting a re-appeared path;
-# if restore fails it stays preserved inside our dir and we warn.
-# rc 0 = removed, 1 = kept.
+# directories restore via renameat2(RENAME_NOREPLACE) for the same
+# reason (sol r27). Anything unrestored stays preserved under its
+# random name and we warn. rc 0 = removed, 1 = kept.
 _unlink_verified() {
     local _p=$1 _want=$2
     [ -n "$_want" ] || return 1
     T5U_PATH="$_p" T5U_WANT="$_want" python3 - <<'PY'
-import os, stat, sys, tempfile
+import os, stat, sys
 
 _p = os.environ["T5U_PATH"]
 _wd, _wi = os.environ["T5U_WANT"].split()
@@ -497,10 +499,10 @@ _name = os.path.basename(_p)
 
 
 def _rename_noreplace(srcfd, src, dstfd, dst):
-    # renameat2(RENAME_NOREPLACE): atomic no-clobber restore for entry
-    # types link(2) cannot carry (directories). False on any failure —
-    # the caller then preserves the capture rather than risking a
-    # clobber.
+    # renameat2(RENAME_NOREPLACE): atomic no-clobber move, used both to
+    # capture the entry and to restore entry types link(2) cannot
+    # carry (directories). False on any failure — the caller then
+    # preserves rather than risking a clobber.
     import ctypes
     try:
         libc = ctypes.CDLL(None, use_errno=True)
@@ -513,51 +515,47 @@ def _rename_noreplace(srcfd, src, dstfd, dst):
         return False
 
 
-pfd = os.open(_parent, os.O_RDONLY | os.O_DIRECTORY)
-rc = 1
+# O_NOFOLLOW: refuse a symlinked parent — ops below must stay inside
+# the directory the caller stat'd, not wherever a swapped link lands.
 try:
-    td = tempfile.mkdtemp(prefix=".t5u.", dir=_parent)
-    tfd = os.open(td, os.O_RDONLY | os.O_DIRECTORY)
-    try:
+    pfd = os.open(_parent,
+                  os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError:
+    sys.exit(1)
+rc = 1
+cap = ".t5u-" + os.urandom(8).hex()
+try:
+    # Capture: renameat2 moves whatever _name currently names onto our
+    # random sibling, atomically and without clobbering. The entry is
+    # now pinned under a name the attacker does not know.
+    if _rename_noreplace(pfd, _name, pfd, cap):
         try:
-            os.rename(_name, "v", src_dir_fd=pfd, dst_dir_fd=tfd)
+            st = os.stat(cap, dir_fd=pfd, follow_symlinks=False)
         except OSError:
-            pass
-        else:
+            st = None
+        if st is not None and stat.S_ISREG(st.st_mode) \
+                and (st.st_dev, st.st_ino) == _want:
+            os.unlink(cap, dir_fd=pfd)
+            rc = 0
+        elif st is not None:
+            # Foreign capture: restore _name without ever clobbering a
+            # re-appeared entry. link(2) is atomic no-clobber for
+            # files/symlinks; a directory cannot link, so it restores
+            # via renameat2(RENAME_NOREPLACE).
+            restored = False
             try:
-                st = os.stat("v", dir_fd=tfd, follow_symlinks=False)
+                os.link(cap, _name, src_dir_fd=pfd, dst_dir_fd=pfd,
+                        follow_symlinks=False)
+                os.unlink(cap, dir_fd=pfd)
+                restored = True
             except OSError:
-                st = None
-            if st is not None and stat.S_ISREG(st.st_mode) \
-                    and (st.st_dev, st.st_ino) == _want:
-                os.unlink("v", dir_fd=tfd)
-                rc = 0
-            else:
-                # Restore the foreign capture's name without ever
-                # clobbering a re-appeared entry: link(2) is atomic
-                # for files/symlinks; a directory capture cannot link,
-                # so it restores via renameat2(RENAME_NOREPLACE) —
-                # a check-then-rename fallback would let a racing
-                # empty dir be replaced (sol r27). Anything unrestored
-                # stays preserved inside our private dir.
-                restored = False
-                try:
-                    os.link("v", _name, src_dir_fd=tfd, dst_dir_fd=pfd,
-                            follow_symlinks=False)
-                    os.unlink("v", dir_fd=tfd)
-                    restored = True
-                except OSError:
-                    restored = _rename_noreplace(tfd, "v", pfd, _name)
-                if not restored:
-                    sys.stderr.write(
-                        "[tier5] WARN: preserved foreign entry at %s/v\n"
-                        % td)
-    finally:
-        os.close(tfd)
-        try:
-            os.rmdir(os.path.basename(td), dir_fd=pfd)
-        except OSError:
-            pass
+                restored = _rename_noreplace(pfd, cap, pfd, _name)
+            if not restored:
+                sys.stderr.write(
+                    "[tier5] WARN: preserved foreign entry as %s/%s\n"
+                    % (_parent, cap))
+        # st is None: the captured entry was re-renamed away before we
+        # could verify it — refuse, nothing is removed.
 finally:
     os.close(pfd)
 sys.exit(rc)

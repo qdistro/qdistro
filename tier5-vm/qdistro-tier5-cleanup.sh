@@ -123,11 +123,17 @@ _read_owner_record() {
     exec {_rfd}<&-
 }
 
+# _unlink_verified <path> <dev-ino> — remove <path> only if it still
+# names the verified inode. Capture is a renameat2(RENAME_NOREPLACE)
+# onto a random sibling name in the SAME directory through the
+# parent's dir fd — no second directory is created or opened, so
+# there is no window to swap one in (sol r28). See spawn-tier5.sh for
+# the full contract.
 _unlink_verified() {
     local _p=$1 _want=$2
     [ -n "$_want" ] || return 1
     T5U_PATH="$_p" T5U_WANT="$_want" python3 - <<'PY'
-import os, stat, sys, tempfile
+import os, stat, sys
 
 _p = os.environ["T5U_PATH"]
 _wd, _wi = os.environ["T5U_WANT"].split()
@@ -149,44 +155,36 @@ def _rename_noreplace(srcfd, src, dstfd, dst):
         return False
 
 
-pfd = os.open(_parent, os.O_RDONLY | os.O_DIRECTORY)
-rc = 1
 try:
-    td = tempfile.mkdtemp(prefix=".t5u.", dir=_parent)
-    tfd = os.open(td, os.O_RDONLY | os.O_DIRECTORY)
-    try:
+    pfd = os.open(_parent,
+                  os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError:
+    sys.exit(1)
+rc = 1
+cap = ".t5u-" + os.urandom(8).hex()
+try:
+    if _rename_noreplace(pfd, _name, pfd, cap):
         try:
-            os.rename(_name, "v", src_dir_fd=pfd, dst_dir_fd=tfd)
+            st = os.stat(cap, dir_fd=pfd, follow_symlinks=False)
         except OSError:
-            pass
-        else:
+            st = None
+        if st is not None and stat.S_ISREG(st.st_mode) \
+                and (st.st_dev, st.st_ino) == _want:
+            os.unlink(cap, dir_fd=pfd)
+            rc = 0
+        elif st is not None:
+            restored = False
             try:
-                st = os.stat("v", dir_fd=tfd, follow_symlinks=False)
+                os.link(cap, _name, src_dir_fd=pfd, dst_dir_fd=pfd,
+                        follow_symlinks=False)
+                os.unlink(cap, dir_fd=pfd)
+                restored = True
             except OSError:
-                st = None
-            if st is not None and stat.S_ISREG(st.st_mode) \
-                    and (st.st_dev, st.st_ino) == _want:
-                os.unlink("v", dir_fd=tfd)
-                rc = 0
-            else:
-                restored = False
-                try:
-                    os.link("v", _name, src_dir_fd=tfd, dst_dir_fd=pfd,
-                            follow_symlinks=False)
-                    os.unlink("v", dir_fd=tfd)
-                    restored = True
-                except OSError:
-                    restored = _rename_noreplace(tfd, "v", pfd, _name)
-                if not restored:
-                    sys.stderr.write(
-                        "[tier5-cleanup] WARN: preserved foreign"
-                        " entry at %s/v\n" % td)
-    finally:
-        os.close(tfd)
-        try:
-            os.rmdir(os.path.basename(td), dir_fd=pfd)
-        except OSError:
-            pass
+                restored = _rename_noreplace(pfd, cap, pfd, _name)
+            if not restored:
+                sys.stderr.write(
+                    "[tier5-cleanup] WARN: preserved foreign"
+                    " entry as %s/%s\n" % (_parent, cap))
 finally:
     os.close(pfd)
 sys.exit(rc)

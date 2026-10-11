@@ -189,12 +189,14 @@ silently merge:
   contents to its own inode — and a symlinked or non-regular `$DISK`
   itself is foreign construction even when it points at the bound
   inode, so it is preserved rather than unlinked. Every final unlink
-  captures the entry by rename into a private same-fs dir and removes
-  only the inode that passed the checks — and every step of that
-  capture runs through dir fds bound at open inside one process, so
-  even renaming the capture dir mid-op cannot redirect the unlink at
-  a planted path; a swapped replacement is
-  restored via link(2) (atomic no-clobber), never deleted) — confirmed qemu
+  captures the entry by renameat2(RENAME_NOREPLACE) onto a random
+  same-dir sibling name and removes only the inode that passed the
+  checks — the whole operation runs through the parent's dir fd, and
+  no second directory is ever created or opened, so there is no
+  create→open window in which a swapped-in capture dir could land the
+  rename on foreign ground (sol r28); a swapped replacement is
+  restored via link(2) or renameat2(RENAME_NOREPLACE) (atomic
+  no-clobber), never deleted) — confirmed qemu
   death proves no live guest is killed, but it does not make a
   foreign definition or disk ours; the owner relaunches under its own
   name and an admin removes a genuinely stale squatter deliberately.
