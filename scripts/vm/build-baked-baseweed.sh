@@ -184,7 +184,7 @@ HOST_DNS="${HOST_DNS_SERVERS[*]:-}"
 # Wire the mirror for the probed backend BEFORE repo_cmd is built below —
 # passt appliances reach the host at its default gateway (qd_passt_host_addr), slirp at 10.0.2.2.
 if [ "$PASST_CONFIRMED" -eq 1 ]; then
-    qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" "$(qd_passt_host_addr)"
+    qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" passt
 else
     qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2
 fi

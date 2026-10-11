@@ -962,3 +962,9 @@ _run_native_builder() {
     run bash -c "QDISTRO_SERVE_PORT=31337; . '$LIB'; qd_serve_port_default"
     [ "$output" = 31337 ]
 }
+
+@test "qd_repo_wire_guest passt: no route and no passt host mapping fails loudly" {
+    run bash -c "export QDISTRO_GUEST_HOST_ADDR=; mkdir -p '$WORK/fb'; printf '#!/bin/sh\nexit 0\n' > '$WORK/fb/ip'; chmod +x '$WORK/fb/ip'
+        export PATH='$WORK/fb':\"\$PATH\"; . '$LIB'; qd_repo_wire_guest 20260101 passt; echo rc=\$? base=\${QDISTRO_REPO_BASE:-unset}"
+    [[ "$output" == *"rc=1 base=unset"* ]]
+}

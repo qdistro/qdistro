@@ -174,7 +174,9 @@ def fetch_stream(url, dest, want_sha, want_algo, sink, retries=3):
                 with r, open(tmp, "wb") as out:
                     h = hashlib.new(want_algo)
                     length = r.headers.get("Content-Length", "")
-                    stream = (length.isdigit()
+                    # length >= 1: with the last chunk held back, a declared
+                    # length of 0 would already be a "complete" response.
+                    stream = (length.isdigit() and int(length) > 0
                               and not r.headers.get("Transfer-Encoding"))
                     length = int(length) if stream else None
                     if stream:
@@ -260,6 +262,16 @@ class Repo:
         self.src = f"{base.rstrip('/')}/{snapshot}/tumbleweed/repo/{repo}/"
         self._pkgs = None
         self._mu = threading.Lock()
+
+    def contained(self, href):
+        """Local path for href, refusing any path whose resolved location
+        (symlinked dirs included) leaves this repo's cache directory — for
+        writes as much as for reads."""
+        local = os.path.join(self.dir, safe_href(href))
+        real_dir = os.path.realpath(self.dir)
+        if not os.path.realpath(local).startswith(real_dir + os.sep):
+            raise CacheError(f"{href}: resolves outside the cache")
+        return local
 
     # -- locking: cross-process flock + in-process mutex ------------------
     def _flock(self, name, shared=False):
@@ -374,7 +386,7 @@ class Repo:
                         sidecars[side] = digest_file(local)
                 entries = parse_repomd(self.repomd())
                 for href, sha, algo, _t in entries:
-                    local = os.path.join(self.dir, href)
+                    local = self.contained(href)
                     if os.path.isfile(local) and digest_file(local, algo) == sha:
                         continue
                     if fetch(self.src + href, local, want_sha=sha, want_algo=algo) is None:
@@ -462,7 +474,7 @@ class Repo:
         if rec is None:
             return None
         sha, algo = rec[0], rec[1]
-        local = os.path.join(self.dir, href)
+        local = self.contained(href)
         # Every serve re-hashes (deep): the index is a hint for --quick
         # audits only; a tampered same-size file must never be served.
         if self.cached_ok(href, sha, algo, deep=True):
@@ -714,6 +726,9 @@ def cmd_audit(args):
     """Read-only. Fails nonzero naming what an offline run would miss."""
     want = read_list(args.list) if args.list else None
     bad = []
+    if want is not None and not any(want.values()):
+        bad.append(f"package list {args.list} names no packages — record it "
+                   "from an online build (qd-cache-warm --record) first")
     for repo in repos_of(args):
         if not repo.metadata_present():
             bad.append(f"{repo.repo}: no metadata.json (never warmed)")

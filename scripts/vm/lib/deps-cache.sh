@@ -561,7 +561,7 @@ GUESTFISH
     printf '%s\n' "$backend"
 }
 
-# qd_repo_wire_guest <snapshot> [host-addr]
+# qd_repo_wire_guest <snapshot> [host-addr|passt]
 # Wire a guest lane (VM over slirp/passt, libguestfs appliance) to the
 # proxy: when the caller has not set QDISTRO_REPO_BASE, start qd_serve and
 # export QDISTRO_REPO_BASE for the guest-reachable host address. Online the
@@ -584,8 +584,15 @@ qd_repo_wire_guest() {
     fi
     qd_serve_start >/dev/null || return 1
     # The host's primary IPv4 reaches the proxy from every transport, so
-    # prefer it; the caller's transport address is the routeless fallback.
-    host="$(qd_guest_host_addr)" && [ -n "$host" ] || host="${2:-10.0.2.2}"
+    # prefer it; the caller's transport is only the routeless fallback.
+    # "passt" resolves passt's host mapping and fails loudly without one.
+    host="$(qd_guest_host_addr)"
+    if [ -z "$host" ]; then
+        case "${2:-10.0.2.2}" in
+            passt) host="$(qd_passt_host_addr)" || return 1 ;;
+            *) host="${2:-10.0.2.2}" ;;
+        esac
+    fi
     base="$(qd_serve_guest_base "$snap" "$host")" || return 1
     _qd_repo_set_base "$base"
 }

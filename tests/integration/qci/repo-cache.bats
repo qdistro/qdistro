@@ -16,7 +16,8 @@ setup() {
     WORK="$BATS_TEST_TMPDIR/work"
     SNAP=20261003
     mkdir -p "$WORK/cache"
-    unset QDISTRO_DEPS_OFFLINE QCI_OFFLINE QDISTRO_REPO_BASE QDISTRO_REPO_PROXY
+    unset QDISTRO_DEPS_OFFLINE QCI_OFFLINE QDISTRO_REPO_BASE QDISTRO_REPO_PROXY _QD_REPO_BASE_WIRED
+    export QDISTRO_SERVE_PORT=0   # never collide with a live proxy on the stable port
     export QDISTRO_DEPS_CACHE_DIR="$WORK/cache"
 
     local r
@@ -360,17 +361,23 @@ PY
 }
 
 @test "proxy: a lying upstream Content-Length is never streamed as a complete body" {
-    # custom upstream: advertises Content-Length 1 for RPMs, sends the body
+    for lie in 1 0; do lying_length_case "$lie"; done
+}
+
+lying_length_case() {
+    # custom upstream: advertises Content-Length $1 for RPMs, sends the body
     local port2; port2="$(free_port)"
     ( exec python3 "$BATS_TEST_DIRNAME/fixtures/lying-length-server.py" \
-        "$WORK/srv" "$port2" >/dev/null 2>&1 </dev/null ) &
+        "$WORK/srv" "$port2" "$1" >/dev/null 2>&1 </dev/null ) &
     COUNT_PID=$!
     wait_http "http://127.0.0.1:$port2/history/$SNAP/tumbleweed/repo/oss/repodata/repomd.xml"
     BASE="http://127.0.0.1:$port2/history"
     start_proxy
     run curl -fsS -o "$WORK/got" "$PROXY/oss/noarch/pkg-a-1.0-1.noarch.rpm"
-    [ "$status" -ne 0 ]
-    [ ! -e "$(C oss)/noarch/pkg-a-1.0-1.noarch.rpm" ]
+    [ "$status" -ne 0 ] || [ "$(cat "$WORK/got")" = "oss-A-bytes" ]   # never a "complete" short body
+    [ ! -e "$(C oss)/noarch/pkg-a-1.0-1.noarch.rpm" ] || cmp -s "$(C oss)/noarch/pkg-a-1.0-1.noarch.rpm" <(printf oss-A-bytes)
+    stop_proxy
+    rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"
     kill "$COUNT_PID"; wait "$COUNT_PID" 2>/dev/null || true; COUNT_PID=
 }
 
@@ -413,4 +420,22 @@ PY
     cache_cmd audit --snapshot "$SNAP" --repo oss --list "$WORK/list" --deep
     [ "$status" -ne 0 ]
     [[ "$output" == *"re-record the list"* ]]
+}
+
+@test "proxy: a symlinked directory inside the cache never redirects a write outside it" {
+    start_proxy
+    wget -q -O /dev/null "$PROXY/oss/repodata/repomd.xml"     # metadata warm
+    mkdir -p "$WORK/elsewhere"
+    ln -s "$WORK/elsewhere" "$(C oss)/noarch"
+    run curl -s -o /dev/null -w '%{http_code}' "$PROXY/oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    [ "$output" != 200 ]
+    [ -z "$(ls -A "$WORK/elsewhere")" ]
+}
+
+@test "audit: a package list that names nothing fails (no vacuous readiness)" {
+    printf '# only comments\n' > "$WORK/list"
+    cache_cmd metadata --snapshot "$SNAP"
+    cache_cmd audit --snapshot "$SNAP" --list "$WORK/list"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"names no packages"* ]]
 }
