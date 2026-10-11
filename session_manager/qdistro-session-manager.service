@@ -22,6 +22,12 @@ User=root
 # follow-up task once the cgroup ops are stable.
 StandardOutput=journal
 StandardError=journal
+# Shutdown grace must outlast the offload teardown budgets: up to
+# 30s waiting out running lifecycle transactions, up to 30s for
+# in-flight answer deliveries, and 10s draining refusal-audit rows
+# (see _OFFLOAD_SHUTDOWN_GRACE_S / _REFUSAL_AUDIT_DRAIN_S). 90s
+# leaves headroom for settle/drain callbacks and bus.flush().
+TimeoutStopSec=90s
 
 [Install]
 WantedBy=multi-user.target

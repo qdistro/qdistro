@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import re
 import shlex
 import subprocess
@@ -254,12 +255,36 @@ def test_create_tier3s_dbus_method_creates_a_tier3s_row(store, ops,
         pytest.skip("dbus-python unavailable")
     mgr = object.__new__(sm.SessionManager)
     mgr.store = store
+    mgr._offload_work_q = queue.Queue(maxsize=sm._OFFLOAD_QUEUE_MAX)
+    for _w in range(2):
+        threading.Thread(target=mgr._offload_worker_loop,
+                         daemon=True).start()
+    mgr._offload_pending = 0
+    mgr._offload_pending_lock = threading.Lock()
+    mgr._offload_active = 0
+    mgr._offload_delivering = 0
+    mgr._offload_drained = False
+    mgr._offload_active_cv = threading.Condition(
+        mgr._offload_pending_lock)
+    mgr._offload_answers = {}
+    mgr._stopping = False
+    mgr._refusal_audit_q = queue.Queue(maxsize=64)
+    threading.Thread(target=mgr._refusal_audit_writer,
+                     daemon=True).start()
     mgr._peer_caller = lambda _s, _c: {"uid": 1000, "pid": 1, "exe": "/bin/t"}
     mgr._require_admin = lambda _s, _c: None
     mgr.audit = None
     # The mutating methods are worker-offloaded; run the reply/error
     # callback inline so the worker's result is visible to the caller.
     monkeypatch.setattr(sm.GLib, "idle_add", lambda callback: callback())
+    # No GLib main loop runs in tests; dispatch the queue deadline on a
+    # daemon Timer with the same one-shot, honour-the-interval semantics.
+    def _timeout_add(ms, fn, *args):
+        t = threading.Timer(ms / 1000.0, lambda: fn(*args))
+        t.daemon = True
+        t.start()
+        return 0
+    monkeypatch.setattr(sm.GLib, "timeout_add", _timeout_add)
 
     replied, errored = threading.Event(), threading.Event()
     errors = []
