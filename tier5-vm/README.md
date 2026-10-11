@@ -149,7 +149,9 @@ silently merge:
   stamped as `<appId> <dev> <ino>` — bound to the inode it names, so
   a leftover or planted sidecar can never authorize a different file
   at the same path. The create itself goes through a
-  `<disk>.partial.<pid>` name: the clone is built, stamped, then
+  `<disk>.partial.XXXXXX` name claimed by mktemp's O_EXCL (so a
+  foreign file at a predictable partial path is never overwritten or
+  unlinked by our create): the clone is built, stamped, then
   hard-linked into place, so crash residue is always provable — a
   partial whose inode the sidecar binds is recovered (the create is
   finished), a bare partial is a harmless leak, and a file AT the
@@ -159,12 +161,16 @@ silently merge:
   LIVE domain bound to another (or no) app is refused (the wrapper
   exits with REAP=0 — it never tears down a guest it does not own), a
   defined foreign domain is refused outright rather than reclaimed,
-  and an overlay whose domain is gone is reused only when its sidecar
+  and an existing overlay is used only when its sidecar
   names our appId, records the disk's own dev/ino, AND its backing
-  file is our base. Every unproven disk at our name — missing
+  file is our base — in every domain state, since the domain's
+  binding vouches for the path, not the inode, and a file swapped in
+  while the domain was stopped must refuse the same way. Every
+  unproven disk at our name — missing
   sidecar, foreign appId, inode mismatch, wrong provenance — is
   refused AND preserved, never booted and never deleted by the
-  launch path — confirmed qemu
+  launch path (the teardown unlink needs the same inode-bound record,
+  and a foreign appId in a sidecar is never overwritten) — confirmed qemu
   death proves no live guest is killed, but it does not make a
   foreign definition or disk ours; the owner relaunches under its own
   name and an admin removes a genuinely stale squatter deliberately.

@@ -461,20 +461,17 @@ def test_overlay_reuse_requires_an_inode_bound_owner_record():
     # no unproven file is ever deleted by the launch path
     assert 'unproven — replacing it' not in body
     assert 'rm -f "$DISK" "$DISK.appid"' not in body
-    # the ownership gate only fires when the domain is CONFIRMED
-    # ABSENT — a defined-ours domain's own binding is the stronger
-    # record (and missing-sidecar backfill records dev/ino too)
-    gate = body[body.index('if [ -f "$DISK" ]'):]
-    assert '[ "$_ds" -eq 1 ]' in gate
-    assert "printf '%s %s\\n' \"$POLICY_KEY\" \"$_di\"" in gate
-    # teardown's confirmed-absent-at-claim path gates the unlink on the
-    # sidecar too — a domain that was already gone never vouched for
-    # the disk, so the inode-bound sidecar is the only owner record
-    # there as well
+    # the gate is unconditional — a defined-ours domain's binding
+    # vouches for the PATH, not the inode: a file swapped in while the
+    # domain was stopped must still refuse (sol r21)
+    gate = body[body.index('if [ -f "$DISK" ]'):body.index('$DISK absent')]
+    assert '_ds' not in gate
+    # teardown's unlink requires the inode-bound record in EVERY case —
+    # the claim never vouched for the current file either (sol r21)
     body = _section("cleanup")
-    assert "_claim_ds=$_ds" in body
     assert "overlay owner unproven" in body
-    assert '_claim_ds" -eq 1' in body
+    assert '[ "$_sapp" != "$POLICY_KEY" ]' in body
+    assert '_claim_ds' not in body
 
 
 def test_create_goes_through_a_recoverable_partial():
@@ -486,7 +483,10 @@ def test_create_goes_through_a_recoverable_partial():
     #          its record can then NEVER be our crash residue, so
     #          refusing it is correct (sol r19/r20)
     create = _section("_create_overlay_disk")
-    assert '_tmp="$DISK.partial.$$"' in create
+    # mktemp claims the name with O_EXCL — a foreign file at a
+    # predictable partial path can never be overwritten or unlinked
+    # by our create (sol r21)
+    assert 'mktemp "$DISK.partial.XXXXXX"' in create
     assert 'qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$_tmp"' \
         in create
     assert create.index("qemu-img create") \
@@ -499,13 +499,20 @@ def test_create_goes_through_a_recoverable_partial():
     # the create-failure path never rm's $DISK itself (sol r19)
     assert 'rm -f "$DISK"' not in create
     # recovery: only a partial whose dev/ino the sidecar binds is
-    # finished — dev+ino cannot be forged by a planted file
+    # finished — dev+ino cannot be forged by a planted file — and a
+    # sidecar naming a foreign app is preserved, never overwritten
+    # (sol r21)
     body = _section("create_domain")
     rec = body[body.index("$DISK absent:"):]
     assert '"$DISK".partial.*' in rec
     assert 'stat -c \'%d %i\' "$_cand"' in rec
     assert 'ln "$_recover" "$DISK"' in rec
     assert 'refusing to clobber' in rec
+    assert 'names foreign app' in rec
+    assert 'refusing to overwrite' in rec
+    # the foreign-sidecar refuse precedes any write to $DISK.appid
+    assert rec.index('names foreign app') \
+        < rec.index('_create_overlay_disk')
     assert 'rm -f "$DISK" "$DISK.appid"' in SPAWN
     assert 'rm -f "$overlay" "$overlay.appid"' in SPAWN
     assert 'rm -f "$DISK" "$DISK.appid"' in CLEANUP

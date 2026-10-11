@@ -1027,7 +1027,6 @@ cleanup() {
             # carry our binding, confirmed-absent has no owner to
             # protect, and an unverifiable state keeps everything.
             domain_defined_state; _ds=$?
-            _claim_ds=$_ds   # the teardown below reuses $_ds
             _bound=""
             [ "$_ds" -eq 0 ] && _bound=$(domain_appid)
             if [ "$_ds" -eq 0 ] && [ "$_bound" != "$POLICY_KEY" ]; then
@@ -1052,21 +1051,21 @@ cleanup() {
                     # (sol r7).
                     domain_is_live; _lv=$?
                     if [ "$_lv" -eq 1 ]; then
-                        # If the domain was already ABSENT at claim
-                        # time, no definition ever vouched for this
-                        # overlay — its sidecar is the disk's only
-                        # owner record (sol r12). A defined-and-ours
-                        # domain above already proved the binding.
-                        if [ "$_claim_ds" -eq 1 ] && [ -f "$DISK" ]; then
-                            _sapp="" _sident=""
-                            read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
-                            if [ "$_sapp" != "$POLICY_KEY" ] \
-                                || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ]; then
-                                domain_reaped=0
-                                echo "[tier5] WARN: keeping $DISK — overlay owner unproven" >&2
-                            else
-                                rm -f "$DISK" "$DISK.appid" 2>/dev/null || true
-                            fi
+                        # The disk unlink needs its own owner record in
+                        # EVERY case: the domain's binding vouched for
+                        # the path, not the inode — a file swapped in
+                        # while the domain was stopped is not ours to
+                        # delete (sol r21). The sidecar must name our
+                        # appId AND the disk's own dev/ino.
+                        _sapp="" _sident=""
+                        [ -f "$DISK" ] \
+                            && read -r _sapp _sident 2>/dev/null \
+                                < "$DISK.appid" || true
+                        if [ -f "$DISK" ] \
+                            && { [ "$_sapp" != "$POLICY_KEY" ] \
+                              || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ]; }; then
+                            domain_reaped=0
+                            echo "[tier5] WARN: keeping $DISK — overlay owner unproven" >&2
                         else
                             rm -f "$DISK" "$DISK.appid" 2>/dev/null || true
                         fi
@@ -1218,7 +1217,12 @@ fi
 # it atomically refuses to clobber a $DISK that appeared after the
 # caller's absence check.
 _create_overlay_disk() {
-    _tmp="$DISK.partial.$$"
+    # mktemp claims the partial name with O_EXCL — a foreign file at a
+    # predictable $DISK.partial.$$ can then never be overwritten by our
+    # qemu-img or unlinked by our failure cleanup (sol r21). Run it as
+    # admin so the partial is admin-owned like every overlay here.
+    _tmp=$(run_as_admin mktemp "$DISK.partial.XXXXXX" 2>/dev/null) \
+        || { echo "[tier5] FAIL: cannot create partial under $DISK_DIR" >&2; exit 4; }
     if ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$_tmp" >/dev/null 2>&1; then
         rm -f "$_tmp" 2>/dev/null
         echo "[tier5] FAIL: qemu-img create -b $DISK_BASE failed at $DISK" >&2
@@ -1260,47 +1264,44 @@ create_domain() {
     esac
 
     # Linked-clone disk per VM. An EXISTING overlay is reusable only
-    # with a provable owner bound to THIS inode: while the domain is
-    # defined-and-ours its binding is the record; with the domain
-    # absent the disk needs its own — the <disk>.appid sidecar stamped
-    # as "<appId> <dev> <ino>". Every check must pass; anything less —
-    # missing sidecar, foreign appId, inode mismatch, wrong provenance
-    # — is refused AND preserved: our own crash residue never lands at
-    # $DISK without its record (the create goes through .partial), so
-    # an unproven file here is not ours to delete either (sol
-    # r12/r19/r20).
+    # with a provable owner bound to THIS inode — in EVERY state: a
+    # defined-ours domain's binding vouches for the path, not the
+    # inode, and a file swapped in while the domain was stopped would
+    # otherwise boot under our binding (sol r21). The <disk>.appid
+    # sidecar must name our appId, record the disk's own dev/ino, and
+    # the backing must be our base; anything less — missing sidecar,
+    # foreign appId, inode mismatch, wrong provenance — is refused AND
+    # preserved: our own crash residue never lands at $DISK without
+    # its record (the create goes through .partial), so an unproven
+    # file here is not ours to delete either (sol r12/r19/r20/r21).
     if [ -f "$DISK" ]; then
-        if [ "$_ds" -eq 1 ]; then
-            _sapp="" _sident=""
-            read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
-            _back=$(run_as_admin qemu-img info --output=json "$DISK" \
-                2>/dev/null \
-                | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
-            if [ "$_sapp" != "$POLICY_KEY" ] \
-                    || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ] \
-                    || [ "$_back" != "$DISK_BASE" ]; then
-                echo "[tier5] FAIL: overlay $DISK bound to" >&2
-                echo "        '${_sapp:-<unbound>}' / backing '${_back:-<unknown>}'" >&2
-                echo "        — refusing to boot an unproven disk" >&2
-                REAP=0; exit 3
-            fi
-        elif [ ! -f "$DISK.appid" ]; then
-            # Defined-ours pre-sidecar guest: backfill the disk's owner
-            # record (appId + the file's dev/ino) so a later definition
-            # loss still proves it ours.
-            _di=$(run_as_admin stat -c '%d %i' "$DISK" 2>/dev/null) \
-                && printf '%s %s\n' "$POLICY_KEY" "$_di" \
-                    > "$DISK.appid" 2>/dev/null \
-                && chmod 0600 "$DISK.appid" 2>/dev/null \
-                || true
+        _sapp="" _sident=""
+        read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
+        _back=$(run_as_admin qemu-img info --output=json "$DISK" \
+            2>/dev/null \
+            | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
+        if [ "$_sapp" != "$POLICY_KEY" ] \
+                || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ] \
+                || [ "$_back" != "$DISK_BASE" ]; then
+            echo "[tier5] FAIL: overlay $DISK bound to" >&2
+            echo "        '${_sapp:-<unbound>}' / backing '${_back:-<unknown>}'" >&2
+            echo "        — refusing to boot an unproven disk" >&2
+            REAP=0; exit 3
         fi
     else
         # $DISK absent: a crash between the sidecar stamp and the ln
         # leaves a provable pair — the sidecar binds a $DISK.partial.*
         # file's inode, and dev+ino cannot be forged by a planted file.
-        # Finish that create rather than leaking the partial.
+        # Finish that create rather than leaking the partial. A sidecar
+        # naming a DIFFERENT app is a foreign owner record — preserve
+        # it and refuse, never overwrite it (sol r21).
         _sapp="" _sident="" _recover=""
         read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
+        if [ -n "$_sapp" ] && [ "$_sapp" != "$POLICY_KEY" ]; then
+            echo "[tier5] FAIL: $DISK.appid names foreign app '$_sapp'" >&2
+            echo "        — preserving the record; refusing to overwrite" >&2
+            REAP=0; exit 3
+        fi
         if [ "$_sapp" = "$POLICY_KEY" ] && [ -n "$_sident" ]; then
             for _cand in "$DISK".partial.*; do
                 [ -f "$_cand" ] || continue
