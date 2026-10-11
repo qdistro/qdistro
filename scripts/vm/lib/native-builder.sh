@@ -72,9 +72,12 @@ qdistro_ensure_native_builder_image() {
         # Mount the verified mirror read-only for the RUN zypper steps —
         # file:// needs no qd_serve inside a build. With the mirror wired
         # the build needs no netns at all, so drop it to prove the contract.
+        # Must run in THIS shell — a subshell drops the export.
         local -a mirror_args=() net_args=()
-        mapfile -t mirror_args < <(qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror)
-        [ "${#mirror_args[@]}" -gt 0 ] && net_args=(--network=none)
+        if qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror; then
+            mirror_args=(--volume "$(qd_deps_root)/repos:/qdistro-mirror:ro,z")
+            net_args=(--network=none)
+        fi
         echo "[native-podman] building toolchain image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT" >&2
         if ! podman build --pull=never --layers "${net_args[@]}" "${mirror_args[@]}" \
             --volume "$rpm_cache:/var/cache/zypp/packages:rw,Z" \

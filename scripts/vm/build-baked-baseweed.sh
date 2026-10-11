@@ -206,8 +206,11 @@ else
     qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2
 fi
 # Probe what zypper will actually fetch: the wired mirror URL when set —
-# honest under a host airgap — else upstream.
+# honest under a host airgap — else upstream. The base interpolates into a
+# --run-command string: reject anything that isn't a plain URL token.
 if [ -n "${QDISTRO_REPO_BASE:-}" ]; then
+    qd_repo_base_safe "$QDISTRO_REPO_BASE" \
+        || { echo "ERROR: QDISTRO_REPO_BASE is not a plain URL: ${QDISTRO_REPO_BASE:0:80}" >&2; exit 3; }
     NET_CHECK="curl -fsS --connect-timeout 10 --max-time 30 $QDISTRO_REPO_BASE/$QDISTRO_SUBSTRATE_SNAPSHOT/tumbleweed/repo/oss/repodata/repomd.xml >/dev/null"
 else
     NET_CHECK='getent ahostsv4 download.opensuse.org >/dev/null && curl -fsS --connect-timeout 10 --max-time 30 https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml >/dev/null'

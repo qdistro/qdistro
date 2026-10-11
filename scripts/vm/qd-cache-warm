@@ -55,12 +55,19 @@ if [ "$check" -eq 1 ]; then
     else
         mark repo missing
     fi
-    if qd_has cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$cloud_base"; then
+    # Offline cloud verification re-verifies the signed sidecars — the
+    # image alone is NOT a warm entry.
+    cloud_dir="$(qd_path cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256")"
+    if qd_has cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$cloud_base" \
+        && [ -s "$cloud_dir/$cloud_base.sha256" ] \
+        && [ -s "$cloud_dir/$cloud_base.sha256.asc" ]; then
         mark cloud ok
     else
         mark cloud missing
     fi
-    if qd_oci_cached "$oci_ref"; then
+    # Structure AND archive bytes — qd_oci_ensure verifies the sha256
+    # sidecar before podman-load, so the audit does too.
+    if qd_oci_cached "$oci_ref" --verify; then
         mark oci ok
     else
         mark oci missing

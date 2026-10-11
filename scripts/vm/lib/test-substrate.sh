@@ -145,6 +145,10 @@ qdistro_substrate_repo_command() {
         fi
         base="https://download.opensuse.org/history"
     fi
+    qd_repo_base_safe "$base" || {
+        echo "ERROR: repo base is not a plain URL: ${base:0:80}" >&2
+        return 1
+    }
     cat <<EOF
 mkdir -p /etc/zypp/repos.d /etc/qdistro
 find /etc/zypp/repos.d -maxdepth 1 -name '*.repo' -delete

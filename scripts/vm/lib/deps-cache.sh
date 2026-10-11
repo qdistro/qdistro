@@ -187,10 +187,10 @@ _qd_oci_digest() {
 # _qd_oci_complete <dir> — a cached archive is usable only when ALL of it
 # landed: the tar, its sha256 sidecar, and the manifest written last.
 # An interrupted save can leave image.tar alone — that state is INCOMPLETE,
-# never a warm hit.
+# never a warm hit. Empty files don't count either (-s).
 _qd_oci_complete() {
-    [ -f "$1/image.tar" ] && [ -f "$1/image.tar.sha256" ] \
-        && [ -f "$1/manifest.txt" ]
+    [ -s "$1/image.tar" ] && [ -s "$1/image.tar.sha256" ] \
+        && [ -s "$1/manifest.txt" ]
 }
 
 # _qd_oci_save <ref> <digest> — save the archive under a per-digest lock.
@@ -219,17 +219,22 @@ _qd_oci_save() {
     ) 9>"$lock"
 }
 
-# qd_oci_cached <ref> — is a COMPLETE archive cached for this ref? Pure
-# filesystem audit: ref map resolves, and the digest entry has tar +
-# sidecar + manifest. Does not touch the podman store — the answer for
-# "could qd_oci_ensure serve this offline".
+# qd_oci_cached <ref> [--verify] — is a COMPLETE archive cached for this
+# ref? Pure filesystem audit: ref map resolves, and the digest entry has
+# non-empty tar + sidecar + manifest. Does not touch the podman store.
+# With --verify, also checks archive bytes against the sha256 sidecar —
+# the same proof qd_oci_ensure runs before podman load.
 qd_oci_cached() {
-    local ref="$1" root refmap digest
+    local ref="$1" root refmap digest dir
     root="$(qd_deps_root)"
     refmap="$root/oci/refs/$(_qd_oci_ref_key "$ref").digest"
     [ -s "$refmap" ] || return 1
     digest="$(cat "$refmap")"
-    _qd_oci_complete "$root/oci/${digest#sha256:}"
+    dir="$root/oci/${digest#sha256:}"
+    _qd_oci_complete "$dir" || return 1
+    if [ "${2:-}" = --verify ]; then
+        ( cd "$dir" && sha256sum -c image.tar.sha256 ) >/dev/null 2>&1 || return 1
+    fi
 }
 
 qd_oci_ensure() {
@@ -386,21 +391,33 @@ qd_serve_guest_base() {
 }
 
 # qd_repo_wire_container <snapshot> <mountpoint>
-# Container builds cannot see the host cache — mount the mirror read-only
-# at <mountpoint> and export QDISTRO_REPO_BASE=file://<mountpoint> when the
-# caller hasn't set one and a complete mirror exists. Prints a two-line
-# podman --volume spec for the caller to splice into its podman argv
-# (mapfile it); prints nothing when unwired. With the mirror mounted the
-# build needs no network at all — pass --network=none to prove it.
+# Container builds cannot see the host cache — when the caller hasn't set
+# QDISTRO_REPO_BASE and a complete mirror exists, export
+# QDISTRO_REPO_BASE=file://<mountpoint> and return 0; the caller must then
+# add --volume <root>/repos:<mountpoint>:ro,z to its podman argv (file://
+# inside the build resolves only with the mount present). Returns 1 when
+# unwired: explicit base wins, or no mirror → online falls back upstream,
+# offline fails closed downstream. MUST be called in the current shell —
+# a subshell (command substitution, mapfile process substitution) drops
+# the export.
 qd_repo_wire_container() {
     local snap="$1" mnt="$2"
-    [ -n "${QDISTRO_REPO_BASE:-}" ] && return 0
-    qd_repo_present "$snap" oss || return 0
-    qd_repo_present "$snap" non-oss || return 0
+    [ -n "${QDISTRO_REPO_BASE:-}" ] && return 1
+    qd_repo_present "$snap" oss || return 1
+    qd_repo_present "$snap" non-oss || return 1
     QDISTRO_REPO_BASE="file://$mnt"
     export QDISTRO_REPO_BASE
-    printf -- '--volume\n%s/repos:%s:ro\n' "$(qd_deps_root)" "$mnt"
     echo "[deps-cache] wired QDISTRO_REPO_BASE=$QDISTRO_REPO_BASE" >&2
+}
+
+# qd_repo_base_safe <url> — repo bases interpolate into .repo files and
+# appliance --run-command strings; anything beyond a single plain URL token
+# (whitespace, quotes, metacharacters) is injection, not a URL.
+qd_repo_base_safe() {
+    # regex in a variable: bare &/() in an unquoted =~ pattern trips the
+    # [[ ]] parser before the match ever runs.
+    local re='^(https?|file)://[A-Za-z0-9._~:/?&=%+@-]+$'
+    [[ "$1" =~ $re ]]
 }
 
 # qd_guestfs_host_addr — the host address a libguestfs appliance reaches:
@@ -409,15 +426,24 @@ qd_repo_wire_container() {
 # probe the backend themselves (build-baked-baseweed.sh) should pass the
 # discovered address to qd_repo_wire_guest instead.
 qd_guestfs_host_addr() {
-    local ver
+    local ver major='' minor='' k v
     ver="$(guestfish version 2>/dev/null || true)"
-    case "$ver" in
-        guestfish\ 1.6[0-9]*|guestfish\ 1.[7-9]*|guestfish\ [2-9]*)
-            if command -v passt >/dev/null 2>&1; then
-                echo 169.254.2.2; return 0
-            fi ;;
-    esac
-    echo 10.0.2.2
+    # Current output is multi-line "major: N\nminor: N"; older guests printed
+    # "guestfish X.Y.Z" on one line — accept both. Parse with builtins only:
+    # callers may run this under a stripped PATH.
+    while IFS=': ' read -r k v; do
+        case "$k" in major) major="$v" ;; minor) minor="$v" ;; esac
+    done <<< "$ver"
+    if [ -z "$major" ] && [[ "$ver" =~ ([0-9]+)\.([0-9]+) ]]; then
+        major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}"
+    fi
+    if { [ "${major:-0}" -gt 1 ] 2>/dev/null \
+        || { [ "${major:-0}" -eq 1 ] && [ "${minor:-0}" -ge 60 ]; } 2>/dev/null; } \
+        && command -v passt >/dev/null 2>&1; then
+        echo 169.254.2.2
+    else
+        echo 10.0.2.2
+    fi
 }
 
 # qd_repo_wire_guest <snapshot> [host-addr]

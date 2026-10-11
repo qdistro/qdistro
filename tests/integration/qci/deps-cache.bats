@@ -689,24 +689,51 @@ fab_mirror() {
     [ ! -s "$WORK/cache/.serve.port" ]
 }
 
-@test "qd_repo_wire_container: file:// base + read-only volume spec" {
+@test "qd_repo_wire_container: file:// base survives in THIS shell" {
     fab_mirror 20260101
-    run bash -c ". '$LIB'; qd_repo_wire_container 20260101 /qdistro-mirror; echo base=\$QDISTRO_REPO_BASE"
-    [ "$status" -eq 0 ]
-    [ "${lines[0]}" = "--volume" ]
-    [ "${lines[1]}" = "$WORK/cache/repos:/qdistro-mirror:ro" ]
-    [ "${lines[-1]}" = "base=file:///qdistro-mirror" ]
+    # The whole contract is that the export reaches the CALLER — invoking
+    # through `run`/a subshell would hide exactly the bug this pins.
+    . "$LIB"
+    local mirror_args=()
+    qd_repo_wire_container 20260101 /qdistro-mirror
+    [ "$QDISTRO_REPO_BASE" = "file:///qdistro-mirror" ]
+    mirror_args=(--volume "$(qd_deps_root)/repos:/qdistro-mirror:ro,z")
+    [ "${mirror_args[0]}" = "--volume" ]
+    [ "${mirror_args[1]}" = "$WORK/cache/repos:/qdistro-mirror:ro,z" ]
 }
 
-@test "qd_repo_wire_container: no mirror → prints nothing, no base" {
-    run bash -c ". '$LIB'; qd_repo_wire_container 20260101 /qdistro-mirror; echo base=\${QDISTRO_REPO_BASE:-unset}"
-    [ "$status" -eq 0 ]
-    [ "$output" = "base=unset" ]
+@test "qd_repo_wire_container: no mirror → rc 1, no base" {
+    . "$LIB"
+    run qd_repo_wire_container 20260101 /qdistro-mirror
+    [ "$status" -eq 1 ]
+    [ -z "${QDISTRO_REPO_BASE:-}" ]
+}
+
+@test "qd_repo_wire_container: explicit base wins" {
+    fab_mirror 20260101
+    . "$LIB"
+    export QDISTRO_REPO_BASE=http://hand.set/base
+    run qd_repo_wire_container 20260101 /qdistro-mirror
+    [ "$status" -eq 1 ]
+    [ "$QDISTRO_REPO_BASE" = "http://hand.set/base" ]
+}
+
+@test "qd_repo_base_safe rejects whitespace/metachar injection" {
+    . "$LIB"
+    run qd_repo_base_safe 'http://10.0.2.2:8000/repos'; [ "$status" -eq 0 ]
+    run qd_repo_base_safe 'file:///qdistro-mirror'; [ "$status" -eq 0 ]
+    run qd_repo_base_safe 'http://x/; rm -rf /'; [ "$status" -eq 1 ]
+    run qd_repo_base_safe "http://x/
+[evil]"; [ "$status" -eq 1 ]
+    run qd_repo_base_safe 'http://x/$(id)'; [ "$status" -eq 1 ]
+    run qd_repo_base_safe 'not-a-url'; [ "$status" -eq 1 ]
 }
 
 @test "qd_guestfs_host_addr: passt-era libguestfs + passt → 169.254.2.2" {
     mkdir -p "$WORK/fakebin"
-    printf '#!/bin/sh\necho "guestfish 1.60.2"\n' > "$WORK/fakebin/guestfish"
+    # Real `guestfish version` output is multi-line key: value — NOT
+    # "guestfish 1.60.2".
+    printf '#!/bin/sh\nprintf "major: 1\\nminor: 60\\nrelease: 1\\nextra: \\n"\n' > "$WORK/fakebin/guestfish"
     printf '#!/bin/sh\nexit 0\n' > "$WORK/fakebin/passt"
     chmod +x "$WORK/fakebin/guestfish" "$WORK/fakebin/passt"
     run bash -c "export PATH='$WORK/fakebin':\"\$PATH\"; . '$LIB'; qd_guestfs_host_addr"
@@ -715,10 +742,19 @@ fab_mirror() {
 
 @test "qd_guestfs_host_addr: no passt → 10.0.2.2" {
     mkdir -p "$WORK/fakebin"
-    printf '#!/bin/sh\necho "guestfish 1.60.2"\n' > "$WORK/fakebin/guestfish"
+    printf '#!/bin/sh\nprintf "major: 1\\nminor: 60\\nrelease: 1\\nextra: \\n"\n' > "$WORK/fakebin/guestfish"
     chmod +x "$WORK/fakebin/guestfish"
     # PATH restricted to the fake: the real passt must not be findable.
     run bash -c "export PATH='$WORK/fakebin'; . '$LIB'; qd_guestfs_host_addr"
+    [ "$output" = "10.0.2.2" ]
+}
+
+@test "qd_guestfs_host_addr: pre-1.60 libguestfs + passt → 10.0.2.2" {
+    mkdir -p "$WORK/fakebin"
+    printf '#!/bin/sh\nprintf "major: 1\\nminor: 44\\nrelease: 3\\nextra: \\n"\n' > "$WORK/fakebin/guestfish"
+    printf '#!/bin/sh\nexit 0\n' > "$WORK/fakebin/passt"
+    chmod +x "$WORK/fakebin/guestfish" "$WORK/fakebin/passt"
+    run bash -c "export PATH='$WORK/fakebin':\"\$PATH\"; . '$LIB'; qd_guestfs_host_addr"
     [ "$output" = "10.0.2.2" ]
 }
 
@@ -729,10 +765,21 @@ fab_mirror() {
     run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest"
     [ "$status" -eq 1 ]
     mkdir -p "$WORK/cache/oci/$REF_SHA"
+    # Empty files are INCOMPLETE, not warm (interrupted-save shape).
     touch "$WORK/cache/oci/$REF_SHA/image.tar"
     run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest"
     [ "$status" -eq 1 ]
-    touch "$WORK/cache/oci/$REF_SHA/image.tar.sha256" "$WORK/cache/oci/$REF_SHA/manifest.txt"
+    printf 'fake-archive-bytes' > "$WORK/cache/oci/$REF_SHA/image.tar"
+    echo x > "$WORK/cache/oci/$REF_SHA/manifest.txt"
+    (cd "$WORK/cache/oci/$REF_SHA" && sha256sum image.tar > image.tar.sha256)
     run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest"
     [ "$status" -eq 0 ]
+    run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest --verify"
+    [ "$status" -eq 0 ]
+    # Corrupt bytes: structure still complete, --verify fails.
+    printf 'tampered' >> "$WORK/cache/oci/$REF_SHA/image.tar"
+    run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest"
+    [ "$status" -eq 0 ]
+    run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest --verify"
+    [ "$status" -eq 1 ]
 }

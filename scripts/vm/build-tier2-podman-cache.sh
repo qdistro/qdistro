@@ -25,11 +25,14 @@ qd_oci_ensure "$base_image" >/dev/null || exit 3
 
 # Mount the verified mirror read-only into the Containerfile RUN steps —
 # file:// inside the build, no qd_serve needed. Wired builds drop the
-# netns entirely: every zypper byte must come from the mirror.
+# netns entirely: every zypper byte must come from the mirror. The wire
+# call must run in THIS shell — a subshell drops the export.
 mirror_args=()
 net_args=()
-mapfile -t mirror_args < <(qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror)
-[ "${#mirror_args[@]}" -gt 0 ] && net_args=(--network=none)
+if qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror; then
+    mirror_args=(--volume "$(qd_deps_root)/repos:/qdistro-mirror:ro,z")
+    net_args=(--network=none)
+fi
 base_id=$(podman image inspect "$base_image" --format '{{.Id}}')
 
 cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}/tier2-podman/$QDISTRO_SUBSTRATE_SNAPSHOT/$QDISTRO_SUBSTRATE_ARCH

@@ -57,11 +57,14 @@ else
     rpm_cache="$cache/podman-rpm/$QDISTRO_SUBSTRATE_SNAPSHOT/$QDISTRO_SUBSTRATE_ARCH/packages"
     mkdir -p "$rpm_cache"
     # Mount the verified mirror read-only for the RUN zypper steps — no
-    # qd_serve needed inside a build; wired builds drop the netns.
+    # qd_serve needed inside a build; wired builds drop the netns. The wire
+    # call must run in THIS shell — a subshell drops the export.
     mirror_args=()
     net_args=()
-    mapfile -t mirror_args < <(qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror)
-    [ "${#mirror_args[@]}" -gt 0 ] && net_args=(--network=none)
+    if qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror; then
+        mirror_args=(--volume "$(qd_deps_root)/repos:/qdistro-mirror:ro,z")
+        net_args=(--network=none)
+    fi
     echo "[host-podman] image cache miss $image" >&2
     podman build --pull=never --layers --security-opt label=disable "${net_args[@]}" "${mirror_args[@]}" \
         --volume "$rpm_cache:/var/cache/zypp/packages:rw" \
