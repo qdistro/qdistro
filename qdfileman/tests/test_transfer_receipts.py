@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QListWidgetItem
 from qfileman import qdistro_integration as qi
 from qfileman.transfer_jobs import TransferSender
+from qfileman import transfer_jobs
 from qfileman.window import FileManagerWindow
 
 
@@ -19,6 +20,12 @@ def capabilities(**changes):
 def receipt(state, **changes):
     return {"version": 1, "instance_id": "receiver-a", "transfer_id": "private-handle",
             "state": state, "reason": "", **changes}
+
+
+def _wait_send_to_rows(window, qtbot, seq=0):
+    """Row discovery is async now; wait for the worker's reply."""
+    qtbot.waitUntil(lambda: window._send_to_rows_seq > seq
+                    and window._send_to_rows is not None)
 
 
 @pytest.fixture
@@ -152,12 +159,13 @@ def test_closed_window_and_stale_results_are_ignored(sender, monkeypatch, qtbot)
     assert messages == []
 
 
-def test_menu_shows_capabilities_and_disables_full_receiver(sender, monkeypatch):
+def test_menu_shows_capabilities_and_disables_full_receiver(sender, monkeypatch, qtbot):
     window, path = sender
     monkeypatch.setattr(qi, "send_to_targets", lambda **kwargs: [
         {"name": "Notebook", "uid": 1000, "service": "org.qdistro.Notebook.uid1000",
          "capabilities": capabilities(available=False, reason="Inbox full")}])
     window._populate_send_to_menu()
+    _wait_send_to_rows(window, qtbot)
     action = window._send_to_menu.actions()[0]
     assert action.text() == "Notebook (262144 bytes; confirmation required)"
     assert action.toolTip() == "UTF-8 text. Inbox full"
@@ -203,6 +211,7 @@ def test_async_menu_enrichment_and_dispatch_use_current_content(sender, monkeypa
     monkeypatch.setattr(qi, "get_transfer_capabilities", caps)
     monkeypatch.setattr(qi, "send_transfer", lambda *args, **kwargs: sent.append(args) or receipt("applied"))
     window._populate_send_to_menu()
+    _wait_send_to_rows(window, qtbot)
     action = window._send_to_menu.actions()[0]
     assert entered.wait(1)
     assert action.text() == "Notebook (acceptance unknown)"
@@ -231,9 +240,12 @@ def test_reopened_menu_ignores_stale_capability_result(sender, monkeypatch, qtbo
         return capabilities()
     monkeypatch.setattr(qi, "get_transfer_capabilities", caps)
     window._populate_send_to_menu()
+    _wait_send_to_rows(window, qtbot)
     assert entered.wait(1)
     rows[0] = {**rows[0], "capabilities": capabilities(instance_id="new-instance", available=False, reason="Inbox full")}
+    seq = window._send_to_rows_seq
     window._populate_send_to_menu()
+    _wait_send_to_rows(window, qtbot, seq)
     action = window._send_to_menu.actions()[0]
     assert not action.isEnabled()
     release.set()
@@ -311,9 +323,12 @@ def test_reopened_menu_still_unknown_row_gets_inflight_result(sender, monkeypatc
 
     monkeypatch.setattr(qi, "get_transfer_capabilities", caps)
     window._populate_send_to_menu()
+    _wait_send_to_rows(window, qtbot)
     assert entered.wait(1)
     first_action = window._send_to_menu.actions()[0]
+    seq = window._send_to_rows_seq
     window._populate_send_to_menu()
+    _wait_send_to_rows(window, qtbot, seq)
     action = window._send_to_menu.actions()[0]
     assert action is not first_action
     release.set()
@@ -321,3 +336,83 @@ def test_reopened_menu_still_unknown_row_gets_inflight_result(sender, monkeypatc
     assert action.isEnabled()
     assert (window._receiver_actions[(1000, "org.qdistro.Notebook.uid1000")][1]
             ["instance_id"] == "receiver-a")
+
+
+def test_send_to_targets_fetch_does_not_block_the_ui_thread(sender, monkeypatch, qtbot):
+    """populate must return while ListReceivers is still in flight; the
+    Qt loop must stay live for the whole fetch."""
+    window, _path = sender
+    entered, release, done = threading.Event(), threading.Event(), threading.Event()
+    rows = [{"name": "Notebook", "uid": 1000,
+             "service": "org.qdistro.Notebook.uid1000",
+             "capabilities": capabilities()}]
+
+    def targets(**kwargs):
+        entered.set()
+        release.wait(5)
+        done.set()
+        return rows
+
+    monkeypatch.setattr(qi, "send_to_targets", targets)
+    try:
+        window._populate_send_to_menu()
+        # the cold path shows a placeholder, not a block
+        assert window._send_to_menu.actions()[0].text() == "(discovering receivers…)"
+        assert entered.wait(1)  # the worker is now blocked inside ListReceivers
+        heartbeat = []
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: heartbeat.append(True))
+        qtbot.waitUntil(lambda: heartbeat == [True])  # loop stayed live mid-fetch
+        # an inline fetch would have finished before the heartbeat could fire
+        assert not done.is_set()
+        release.set()
+        qtbot.waitUntil(lambda: "Notebook" in window._send_to_menu.actions()[0].text())
+    finally:
+        release.set()
+
+
+def test_receiver_list_fetch_is_single_flight(sender, monkeypatch, qtbot):
+    """Reopening while a fetch is in flight must not pile up calls, and
+    the in-flight result must still reach the reopened menu."""
+    window, _path = sender
+    calls, entered, release = [], threading.Event(), threading.Event()
+    rows = [{"name": "Notebook", "uid": 1000,
+             "service": "org.qdistro.Notebook.uid1000",
+             "capabilities": capabilities()}]
+
+    def targets(**kwargs):
+        calls.append(kwargs)
+        entered.set()
+        release.wait(5)
+        return rows
+
+    monkeypatch.setattr(qi, "send_to_targets", targets)
+    window._populate_send_to_menu()
+    assert entered.wait(1)
+    window._populate_send_to_menu()
+    window._populate_send_to_menu()
+    release.set()
+    qtbot.waitUntil(lambda: window._send_to_rows_seq > 0
+                    and window._send_to_rows is not None)
+    assert len(calls) == 1
+    action = window._send_to_menu.actions()[0]
+    assert "Notebook" in action.text()
+
+
+def test_receiver_list_fetch_respects_shared_worker_bound(sender, monkeypatch, qtbot):
+    """An exhausted shared worker pool refuses the fetch — _busy stays
+    clear, the menu keeps its placeholder, and the next open retries."""
+    window, _path = sender
+    monkeypatch.setattr(qi, "send_to_targets", lambda **_: [])
+    assert transfer_jobs._DISCOVERY_WORKERS.acquire(blocking=False)
+    assert transfer_jobs._DISCOVERY_WORKERS.acquire(blocking=False)
+    try:
+        window._populate_send_to_menu()
+        assert not window._receiver_list._busy
+        assert window._send_to_menu.actions()[0].text() == "(discovering receivers…)"
+    finally:
+        transfer_jobs._DISCOVERY_WORKERS.release()
+        transfer_jobs._DISCOVERY_WORKERS.release()
+    window._populate_send_to_menu()
+    _wait_send_to_rows(window, qtbot)
+    assert window._send_to_menu.actions()[0].text() == "(no receivers running)"

@@ -169,3 +169,55 @@ class CapabilityDiscovery(QObject):
         if self._closed or generation != self._generation or done:
             return
         self.enriched.emit(*result)
+
+
+class ReceiverListDiscovery(QObject):
+    """Fetch the Send-To target list off the Qt thread.
+
+    ``send_to_targets`` bottoms out in a synchronous ``ListReceivers``
+    D-Bus call with a multi-second timeout; running it inside
+    ``aboutToShow`` froze the whole UI for that duration. Rows are
+    emitted once via ``found`` on the Qt thread; ``_busy`` keeps the
+    fetch single-flight so a menu reopen never piles up calls."""
+
+    found = pyqtSignal(object)
+    result = pyqtSignal(int, object)
+
+    def __init__(self, parent, integration):
+        super().__init__(parent)
+        self.integration = integration
+        self._generation = 0
+        self._busy = False
+        self._closed = False
+        self.result.connect(self._present, Qt.ConnectionType.QueuedConnection)
+
+    def start(self):
+        if self._closed or self._busy or not _DISCOVERY_WORKERS.acquire(blocking=False):
+            return
+        self._busy = True
+        self._generation += 1
+        threading.Thread(target=self._run, args=(self._generation,),
+                         daemon=True, name="qfileman-receivers").start()
+
+    def close(self):
+        self._closed = True
+        self._generation += 1
+
+    def _run(self, generation):
+        try:
+            rows = self.integration.send_to_targets()
+        except Exception:
+            rows = []
+        try:
+            self.result.emit(generation, rows)
+        except RuntimeError:
+            pass
+        finally:
+            _DISCOVERY_WORKERS.release()
+
+    @pyqtSlot(int, object)
+    def _present(self, generation, rows):
+        self._busy = False
+        if self._closed or generation != self._generation:
+            return
+        self.found.emit(rows)
