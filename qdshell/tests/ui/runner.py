@@ -1871,6 +1871,11 @@ Constraints:
 # the surface whose golden actually needs them; every hint still asks for
 # visible evidence, never for the expected answer.
 _DESCRIBE_SURFACE_HINTS = {
+    "bar_idle": (
+        "Identify whether the narrow strip pinned along the screen edge "
+        "is a bar window, and describe its start, center and end widget "
+        "groups separately from the desktop below it."
+    ),
     "panel_calendar": (
         "In the calendar grid, identify the date whose cell is visibly "
         "highlighted or selected, or say none is distinguishable."
@@ -1888,6 +1893,12 @@ _DESCRIBE_SURFACE_HINTS = {
         "Advanced tab header. For setting rows, distinguish bright/enabled "
         "reset controls from dimmed/disabled ones, using visible styling "
         "rather than the mere presence of a reset icon."
+    ),
+    "settings_windowmanager": (
+        "For the Window decoration theme control, inspect whether it is "
+        "a free-text input or a dropdown. Report whether a dropdown arrow "
+        "is visible; a rounded border or dim color alone does not identify "
+        "the control type."
     ),
     "panel_battery": (
         "State whether battery rows, charge level and time are visible, "
