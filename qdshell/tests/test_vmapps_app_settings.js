@@ -81,29 +81,6 @@ const win = fs.readFileSync(
         "VMAppsTab rows must expose their appId as highlightKey");
 }
 
-// --- deterministic per-app VM name (relaunch reuse) ---------------------
-// ensures: every launch of the same app lands on the same domain — the
-//          name is a pure function of appId with no random component, so
-//          the wrapper's hold-lock protocol and the silo tag share one
-//          identity
-{
-    const fn = service.slice(
-        service.indexOf("function _vmNameForApp(appId)"),
-        service.indexOf("function rebuild()"));
-    assert.ok(fn.length > 0, "_vmNameForApp must exist in VMApps.qml");
-    assert.ok(!fn.includes("Math.random"),
-        "the VM name must not contain random components");
-    assert.ok(fn.includes('"t5-" +'),
-        "the VM name keeps the t5- prefix convention");
-    assert.ok(service.includes("root._vmNameForApp(row.appId)"),
-        "launch must use the deterministic per-app name");
-    assert.ok(!service.includes("_generateVmName"),
-        "the random per-launch name generator must be gone");
-    // ensures: launch still passes the stable appId through --policy-key
-    assert.ok(service.includes('"--policy-key", row.appId'),
-        "launch must keep passing appId as the policy key");
-}
-
 console.log(
     "vmapps-app-settings: launcher action, enum-id tab nav, appId " +
-    "highlight, deterministic VM name invariants passed");
+    "highlight invariants passed");

@@ -226,11 +226,20 @@ $VMEXEC "$VM" 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
   || { echo "FAIL(S3): could not open the vmapps settings tab via IPC"; exit 1; }
 sleep 2
 qdwin_screenshot "$ART/s3-vmapps-tab.png"
+# The tab is taller than the 1280x800 test screen: the per-app rows sit
+# at the bottom of its scroll area. Wheel over the tab body (QMP input)
+# to bring the last row into view.
+$VMGUI "$VM" scroll down 10 740 400
+sleep 1
+qdwin_screenshot "$ART/s3-vmapps-tab-bottom.png"
 ```
 
-**Assert** (hard, agent-visual): the Settings panel shows the
-"Sandboxed VM apps" tab listing **Konsole** and **Foot** rows from the
-restored manifest — each row carrying a per-app override control. This
+**Assert** (hard, agent-visual): `s3-vmapps-tab.png` shows the Settings
+panel on the "Sandboxed VM apps" tab with a **Konsole** per-app override
+row, and `s3-vmapps-tab-bottom.png` (the same tab scrolled down) shows
+both a **Konsole** and a **Foot** row from the restored manifest — each
+row carrying a per-app override control. If the bottom frame still ends
+at Konsole with no Foot row below it, that is a FAIL. This
 proves the Settings override surface is fed by the same discovered
 catalogue (the appId is the policy key; a row the tab cannot see cannot
 be overridden).
@@ -307,4 +316,5 @@ $VMGUI "$VM" key Escape
 - S4 launcher activation reaches spawn under the stable appId (journal)
 - Artifacts under `$ART/`: s1-launcher-konsole.png,
   s2-launcher-foot.png, s2-launcher-konsole-gone.png, s3-vmapps-tab.png,
+  s3-vmapps-tab-bottom.png,
   s3-pre-click.png, s3-override-on.png
