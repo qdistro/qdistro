@@ -14311,12 +14311,12 @@ static const struct zwp_idle_inhibitor_v1_interface qdwin_idle_inhibitor_impl = 
 	.destroy = qdwin_idle_inhibitor_destroy,
 };
 
+/* Drop the hold and detach every bookkeeping edge. Kept as one unit so
+ * the behavioural probe splices this exact function instead of
+ * mirroring the teardown; the caller owns freeing inh. */
 static void
-qdwin_idle_inhibitor_resource_destroy(struct wl_resource *resource)
+qdwin_idle_inhibitor_teardown(struct qdwin_idle_inhibitor *inh)
 {
-	struct qdwin_idle_inhibitor *inh = wl_resource_get_user_data(resource);
-	if (!inh)
-		return;
 	qdwin_idle_inhibitor_deactivate(inh);
 	if (inh->surface) {
 		wl_list_remove(&inh->surface_destroy_listener.link);
@@ -14325,6 +14325,15 @@ qdwin_idle_inhibitor_resource_destroy(struct wl_resource *resource)
 		inh->surface = NULL;
 	}
 	wl_list_remove(&inh->link);
+}
+
+static void
+qdwin_idle_inhibitor_resource_destroy(struct wl_resource *resource)
+{
+	struct qdwin_idle_inhibitor *inh = wl_resource_get_user_data(resource);
+	if (!inh)
+		return;
+	qdwin_idle_inhibitor_teardown(inh);
 	free(inh);
 }
 
@@ -14424,6 +14433,52 @@ qdwin_idle_inhibit_manager_destroy(struct wl_client *client,
 	wl_resource_destroy(resource);
 }
 
+/* Arm a zeroed inhibitor: field init, per-surface listeners, list link,
+ * the initial sync, and the empty -> non-empty backstop arm. Kept as one
+ * unit so the behavioural probe splices this exact function instead of
+ * mirroring the create path; on false the caller owns the unwind
+ * (production: wl_resource_destroy -> resource_destroy -> teardown). */
+static bool
+qdwin_idle_inhibitor_arm(struct qdwin *qdwin,
+			struct qdwin_idle_inhibitor *inh,
+			struct weston_surface *surface)
+{
+	bool was_empty;
+
+	inh->qdwin = qdwin;
+	inh->surface = surface;
+	inh->active = 0;
+	wl_list_init(&inh->surface_destroy_listener.link);
+	wl_list_init(&inh->surface_map_listener.link);
+	wl_list_init(&inh->surface_unmap_listener.link);
+	if (surface) {
+		inh->surface_destroy_listener.notify =
+			qdwin_idle_inhibitor_surface_destroyed;
+		wl_signal_add(&surface->destroy_signal,
+			      &inh->surface_destroy_listener);
+		/* iso2/11 E2: the hold follows the surface's mapped state
+		 * for the life of the inhibitor, not just at create time. */
+		inh->surface_map_listener.notify =
+			qdwin_idle_inhibitor_surface_mapped;
+		wl_signal_add(&surface->map_signal,
+			      &inh->surface_map_listener);
+		inh->surface_unmap_listener.notify =
+			qdwin_idle_inhibitor_surface_unmapped;
+		wl_signal_add(&surface->unmap_signal,
+			      &inh->surface_unmap_listener);
+	}
+	was_empty = wl_list_empty(&qdwin->idle_inhibitors);
+	wl_list_insert(&qdwin->idle_inhibitors, &inh->link);
+	/* Not an unconditional activate: an inhibitor taken on a surface
+	 * that is not mapped yet holds nothing until it maps. */
+	qdwin_idle_inhibitor_sync(inh);
+	/* Arm on the empty -> non-empty transition only; the callback owns
+	 * every later deadline (codex r2 #1). */
+	if (was_empty && !qdwin_idle_inhibit_recheck_schedule(qdwin))
+		return false;
+	return true;
+}
+
 static void
 qdwin_idle_inhibit_create_inhibitor(struct wl_client *client,
 				    struct wl_resource *resource,
@@ -14436,7 +14491,6 @@ qdwin_idle_inhibit_create_inhibitor(struct wl_client *client,
 				 : NULL;
 	struct qdwin_idle_inhibitor *inh;
 	struct wl_resource *inh_resource;
-	bool was_empty;
 
 	/* codex r2 #3: never accept a hold we cannot later re-evaluate.
 	 * Without the backstop an ancestor unmap would leave a permanent
@@ -14460,39 +14514,13 @@ qdwin_idle_inhibit_create_inhibitor(struct wl_client *client,
 		wl_client_post_no_memory(client);
 		return;
 	}
-	inh->qdwin = qdwin;
-	inh->resource = inh_resource;
-	inh->surface = surface;
-	wl_list_init(&inh->surface_destroy_listener.link);
-	wl_list_init(&inh->surface_map_listener.link);
-	wl_list_init(&inh->surface_unmap_listener.link);
-	if (surface) {
-		inh->surface_destroy_listener.notify =
-			qdwin_idle_inhibitor_surface_destroyed;
-		wl_signal_add(&surface->destroy_signal,
-			      &inh->surface_destroy_listener);
-		/* iso2/11 E2: the hold follows the surface's mapped state
-		 * for the life of the inhibitor, not just at create time. */
-		inh->surface_map_listener.notify =
-			qdwin_idle_inhibitor_surface_mapped;
-		wl_signal_add(&surface->map_signal,
-			      &inh->surface_map_listener);
-		inh->surface_unmap_listener.notify =
-			qdwin_idle_inhibitor_surface_unmapped;
-		wl_signal_add(&surface->unmap_signal,
-			      &inh->surface_unmap_listener);
-	}
-	was_empty = wl_list_empty(&qdwin->idle_inhibitors);
-	wl_list_insert(&qdwin->idle_inhibitors, &inh->link);
+	/* Wired before arm() so an arm failure unwinds through the
+	 * resource destroy callback exactly like a client destroy. */
 	wl_resource_set_implementation(inh_resource, &qdwin_idle_inhibitor_impl,
 				       inh,
 				       qdwin_idle_inhibitor_resource_destroy);
-	/* Not an unconditional activate: an inhibitor taken on a surface
-	 * that is not mapped yet holds nothing until it maps. */
-	qdwin_idle_inhibitor_sync(inh);
-	/* Arm on the empty -> non-empty transition only; the callback owns
-	 * every later deadline (codex r2 #1). */
-	if (was_empty && !qdwin_idle_inhibit_recheck_schedule(qdwin)) {
+	inh->resource = inh_resource;
+	if (!qdwin_idle_inhibitor_arm(qdwin, inh, surface)) {
 		wl_resource_destroy(inh_resource);
 		wl_client_post_no_memory(client);
 		return;
