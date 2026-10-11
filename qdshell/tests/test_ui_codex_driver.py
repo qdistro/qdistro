@@ -29,3 +29,23 @@ def test_ui_codex_driver_pins_luna_and_keeps_rollout(monkeypatch, with_image):
     assert (f"--image={image}" in cmd) == with_image
     assert cmd[-1] == "describe this frame"
     assert kwargs["timeout"] == 180
+
+
+@pytest.mark.parametrize(
+    ("image_name", "expected_detail"),
+    [
+        ("panel_calendar.png", "date whose cell"),
+        ("panel_launcher.png", "visible caret"),
+        ("settings_defaultapps-p2.png", "explanatory paragraph"),
+        ("panel_battery.png", "only a header"),
+        ("panel_wallpaper.png", "hidden-files eye"),
+        ("panel_sessionmenu.png", "corner keybind badge"),
+        ("panel_brightness.png", "icon before the slider"),
+    ],
+)
+def test_ui_describer_details_are_scoped_to_surface(image_name, expected_detail):
+    prompt = runner._describe_prompt_for(Path(image_name))
+    assert expected_detail in prompt
+    assert expected_detail not in runner._describe_prompt_for(
+        Path("panel_network.png")
+    )

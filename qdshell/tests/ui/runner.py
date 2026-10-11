@@ -1767,10 +1767,6 @@ Cover, as bullet points:
     For a switch, infer on/off from the thumb position (left=off,
     right=on), not the thumb color. Separately state whether the control
     looks disabled/dimmed; a checked value can still be disabled.
-    For a search input, say whether a text caret or focus outline is
-    visible; do not infer focus merely from the input's presence.
-    For a calendar, identify the date whose cell is visibly highlighted
-    or selected, or explicitly say that none is distinguishable.
   - Icon-only buttons (especially in header/toolbar rows): name each one's
     apparent FUNCTION from its icon — e.g. "a close button (X)", "a
     list/grid view-toggle button", "a settings gear button", "a clear/trash
@@ -1797,6 +1793,50 @@ Constraints:
   - If the panel appears empty / shell still loading, say so explicitly.
 """
 
+# Small surface-specific details can be lost when the generic description
+# spends its word budget on the desktop bar. Keep these observations scoped to
+# the surface whose golden actually needs them; every hint still asks for
+# visible evidence, never for the expected answer.
+_DESCRIBE_SURFACE_HINTS = {
+    "panel_calendar": (
+        "In the calendar grid, identify the date whose cell is visibly "
+        "highlighted or selected, or say none is distinguishable."
+    ),
+    "panel_launcher": (
+        "For the search input, report any visible caret or focus outline, "
+        "or say neither is visible; do not infer focus from its presence."
+    ),
+    "settings_defaultapps": (
+        "Inspect and transcribe the small explanatory paragraph directly "
+        "below the Default Applications heading, if one is visible."
+    ),
+    "panel_battery": (
+        "State whether battery rows, charge level and time are visible, "
+        "or whether the panel has only a header and close button."
+    ),
+    "panel_wallpaper": (
+        "Inspect the file-browser toolbar closely. Identify the "
+        "hidden-files eye control if its glyph is visible."
+    ),
+    "panel_sessionmenu": (
+        "For each power-action card, report any small corner keybind badge "
+        "and which card is highlighted."
+    ),
+    "panel_brightness": (
+        "For each display row, inspect the small icon before the slider "
+        "and whether the slider looks dimmed or disabled. If its visual "
+        "state is ambiguous, say so rather than guessing."
+    ),
+}
+
+
+def _describe_prompt_for(image_path: Path) -> str:
+    name = image_path.name
+    for surface_id, hint in _DESCRIBE_SURFACE_HINTS.items():
+        if name == f"{surface_id}.png" or name.startswith(f"{surface_id}-"):
+            return f"{_DESCRIBE_PROMPT}\nSurface detail to inspect: {hint}"
+    return _DESCRIBE_PROMPT
+
 
 def describe(image_path: Path) -> str:
     """Send PNG to a vision LLM; return the textual description.
@@ -1808,12 +1848,13 @@ def describe(image_path: Path) -> str:
     A single bounded retry covers transient codex failures (empty output is
     an observability gap, never a pass — a second failure still returns "").
     """
+    prompt = _describe_prompt_for(image_path)
     for _ in range(2):
         desc = ""
         if shutil.which("codex") and os.environ.get("QDSHELL_UI_NO_CODEX") != "1":
-            desc = _describe_with_codex(image_path)
+            desc = _describe_with_codex(image_path, prompt)
         elif shutil.which("pi") and os.environ.get("QDSHELL_UI_NO_PI") != "1":
-            desc = _describe_with_pi(image_path)
+            desc = _describe_with_pi(image_path, prompt)
         if desc.strip():
             return desc
         time.sleep(2)
@@ -1853,16 +1894,16 @@ def _run_codex(prompt: str, image_path: Optional[Path] = None) -> str:
         return result.stdout.strip()
 
 
-def _describe_with_codex(image_path: Path) -> str:
-    return _run_codex(_DESCRIBE_PROMPT, image_path=image_path)
+def _describe_with_codex(image_path: Path, prompt: str) -> str:
+    return _run_codex(prompt, image_path=image_path)
 
 
-def _describe_with_pi(image_path: Path) -> str:
+def _describe_with_pi(image_path: Path, prompt: str) -> str:
     """Vision via local pi CLI + qwen3.6-plus. See memory: reference-pi-vision-fallback."""
     try:
         result = subprocess.run(
             ["pi", "--print", "--provider", "qwen", "--model", "qwen3.6-plus",
-             f"@{image_path}", _DESCRIBE_PROMPT],
+             f"@{image_path}", prompt],
             capture_output=True, text=True, timeout=120,
         )
     except (subprocess.TimeoutExpired, OSError):
