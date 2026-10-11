@@ -187,7 +187,12 @@ silently merge:
   survives reboot), and every accept/recover/reap/delete decision
   requires BOTH records to bind the same inode — a planted
   disk+sidecar can satisfy the sidecar but can never mint the
-  registry entry (sol r33). Every
+  registry entry (sol r33). The registry also vouches at the domain
+  layer: the XML `appId` tag is admin-writable session metadata
+  anyone in the libvirt session can forge, so adoption of a running
+  domain, teardown of a defined one, and the cleanup helper's
+  destroy each require the registry to agree independently — a
+  forged guest is refused, never adopted or destroyed (sol r34). Every
   unproven disk at our name — missing
   sidecar, foreign appId, inode mismatch, wrong provenance — is
   refused AND preserved, never booted and never deleted by the

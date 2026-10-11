@@ -1079,3 +1079,17 @@ def test_ownership_registry_authenticates_pairs():
     assert '[ "$_oapp" != "$_sapp" ]' in CLEANUP
     assert '[ "$_oident" != "$_dino" ]' in CLEANUP
     assert '_drop_owned "$VM_NAME"' in CLEANUP
+    # forged XML bindings get no authority either (sol r34): the
+    # appId tag is admin-writable session metadata, so adoption AND
+    # domain destruction require the registry to vouch independently
+    decision = SPAWN[SPAWN.index("ADOPTED=0"):]
+    assert decision.count('_read_owned "$VM_NAME"') >= 2
+    assert decision.count('refusing to adopt a forged guest') >= 2
+    # teardown re-verifies the registry before destroying a defined
+    # domain, and the lone-sidecar unlink needs it too
+    gate = _section("cleanup")
+    assert 'binding not backed by the' in gate
+    assert '[ "$_oident" = "$_sident" ]' in gate
+    # the helper refuses to destroy a forged-tag domain
+    assert 'refusing to destroy a forged guest' in CLEANUP
+    assert '[ "$_oapp" != "$_bound" ]' in CLEANUP

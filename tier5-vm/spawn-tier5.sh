@@ -1309,9 +1309,17 @@ cleanup() {
             domain_defined_state; _ds=$?
             _bound=""
             [ "$_ds" -eq 0 ] && _bound=$(domain_appid)
+            _read_owned "$VM_NAME"
             if [ "$_ds" -eq 0 ] && [ "$_bound" != "$POLICY_KEY" ]; then
                 echo "[tier5] $VM_NAME re-bound to '${_bound:-<unbound>}'" >&2
                 echo "        — leaving domain and overlay alone" >&2
+                domain_reaped=0
+            elif [ "$_ds" -eq 0 ] && [ "$_oapp" != "$POLICY_KEY" ]; then
+                # A matching tag is forgeable session metadata — the
+                # domain may only be destroyed when the root-side
+                # record independently vouches we created it (sol r34)
+                echo "[tier5] $VM_NAME binding not backed by the" >&2
+                echo "        ownership record — leaving it alone" >&2
                 domain_reaped=0
             elif [ "$_ds" -eq 2 ]; then
                 echo "[tier5] cannot verify $VM_NAME state —" >&2
@@ -1380,8 +1388,14 @@ cleanup() {
                             echo "[tier5] WARN: keeping $DISK — not a" >&2
                             echo "        regular file (foreign construction)" >&2
                         elif [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
+                            # A lone record also needs the registry —
+                            # the sidecar is admin-writable, so its
+                            # appId+inode match alone does not prove
+                            # this suite wrote it (sol r34).
                             if [ "$_sapp" = "$POLICY_KEY" ] \
-                                && [ -n "$_sfid" ]; then
+                                && [ -n "$_sfid" ] \
+                                && [ "$_oapp" = "$POLICY_KEY" ] \
+                                && [ "$_oident" = "$_sident" ]; then
                                 _unlink_verified "$DISK.appid" "$_sfid" \
                                     || domain_reaped=0
                                 [ "$domain_reaped" = "1" ] \
@@ -1972,6 +1986,17 @@ if [ "$_lv" -eq 0 ]; then
         echo "        not '$POLICY_KEY' — refusing cross-app adoption" >&2
         REAP=0; exit 3
     fi
+    # The XML tag is admin-writable metadata — anyone in the session
+    # can stamp a forged binding on a guest we never created. The
+    # root-side registry must independently vouch that WE created the
+    # pair this name came from before the guest is adopted (sol r34).
+    _read_owned "$VM_NAME"
+    if [ "$_oapp" != "$POLICY_KEY" ]; then
+        echo "[tier5] FAIL: domain $VM_NAME carries a tier-5 binding" >&2
+        echo "        with no root-side ownership record —" >&2
+        echo "        refusing to adopt a forged guest" >&2
+        REAP=0; exit 3
+    fi
     ADOPTED=1
 elif [ "$_lv" -eq 2 ]; then
     # Cannot prove the domain is dead OR alive — never guess on an
@@ -1991,6 +2016,14 @@ else
         if [ "$_bound" != "$POLICY_KEY" ]; then
             echo "[tier5] FAIL: domain $VM_NAME is bound to app '${_bound:-<unbound>}'," >&2
             echo "        not '$POLICY_KEY' — refusing cross-app adoption" >&2
+            REAP=0; exit 3
+        fi
+        # same forged-binding check as the unlocked adoption above
+        _read_owned "$VM_NAME"
+        if [ "$_oapp" != "$POLICY_KEY" ]; then
+            echo "[tier5] FAIL: domain $VM_NAME carries a tier-5" >&2
+            echo "        binding with no root-side ownership" >&2
+            echo "        record — refusing to adopt a forged guest" >&2
             REAP=0; exit 3
         fi
         ADOPTED=1

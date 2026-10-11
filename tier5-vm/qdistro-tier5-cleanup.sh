@@ -305,6 +305,17 @@ if [ "$_ds" -eq 0 ]; then
         echo "        which derives a different guest — refusing to destroy" >&2
         exit 3
     fi
+    # The tag itself is forgeable: anyone in the admin session can
+    # stamp a matching appId on a domain we never created. Destroying
+    # needs the root-side ownership record to agree — a forged guest
+    # can satisfy the XML check but can never mint it (sol r34).
+    _read_owned "$VM_NAME"
+    if [ "$_oapp" != "$_bound" ]; then
+        echo "[tier5-cleanup] FAIL: $VM_NAME carries a tier-5 binding" >&2
+        echo "        with no matching root-side ownership record —" >&2
+        echo "        refusing to destroy a forged guest" >&2
+        exit 3
+    fi
     run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
     # destroy can no-op under a lying domstate — signal leftover qemu
     # directly (mirrors reap_domain's fallback), then demand a
