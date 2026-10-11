@@ -7525,11 +7525,52 @@ qdwin_overlay_grab_modifiers(struct weston_keyboard_grab *grab,
 				       mods_locked, group);
 }
 
+/* The keyboard the overlay grab was started on, or NULL once that
+ * keyboard's seat is gone. weston_seat_release() unlinks the seat and then
+ * frees its keyboard without ending the keyboard's grab, so the cached
+ * overlay_grab.keyboard can outlive the keyboard (an RDP/VNC peer seat, a
+ * per-stream or nested inner seat); never dereference it unchecked. */
+static struct weston_keyboard *
+qdwin_overlay_grab_keyboard(struct qdwin *qdwin)
+{
+	struct weston_keyboard *kb = qdwin->overlay_grab.keyboard;
+	struct weston_seat *seat;
+
+	if (!kb)
+		return NULL;
+	wl_list_for_each(seat, &qdwin->compositor->seat_list, link)
+		if (seat->keyboard_state == kb)
+			return kb;
+	return NULL;
+}
+
 static void
 qdwin_overlay_grab_cancel(struct weston_keyboard_grab *grab)
 {
 	struct qdwin *qdwin = wl_container_of(grab, qdwin, overlay_grab);
-	qdwin->overlay_grab_active = 0;
+	/* weston_keyboard_cancel_grab() (keyboard release on VT switch or
+	 * seat teardown, keyboard focus-out such as a nested qdwin losing host
+	 * focus) only invokes this callback — it does NOT reset
+	 * keyboard->grab. This used to clear overlay_grab_active and nothing
+	 * else, leaving the grab installed while every end path skipped it on
+	 * the flag: after a VT switch on a locked screen, unlock left the
+	 * locker grab in place and every later key went to overlay_key
+	 * instead of the desktop.
+	 *
+	 * Unlike the popup/move/switcher grabs, the overlay grab is not ended
+	 * here: its lifetime is the overlay's (launcher/switcher mapped,
+	 * compositor locked), not keyboard focus, and its own end paths
+	 * (unlock, launcher destroy, locker crash, teardown) end it. For the
+	 * locker that is the fail-secure choice: while locked the default
+	 * keyboard grab drops every key, so ending the locker grab on a VT
+	 * switch would leave the password field unreachable after switching
+	 * back. Keep it installed and keep overlay_grab_active truthful. A
+	 * cancel from a seat about to be destroyed is covered by
+	 * qdwin_overlay_grab_keyboard(), which stops trusting the cached
+	 * keyboard once its seat is gone. */
+	weston_log("qdwin: overlay grab role=%u cancelled by weston; kept "
+		   "installed for the overlay's lifetime\n",
+		   qdwin->overlay_grab_role);
 }
 
 static const struct weston_keyboard_grab_interface qdwin_overlay_grab_iface = {
@@ -7562,10 +7603,18 @@ qdwin_overlay_grab_start(struct qdwin *qdwin, uint32_t role)
 				kb->keys.size / sizeof(uint32_t));
 	}
 	if (qdwin->overlay_grab_active) {
-		/* Already grabbed — just update the role (e.g. launcher
-		 * → locker takeover). The grab struct itself stays. */
-		qdwin->overlay_grab_role = role;
-		return;
+		struct weston_keyboard *cur = qdwin_overlay_grab_keyboard(qdwin);
+		if (cur && cur->grab == &qdwin->overlay_grab) {
+			/* Already grabbed — just update the role (e.g.
+			 * launcher → locker takeover). The grab struct
+			 * itself stays. */
+			qdwin->overlay_grab_role = role;
+			return;
+		}
+		/* The grab died with its seat, or another grab replaced it
+		 * via weston_keyboard_start_grab() (no cancel): it is not
+		 * delivering keys, so take the keyboard afresh. */
+		qdwin->overlay_grab_active = 0;
 	}
 	qdwin->overlay_grab.interface = &qdwin_overlay_grab_iface;
 	qdwin->overlay_grab.keyboard = kb;
@@ -7574,16 +7623,22 @@ qdwin_overlay_grab_start(struct qdwin *qdwin, uint32_t role)
 	qdwin->overlay_grab_active = 1;
 }
 
+/* End the overlay grab iff it is still the installed grab of a live
+ * keyboard, whatever overlay_grab_active says: weston_keyboard_start_grab()
+ * replaces a grab without cancelling it, so a replaced overlay grab must
+ * not end the replacing one, and an installed one must never be left
+ * behind. The cached keyboard is dropped once the grab is over. */
 static void
 qdwin_overlay_grab_end(struct qdwin *qdwin)
 {
-	if (!qdwin->overlay_grab_active)
-		return;
-	struct weston_keyboard *kb = qdwin->overlay_grab.keyboard;
+	struct weston_keyboard *kb = qdwin_overlay_grab_keyboard(qdwin);
 	uint32_t role = qdwin->overlay_grab_role;
+	int was_active = qdwin->overlay_grab_active;
 	qdwin->overlay_grab_active = 0;
-	if (kb) {
+	qdwin->overlay_grab.keyboard = NULL;
+	if (kb && kb->grab == &qdwin->overlay_grab)
 		weston_keyboard_end_grab(kb);
+	if (kb && was_active) {
 
 		/* The locker grab deliberately suppresses wl_keyboard.modifiers
 		 * while locked so Ctrl/Alt/Shift state cannot leak to the hidden

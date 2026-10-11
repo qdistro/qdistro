@@ -72,6 +72,13 @@ Cases:
      nothing itself): the real cancel ends the still-installed grab, drops
      its cached keyboard and commits the switch once; the end path ends a
      grab iff it is still installed, whatever switcher_grab_active says.
+ 18. Overlay (locker/launcher) keyboard grab cancel: the real cancel keeps
+     the grab installed AND overlay_grab_active set (fail-secure: the
+     locker must still get the password after a VT switch-back), so the
+     unlock end path really ends it. The end path ends a grab iff it is
+     still installed on a live seat's keyboard, whatever the flag says,
+     leaves a replacing grab alone, and never touches a keyboard whose
+     seat is gone.
 """
 
 from pathlib import Path
@@ -166,6 +173,7 @@ struct wl_resource {
 
 struct weston_compositor {
 	struct wl_list output_list;
+	struct wl_list seat_list;
 	struct wl_display *wl_display;
 	int kb_repeat_rate, kb_repeat_delay;
 };
@@ -203,6 +211,7 @@ struct weston_seat {
 	struct weston_compositor *compositor;
 	struct wl_signal destroy_signal;
 	struct wl_list link;
+	struct weston_keyboard *keyboard_state;
 };
 
 /* ---- reduced qdwin types -------------------------------------------- */
@@ -722,6 +731,8 @@ SPLICED = [
     "qdwin_move_grab_end_for",
     "qdwin_switcher_grab_cancel",
     "qdwin_switcher_grab_end",
+    "qdwin_overlay_grab_keyboard",
+    "qdwin_overlay_grab_cancel",
     "qdwin_overlay_grab_end",
     "qdwin_surface_removed",
     "qdwin_nested_proxy_destroy",
@@ -888,6 +899,11 @@ static void init_input(void)
 	main_pointer.grab = &main_pointer.default_grab;
 	main_keyboard.seat = &main_seat;
 	main_keyboard.grab = &main_keyboard.default_grab;
+	/* Live seat: the overlay grab only trusts a keyboard it can still
+	 * find on compositor->seat_list. */
+	main_seat.keyboard_state = &main_keyboard;
+	wl_list_init(&comp.seat_list);
+	wl_list_insert(&comp.seat_list, &main_seat.link);
 }
 
 static void reset_counters(void)
@@ -1084,7 +1100,10 @@ static int case_shell_objects(void)
 	wl_list_insert(&q->launchers, &ln->link);
 	q->overlay_grab_active = 1;
 	q->overlay_grab_role = 0;
+	/* Installed, as weston_keyboard_start_grab() leaves it: the overlay
+	 * end path only ends the grab while it is still the keyboard's. */
 	q->overlay_grab.keyboard = &main_keyboard;
+	main_keyboard.grab = &q->overlay_grab;
 
 	struct weston_view *pv = p->view, *nv = n->view, *lv = ln->view;
 	struct wl_resource *p_res = p->resource, *n_res = n->resource;
@@ -1420,7 +1439,8 @@ static int case_binding_destructors(void)
 	q->locked = 1;
 	q->overlay_grab_active = 1;
 	q->overlay_grab_role = 2;
-	q->overlay_grab.keyboard = &main_keyboard;
+	q->overlay_grab.keyboard = &main_keyboard;   /* installed, as above */
+	main_keyboard.grab = &q->overlay_grab;
 	qd_res_destroy(lkr);
 	CHECK(q->locker_resource == NULL && q->locker_pid == 0,
 	      "locker unbind did not clear identity");
@@ -1607,6 +1627,81 @@ static int case_switcher_grab_cancel(void)
 
 	main_keyboard.grab = &main_keyboard.default_grab;
 	free(shell_res);
+	free(q);
+	return 0;
+}
+
+/* 18: overlay grab cancel keeps the grab and its flag consistent; the
+ * end path ends a grab iff it is installed on a live keyboard. */
+static int case_overlay_grab_cancel(void)
+{
+	reset_counters();
+	struct qdwin *q = q_new();
+
+	/* Locked, locker grab installed; weston cancels it (VT switch). */
+	q->locked = 1;
+	q->overlay_grab_active = 1;
+	q->overlay_grab_role = 2;
+	q->overlay_grab.keyboard = &main_keyboard;
+	main_keyboard.grab = &q->overlay_grab;
+	qdwin_overlay_grab_cancel(main_keyboard.grab);
+	CHECK(main_keyboard.grab == &q->overlay_grab && kbd_end_grab_calls == 0,
+	      "overlay cancel dropped the locker grab while locked — the "
+	      "password field would be unreachable after a VT switch-back");
+	CHECK(q->overlay_grab_active,
+	      "overlay cancel cleared overlay_grab_active while the grab stays "
+	      "installed — unlock would skip ending it");
+	/* Unlock: the role-2 end path must really uninstall it. */
+	q->locked = 0;
+	qdwin_overlay_grab_end(q);
+	CHECK(main_keyboard.grab == &main_keyboard.default_grab &&
+	      kbd_end_grab_calls == 1,
+	      "unlock after a cancel left the locker grab installed");
+	CHECK(!q->overlay_grab_active && q->overlay_grab.keyboard == NULL,
+	      "overlay end left its flag or cached keyboard behind");
+	CHECK(send_modifiers_calls == 1,
+	      "unlock after a cancel skipped the modifier resync");
+
+	/* Installed, flag clear: the end path ends it anyway. */
+	reset_counters();
+	q->overlay_grab_role = 0;
+	q->overlay_grab_active = 0;
+	q->overlay_grab.keyboard = &main_keyboard;
+	main_keyboard.grab = &q->overlay_grab;
+	qdwin_overlay_grab_end(q);
+	CHECK(main_keyboard.grab == &main_keyboard.default_grab &&
+	      kbd_end_grab_calls == 1,
+	      "overlay end left an installed grab because the flag was clear");
+
+	/* Replaced by start_grab (no cancel), flag still set: leave it. */
+	reset_counters();
+	struct weston_keyboard_grab foreign = { .keyboard = &main_keyboard };
+	q->overlay_grab_active = 1;
+	q->overlay_grab.keyboard = &main_keyboard;
+	main_keyboard.grab = &foreign;
+	qdwin_overlay_grab_end(q);
+	CHECK(main_keyboard.grab == &foreign && kbd_end_grab_calls == 0,
+	      "overlay end ended a grab it did not own");
+	CHECK(!q->overlay_grab_active, "overlay end left the flag set");
+	main_keyboard.grab = &main_keyboard.default_grab;
+
+	/* The grab's seat is gone (weston_seat_release unlinks the seat, then
+	 * frees the keyboard without ending its grab): the end path must not
+	 * dereference the cached keyboard. Under ASan a read is fatal. */
+	reset_counters();
+	struct weston_keyboard *gone = calloc(1, sizeof *gone);
+	assert(gone);
+	gone->grab = &q->overlay_grab;
+	q->overlay_grab_active = 1;
+	q->overlay_grab_role = 2;
+	q->overlay_grab.keyboard = gone;
+	free(gone);
+	qdwin_overlay_grab_end(q);
+	CHECK(kbd_end_grab_calls == 0 && send_modifiers_calls == 0,
+	      "overlay end used a keyboard whose seat is gone");
+	CHECK(!q->overlay_grab_active && q->overlay_grab.keyboard == NULL,
+	      "overlay end kept a dead keyboard cached");
+
 	free(q);
 	return 0;
 }
@@ -1913,7 +2008,8 @@ int main(void)
 	if ((r = case_lock_attach_promote())) return r;
 	if ((r = case_layer_popup_grab_cancel())) return r;
 	if ((r = case_switcher_grab_cancel())) return r;
-	printf("destroy-drain behaviour: 16 cases OK\n");
+	if ((r = case_overlay_grab_cancel())) return r;
+	printf("destroy-drain behaviour: 17 cases OK\n");
 	return 0;
 }
 """
@@ -1935,6 +2031,7 @@ def main():
     # order (e.g. toplevels_destroy_all calls nested_proxy_destroy).
     return_types = {
         "qdwin_neutralize_binding_resource": "enum wl_iterator_result",
+        "qdwin_overlay_grab_keyboard": "struct weston_keyboard *",
     }
     for name in SPLICED:
         body = extract(qdwin_c, name)
