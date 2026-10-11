@@ -239,8 +239,9 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
 
 ### S6 — the Close row closes a fresh window
 
-Launch the admin TUI window (qterminal wrapping the TUI — a second,
-independent toplevel), wait for its chrome strip, reopen its menu, and
+Launch `weston-terminal` (a second, independent native-Wayland
+toplevel; the baked base ships it with weston — the XWayland-backed
+admin TUI launcher is an opt-in lane), wait for its chrome strip, reopen its menu, and
 click the **Close** row (bottom row). `request_close` must be
 dispatched and the toplevel removed — the whole chrome/popup state for
 the handle dies with it.
@@ -248,26 +249,27 @@ the handle dies with it.
 ```bash
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
     runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
-        setsid /usr/local/bin/qdistro-start-admin-tui </dev/null \
+        WAYLAND_DISPLAY=wayland-1 setsid weston-terminal </dev/null \
         >/tmp/61-tui.log 2>&1 &
-    H2=$(qdwin_window_handle ".*[Tt]erminal.*|.*[Tt][Uu][Ii].*") || {
-        for i in $(seq 1 40); do
-            H2=$(qdwin_window_handle "admin.*|.*terminal.*") && break
-            sleep 0.5
-        done; }
-    [ -n "$H2" ] || { echo "ERROR: admin TUI window never appeared" >&2; exit 2; }
+    H2=""
+    for i in $(seq 1 40); do
+        TPID=$(pgrep -u admin -nx weston-terminal) \
+            && H2=$(qdwin_window_handle ".*" "$TPID") && break
+        sleep 0.5
+    done
+    [ -n "$H2" ] || { echo "ERROR: weston-terminal window never appeared" >&2; exit 2; }
     echo "$H2" > /tmp/61-tui.handle
-    echo "tui handle=$H2"'
+    echo "second window pid=$TPID handle=$H2"'
 $VMEXEC "$VM" 'H2=$(cat /tmp/61-tui.handle)
     bash /tmp/61-driver.sh await_qdwin_line "attach_decoration handle=$H2 inset=N20"' \
-    || { echo "FAIL(S6): no chrome strip on the TUI window"; exit 1; }
+    || { echo "FAIL(S6): no chrome strip on the second window"; exit 1; }
 qdwin_screenshot "$ART/s6-tui.png"
-# Runner: TUI-window strip midpoint (X4,Y4) from s6-tui.png
+# Runner: second-window strip midpoint (X4,Y4) from s6-tui.png
 $VMGUI "$VM" click-preview X4 Y4 tui-strip
 $VMGUI "$VM" rightclick X4 Y4
 $VMEXEC "$VM" 'H2=$(cat /tmp/61-tui.handle)
     bash /tmp/61-driver.sh await_qdwin_line "show_popup parent=$H2"' \
-    || { echo "FAIL(S6): no show_popup for the TUI window"; exit 1; }
+    || { echo "FAIL(S6): no show_popup for the second window"; exit 1; }
 qdwin_screenshot "$ART/s6-menu.png"
 # Runner: Close row centre (CX,CY) — bottom row of the menu.
 $VMGUI "$VM" click-preview CX CY close-row
@@ -281,14 +283,13 @@ qdwin_screenshot "$ART/s6-closed.png"
 
 **Assert** (hard): `request_close handle=$H2` then
 `toplevel_removed handle=$H2` in the compositor journal, and
-(agent-visual) `s6-closed.png` shows the TUI window gone.
+(agent-visual) `s6-closed.png` shows the second window gone.
 
 ## Teardown
 
 ```bash
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app.py 2>/dev/null;
-    pkill -u admin -f "qdistro-admin-tui" 2>/dev/null;
-    pkill -u admin -f qterminal 2>/dev/null;
+    pkill -u admin -x weston-terminal 2>/dev/null;
     rm -f /tmp/61-driver.sh /tmp/61-app.pid /tmp/61-app.handle /tmp/61-tui.handle /tmp/61-tui.log'
 ```
 
