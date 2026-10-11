@@ -40,7 +40,9 @@ ARGV = ["headless-smoke", "--", "qdistro-tier3s-smoke"]
 
 FAKE_PODMAN = r'''#!/bin/bash
 F=@F@; T=@T@
-echo "podman $*" >> "$F/calls"
+# the call line and its 'prov' record are ONE write, so no concurrent fake
+# can split them (astra A r1: per-invocation provenance)
+printf 'podman %s\nprov podman pid=%s ppid=%s\n' "$*" "$$" "$PPID" >> "$F/calls"
 for fd in 8 9; do [ ! -e "/proc/$$/fd/$fd" ] || echo "podman HELD lock fd $fd" >> "$F/calls"; done
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -267,8 +269,13 @@ esac
 
 FAKE_RUNUSER = r'''#!/bin/bash
 F=@F@
-echo "runuser $*" >> "$F/calls"
-[ "$1" = -u ] && [ "$3" = -- ] || { echo "fake runuser: bad args $*" >&2; exit 99; }
+[ "$1" = -u ] && [ "$3" = -- ] || { echo "runuser $*" >> "$F/calls"
+    echo "fake runuser: bad args $*" >&2; exit 99; }
+# the call line and its 'prov' record are ONE write, so no concurrent fake
+# can split them; the exec below keeps this pid for the payload, so a podman
+# record's pid — or, through the cleanup's 'sh -c' payload, its ppid — names
+# THIS runuser invocation, not merely some earlier similar one (astra A r1)
+printf 'runuser %s\nprov runuser pid=%s\n' "$*" "$$" >> "$F/calls"
 # runuser_fail: the privilege drop itself fails (the payload never runs) —
 # rc 1 the supervisor produces, not podman's "absent" (A r3 P1)
 [ ! -e "$F/runuser_fail" ] || { echo "runuser: injected setup failure" >&2; exit 1; }
@@ -568,8 +575,15 @@ class World:
     def set_unit(self, unit, state):
         (self.F / "units" / f"{unit}.state").write_text(state + "\n")
 
-    def calls(self):
+    def raw_calls(self):
+        """The log as written: every runuser/podman call line is followed
+        by its 'prov …' provenance record (astra A r1)."""
         return [l for l in (self.F / "calls").read_text().splitlines() if l]
+
+    def calls(self):
+        """The call lines only — a 'prov' record is provenance metadata
+        for the call on the previous line, not a call itself."""
+        return [l for l in self.raw_calls() if not l.startswith("prov ")]
 
     def first(self, prefix):
         for i, l in enumerate(self.calls()):
@@ -928,6 +942,51 @@ def test_every_non_allow_reply_refuses_before_activation_and_podman(w, mode, nee
     assert list(w.ctl.iterdir()) == [] and list(w.launch_parent.iterdir()) == []
 
 
+def assert_podman_ran_via_runuser(raw):
+    """Per-invocation provenance for the shared calls log (astra A r1):
+    every 'podman' call must be attributable to the 'runuser -u' invocation
+    that spawned it — neither adjacency nor argv similarity can prove that
+    once the launch's systemd-run is backgrounded and the scope helper plus
+    the start poll append to this log concurrently (an earlier
+    'runuser … podman container exists good' must not cover a later
+    unwrapped identical or different-argv call). The fakes pin attribution
+    with real ids: runuser logs 'prov runuser pid=N' and then exec()s its
+    payload, so the payload keeps runuser's pid (an 'sh -c' payload's
+    children carry it as ppid); podman logs 'prov podman pid=P ppid=Q'.
+    Each record pair is a single write, so it can never be split by a
+    concurrent appender. A podman call is covered iff P or Q is a recorded
+    runuser pid — a wrapper that never ran cannot cover it, and one wrapper
+    can never cover a concurrent second call. `raw` is the log WITH the
+    'prov' lines (w.raw_calls()); returns the (podman, runuser) pairs so a
+    caller can assert more on the matched wrapper.
+    """
+    ru_by_pid, pm = {}, []
+    for i, c in enumerate(raw):
+        if c.startswith("runuser -u "):
+            nxt = raw[i + 1] if i + 1 < len(raw) else ""
+            m = re.fullmatch(r"prov runuser pid=(\d+)", nxt)
+            assert m, f"runuser call without its provenance record: {c!r}"
+            ru_by_pid[int(m.group(1))] = c
+        elif c.startswith("podman") and "HELD" not in c:
+            pm.append((i, c))
+    pairs = []
+    for i, c in pm:
+        nxt = raw[i + 1] if i + 1 < len(raw) else ""
+        m = re.fullmatch(r"prov podman pid=(\d+) ppid=(\d+)", nxt)
+        assert m, f"podman call without its provenance record: {c!r}"
+        pid, ppid = int(m.group(1)), int(m.group(2))
+        ru = ru_by_pid.get(pid) or ru_by_pid.get(ppid)
+        assert ru is not None, f"no 'runuser -u' invocation covers {c!r}"
+        # the matched wrapper — and only it — must carry the fixed model-A
+        # env (per-silo runtime dir + the root-owned CONTAINERS_CONF pinning
+        # cgroupfs; spawn's $T-prefixed LIBDIR and the cleanup's installed
+        # path both end in tier3s/containers.conf)
+        assert "env -i " in ru and "XDG_RUNTIME_DIR=" in ru, ru
+        assert "CONTAINERS_CONF=" in ru and "tier3s/containers.conf" in ru, ru
+        pairs.append((c, ru))
+    return pairs
+
+
 def test_gate_order_probe_resolve_gate_record_then_podman(w):
     w.set("resolver_mode", "digest")
     r = w.spawn()
@@ -943,15 +1002,89 @@ def test_gate_order_probe_resolve_gate_record_then_podman(w):
     assert probe < resolve_ro < gate < record < image < scope < run, calls
     # every podman call runs dropped to a user (the silo account; the test
     # seam resolves it to the test user) under the fixed model-A env
-    # (per-silo runtime dir + the root-owned CONTAINERS_CONF pinning cgroupfs;
-    # spawn's $T-prefixed LIBDIR and the cleanup's installed path both end in
-    # tier3s/containers.conf)
-    for i, c in enumerate(calls):
-        if c.startswith("podman") and "HELD" not in c:
-            assert calls[i - 1].startswith("runuser -u "), calls[i - 1]
-            assert "env -i " in calls[i - 1] and "XDG_RUNTIME_DIR=" in calls[i - 1]
-            assert "CONTAINERS_CONF=" in calls[i - 1] \
-                and "tier3s/containers.conf" in calls[i - 1], calls[i - 1]
+    # (per-silo runtime dir + the root-owned CONTAINERS_CONF pinning
+    # cgroupfs). The covering 'runuser -u' line is not necessarily nearby:
+    # once the launch's systemd-run is backgrounded, the scope helper
+    # (chown/runuser/podman) and the start poll (runuser/podman
+    # inspect/systemctl) append to this log concurrently. The fakes' 'prov'
+    # records attribute each podman call to the exact runuser invocation
+    # that spawned it (astra A r1).
+    assert_podman_ran_via_runuser(w.raw_calls())
+
+
+# --- the provenance pairing itself, against synthetic logs -----------------
+
+RU_ENV = ("env -i PATH=/usr/bin:/bin HOME=/h XDG_RUNTIME_DIR=/rt "
+          "CONTAINERS_CONF=/l/tier3s/containers.conf")
+
+
+def _prov_ru(pid, argv):
+    """A synthetic runuser record pair (call line + provenance record)."""
+    return [f"runuser -u {argv}", f"prov runuser pid={pid}"]
+
+
+def _prov_pm(pid, ppid, argv):
+    """A synthetic podman record pair (call line + provenance record)."""
+    return [f"podman {argv}", f"prov podman pid={pid} ppid={ppid}"]
+
+
+def test_podman_provenance_pairs_interleaved_calls_with_their_own_runuser():
+    """astra A r1: a legitimately interleaved concurrent sequence still
+    passes — each podman record pairs with the runuser invocation that
+    spawned it, a direct payload by pid, an 'sh -c' payload's child by
+    ppid, whatever landed between the records in the shared log."""
+    raw = (_prov_ru(11, f"qt3s-a -- {RU_ENV} podman image exists img")
+           + ["resolver smoke --launch-env"]                      # an unrelated line
+           + _prov_ru(12, f"qt3s-b -- {RU_ENV} "
+                        "sh -c 'podman container exists \"$1\"' sh ctr")
+           + _prov_pm(11, 9, "image exists img")
+           + ["systemctl show -p ControlGroup --value s.scope"]  # an interleaved writer
+           + _prov_pm(30, 12, "container exists ctr"))
+    pairs = assert_podman_ran_via_runuser(raw)
+    assert [c for c, _ in pairs] == \
+        ["podman image exists img", "podman container exists ctr"]
+    assert pairs[0][1].startswith("runuser -u qt3s-a")
+    assert pairs[1][1].startswith("runuser -u qt3s-b")
+
+
+def test_podman_provenance_rejects_an_extra_identical_unwrapped_call():
+    """astra A r1 counterexample: a valid wrapped 'podman container exists
+    good' must not cover a second, unwrapped call with the same argv."""
+    raw = (_prov_ru(11, f"qt3s-a -- {RU_ENV} podman container exists good")
+           + _prov_pm(11, 9, "container exists good")
+           + _prov_pm(77, 9, "container exists good"))    # no runuser owns pid 77
+    with pytest.raises(AssertionError, match="no 'runuser -u' invocation covers"):
+        assert_podman_ran_via_runuser(raw)
+
+
+def test_podman_provenance_rejects_a_different_argv_unwrapped_call():
+    """astra A r1 counterexample: a valid wrapped call must not cover an
+    unwrapped call with different arguments either."""
+    raw = (_prov_ru(11, f"qt3s-a -- {RU_ENV} podman container exists good")
+           + _prov_pm(11, 9, "container exists good")
+           + _prov_pm(78, 9, "container exists other"))   # no runuser owns pid 78
+    with pytest.raises(AssertionError, match="no 'runuser -u' invocation covers"):
+        assert_podman_ran_via_runuser(raw)
+
+
+def test_podman_provenance_rejects_a_wrapper_without_the_model_a_env():
+    """The covering wrapper itself must carry the fixed env — a runuser
+    that dropped the env -i / XDG_RUNTIME_DIR / CONTAINERS_CONF contract is
+    not a cover."""
+    raw = (_prov_ru(11, "qt3s-a -- podman image exists img")
+           + _prov_pm(11, 9, "image exists img"))
+    with pytest.raises(AssertionError, match="env -i"):
+        assert_podman_ran_via_runuser(raw)
+
+
+def test_podman_provenance_rejects_calls_without_prov_records():
+    """A call whose fake emitted no provenance record fails loudly — the
+    pairing can never silently degrade to argv matching."""
+    with pytest.raises(AssertionError, match="provenance record"):
+        assert_podman_ran_via_runuser(["podman image exists img"])
+    with pytest.raises(AssertionError, match="provenance record"):
+        assert_podman_ran_via_runuser(
+            [f"runuser -u qt3s-a -- {RU_ENV} podman image exists img"])
 
 
 def test_binding_drift_between_resolution_and_activation_refuses(w):
