@@ -210,13 +210,20 @@ class _RecordingBroker:
                 raise exc
         return len(self.filed)
 
-    def WaitForDecision(self, rid, **kw):
-        self.waited.append((rid, kw))
-        if self._wait_raises:
-            exc = self._wait_raises.pop(0)
+    def WaitForDecision(self, rid, reply_handler=None, error_handler=None,
+                        **kw):
+        self.waited.append((rid, dict(kw, async_=reply_handler is not None)))
+        exc = self._wait_raises.pop(0) if self._wait_raises else None
+        if reply_handler is None:
             if exc is not None:
                 raise exc
-        return self._decision
+            return self._decision
+        # Async form: dbus-python completes it from the main loop.
+        if exc is not None:
+            error_handler(exc)
+        else:
+            reply_handler(self._decision)
+        return None
 
     def AnnouncePolkitAuth(self, cookie, **kw):
         self.announced.append((cookie, kw))
@@ -284,6 +291,17 @@ class TestBrokerDelegation:
         assert timeout >= 300, (
             f"a {timeout}s cutoff is not enough time for an admin to notice "
             "and answer a prompt")
+
+    def test_wait_is_async_so_the_shared_bus_keeps_dispatching(self, make_agent):
+        """A blocking WaitForDecision on the worker holds libdbus's I/O path
+        on the shared system bus, and the main loop's dispatch for that
+        connection waits behind it: a stray pending auth still froze the
+        A->B->A session migration with the auth on a worker thread. The
+        wait must be an async call completed by the main loop."""
+        broker = _RecordingBroker()
+        assert make_agent(broker)._ask_broker("qsu.exec", {}, "cookie1", []) is True
+        assert broker.waited[0][1]["async_"], (
+            "WaitForDecision was a blocking call from the auth worker")
 
     def test_filing_carries_a_bounded_timeout(self, make_agent):
         broker = _RecordingBroker()
@@ -584,9 +602,19 @@ class _BrokerProxy:
         inst.filed.append(action)
         return len(inst.filed)            # per-instance ids restart at 1
 
-    def WaitForDecision(self, rid, **kw):
-        inst = self._instance()
+    def WaitForDecision(self, rid, reply_handler=None, error_handler=None,
+                        **kw):
+        try:
+            inst = self._instance()
+        except Exception as e:
+            if error_handler is None:
+                raise
+            error_handler(e)
+            return None
         inst.waited.append(rid)
+        if reply_handler is not None:
+            reply_handler(True)
+            return None
         return True
 
     def AnnouncePolkitAuth(self, cookie, **kw):
