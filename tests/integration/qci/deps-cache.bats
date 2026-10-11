@@ -40,6 +40,43 @@ setup() {
 teardown() {
     kill "$SERVER_PID" 2>/dev/null
     wait "$SERVER_PID" 2>/dev/null || true
+    if [ -n "${COUNT_PID:-}" ]; then
+        kill "$COUNT_PID" 2>/dev/null
+        wait "$COUNT_PID" 2>/dev/null || true
+    fi
+}
+
+# start_counting_server <serve-dir> <hit-log> <delay-s>
+# A threaded http.server that appends every GET path to <hit-log> and
+# sleeps <delay-s> per request — the oracle for "exactly one upstream
+# pass" when N cache clients race (a serialization failure shows up as
+# duplicate hits or a torn entry). Prints nothing; sets COUNT_URL/COUNT_PID.
+start_counting_server() {
+    local root="$1" hits="$2" delay="$3" port
+    : > "$hits"
+    port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    ( exec python3 - "$root" "$hits" "$delay" "$port" <<'PY'
+import functools, http.server, sys, time
+root, hits, delay, port = sys.argv[1], sys.argv[2], float(sys.argv[3]), int(sys.argv[4])
+class H(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        with open(hits, "a") as f:
+            f.write(self.path + "\n")
+        if delay:
+            time.sleep(delay)
+        super().do_GET()
+    def log_message(self, *a):
+        pass
+h = functools.partial(H, directory=root)
+http.server.ThreadingHTTPServer(("127.0.0.1", port), h).serve_forever()
+PY
+    ) &
+    COUNT_PID=$!
+    for _ in $(seq 1 50); do
+        wget -q -O /dev/null "http://127.0.0.1:$port/" && break
+        sleep 0.1
+    done
+    COUNT_URL="http://127.0.0.1:$port"
 }
 
 # Run a function from the lib in a clean shell with the cache root set;
@@ -436,4 +473,168 @@ oci_img_present() {
     run runoci
     [ "$status" -eq 0 ]
     [ -f "$WORK/cache/oci/$REF_SHA/image.tar.sha256" ]
+}
+
+# ---- concurrency --------------------------------------------------------
+# The locking contract under real parallelism: the per-key flock +
+# .partial staging must give exactly-once publish, and a reader must
+# never observe torn bytes at a final path. The counting server is the
+# oracle — N parallel cold warmers may cause ONE upstream hit for the
+# artifact; more means the lock or the locked recheck is broken.
+
+@test "parallel qd_fetch on a cold key: exactly one download, all callers converge" {
+    start_counting_server "$WORK/src" "$WORK/hits.log" 0.2
+    local pids=() i rc
+    for i in 1 2 3; do
+        env QDISTRO_DEPS_CACHE_DIR="$WORK/cache" bash -c \
+            ". '$LIB'; qd_fetch blob '$COUNT_URL/blob.bin' '$GOOD_SHA'" \
+            >"$WORK/out.$i" 2>/dev/null &
+        pids+=("$!")
+    done
+    rc=0
+    for i in "${pids[@]}"; do wait "$i" || rc=$((rc + 1)); done
+    [ "$rc" -eq 0 ]
+    # All callers converge on the same promoted path.
+    for i in 1 2 3; do
+        [ "$(cat "$WORK/out.$i")" = "$WORK/cache/blob/$GOOD_SHA/blob.bin" ]
+    done
+    # Exactly one upstream GET: losers of the flock must see the warm
+    # entry in the locked recheck, never re-download.
+    [ "$(grep -c '/blob\.bin$' "$WORK/hits.log")" -eq 1 ]
+    runq "qd_verify blob '$GOOD_SHA'"; [ "$status" -eq 0 ]
+    [ -f "$WORK/cache/blob/$GOOD_SHA/manifest.txt" ]
+    # No staging residue: .partial drained, no hidden promote tmp in the entry.
+    [ -z "$(find "$WORK/cache/.partial" -mindepth 1 -print -quit 2>/dev/null)" ]
+    [ -z "$(find "$WORK/cache/blob/$GOOD_SHA" -name '.*' -print -quit)" ]
+}
+
+@test "qd_adopt racing qd_fetch: whichever wins, the entry is verified and fetched at most once" {
+    printf 'hello artifact' > "$WORK/src/legacy.img"
+    start_counting_server "$WORK/src" "$WORK/hits.log" 0.2
+    env QDISTRO_DEPS_CACHE_DIR="$WORK/cache" bash -c \
+        ". '$LIB'; qd_adopt blob '$GOOD_SHA' '$WORK/src/legacy.img' '$COUNT_URL/legacy.img'" \
+        >/dev/null 2>&1 &
+    local adopt_pid=$!
+    env QDISTRO_DEPS_CACHE_DIR="$WORK/cache" bash -c \
+        ". '$LIB'; qd_fetch blob '$COUNT_URL/blob.bin' '$GOOD_SHA' >/dev/null" &
+    local fetch_pid=$!
+    local rc_a=0 rc_f=0
+    wait "$adopt_pid" || rc_a=$?
+    wait "$fetch_pid" || rc_f=$?
+    [ "$rc_a" -eq 0 ] && [ "$rc_f" -eq 0 ]
+    # If adopt won the entry, the fetch never downloaded; if fetch won,
+    # it downloaded exactly once. There is no interleaving with two.
+    [ "$(grep -c '/blob\.bin$' "$WORK/hits.log")" -le 1 ]
+    runq "qd_verify blob '$GOOD_SHA'"; [ "$status" -eq 0 ]
+}
+
+@test "a reader never observes torn bytes while writers publish" {
+    # Eight writers publish DISTINCT keys through .partial; a reader
+    # sweeps the entry tree the whole time and requires every artifact
+    # visible at a final path to hash to its directory key — a torn or
+    # half-promoted file is a hard fail.
+    start_counting_server "$WORK/src" "$WORK/hits.log" 0.05
+    local keys=() pids=() i sha
+    for i in 1 2 3 4 5 6 7 8; do
+        printf 'payload-%s' "$i" > "$WORK/src/blob-$i.bin"
+        sha="$(sha256sum "$WORK/src/blob-$i.bin" | awk '{print $1}')"
+        keys+=("$sha")
+    done
+    (
+        for _ in $(seq 1 400); do
+            for f in "$WORK/cache/blob"/*/*; do
+                [ -f "$f" ] || continue
+                case "$(basename "$f")" in
+                    manifest.txt|*.lock|*.sha256|*.asc|*.sig) continue ;;
+                esac
+                local_key="$(basename "$(dirname "$f")")"
+                [ "$(sha256sum "$f" 2>/dev/null | awk '{print $1}')" = "$local_key" ] \
+                    || echo "TORN $f" >> "$WORK/torn.log"
+            done
+        done
+    ) &
+    local reader_pid=$!
+    for i in "${!keys[@]}"; do
+        env QDISTRO_DEPS_CACHE_DIR="$WORK/cache" bash -c \
+            ". '$LIB'; qd_fetch blob '$COUNT_URL/blob-$((i + 1)).bin' '${keys[$i]}' >/dev/null" &
+        pids+=("$!")
+    done
+    local rc=0
+    for i in "${pids[@]}"; do wait "$i" || rc=$((rc + 1)); done
+    wait "$reader_pid"
+    [ "$rc" -eq 0 ]
+    [ ! -s "$WORK/torn.log" ]
+    for i in "${keys[@]}"; do
+        runq "qd_verify blob '$i'"; [ "$status" -eq 0 ]
+    done
+}
+
+@test "a dead writer's residue never blocks or fools the next caller" {
+    # kill -9 mid-publish leaves: the per-key lockfile (flock dies with
+    # the process, the file persists), a private .partial staging dir,
+    # and possibly an EMPTY entry dir. None of it may count as warm or
+    # stall the next fetcher.
+    mkdir -p "$WORK/cache/.locks" \
+        "$WORK/cache/.partial/blob-${GOOD_SHA:0:12}.dead9" \
+        "$WORK/cache/blob/$GOOD_SHA"
+    : > "$WORK/cache/.locks/blob-$GOOD_SHA.lock"
+    printf 'half-downloaded' \
+        > "$WORK/cache/.partial/blob-${GOOD_SHA:0:12}.dead9/blob.bin"
+    runq "qd_fetch blob '$URL/blob.bin' '$GOOD_SHA'"
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = "$WORK/cache/blob/$GOOD_SHA/blob.bin" ]
+    [ "$(cat "$WORK/cache/blob/$GOOD_SHA/blob.bin")" = "hello artifact" ]
+    runq "qd_verify blob '$GOOD_SHA'"; [ "$status" -eq 0 ]
+}
+
+@test "parallel qd_fetch_sidecar: no temp collision, no residue, one file" {
+    # Regression for the pre-mktemp temp-name collision: concurrent
+    # sidecar fetches are deliberately UNLOCKED (mktemp + mv is the
+    # atomicity mechanism); both may download but the final file must
+    # be whole and no .sidecar.* staging may leak.
+    printf 'deadbeef  blob.bin' > "$WORK/src/blob.bin.sha256"
+    runq "qd_fetch blob '$URL/blob.bin' '$GOOD_SHA'"
+    [ "$status" -eq 0 ]
+    local pids=() i rc
+    for i in 1 2; do
+        env QDISTRO_DEPS_CACHE_DIR="$WORK/cache" bash -c \
+            ". '$LIB'; qd_fetch_sidecar blob '$GOOD_SHA' '$URL/blob.bin' '.sha256'" \
+            >"$WORK/sc-out.$i" 2>/dev/null &
+        pids+=("$!")
+    done
+    rc=0
+    for i in "${pids[@]}"; do wait "$i" || rc=$((rc + 1)); done
+    [ "$rc" -eq 0 ]
+    for i in 1 2; do
+        [ "$(cat "$WORK/sc-out.$i")" = "$WORK/cache/blob/$GOOD_SHA/blob.bin.sha256" ]
+    done
+    [ "$(cat "$WORK/cache/blob/$GOOD_SHA/blob.bin.sha256")" = "deadbeef  blob.bin" ]
+    [ -z "$(find "$WORK/cache/blob/$GOOD_SHA" -name '.sidecar.*' -print -quit)" ]
+}
+
+@test "parallel cold qd_oci_ensure: one save, one archive, same digest to all" {
+    oci_setup_fake
+    local i rc pids=()
+    for i in 1 2; do
+        env PATH="$WORK/bin:$PATH" FAKE_PODMAN_DIR="$FAKE_PODMAN_DIR" \
+            QDISTRO_DEPS_CACHE_DIR="$WORK/cache" \
+            bash -c ". '$LIB'; qd_oci_ensure '$REF'" \
+            >"$WORK/oci-out.$i" 2>"$WORK/oci-err.$i" &
+        pids+=("$!")
+    done
+    rc=0
+    for i in "${pids[@]}"; do wait "$i" || rc=$((rc + 1)); done
+    [ "$rc" -eq 0 ]
+    for i in 1 2; do
+        [ "$(tail -1 "$WORK/oci-out.$i")" = "sha256:$REF_SHA" ]
+    done
+    # Pulls may legitimately race (pull is outside the lock), but the
+    # archive is written under oci-<hex>.lock: exactly ONE podman save.
+    [ "$(grep -c 'podman save' "$FAKE_PODMAN_DIR/calls.log")" -eq 1 ]
+    [ -f "$WORK/cache/oci/$REF_SHA/image.tar" ]
+    [ -f "$WORK/cache/oci/$REF_SHA/image.tar.sha256" ]
+    [ -f "$WORK/cache/oci/$REF_SHA/manifest.txt" ]
+    grep -qx "sha256:$REF_SHA" "$WORK/cache/oci/refs/$REF_SHA.digest"
+    # No staged tmp leftovers inside the entry dir.
+    [ -z "$(find "$WORK/cache/oci/$REF_SHA" -name '.*' -type f -print -quit)" ]
 }

@@ -76,6 +76,42 @@ teardown() {
     bash -c ". '$DEPS'; qd_serve_stop" 2>/dev/null || true
     kill "$SERVER_PID" 2>/dev/null
     wait "$SERVER_PID" 2>/dev/null || true
+    if [ -n "${COUNT_PID:-}" ]; then
+        kill "$COUNT_PID" 2>/dev/null
+        wait "$COUNT_PID" 2>/dev/null || true
+    fi
+}
+
+# start_counting_server <serve-dir> <hit-log> <delay-s>
+# A threaded http.server that appends every GET path to <hit-log> and
+# sleeps <delay-s> per request — the oracle for "exactly one upstream
+# pass" when N mirror workers race. Sets COUNT_PORT/COUNT_PID.
+start_counting_server() {
+    local root="$1" hits="$2" delay="$3" port
+    : > "$hits"
+    port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    ( exec python3 - "$root" "$hits" "$delay" "$port" <<'PY'
+import functools, http.server, sys, time
+root, hits, delay, port = sys.argv[1], sys.argv[2], float(sys.argv[3]), int(sys.argv[4])
+class H(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        with open(hits, "a") as f:
+            f.write(self.path + "\n")
+        if delay:
+            time.sleep(delay)
+        super().do_GET()
+    def log_message(self, *a):
+        pass
+h = functools.partial(H, directory=root)
+http.server.ThreadingHTTPServer(("127.0.0.1", port), h).serve_forever()
+PY
+    ) &
+    COUNT_PID=$!
+    for _ in $(seq 1 50); do
+        wget -q -O /dev/null "http://127.0.0.1:$port/" && break
+        sleep 0.1
+    done
+    COUNT_PORT="$port"
 }
 
 run_mirror() {  # extra args pass through to the worker
@@ -295,4 +331,32 @@ print(urllib.request.urlopen('http://127.0.0.1:$port/repos/$SNAP/tumbleweed/repo
     [ "$status" -ne 0 ]
     [[ "$output" == *"QDISTRO_REPO_BASE"* ]]
     [[ "$output" == *"offline"* ]]
+}
+
+@test "two concurrent cold mirrors: .mirror.lock serializes to a single pass" {
+    # The slowed, counting server makes the overlap real — one fixture
+    # pass is 7 GETs x 0.25s, so runner B reaches .mirror.lock well
+    # inside runner A's window. B must block, then take the completed-
+    # marker fast path; a broken lock shows up as a second upstream pass.
+    start_counting_server "$WORK/srv" "$WORK/mhits.log" 0.25
+    local cbase="http://127.0.0.1:$COUNT_PORT/history"
+    python3 "$MIRROR" --root "$WORK/cache" --snapshot "$SNAP" --repo oss \
+        --base "$cbase" >"$WORK/m1.log" 2>&1 &
+    local p1=$!
+    python3 "$MIRROR" --root "$WORK/cache" --snapshot "$SNAP" --repo oss \
+        --base "$cbase" >"$WORK/m2.log" 2>&1 &
+    local p2=$!
+    local rc1=0 rc2=0
+    wait "$p1" || rc1=$?
+    wait "$p2" || rc2=$?
+    [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ]
+    # Exactly ONE pass touched upstream: repomd + .asc + .key + primary +
+    # other + 2 RPMs = 7 GETs. Two passes would log 14.
+    [ "$(grep -c '^/history' "$WORK/mhits.log")" -eq 7 ]
+    # And exactly one runner did work; the loser fast-pathed on the marker.
+    [ "$(cat "$WORK/m1.log" "$WORK/m2.log" | grep -c 'complete mirror present')" -eq 1 ]
+    local d="$WORK/cache/repos/$SNAP/tumbleweed/repo/oss"
+    [ -s "$d/mirror.json" ]
+    [ "$(cat "$d/noarch/pkg-a-1.0-1.noarch.rpm")" = "rpm-A-bytes" ]
+    [ "$(cat "$d/noarch/pkg-b-1.0-1.noarch.rpm")" = "rpm-B-bytes" ]
 }
