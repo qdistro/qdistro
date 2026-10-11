@@ -359,6 +359,25 @@ def test_qemu_scan_unreadable_comm_is_uncertain_not_dead():
         assert '&& return 2; return 1' in body, name
 
 
+def test_qemu_scan_requires_the_name_argv_token():
+    # ensures: the ps-line substring is only a CANDIDATE filter — the
+    #          verdict also requires the guest=<name>, token to sit as
+    #          the argument right after `-name` in the pid's OWN argv.
+    #          A foreign qemu carrying the string inside another
+    #          argument (file=/tmp/-name guest=t5-x,b.qcow2) must never
+    #          be handed to a caller that signals it (sol r18)
+    for src, name in ((SPAWN, "spawn"), (CLEANUP, "cleanup")):
+        body = re.search(
+            r"qemu_pids_for_domain\(\)\s*\{(?P<body>.*?)\n\}",
+            src, re.S,
+        ).group("body")
+        assert '"/proc/$p/cmdline"' in body, name
+        assert 'p == "-name"' in body, name
+        # the argv check sits inside the candidate loop, after comm
+        assert body.index('c=$(cat "/proc/$p/comm"') \
+            < body.index('"/proc/$p/cmdline"'), name
+
+
 def test_wait_loop_breaks_only_on_confirmed_dead():
     # ensures: neither an ambiguous nor a LYING domstate can end or
     #          wedge the session watch — the loop consults the qemu
@@ -436,6 +455,11 @@ def test_overlay_reuse_requires_a_provable_owner():
     # the sidecar is stamped at create and removed everywhere the
     # overlay is removed (teardown, reaper, cleanup helper)
     assert 'mv -f "$DISK.appid.$$" "$DISK.appid"' in body
+    # the sidecar is stamped BEFORE qemu-img create — a crash between
+    # the two leaves a harmless lone sidecar (the next spawn
+    # overwrites it), not an unproven disk nothing may touch (sol r18)
+    assert body.index('"$DISK.appid.$$"') \
+        < body.index("qemu-img create")
     assert 'rm -f "$DISK" "$DISK.appid"' in SPAWN
     assert 'rm -f "$overlay" "$overlay.appid"' in SPAWN
     assert 'rm -f "$DISK" "$DISK.appid"' in CLEANUP

@@ -52,7 +52,18 @@ qemu_pids_for_domain() {
     for p in $raw; do
         # An unreadable /proc/<pid>/comm is ambiguous, never "dead".
         c=$(cat "/proc/$p/comm" 2>/dev/null) || { unread=1; continue; }
-        case "$c" in qemu-system-*|qemu-kvm) out="$out $p" ;; esac
+        case "$c" in qemu-system-*|qemu-kvm) ;; *) continue ;; esac
+        # And the candidate's OWN argv must carry guest=<name>, as the
+        # argument right after `-name` — the ps-line substring alone
+        # also matches a foreign qemu carrying it inside another
+        # argument (file=/tmp/-name guest=t5-x,backup.qcow2), which
+        # would hand callers a foreign pid to signal (sol r18).
+        _av=$(tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null) \
+            || { unread=1; continue; }
+        printf '%s\n' "$_av" | T5N="guest=$name," \
+            awk 'p == "-name" && index($0, ENVIRON["T5N"]) == 1 { f=1 }
+                 { p = $0 } END { exit !f }' \
+            && out="$out $p"
     done
     [ -n "$out" ] || { [ -n "$unread" ] && return 2; return 1; }
     printf '%s' "$out"

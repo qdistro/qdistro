@@ -270,9 +270,12 @@ run_as_admin() {
 # candidates are narrowed to REAL qemu by /proc/<pid>/comm (truncated
 # to 15 chars, e.g. "qemu-system-x86"), which also discards the
 # run_as_admin wrapper chain (runuser/env/ps) carrying the pattern in
-# its own argv. A candidate whose comm cannot be READ (vanished or
-# permission) is unverifiable — never silently discounted as "not qemu"
-# (sol r7).
+# its own argv — and further verified against /proc/<pid>/cmdline:
+# the guest=<name>, token must be the argument right after `-name`,
+# so a foreign qemu carrying the string inside another argument can
+# never be reported (sol r18). A candidate whose comm cannot be READ
+# (vanished or permission) is unverifiable — never silently
+# discounted as "not qemu" (sol r7).
 qemu_pids_for_domain() {
     local name="${1:-$VM_NAME}" p c out="" raw unread=""
     # The scan's own plumbing must work before "empty" can mean "dead":
@@ -295,7 +298,18 @@ qemu_pids_for_domain() {
         # that vanished between the ps scan and the read also lands
         # here, which fails closed — the next scan settles it.
         c=$(cat "/proc/$p/comm" 2>/dev/null) || { unread=1; continue; }
-        case "$c" in qemu-system-*|qemu-kvm) out="$out $p" ;; esac
+        case "$c" in qemu-system-*|qemu-kvm) ;; *) continue ;; esac
+        # And the candidate's OWN argv must carry guest=<name>, as the
+        # argument right after `-name` — the ps-line substring alone
+        # also matches a foreign qemu carrying it inside another
+        # argument (file=/tmp/-name guest=t5-x,backup.qcow2), which
+        # would hand callers a foreign pid to signal (sol r18).
+        _av=$(tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null) \
+            || { unread=1; continue; }
+        printf '%s\n' "$_av" | T5N="guest=$name," \
+            awk 'p == "-name" && index($0, ENVIRON["T5N"]) == 1 { f=1 }
+                 { p = $0 } END { exit !f }' \
+            && out="$out $p"
     done
     [ -n "$out" ] || { [ -n "$unread" ] && return 2; return 1; }
     printf '%s' "$out"
@@ -1222,17 +1236,20 @@ create_domain() {
                 || true
         fi
     else
-        if ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$DISK" >/dev/null 2>&1; then
-            echo "[tier5] FAIL: qemu-img create -b $DISK_BASE failed at $DISK" >&2
-            exit 4
-        fi
-        # Stamp the binding the domain will carry — if the definition
-        # is ever lost, the sidecar is the disk's own owner record.
+        # Stamp the binding BEFORE creating the disk: a crash between
+        # the two leaves a lone sidecar — harmless, the next spawn
+        # overwrites it — while the reverse order strands an unproven
+        # disk no path may reuse or reap (sol r18).
         if ! { printf '%s\n' "$POLICY_KEY" > "$DISK.appid.$$" \
                 && mv -f "$DISK.appid.$$" "$DISK.appid" \
                 && chmod 0600 "$DISK.appid"; }; then
-            rm -f "$DISK" "$DISK.appid.$$" 2>/dev/null
+            rm -f "$DISK.appid.$$" 2>/dev/null
             echo "[tier5] FAIL: could not stamp binding sidecar $DISK.appid" >&2
+            exit 4
+        fi
+        if ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$DISK" >/dev/null 2>&1; then
+            rm -f "$DISK" "$DISK.appid" 2>/dev/null
+            echo "[tier5] FAIL: qemu-img create -b $DISK_BASE failed at $DISK" >&2
             exit 4
         fi
     fi

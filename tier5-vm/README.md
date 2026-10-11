@@ -146,8 +146,11 @@ silently merge:
   path — the appId is the only identity.
 - The domain records its bound appId in `<metadata>` at define time,
   and the overlay gets the same binding in a `<disk>.appid` sidecar
-  stamped at create — if the definition is ever lost, the disk keeps
-  its own owner record. Adoption verifies bound == `--policy-key`: a
+  stamped BEFORE the disk is created — if the definition is ever
+  lost, the disk keeps its own owner record, and a crash between
+  the two leaves only a harmless lone sidecar the next spawn
+  overwrites (a disk without its record would be unrecoverable).
+  Adoption verifies bound == `--policy-key`: a
   LIVE domain bound to another (or no) app is refused (the wrapper
   exits with REAP=0 — it never tears down a guest it does not own), a
   defined foreign domain is refused outright rather than reclaimed,
@@ -190,9 +193,13 @@ silently merge:
   "Live" is decided by `qemu_pids_for_domain` alone —
   a LITERAL substring scan of the ps table for libvirt's
   `-name guest=<vm>` argv token narrowed to real qemu via
-  `/proc/<pid>/comm`, with a distinct cannot-determine rc — a regex
-  scan would let a manual name like `t5.a` match `t5xa` and hand the
-  cleanup helper foreign pids to signal.
+  `/proc/<pid>/comm` AND `/proc/<pid>/cmdline` — the `guest=<name>,`
+  token must be the argument right after `-name` in the pid's own
+  argv, so a foreign qemu carrying the string inside another
+  argument never matches — with a distinct cannot-determine rc. A
+  regex scan would let a manual name like `t5.a` match `t5xa`, and
+  a raw substring would match inside a foreign argument; both
+  would hand the cleanup helper foreign pids to signal.
   `domstate` is not consulted for liveness at all: nested-virt libvirt
   can lie in both directions — "shut off" for a live qemu and stale
   "running" for a dead one — and no backing qemu process means death,
@@ -222,9 +229,10 @@ silently merge:
   hold before judging, touches only overlays whose domain is
   CONFIRMED ABSENT (it never undefines — a defined-but-dead domain
   has an owner record the reaper cannot adjudicate) AND whose disk
-  carries no live owner record (no sidecar, or a sidecar appId the
-  current non-stale manifest no longer publishes), and re-verifies
-  death after a settle; and every
+  carries no live owner record (a sidecar that re-derives to its
+  name and whose appId the current valid manifest still publishes
+  keeps it), and re-verifies death plus every ownership verdict
+  after a settle; and every
   overlay `rm` — in teardown, reaper, and
   `qdistro-tier5-cleanup.sh` — is preceded by confirmed-absent
   definition + confirmed-dead qemu, in that order. The cleanup helper
