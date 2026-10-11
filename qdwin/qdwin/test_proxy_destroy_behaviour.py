@@ -42,6 +42,20 @@ Cases:
      already replaced alone.
  13. The full scenario destroys the proxy the production way — by destroying
      the advertiser's wl_resource — not by calling the destroy function.
+ 14. Popup grab cancel (weston_pointer_cancel_grab on VT switch / device
+     release resets nothing itself): the real cancel callback ends the
+     still-installed grab, drops its cached pointer and dismisses once, so
+     the later teardown frees the popup with no pointer->grab left in it.
+ 15. A popup whose grab_active was cleared while its grab is still the
+     installed one: teardown ends it anyway (otherwise pointer->grab would
+     dangle into the freed popup).
+ 16. A popup whose grab was replaced by another grab while grab_active is
+     still set: teardown leaves the foreign grab installed.
+ 17. Stream confinement cancel: the real cancel callback ends the
+     still-installed confine grab and drops its cached pointer, so the
+     later seat release finds the default grab and nothing ends twice.
+ 18. A confine grab still installed with confine_grab_active clear: the
+     teardown ends it anyway, before the stream's pointer dies.
 """
 
 from pathlib import Path
@@ -754,6 +768,182 @@ static int scenario_live_proxy_preserved(void)
 	return 0;
 }
 
+/* The popup grab cancel ends its own grab: weston_pointer_cancel_grab()
+ * only calls the callback and leaves pointer->grab alone, so a cancel that
+ * just cleared the flag left pointer->grab pointing into the popup the
+ * client then tore down. */
+static int scenario_popup_grab_cancel(void)
+{
+	struct weston_view curtain = { 0 };
+	struct weston_pointer pointer;
+	struct weston_surface surf;
+	struct wl_resource *res;
+	struct qdwin_toplevel *tl;
+	struct qdwin_popup *p;
+	int before = focus_handler_calls, dismissed = dismissed_sent;
+
+	init_pointer(&pointer);
+	wl_signal_init(&surf.destroy_signal);
+	tl = make_proxy(30, &curtain);
+	p = make_popup(tl, &surf, &pointer, &res);
+	pick_result = NULL;
+
+	/* weston_pointer_cancel_grab(): pointer->grab->interface->cancel only. */
+	qdwin_popup_grab_cancel(pointer.grab);
+
+	CHECK(pointer.grab == &pointer.default_grab,
+	      "popup grab cancel left the popup grab installed");
+	CHECK(focus_handler_calls == before + 1,
+	      "popup grab cancel did not end the grab through end_grab");
+	CHECK(!p->grab_active, "popup grab cancel left grab_active set");
+	CHECK(p->grab.pointer == NULL,
+	      "popup grab cancel kept a pointer weston may free with its seat");
+	CHECK(dismissed_sent == dismissed + 1,
+	      "popup grab cancel did not dismiss the popup once");
+
+	/* The client answers the dismissal by destroying its popup object. */
+	wl_resource_destroy(res);
+	CHECK(tl->popup == NULL, "the popup outlived its resource");
+	CHECK(pointer.grab == &pointer.default_grab,
+	      "teardown after cancel touched the pointer's grab");
+	CHECK(focus_handler_calls == before + 1,
+	      "teardown after cancel ended a grab a second time");
+	free(res);
+	wl_list_remove(&tl->link);
+	free(tl);
+	return 0;
+}
+
+/* Teardown ends a popup grab that is still installed even with grab_active
+ * clear: the flag is not what keeps pointer->grab out of freed memory. */
+static int scenario_popup_teardown_installed_flag_clear(void)
+{
+	struct weston_view curtain = { 0 };
+	struct weston_pointer pointer;
+	struct weston_surface surf;
+	struct wl_resource *res;
+	struct qdwin_toplevel *tl;
+	struct qdwin_popup *p;
+	int before = focus_handler_calls;
+
+	init_pointer(&pointer);
+	wl_signal_init(&surf.destroy_signal);
+	tl = make_proxy(31, &curtain);
+	p = make_popup(tl, &surf, &pointer, &res);
+	p->grab_active = 0;
+	pick_result = NULL;
+
+	wl_resource_destroy(res);
+
+	CHECK(pointer.grab == &pointer.default_grab,
+	      "teardown left a still-installed popup grab pointing at the "
+	      "freed popup because grab_active was clear");
+	CHECK(focus_handler_calls == before + 1,
+	      "teardown did not end the installed popup grab via end_grab");
+	free(res);
+	wl_list_remove(&tl->link);
+	free(tl);
+	return 0;
+}
+
+/* weston_pointer_start_grab() replaced the popup grab without cancelling
+ * it, so grab_active is still set: teardown must not end the foreign grab. */
+static int scenario_popup_teardown_grab_replaced(void)
+{
+	struct weston_view curtain = { 0 };
+	struct weston_pointer pointer;
+	struct weston_pointer_grab foreign = { .interface = &foreign_grab_iface };
+	struct weston_surface surf;
+	struct wl_resource *res;
+	struct qdwin_toplevel *tl;
+	int before = focus_handler_calls;
+
+	init_pointer(&pointer);
+	wl_signal_init(&surf.destroy_signal);
+	tl = make_proxy(32, &curtain);
+	make_popup(tl, &surf, &pointer, &res);
+	foreign.pointer = &pointer;
+	pointer.grab = &foreign;
+	pick_result = NULL;
+
+	wl_resource_destroy(res);
+
+	CHECK(pointer.grab == &foreign,
+	      "popup teardown uninstalled a grab it did not own");
+	CHECK(focus_handler_calls == before,
+	      "popup teardown ran end_grab on a foreign grab");
+	free(res);
+	wl_list_remove(&tl->link);
+	free(tl);
+	return 0;
+}
+
+/* weston_pointer_cancel_grab() only calls the confine grab's cancel; a
+ * cancel that only cleared the flag left the grab installed, and grab_end
+ * then returned early on the flag. */
+static int scenario_confine_cancel(void)
+{
+	struct weston_view curtain = { 0 };
+	struct weston_pointer *stream_pointer;
+	struct qdwin_view_stream *s;
+	struct qdwin_toplevel *tl;
+	int before = focus_handler_calls;
+
+	tl = make_proxy(33, &curtain);
+	s = make_stream(tl);
+	stream_pointer = confine(s);
+	pick_result = NULL;
+
+	qdwin_stream_confine_cancel(stream_pointer->grab);
+
+	CHECK(stream_pointer->grab == &stream_pointer->default_grab,
+	      "confine cancel left the confine grab installed");
+	CHECK(focus_handler_calls == before + 1,
+	      "confine cancel did not end the grab through end_grab");
+	CHECK(!s->confine_grab_active, "confine cancel left the flag set");
+	CHECK(s->confine_grab.pointer == NULL,
+	      "confine cancel kept a pointer the seat release frees");
+
+	qdwin_nested_proxy_destroy(tl);
+
+	/* Address only: the pointer itself is freed by now. */
+	CHECK(grab_at_release == (void *)&stream_pointer->default_grab,
+	      "the pointer was not on its default grab when it died");
+	CHECK(focus_handler_calls == before + 1,
+	      "teardown after cancel ended a grab a second time");
+	wl_resource_destroy(s->resource);
+	return 0;
+}
+
+/* The flag is not what keeps pointer->grab out of a freed view_stream: a
+ * confine grab still installed is ended whatever confine_grab_active says. */
+static int scenario_confine_installed_flag_clear(void)
+{
+	struct weston_view curtain = { 0 };
+	struct weston_pointer *stream_pointer;
+	struct qdwin_view_stream *s;
+	struct qdwin_toplevel *tl;
+	int before = focus_handler_calls;
+
+	tl = make_proxy(34, &curtain);
+	s = make_stream(tl);
+	stream_pointer = confine(s);
+	s->confine_grab_active = 0;
+	pick_result = NULL;
+	grab_at_release = NULL;
+
+	qdwin_nested_proxy_destroy(tl);
+
+	CHECK(grab_at_release != NULL &&
+	      grab_at_release != (void *)&s->confine_grab,
+	      "teardown left an installed confine grab on the pointer because "
+	      "confine_grab_active was clear");
+	CHECK(focus_handler_calls == before + 1,
+	      "teardown did not end the installed confine grab via end_grab");
+	wl_resource_destroy(s->resource);
+	return 0;
+}
+
 static int scenario_pending_and_idempotence(void)
 {
 	struct weston_view other_curtain = { 0 };
@@ -822,8 +1012,18 @@ int main(void)
 		return rc;
 	if ((rc = scenario_pending_and_idempotence()))
 		return rc;
+	if ((rc = scenario_popup_grab_cancel()))
+		return rc;
+	if ((rc = scenario_popup_teardown_installed_flag_clear()))
+		return rc;
+	if ((rc = scenario_popup_teardown_grab_replaced()))
+		return rc;
+	if ((rc = scenario_confine_cancel()))
+		return rc;
+	if ((rc = scenario_confine_installed_flag_clear()))
+		return rc;
 
-	printf("ok: nested-proxy destroy teardown (13 cases)\n");
+	printf("ok: nested-proxy destroy teardown (18 cases)\n");
 	return 0;
 }
 """
@@ -834,9 +1034,12 @@ QDWIN_FNS = [
     ("void", "qdwin_proxy_default_grab_focus"),
     ("void", "qdwin_move_grab_end_if_installed"),
     ("void", "qdwin_move_grab_end_for"),
+    ("void", "qdwin_popup_grab_cancel"),
+    ("void", "qdwin_popup_grab_end_if_installed"),
     ("void", "qdwin_popup_teardown"),
     ("void", "qdwin_popup_resource_destroyed"),
     ("void", "qdwin_popup_surface_destroyed"),
+    ("void", "qdwin_stream_confine_cancel"),
     ("void", "qdwin_stream_confine_grab_end"),
     ("void", "qdwin_stream_seat_release"),
     ("void", "qdwin_stream_input_handle_resource_destroyed"),

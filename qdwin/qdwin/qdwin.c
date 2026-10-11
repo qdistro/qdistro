@@ -4333,6 +4333,9 @@ qdwin_popup_grab_button(struct weston_pointer_grab *grab,
 			weston_pointer_end_grab(pointer);
 			p->grab_active = 0;
 		}
+		/* Drop the cached pointer: teardown runs later and must not
+		 * read a weston_pointer its seat may have freed meanwhile. */
+		p->grab.pointer = NULL;
 		if (p->resource)
 			qdwin_popup_v1_send_dismissed(p->resource);
 		return;
@@ -4397,10 +4400,22 @@ static void
 qdwin_popup_grab_cancel(struct weston_pointer_grab *grab)
 {
 	struct qdwin_popup *p = wl_container_of(grab, p, grab);
-	/* libweston has cancelled the grab; mark it inactive so teardown
-	 * doesn't try to end it again. Defer actual teardown to the
+	/* weston_pointer_cancel_grab() (pointer-device release on VT switch
+	 * or seat teardown, keyboard focus-out) only invokes this callback —
+	 * it does NOT reset pointer->grab. Leaving the grab installed while
+	 * the client tears the popup down would leave pointer->grab pointing
+	 * into the freed qdwin_popup: a use-after-free on the next pointer
+	 * event. End it ourselves (end_grab restores the default grab),
+	 * guarded on ours still being the installed grab, as
+	 * qdwin_move_grab_cancel does. Then drop the cached pointer: the
+	 * grab is over, and weston may free that pointer together with its
+	 * seat right after this cancel (weston_seat_release), so teardown
+	 * must not dereference it. Defer the popup's own teardown to the
 	 * client resource-destroy path (same reasoning as button). */
 	p->grab_active = 0;
+	if (grab->pointer && grab->pointer->grab == grab)
+		weston_pointer_end_grab(grab->pointer);
+	grab->pointer = NULL;
 	if (p->resource)
 		qdwin_popup_v1_send_dismissed(p->resource);
 }
@@ -5041,13 +5056,28 @@ qdwin_popup_surface_destroyed(struct wl_listener *listener, void *data)
 	qdwin_popup_teardown(p);
 }
 
+/* End the popup's pointer grab only while it is still the installed grab,
+ * whatever grab_active says. weston_pointer_start_grab() replaces
+ * pointer->grab without cancelling the previous grab, so:
+ *  - a grab that was replaced (another toplevel's popup, a move or
+ *    confine grab) must NOT be ended — that would end someone else's;
+ *  - a grab still installed must be ended before the popup is freed even
+ *    if grab_active was cleared, or pointer->grab dangles into the freed
+ *    qdwin_popup. */
+static void
+qdwin_popup_grab_end_if_installed(struct qdwin_popup *p)
+{
+	struct weston_pointer *pointer = p->grab.pointer;
+
+	p->grab_active = 0;
+	if (pointer && pointer->grab == &p->grab)
+		weston_pointer_end_grab(pointer);
+}
+
 static void
 qdwin_popup_teardown(struct qdwin_popup *p)
 {
-	if (p->grab_active) {
-		weston_pointer_end_grab(p->grab.pointer);
-		p->grab_active = 0;
-	}
+	qdwin_popup_grab_end_if_installed(p);
 	if (p->parent && p->parent->popup == p)
 		p->parent->popup = NULL;
 	if (p->view) {
@@ -6132,13 +6162,21 @@ qdwin_stream_confine_frame(struct weston_pointer_grab *grab)
 static void
 qdwin_stream_confine_cancel(struct weston_pointer_grab *grab)
 {
-	/* Weston calls cancel when another grab replaces ours (or on teardown).
-	 * After that our grab is no longer the pointer's active grab, so clear
-	 * the active flag — otherwise a later grab_end would call
-	 * weston_pointer_end_grab on a pointer whose grab is now someone else's
-	 * and tear down the wrong grab (codex impl-20). */
+	/* Weston does NOT call cancel when another grab replaces ours —
+	 * weston_pointer_start_grab() just swaps pointer->grab (grab_end below
+	 * guards for that). Cancel comes from weston_pointer_cancel_grab()
+	 * (pointer-device release, keyboard focus-out), which only invokes
+	 * this callback and leaves pointer->grab alone: our grab is still the
+	 * installed one. Clearing the flag alone would leave it installed with
+	 * grab_end then returning early, so pointer->grab would outlive the
+	 * view_stream. End it ourselves (guarded on it still being ours) and
+	 * drop the cached pointer: the grab is over, and weston may free that
+	 * pointer with its seat. */
 	struct qdwin_view_stream *s = wl_container_of(grab, s, confine_grab);
 	s->confine_grab_active = 0;
+	if (grab->pointer && grab->pointer->grab == grab)
+		weston_pointer_end_grab(grab->pointer);
+	grab->pointer = NULL;
 }
 
 static const struct weston_pointer_grab_interface qdwin_stream_confine_grab_iface = {
@@ -6170,13 +6208,16 @@ qdwin_stream_confine_grab_start(struct qdwin_view_stream *s)
 static void
 qdwin_stream_confine_grab_end(struct qdwin_view_stream *s)
 {
-	if (!s->confine_grab_active)
-		return;
-	s->confine_grab_active = 0;
 	/* Only end the grab if OURS is still the pointer's active grab — if it
-	 * was already replaced/cancelled, ending here would tear down whatever
-	 * grab is active now (codex impl-20). */
+	 * was already replaced, ending here would tear down whatever grab is
+	 * active now (codex impl-20). Conversely a grab that is still installed
+	 * is ended whatever confine_grab_active says, so pointer->grab can never
+	 * outlive the view_stream. The cached pointer is dropped once the grab
+	 * is over: the stream seat release frees it, and later callers (the
+	 * compositor-teardown drain) must not dereference it. */
 	struct weston_pointer *ptr = s->confine_grab.pointer;
+	s->confine_grab_active = 0;
+	s->confine_grab.pointer = NULL;
 	if (ptr && ptr->grab == &s->confine_grab)
 		weston_pointer_end_grab(ptr);
 }
@@ -7331,7 +7372,24 @@ static void
 qdwin_switcher_grab_cancel(struct weston_keyboard_grab *grab)
 {
 	struct qdwin *qdwin = wl_container_of(grab, qdwin, switcher_grab);
+	/* weston_keyboard_cancel_grab() (keyboard release on VT switch or
+	 * seat teardown, keyboard focus-out) only invokes this callback — it
+	 * does NOT reset keyboard->grab. Clearing the flag alone left the
+	 * switcher grab installed with qdwin_switcher_grab_end then returning
+	 * early on the flag: every later key was eaten by the switcher and
+	 * the keyboard stayed dead. End it ourselves (guarded on it still
+	 * being ours) and drop the cached keyboard, which weston may free with
+	 * its seat right after this cancel. The Alt release that would commit
+	 * the switch can no longer arrive, so commit now, as a non-Tab key
+	 * does (upstream desktop-shell's switcher cancel also finalises). */
 	qdwin->switcher_grab_active = 0;
+	if (grab->keyboard && grab->keyboard->grab == grab)
+		weston_keyboard_end_grab(grab->keyboard);
+	grab->keyboard = NULL;
+	if (qdwin->shell_resource) {
+		weston_log("qdwin: switcher_commit cause=grab-cancelled\n");
+		qdwin_shell_v1_send_switcher_commit(qdwin->shell_resource);
+	}
 }
 
 static const struct weston_keyboard_grab_interface qdwin_switcher_grab_iface = {
@@ -7351,14 +7409,18 @@ qdwin_switcher_grab_start(struct qdwin *qdwin, struct weston_keyboard *kb)
 	qdwin->switcher_grab_active = 1;
 }
 
+/* End the switcher grab iff it is still the keyboard's installed grab,
+ * whatever switcher_grab_active says: weston_keyboard_start_grab()
+ * replaces a grab without cancelling it, so a replaced switcher grab must
+ * not end the replacing one, and a still-installed one must never be left
+ * behind. The cached keyboard is dropped once the grab is over. */
 static void
 qdwin_switcher_grab_end(struct qdwin *qdwin)
 {
-	if (!qdwin->switcher_grab_active)
-		return;
 	struct weston_keyboard *kb = qdwin->switcher_grab.keyboard;
 	qdwin->switcher_grab_active = 0;
-	if (kb)
+	qdwin->switcher_grab.keyboard = NULL;
+	if (kb && kb->grab == &qdwin->switcher_grab)
 		weston_keyboard_end_grab(kb);
 }
 
@@ -7466,11 +7528,52 @@ qdwin_overlay_grab_modifiers(struct weston_keyboard_grab *grab,
 				       mods_locked, group);
 }
 
+/* The keyboard the overlay grab was started on, or NULL once that
+ * keyboard's seat is gone. weston_seat_release() unlinks the seat and then
+ * frees its keyboard without ending the keyboard's grab, so the cached
+ * overlay_grab.keyboard can outlive the keyboard (an RDP/VNC peer seat, a
+ * per-stream or nested inner seat); never dereference it unchecked. */
+static struct weston_keyboard *
+qdwin_overlay_grab_keyboard(struct qdwin *qdwin)
+{
+	struct weston_keyboard *kb = qdwin->overlay_grab.keyboard;
+	struct weston_seat *seat;
+
+	if (!kb)
+		return NULL;
+	wl_list_for_each(seat, &qdwin->compositor->seat_list, link)
+		if (seat->keyboard_state == kb)
+			return kb;
+	return NULL;
+}
+
 static void
 qdwin_overlay_grab_cancel(struct weston_keyboard_grab *grab)
 {
 	struct qdwin *qdwin = wl_container_of(grab, qdwin, overlay_grab);
-	qdwin->overlay_grab_active = 0;
+	/* weston_keyboard_cancel_grab() (keyboard release on VT switch or
+	 * seat teardown, keyboard focus-out such as a nested qdwin losing host
+	 * focus) only invokes this callback — it does NOT reset
+	 * keyboard->grab. This used to clear overlay_grab_active and nothing
+	 * else, leaving the grab installed while every end path skipped it on
+	 * the flag: after a VT switch on a locked screen, unlock left the
+	 * locker grab in place and every later key went to overlay_key
+	 * instead of the desktop.
+	 *
+	 * Unlike the popup/move/switcher grabs, the overlay grab is not ended
+	 * here: its lifetime is the overlay's (launcher/switcher mapped,
+	 * compositor locked), not keyboard focus, and its own end paths
+	 * (unlock, launcher destroy, locker crash, teardown) end it. For the
+	 * locker that is the fail-secure choice: while locked the default
+	 * keyboard grab drops every key, so ending the locker grab on a VT
+	 * switch would leave the password field unreachable after switching
+	 * back. Keep it installed and keep overlay_grab_active truthful. A
+	 * cancel from a seat about to be destroyed is covered by
+	 * qdwin_overlay_grab_keyboard(), which stops trusting the cached
+	 * keyboard once its seat is gone. */
+	weston_log("qdwin: overlay grab role=%u cancelled by weston; kept "
+		   "installed for the overlay's lifetime\n",
+		   qdwin->overlay_grab_role);
 }
 
 static const struct weston_keyboard_grab_interface qdwin_overlay_grab_iface = {
@@ -7503,10 +7606,18 @@ qdwin_overlay_grab_start(struct qdwin *qdwin, uint32_t role)
 				kb->keys.size / sizeof(uint32_t));
 	}
 	if (qdwin->overlay_grab_active) {
-		/* Already grabbed — just update the role (e.g. launcher
-		 * → locker takeover). The grab struct itself stays. */
-		qdwin->overlay_grab_role = role;
-		return;
+		struct weston_keyboard *cur = qdwin_overlay_grab_keyboard(qdwin);
+		if (cur && cur->grab == &qdwin->overlay_grab) {
+			/* Already grabbed — just update the role (e.g.
+			 * launcher → locker takeover). The grab struct
+			 * itself stays. */
+			qdwin->overlay_grab_role = role;
+			return;
+		}
+		/* The grab died with its seat, or another grab replaced it
+		 * via weston_keyboard_start_grab() (no cancel): it is not
+		 * delivering keys, so take the keyboard afresh. */
+		qdwin->overlay_grab_active = 0;
 	}
 	qdwin->overlay_grab.interface = &qdwin_overlay_grab_iface;
 	qdwin->overlay_grab.keyboard = kb;
@@ -7515,16 +7626,22 @@ qdwin_overlay_grab_start(struct qdwin *qdwin, uint32_t role)
 	qdwin->overlay_grab_active = 1;
 }
 
+/* End the overlay grab iff it is still the installed grab of a live
+ * keyboard, whatever overlay_grab_active says: weston_keyboard_start_grab()
+ * replaces a grab without cancelling it, so a replaced overlay grab must
+ * not end the replacing one, and an installed one must never be left
+ * behind. The cached keyboard is dropped once the grab is over. */
 static void
 qdwin_overlay_grab_end(struct qdwin *qdwin)
 {
-	if (!qdwin->overlay_grab_active)
-		return;
-	struct weston_keyboard *kb = qdwin->overlay_grab.keyboard;
+	struct weston_keyboard *kb = qdwin_overlay_grab_keyboard(qdwin);
 	uint32_t role = qdwin->overlay_grab_role;
+	int was_active = qdwin->overlay_grab_active;
 	qdwin->overlay_grab_active = 0;
-	if (kb) {
+	qdwin->overlay_grab.keyboard = NULL;
+	if (kb && kb->grab == &qdwin->overlay_grab)
 		weston_keyboard_end_grab(kb);
+	if (kb && was_active) {
 
 		/* The locker grab deliberately suppresses wl_keyboard.modifiers
 		 * while locked so Ctrl/Alt/Shift state cannot leak to the hidden
@@ -15348,8 +15465,15 @@ qdwin_layer_popup_destroy(struct qdwin_layer_popup *lp)
 	 * - lp->grab.pointer is the pointer cached at start time. We must
 	 *   not dereference it if its owning seat was destroyed since (the
 	 *   seat_destroy_listener nulls lp->grab_seat for that case; we
-	 *   skip end_grab and just release our state). */
-	if (lp->grab_active && lp->grab_seat && lp->grab.pointer &&
+	 *   skip end_grab and just release our state).
+	 *
+	 * - Whether to end it is decided by "is ours still the installed
+	 *   grab", NOT by grab_active: weston_pointer_start_grab() replaces
+	 *   a grab without cancelling it (so a replaced grab must be left
+	 *   alone even with grab_active set), and a grab that is still
+	 *   installed must be ended before lp is freed even with grab_active
+	 *   clear, or pointer->grab dangles into the freed popup. */
+	if (lp->grab_seat && lp->grab.pointer &&
 	    lp->grab.pointer->grab == &lp->grab) {
 		struct weston_pointer *p = lp->grab.pointer;
 		lp->popup_resource = NULL;        /* suppresses cancel→dismiss */
@@ -15616,7 +15740,18 @@ static void
 qdwin_layer_popup_grab_cancel(struct weston_pointer_grab *grab)
 {
 	struct qdwin_layer_popup *lp = wl_container_of(grab, lp, grab);
+	/* weston_pointer_cancel_grab() (pointer-device release on VT switch
+	 * or seat teardown, keyboard focus-out) only invokes this callback —
+	 * it does NOT reset pointer->grab. Clearing grab_active alone left
+	 * the grab installed, and the popup the client destroys in answer to
+	 * popup_done was then freed under it. End it ourselves (guarded on it
+	 * still being the installed grab, as qdwin_move_grab_cancel does) and
+	 * drop the cached pointer: the grab is over, and weston may free that
+	 * pointer with its seat right after this cancel. */
 	lp->grab_active = 0;
+	if (grab->pointer && grab->pointer->grab == grab)
+		weston_pointer_end_grab(grab->pointer);
+	grab->pointer = NULL;
 	if (lp->popup_resource) {
 		qdwin_xdg_popup_dismiss_layer_grab_fn dismiss =
 			qdwin_xdg_popup_dismiss_layer_grab_sym();
@@ -18407,9 +18542,16 @@ qdwin_im_grab_cancel(struct weston_keyboard_grab *grab)
 {
 	struct qdwin_im_keyboard_grab *g =
 		wl_container_of(grab, g, base);
-	/* weston is tearing the grab down (e.g. seat/keyboard release). Detach
-	 * from the keyboard so the resource-destroy path does not call
-	 * weston_keyboard_end_grab() on an already-gone grab. */
+	/* weston_keyboard_cancel_grab() (keyboard release on VT switch or
+	 * seat teardown, keyboard focus-out) only invokes this callback — it
+	 * does NOT reset keyboard->grab, so our grab is still the installed
+	 * one. Nulling g->keyboard alone made the resource-destroy path skip
+	 * end_grab and free g with keyboard->grab still pointing into it: a
+	 * use-after-free on the next key. End it ourselves (guarded on it
+	 * still being ours), then detach: the keyboard may be freed with its
+	 * seat right after this cancel. */
+	if (grab->keyboard && grab->keyboard->grab == grab)
+		weston_keyboard_end_grab(grab->keyboard);
 	g->keyboard = NULL;
 }
 
@@ -19913,12 +20055,11 @@ qdwin_output_boundary_cancel_state(struct qdwin *qdwin,
 		wl_list_for_each_safe(lp, tmp, &ls->popups, link) {
 			/* Send xdg_popup.popup_done through the vendored helper before
 			 * dropping qdwin's wrapper; destroy alone only releases local
-			 * state and would strand the client's popup role. Do NOT call the
-			 * grab's cancel callback directly: that callback deliberately
-			 * leaves pointer->grab installed for libweston's seat-teardown
-			 * caller, so freeing lp afterwards would leave a dangling grab.
-			 * qdwin_layer_popup_destroy sees grab_active and safely ends the
-			 * pointer grab after this one protocol dismissal. */
+			 * state and would strand the client's popup role. Do not call the
+			 * grab's cancel callback here: it would send that dismissal a
+			 * second time. qdwin_layer_popup_destroy ends the pointer grab
+			 * itself whenever it is still installed, after this one protocol
+			 * dismissal. */
 			if (lp->popup_resource) {
 				qdwin_xdg_popup_dismiss_layer_grab_fn dismiss =
 					qdwin_xdg_popup_dismiss_layer_grab_sym();
