@@ -7369,7 +7369,24 @@ static void
 qdwin_switcher_grab_cancel(struct weston_keyboard_grab *grab)
 {
 	struct qdwin *qdwin = wl_container_of(grab, qdwin, switcher_grab);
+	/* weston_keyboard_cancel_grab() (keyboard release on VT switch or
+	 * seat teardown, keyboard focus-out) only invokes this callback — it
+	 * does NOT reset keyboard->grab. Clearing the flag alone left the
+	 * switcher grab installed with qdwin_switcher_grab_end then returning
+	 * early on the flag: every later key was eaten by the switcher and
+	 * the keyboard stayed dead. End it ourselves (guarded on it still
+	 * being ours) and drop the cached keyboard, which weston may free with
+	 * its seat right after this cancel. The Alt release that would commit
+	 * the switch can no longer arrive, so commit now, as a non-Tab key
+	 * does (upstream desktop-shell's switcher cancel also finalises). */
 	qdwin->switcher_grab_active = 0;
+	if (grab->keyboard && grab->keyboard->grab == grab)
+		weston_keyboard_end_grab(grab->keyboard);
+	grab->keyboard = NULL;
+	if (qdwin->shell_resource) {
+		weston_log("qdwin: switcher_commit cause=grab-cancelled\n");
+		qdwin_shell_v1_send_switcher_commit(qdwin->shell_resource);
+	}
 }
 
 static const struct weston_keyboard_grab_interface qdwin_switcher_grab_iface = {
@@ -7389,14 +7406,18 @@ qdwin_switcher_grab_start(struct qdwin *qdwin, struct weston_keyboard *kb)
 	qdwin->switcher_grab_active = 1;
 }
 
+/* End the switcher grab iff it is still the keyboard's installed grab,
+ * whatever switcher_grab_active says: weston_keyboard_start_grab()
+ * replaces a grab without cancelling it, so a replaced switcher grab must
+ * not end the replacing one, and a still-installed one must never be left
+ * behind. The cached keyboard is dropped once the grab is over. */
 static void
 qdwin_switcher_grab_end(struct qdwin *qdwin)
 {
-	if (!qdwin->switcher_grab_active)
-		return;
 	struct weston_keyboard *kb = qdwin->switcher_grab.keyboard;
 	qdwin->switcher_grab_active = 0;
-	if (kb)
+	qdwin->switcher_grab.keyboard = NULL;
+	if (kb && kb->grab == &qdwin->switcher_grab)
 		weston_keyboard_end_grab(kb);
 }
 

@@ -68,6 +68,10 @@ Cases:
      nothing twice. A grab still installed with grab_active clear is
      ended by destroy anyway; a grab replaced by another grab while
      grab_active is set is left alone.
+ 17. Switcher keyboard grab cancel (weston_keyboard_cancel_grab resets
+     nothing itself): the real cancel ends the still-installed grab, drops
+     its cached keyboard and commits the switch once; the end path ends a
+     grab iff it is still installed, whatever switcher_grab_active says.
 """
 
 from pathlib import Path
@@ -702,6 +706,10 @@ static void probe_layer_popup_done(struct wl_resource *r)
 static qdwin_xdg_popup_dismiss_layer_grab_fn
 qdwin_xdg_popup_dismiss_layer_grab_sym(void)
 { return probe_layer_popup_done; }
+
+static int switcher_commit_calls;
+static void qdwin_shell_v1_send_switcher_commit(struct wl_resource *r)
+{ (void)r; switcher_commit_calls++; }
 """
 
 SPLICED = [
@@ -712,6 +720,8 @@ SPLICED = [
     "qdwin_popup_teardown",
     "qdwin_move_grab_end_if_installed",
     "qdwin_move_grab_end_for",
+    "qdwin_switcher_grab_cancel",
+    "qdwin_switcher_grab_end",
     "qdwin_overlay_grab_end",
     "qdwin_surface_removed",
     "qdwin_nested_proxy_destroy",
@@ -1545,6 +1555,62 @@ static int case_layer_popup_grab_cancel(void)
 	return 0;
 }
 
+/* 17: switcher keyboard grab cancel ends its own grab; the end path ends
+ * a grab iff it is still installed, whatever the flag says. */
+static int case_switcher_grab_cancel(void)
+{
+	reset_counters();
+	switcher_commit_calls = 0;
+	struct qdwin *q = q_new();
+	struct wl_resource *shell_res = res_new(q, NULL);
+	q->shell_resource = shell_res;
+
+	/* Cancel, as weston_keyboard_cancel_grab() runs it: the callback
+	 * alone, with keyboard->grab still ours. */
+	q->switcher_grab.keyboard = &main_keyboard;
+	q->switcher_grab_active = 1;
+	main_keyboard.grab = &q->switcher_grab;
+	qdwin_switcher_grab_cancel(main_keyboard.grab);
+	CHECK(main_keyboard.grab == &main_keyboard.default_grab,
+	      "switcher grab cancel left the grab installed (keyboard dead)");
+	CHECK(kbd_end_grab_calls == 1,
+	      "switcher grab cancel did not end the grab via end_grab");
+	CHECK(!q->switcher_grab_active, "switcher cancel left the flag set");
+	CHECK(q->switcher_grab.keyboard == NULL,
+	      "switcher cancel kept a keyboard weston may free");
+	CHECK(switcher_commit_calls == 1,
+	      "switcher cancel did not commit the switch once");
+	qdwin_switcher_grab_end(q);
+	CHECK(kbd_end_grab_calls == 1,
+	      "switcher end after cancel ended a grab a second time");
+
+	/* Still installed, flag clear: the end path ends it anyway. */
+	reset_counters();
+	q->switcher_grab.keyboard = &main_keyboard;
+	q->switcher_grab_active = 0;
+	main_keyboard.grab = &q->switcher_grab;
+	qdwin_switcher_grab_end(q);
+	CHECK(main_keyboard.grab == &main_keyboard.default_grab &&
+	      kbd_end_grab_calls == 1,
+	      "switcher end left an installed grab because the flag was clear");
+
+	/* Replaced by start_grab (no cancel), flag still set: leave it. */
+	reset_counters();
+	struct weston_keyboard_grab foreign = { .keyboard = &main_keyboard };
+	q->switcher_grab.keyboard = &main_keyboard;
+	q->switcher_grab_active = 1;
+	main_keyboard.grab = &foreign;
+	qdwin_switcher_grab_end(q);
+	CHECK(main_keyboard.grab == &foreign && kbd_end_grab_calls == 0,
+	      "switcher end ended a grab it did not own");
+	CHECK(!q->switcher_grab_active, "switcher end left the flag set");
+
+	main_keyboard.grab = &main_keyboard.default_grab;
+	free(shell_res);
+	free(q);
+	return 0;
+}
+
 /* 13: full pass — populate every family, drain, free, fire late paths. */
 static int case_full_pass(void)
 {
@@ -1846,7 +1912,8 @@ int main(void)
 	if ((r = case_unclaimed_bindings())) return r;
 	if ((r = case_lock_attach_promote())) return r;
 	if ((r = case_layer_popup_grab_cancel())) return r;
-	printf("destroy-drain behaviour: 15 cases OK\n");
+	if ((r = case_switcher_grab_cancel())) return r;
+	printf("destroy-drain behaviour: 16 cases OK\n");
 	return 0;
 }
 """
