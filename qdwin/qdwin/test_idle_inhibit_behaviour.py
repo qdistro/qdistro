@@ -8,7 +8,8 @@ surface lifecycles.
 There is no headless harness that can run qdwin's compositor, so this splices
 the real function bodies — weston's recursive weston_surface_is_mapped() /
 weston_surface_map() / weston_surface_unmap() and qdwin's inhibitor
-activate/deactivate/sync/recheck — out of the actual sources, compiles them
+activate/deactivate/sync/recheck plus the real arm/teardown halves of the
+create and resource-destroy paths — out of the actual sources, compiles them
 against real libwayland-server signals with reduced structs, and asserts on
 the counter. Technique credited to the codex round-1 review, which used it to
 find the parent-unmap hole this file now regression-tests.
@@ -27,6 +28,9 @@ Cases:
   8. Creation churn cannot starve the backstop timer.
   9. Multiple inhibitors are independent and the counter ends clean.
  9b. Dropping the last hold re-arms weston's one-shot idle timer.
+ 9c. A failed empty->non-empty backstop arm refuses the inhibitor and
+     unwinds it completely.
+ 9d. wl_surface destroy drops the hold immediately via the destroy listener.
  10. A failed backstop re-arm disables idle-inhibit terminally: holds go,
      a remap does not re-acquire, and new inhibitors are refused.
 """
@@ -98,7 +102,7 @@ struct weston_buffer_ref { struct weston_buffer *buffer; };
 struct weston_surface {
 	bool is_mapped, is_mapping;
 	struct weston_compositor *compositor;
-	struct wl_signal map_signal, unmap_signal;
+	struct wl_signal destroy_signal, map_signal, unmap_signal;
 	struct wl_list views;
 	void *output;
 	struct weston_buffer_ref buffer_ref;
@@ -171,6 +175,7 @@ EPILOGUE = r"""
 static void init_surface(struct weston_surface *s, struct weston_compositor *c)
 {
 	s->compositor = c;
+	wl_signal_init(&s->destroy_signal);
 	wl_signal_init(&s->map_signal);
 	wl_signal_init(&s->unmap_signal);
 	wl_list_init(&s->views);
@@ -195,42 +200,31 @@ static void destroy_subsurface_role(struct weston_surface *s)
 	s->sub = NULL;
 }
 
-/* The real create path, minus resource allocation: same ordering, same
- * empty->non-empty arming rule. */
+/* Production order in qdwin_idle_inhibit_create_inhibitor: the
+ * recheck_ensure refusal pre-dates the resource, then the wired
+ * wl_resource wraps qdwin_idle_inhibitor_arm(), and an arm failure
+ * unwinds through wl_resource_destroy -> resource_destroy ->
+ * qdwin_idle_inhibitor_teardown. The probe cannot make a wl_resource,
+ * so this is that same sequence minus the resource: the ensure refusal
+ * precedes arm(), and the arm-failure unwind IS teardown. */
 static bool
 create_inhibitor(struct qdwin_idle_inhibitor *i, struct qdwin *q,
 		 struct weston_surface *s)
 {
-	bool was_empty;
-
 	if (!qdwin_idle_inhibit_recheck_ensure(q))
 		return false;   /* production posts no_memory and returns */
-	i->qdwin = q;
-	i->surface = s;
-	i->active = 0;
-	wl_list_init(&i->surface_destroy_listener.link);
-	i->surface_map_listener.notify = qdwin_idle_inhibitor_surface_mapped;
-	i->surface_unmap_listener.notify = qdwin_idle_inhibitor_surface_unmapped;
-	wl_signal_add(&s->map_signal, &i->surface_map_listener);
-	wl_signal_add(&s->unmap_signal, &i->surface_unmap_listener);
-	was_empty = wl_list_empty(&q->idle_inhibitors);
-	wl_list_insert(&q->idle_inhibitors, &i->link);
-	qdwin_idle_inhibitor_sync(i);
-	if (was_empty && !qdwin_idle_inhibit_recheck_schedule(q))
+	if (!qdwin_idle_inhibitor_arm(q, i, s)) {
+		qdwin_idle_inhibitor_teardown(i);
 		return false;
+	}
 	return true;
 }
 
-/* The real resource-destroy path. */
+/* Production: wl_resource_destroy -> resource_destroy -> teardown +
+ * free. Stack-allocated inhibitors have nothing to free. */
 static void destroy_inhibitor(struct qdwin_idle_inhibitor *i)
 {
-	qdwin_idle_inhibitor_deactivate(i);
-	if (i->surface) {
-		wl_list_remove(&i->surface_map_listener.link);
-		wl_list_remove(&i->surface_unmap_listener.link);
-		i->surface = NULL;
-	}
-	wl_list_remove(&i->link);
+	qdwin_idle_inhibitor_teardown(i);
 }
 
 /* Drive the real event loop for a real `ms` of wall time. Dispatch can
@@ -462,6 +456,64 @@ int main(void)
 		c.idle_inhibit = baseline;
 	}
 
+	/* 9c. A failed empty->non-empty backstop arm refuses the inhibitor
+	 *     and unwinds it completely — production reaches the same state
+	 *     through wl_resource_destroy -> resource_destroy -> teardown. */
+	{
+		struct weston_surface s9 = { 0 };
+		struct weston_view v9 = { 0 };
+		struct qdwin_idle_inhibitor i9 = { 0 };
+		struct weston_buffer b9;
+
+		init_surface(&s9, &c);
+		add_view(&s9, &v9);
+		s9.buffer_ref.buffer = &b9;
+		weston_surface_map(&s9);
+		fail_next_backstop_updates = 1;
+		CHECK(!create_inhibitor(&i9, &q, &s9),
+		      "case 9c: create accepted despite a failed backstop arm");
+		CHECK(wl_list_empty(&q.idle_inhibitors),
+		      "case 9c: the refused inhibitor stayed linked");
+		CHECK(i9.surface == NULL,
+		      "case 9c: the refused inhibitor kept its surface");
+		CHECK(c.idle_inhibit == baseline,
+		      "case 9c: the refused inhibitor moved the counter "
+		      "(counter=%u)", c.idle_inhibit);
+	}
+
+	/* 9d. wl_surface destroy: the destroy listener drops inh->surface,
+	 *     detaches every listener, and syncs — the hold goes NOW, not
+	 *     on a later sweep. This listener was never wired by the old
+	 *     mirrored create helper. */
+	{
+		struct weston_surface s4 = { 0 };
+		struct weston_view v4 = { 0 };
+		struct qdwin_idle_inhibitor i4 = { 0 };
+		struct weston_buffer b4;
+
+		init_surface(&s4, &c);
+		add_view(&s4, &v4);
+		s4.buffer_ref.buffer = &b4;
+		weston_surface_map(&s4);
+		CHECK(create_inhibitor(&i4, &q, &s4), "case 9d create failed");
+		CHECK(c.idle_inhibit == baseline + 1,
+		      "case 9d precondition: hold not taken (counter=%u)",
+		      c.idle_inhibit);
+		wl_signal_emit(&s4.destroy_signal, &s4);
+		CHECK(i4.surface == NULL,
+		      "case 9d: destroyed surface still referenced");
+		CHECK(c.idle_inhibit == baseline,
+		      "case 9d: the hold survived surface destroy "
+		      "(counter=%u)", c.idle_inhibit);
+		pump(loop, 1400);
+		CHECK(c.idle_inhibit == baseline,
+		      "case 9d: a later sweep re-acquired after destroy "
+		      "(counter=%u)", c.idle_inhibit);
+		destroy_inhibitor(&i4);
+		CHECK(wl_list_empty(&q.idle_inhibitors),
+		      "case 9d: inhibitor list not drained");
+	}
+
 	/* 10. codex r3 #1: if the backstop's self-rearm ever fails, every
 	 *     hold must go and NOTHING may take one again — not this
 	 *     inhibitor on a later map, not a freshly created one. Merely
@@ -536,7 +588,10 @@ QDWIN_FNS = [("void", "qdwin_idle_notifications_deliver_expired"),
              ("void", "qdwin_idle_inhibitor_surface_mapped"),
              ("void", "qdwin_idle_inhibitor_surface_unmapped"),
              ("int", "qdwin_idle_inhibit_recheck"),
-             ("bool", "qdwin_idle_inhibit_recheck_ensure")]
+             ("bool", "qdwin_idle_inhibit_recheck_ensure"),
+             ("void", "qdwin_idle_inhibitor_surface_destroyed"),
+             ("bool", "qdwin_idle_inhibitor_arm"),
+             ("void", "qdwin_idle_inhibitor_teardown")]
 
 
 def main():

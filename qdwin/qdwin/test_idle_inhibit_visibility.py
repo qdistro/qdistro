@@ -118,7 +118,19 @@ def check_create_does_not_unconditionally_activate(source):
         "qdwin_idle_inhibit_create_inhibitor")
     if err:
         return fail(err)
-    code = _strip_comments(body)
+    create_code = _strip_comments(body)
+    # The wiring/sync/arming half of the create path lives in
+    # qdwin_idle_inhibitor_arm so the behavioural probe can splice the
+    # real body; the pins below run on the create path as a whole.
+    if "qdwin_idle_inhibitor_arm(" not in create_code:
+        return fail("create_inhibitor does not call qdwin_idle_inhibitor_arm")
+    arm, err = _function_body(
+        source,
+        r"static bool\s+qdwin_idle_inhibitor_arm\s*\(",
+        "qdwin_idle_inhibitor_arm")
+    if err:
+        return fail(err)
+    code = create_code + _strip_comments(arm)
     if "qdwin_idle_inhibitor_activate(" in code:
         return fail("create_inhibitor activates directly instead of via sync() "
                     "— an unmapped surface would inhibit idle immediately")
@@ -205,22 +217,37 @@ def check_teardown_unhooks_every_listener(source):
         return fail("surface_destroyed syncs before clearing inh->surface "
                     "— the predicate would read a dying surface")
 
+    # The unhook/unlink sequence lives in qdwin_idle_inhibitor_teardown so
+    # the behavioural probe splices the real body; resource_destroy must
+    # route through it and still own the free.
     body, err = _function_body(
         source,
         r"static void\s+qdwin_idle_inhibitor_resource_destroy\s*\(",
         "qdwin_idle_inhibitor_resource_destroy")
     if err:
         return fail(err)
+    rd_code = _strip_comments(body)
+    if "qdwin_idle_inhibitor_teardown(inh)" not in rd_code:
+        return fail("resource destroy does not route through "
+                    "qdwin_idle_inhibitor_teardown")
+    if "free(inh)" not in rd_code:
+        return fail("resource destroy does not free the inhibitor")
+    body, err = _function_body(
+        source,
+        r"static void\s+qdwin_idle_inhibitor_teardown\s*\(",
+        "qdwin_idle_inhibitor_teardown")
+    if err:
+        return fail(err)
     code = _strip_comments(body)
     if "qdwin_idle_inhibitor_deactivate(inh)" not in code:
-        return fail("resource destroy does not release the hold")
+        return fail("teardown does not release the hold")
     for needle in ("surface_destroy_listener.link",
                    "surface_map_listener.link",
                    "surface_unmap_listener.link"):
         if f"wl_list_remove(&inh->{needle})" not in code:
-            return fail(f"resource destroy leaves {needle} hooked")
+            return fail(f"teardown leaves {needle} hooked")
     if "wl_list_remove(&inh->link)" not in code:
-        return fail("resource destroy does not unlink from qdwin->idle_inhibitors")
+        return fail("teardown does not unlink from qdwin->idle_inhibitors")
     return 0
 
 
