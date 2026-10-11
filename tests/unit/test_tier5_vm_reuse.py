@@ -881,11 +881,13 @@ def test_record_reads_and_unlinks_are_race_bound():
         assert '_unlink_verified()' in src
         # capture lands in a private dir created AND opened through
         # the parent's dir fd (mkdirat/openat + O_NOFOLLOW), and the
-        # opened fd must verify as OUR root-owned 0700 dir before
-        # anything moves in — no create→open window can land the
-        # rename on foreign ground (sol r28), and once bound the
-        # chamber is unreachable to a co-admin, so no stat→unlink
-        # swap is possible on the captured name (sol r29)
+        # opened fd must verify as OUR EMPTY root-owned 0700 dir
+        # before anything moves in — no create→open window can land
+        # the rename on foreign ground (sol r28), a leftover chamber
+        # holding a preserved foreign entry can never be clobbered
+        # (sol r30), and once bound the chamber is unreachable to a
+        # co-admin so no stat→unlink swap is possible on the
+        # captured name (sol r29)
         assert 'tempfile.mkdtemp' not in src
         assert 'os.open(_parent,' in src
         assert 'os.O_NOFOLLOW' in src
@@ -893,7 +895,8 @@ def test_record_reads_and_unlinks_are_race_bound():
         assert 'dir_fd=pfd)' in src
         assert '_st.st_uid == os.geteuid()' in src
         assert '_st.st_mode & 0o777 == 0o700' in src
-        assert 'os.rename(_name, "v", src_dir_fd=pfd,' in src
+        assert 'os.listdir(tfd) == []' in src
+        assert '_rename_noreplace(pfd, _name, tfd, "v")' in src
         assert 'os.stat("v", dir_fd=tfd,' in src
         assert 'os.unlink("v", dir_fd=tfd)' in src
         # a foreign capture is restored via link(2) — atomic

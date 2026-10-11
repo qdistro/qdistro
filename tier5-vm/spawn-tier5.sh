@@ -479,10 +479,13 @@ _read_owner_record() {
 # co-admin cannot reach inside the dir to replace the entry between
 # stat and unlink (sol r26/r29). The dir is created AND opened through
 # the parent's dir fd (mkdirat/openat), and the opened fd is verified
-# to be OUR directory (root-owned, mode 0700) before anything moves
-# into it — a swapped-in symlink fails O_NOFOLLOW and a swapped-in
-# admin dir fails the uid/mode check, so no create→open window can
-# land the rename on foreign ground (sol r28). A swapped entry fails
+# to be OUR EMPTY directory (euid-owned, mode 0700) before anything
+# moves into it — a swapped-in symlink fails O_NOFOLLOW, a swapped-in
+# admin dir fails the uid/mode check, and a leftover chamber holding
+# a preserved entry fails the empty check, so no create→open window
+# can land the move on foreign ground or clobber a preserved "v"
+# (sol r28/r30); the capture itself is renameat2(RENAME_NOREPLACE).
+# A swapped entry fails
 # verification and its name is restored via link(2) — atomic
 # no-clobber, never overwriting a re-appeared path; directories
 # restore via renameat2(RENAME_NOREPLACE) for the same reason
@@ -549,21 +552,23 @@ try:
                 # swapped-in symlink failed O_NOFOLLOW above, and a
                 # swapped-in foreign dir fails here (a co-admin can
                 # rename entries in _parent but cannot fabricate a
-                # root-owned 0700 dir). Only then is tfd a chamber the
-                # attacker cannot reach into.
+                # root-owned 0700 dir). EMPTY is required too: a
+                # leftover chamber holding a preserved foreign "v" is
+                # also root-owned 0700, and the capture move must
+                # never clobber it (sol r30). Only then is tfd a
+                # chamber the attacker cannot reach into.
                 _st = os.fstat(tfd)
                 if not (stat.S_ISDIR(_st.st_mode)
                         and _st.st_uid == os.geteuid()
-                        and _st.st_mode & 0o777 == 0o700):
+                        and _st.st_mode & 0o777 == 0o700
+                        and os.listdir(tfd) == []):
                     os.close(tfd)
                     tfd = -1
             if tfd >= 0:
-                try:
-                    os.rename(_name, "v", src_dir_fd=pfd,
-                              dst_dir_fd=tfd)
-                except OSError:
-                    pass
-                else:
+                # Capture via renameat2(RENAME_NOREPLACE): even if the
+                # empty check were somehow raced, "v" can never be
+                # overwritten — the move fails instead of clobbering.
+                if _rename_noreplace(pfd, _name, tfd, "v"):
                     try:
                         st = os.stat("v", dir_fd=tfd,
                                      follow_symlinks=False)

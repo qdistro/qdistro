@@ -126,9 +126,11 @@ _read_owner_record() {
 # _unlink_verified <path> <dev-ino> — remove <path> only if it still
 # names the verified inode. The entry is captured into a root-owned
 # 0700 dir created AND opened through the parent's dir fd, the opened
-# fd verified as OURS (euid + mode) before anything moves in — no
-# create→open window (sol r28), and a co-admin cannot reach inside
-# the dir to swap the entry between stat and unlink (sol r29). See
+# fd verified as OUR EMPTY chamber (euid + mode + empty) before
+# anything moves in — no create→open window (sol r28), no leftover-
+# chamber clobber (sol r30), and a co-admin cannot reach inside the
+# dir to swap the entry between stat and unlink (sol r29). The
+# capture move itself is renameat2(RENAME_NOREPLACE). See
 # spawn-tier5.sh for the full contract.
 _unlink_verified() {
     local _p=$1 _want=$2
@@ -181,16 +183,12 @@ try:
                 _st = os.fstat(tfd)
                 if not (stat.S_ISDIR(_st.st_mode)
                         and _st.st_uid == os.geteuid()
-                        and _st.st_mode & 0o777 == 0o700):
+                        and _st.st_mode & 0o777 == 0o700
+                        and os.listdir(tfd) == []):
                     os.close(tfd)
                     tfd = -1
             if tfd >= 0:
-                try:
-                    os.rename(_name, "v", src_dir_fd=pfd,
-                              dst_dir_fd=tfd)
-                except OSError:
-                    pass
-                else:
+                if _rename_noreplace(pfd, _name, tfd, "v"):
                     try:
                         st = os.stat("v", dir_fd=tfd,
                                      follow_symlinks=False)
