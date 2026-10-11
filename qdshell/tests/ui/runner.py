@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import dataclasses
+import json
 import os
 import re
 import shlex
@@ -1541,6 +1542,76 @@ def _describe_scrolled_vm(session: VMSession, surface, first_png: Path,
     )
 
 
+def _mouse_overrides_vm(session: VMSession) -> str:
+    """Read the persisted pointer override map to attest interaction/restore."""
+    result = guest_sh_vm(session, "python3 - <<'PY'\n"
+                         "import json\n"
+                         "with open('/home/admin/.config/qdshell/settings.json') as f:\n"
+                         "    settings = json.load(f)\n"
+                         "print(json.dumps(settings.get('pointer', {}).get("
+                         "'perDeviceOverrides', {}), sort_keys=True))\n"
+                         "PY\n")
+    if result.returncode != 0:
+        raise RuntimeError(f"cannot read mouse overrides: {result.stderr[:250]}")
+    return json.dumps(json.loads(result.stdout.strip()), sort_keys=True)
+
+
+def _capture_mouse_override_vm(session: VMSession) -> str:
+    """Open the VM's real ydotoold mouse override, capture it, then restore."""
+    before = _mouse_overrides_vm(session)
+    # The fixed 1280x800 qdwin GUI profile enumerates the ydotoold virtual
+    # mouse after the QEMU tablet. From the top, 15 wheel ticks put its
+    # Customize switch at (1002, 343). The existing scroll sweep ends at the
+    # bottom, so seek from the top instead of depending on its final offset.
+    wheel_x = int(VM_SCREEN_W * 0.55)
+    wheel_y = int(VM_SCREEN_H * 0.55)
+    switch_x = int(VM_SCREEN_W * 0.783)
+    switch_y = int(VM_SCREEN_H * 0.429)
+    mouse_wheel(session, wheel_x, wheel_y, 30, "up")
+    time.sleep(0.5)
+    mouse_wheel(session, wheel_x, wheel_y, 15, "down")
+    time.sleep(0.7)
+    clicked = False
+    try:
+        mouse_click(session, switch_x, switch_y)
+        clicked = True
+        time.sleep(1.5)  # Settings debounce and the expanded card settle.
+        after = _mouse_overrides_vm(session)
+        if after == before:
+            raise RuntimeError("mouse Customize click did not persist an override")
+
+        first = ARTIFACTS_DIR / "settings_mouse-override.png"
+        screenshot_vm(session, first)
+        first_desc = describe(first)
+        mouse_wheel(session, wheel_x, wheel_y, 5, "down")
+        time.sleep(0.7)
+        second = ARTIFACTS_DIR / "settings_mouse-override-p2.png"
+        screenshot_vm(session, second)
+        second_desc = describe(second)
+        return (f"\n\n=== mouse override enabled ({first.name}) ===\n"
+                f"{first_desc}\n\n=== mouse override scrolled ({second.name}) ===\n"
+                f"{second_desc}")
+    finally:
+        if clicked:
+            # A screenshot/describe/readback can throw after the first click.
+            # Inspect persisted state here rather than relying on where the
+            # exception happened in the try block.
+            current = _mouse_overrides_vm(session)
+            if current != before:
+                # Expanding the device card changes the Flickable's content
+                # height. Five ticks up does not undo five ticks down once
+                # that happens, so seek from the top again before toggling.
+                mouse_wheel(session, wheel_x, wheel_y, 30, "up")
+                time.sleep(0.5)
+                mouse_wheel(session, wheel_x, wheel_y, 15, "down")
+                time.sleep(0.7)
+                mouse_click(session, switch_x, switch_y)
+                time.sleep(1.5)
+                restored = _mouse_overrides_vm(session)
+                if restored != before:
+                    raise RuntimeError("mouse Customize override was not restored")
+
+
 def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
                        ) -> tuple[Path, str]:
     """VM analogue of capture_surface: open via in-VM IPC, shell-capture, describe."""
@@ -1601,6 +1672,8 @@ def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
         if surface.kind == "settings":
             description = _describe_scrolled_vm(session, surface, png_path,
                                               description)
+        if surface.id == "settings_mouse":
+            description += _capture_mouse_override_vm(session)
 
         # Additional views (e.g. the audio panel's Devices tab or an opened
         # settings chooser): every clicked state is described and concatenated
@@ -1832,6 +1905,11 @@ _DESCRIBE_SURFACE_HINTS = {
         "For each display row, inspect the small icon before the slider "
         "and whether the slider looks dimmed or disabled. If its visual "
         "state is ambiguous, say so rather than guessing."
+    ),
+    "panel_tray_degraded": (
+        "Check whether a separate tray drawer surface or attached notch is "
+        "still visible below the right side of the bar. Distinguish an "
+        "unobstructed desktop background from an empty, dimmed drawer."
     ),
 }
 

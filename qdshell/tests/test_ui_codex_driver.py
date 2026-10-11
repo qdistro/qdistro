@@ -42,6 +42,7 @@ def test_ui_codex_driver_pins_luna_and_keeps_rollout(monkeypatch, with_image):
         ("panel_wallpaper.png", "hidden-files eye"),
         ("panel_sessionmenu.png", "corner keybind badge"),
         ("panel_brightness.png", "icon before the slider"),
+        ("panel_tray_degraded.png", "separate tray drawer surface"),
     ],
 )
 def test_ui_describer_details_are_scoped_to_surface(image_name, expected_detail):

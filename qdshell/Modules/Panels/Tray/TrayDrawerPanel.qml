@@ -40,29 +40,26 @@ SmartPanel {
 
   // Auto-close drawer when all items are pinned (drawer becomes empty)
   onTrayValuesChanged: {
-    if (visible && trayValues.length === 0) {
-      close();
-    }
-  }
-
-  // Force refresh panelContent settings when drawer opens
-  onOpened: {
-    if (panelContent && panelContent.settingsVersion !== undefined) {
-      panelContent.settingsVersion++;
-    }
-    // Auto-close must also cover the already-empty case:
-    // onTrayValuesChanged only fires on a transition TO empty, so a
-    // drawer opened while trayValues is [] would otherwise stay open as
-    // a bare stub (observed live in qdshell-ui test_panel_degraded[tray]).
-    if (panelContent) {
-      panelContent.updateFilteredItems();
-      if (trayValues.length === 0)
-        close();
+    if (isPanelOpen && visible && trayValues.length === 0) {
+      closeImmediately();
     }
   }
 
   panelContent: Item {
     id: panelContent
+
+    // SmartPanel.panelContent is a Component, not this loaded Item. Handle
+    // opened here so updateFilteredItems() runs on the live instance. An
+    // already-empty drawer must close before its stub/dimmer is rendered.
+    Connections {
+      target: root
+      function onOpened() {
+        panelContent.settingsVersion++;
+        panelContent.updateFilteredItems();
+        if (root.isPanelOpen && root.trayValues.length === 0)
+          root.closeImmediately();
+      }
+    }
 
     // Settings state (lazy-loaded with panelContent)
     property int settingsVersion: 0
