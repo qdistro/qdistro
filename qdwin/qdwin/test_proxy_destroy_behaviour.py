@@ -42,6 +42,15 @@ Cases:
      already replaced alone.
  13. The full scenario destroys the proxy the production way — by destroying
      the advertiser's wl_resource — not by calling the destroy function.
+ 14. Popup grab cancel (weston_pointer_cancel_grab on VT switch / device
+     release resets nothing itself): the real cancel callback ends the
+     still-installed grab, drops its cached pointer and dismisses once, so
+     the later teardown frees the popup with no pointer->grab left in it.
+ 15. A popup whose grab_active was cleared while its grab is still the
+     installed one: teardown ends it anyway (otherwise pointer->grab would
+     dangle into the freed popup).
+ 16. A popup whose grab was replaced by another grab while grab_active is
+     still set: teardown leaves the foreign grab installed.
 """
 
 from pathlib import Path
@@ -754,6 +763,116 @@ static int scenario_live_proxy_preserved(void)
 	return 0;
 }
 
+/* The popup grab cancel ends its own grab: weston_pointer_cancel_grab()
+ * only calls the callback and leaves pointer->grab alone, so a cancel that
+ * just cleared the flag left pointer->grab pointing into the popup the
+ * client then tore down. */
+static int scenario_popup_grab_cancel(void)
+{
+	struct weston_view curtain = { 0 };
+	struct weston_pointer pointer;
+	struct weston_surface surf;
+	struct wl_resource *res;
+	struct qdwin_toplevel *tl;
+	struct qdwin_popup *p;
+	int before = focus_handler_calls, dismissed = dismissed_sent;
+
+	init_pointer(&pointer);
+	wl_signal_init(&surf.destroy_signal);
+	tl = make_proxy(30, &curtain);
+	p = make_popup(tl, &surf, &pointer, &res);
+	pick_result = NULL;
+
+	/* weston_pointer_cancel_grab(): pointer->grab->interface->cancel only. */
+	qdwin_popup_grab_cancel(pointer.grab);
+
+	CHECK(pointer.grab == &pointer.default_grab,
+	      "popup grab cancel left the popup grab installed");
+	CHECK(focus_handler_calls == before + 1,
+	      "popup grab cancel did not end the grab through end_grab");
+	CHECK(!p->grab_active, "popup grab cancel left grab_active set");
+	CHECK(p->grab.pointer == NULL,
+	      "popup grab cancel kept a pointer weston may free with its seat");
+	CHECK(dismissed_sent == dismissed + 1,
+	      "popup grab cancel did not dismiss the popup once");
+
+	/* The client answers the dismissal by destroying its popup object. */
+	wl_resource_destroy(res);
+	CHECK(tl->popup == NULL, "the popup outlived its resource");
+	CHECK(pointer.grab == &pointer.default_grab,
+	      "teardown after cancel touched the pointer's grab");
+	CHECK(focus_handler_calls == before + 1,
+	      "teardown after cancel ended a grab a second time");
+	free(res);
+	wl_list_remove(&tl->link);
+	free(tl);
+	return 0;
+}
+
+/* Teardown ends a popup grab that is still installed even with grab_active
+ * clear: the flag is not what keeps pointer->grab out of freed memory. */
+static int scenario_popup_teardown_installed_flag_clear(void)
+{
+	struct weston_view curtain = { 0 };
+	struct weston_pointer pointer;
+	struct weston_surface surf;
+	struct wl_resource *res;
+	struct qdwin_toplevel *tl;
+	struct qdwin_popup *p;
+	int before = focus_handler_calls;
+
+	init_pointer(&pointer);
+	wl_signal_init(&surf.destroy_signal);
+	tl = make_proxy(31, &curtain);
+	p = make_popup(tl, &surf, &pointer, &res);
+	p->grab_active = 0;
+	pick_result = NULL;
+
+	wl_resource_destroy(res);
+
+	CHECK(pointer.grab == &pointer.default_grab,
+	      "teardown left a still-installed popup grab pointing at the "
+	      "freed popup because grab_active was clear");
+	CHECK(focus_handler_calls == before + 1,
+	      "teardown did not end the installed popup grab via end_grab");
+	free(res);
+	wl_list_remove(&tl->link);
+	free(tl);
+	return 0;
+}
+
+/* weston_pointer_start_grab() replaced the popup grab without cancelling
+ * it, so grab_active is still set: teardown must not end the foreign grab. */
+static int scenario_popup_teardown_grab_replaced(void)
+{
+	struct weston_view curtain = { 0 };
+	struct weston_pointer pointer;
+	struct weston_pointer_grab foreign = { .interface = &foreign_grab_iface };
+	struct weston_surface surf;
+	struct wl_resource *res;
+	struct qdwin_toplevel *tl;
+	int before = focus_handler_calls;
+
+	init_pointer(&pointer);
+	wl_signal_init(&surf.destroy_signal);
+	tl = make_proxy(32, &curtain);
+	make_popup(tl, &surf, &pointer, &res);
+	foreign.pointer = &pointer;
+	pointer.grab = &foreign;
+	pick_result = NULL;
+
+	wl_resource_destroy(res);
+
+	CHECK(pointer.grab == &foreign,
+	      "popup teardown uninstalled a grab it did not own");
+	CHECK(focus_handler_calls == before,
+	      "popup teardown ran end_grab on a foreign grab");
+	free(res);
+	wl_list_remove(&tl->link);
+	free(tl);
+	return 0;
+}
+
 static int scenario_pending_and_idempotence(void)
 {
 	struct weston_view other_curtain = { 0 };
@@ -822,8 +941,14 @@ int main(void)
 		return rc;
 	if ((rc = scenario_pending_and_idempotence()))
 		return rc;
+	if ((rc = scenario_popup_grab_cancel()))
+		return rc;
+	if ((rc = scenario_popup_teardown_installed_flag_clear()))
+		return rc;
+	if ((rc = scenario_popup_teardown_grab_replaced()))
+		return rc;
 
-	printf("ok: nested-proxy destroy teardown (13 cases)\n");
+	printf("ok: nested-proxy destroy teardown (16 cases)\n");
 	return 0;
 }
 """
@@ -834,6 +959,8 @@ QDWIN_FNS = [
     ("void", "qdwin_proxy_default_grab_focus"),
     ("void", "qdwin_move_grab_end_if_installed"),
     ("void", "qdwin_move_grab_end_for"),
+    ("void", "qdwin_popup_grab_cancel"),
+    ("void", "qdwin_popup_grab_end_if_installed"),
     ("void", "qdwin_popup_teardown"),
     ("void", "qdwin_popup_resource_destroyed"),
     ("void", "qdwin_popup_surface_destroyed"),

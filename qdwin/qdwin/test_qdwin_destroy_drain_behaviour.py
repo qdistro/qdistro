@@ -691,6 +691,7 @@ SPLICED = [
     "qdwin_view_stream_release_server_state",
     "qdwin_view_stream_terminate",
     "qdwin_toplevel_release_dependents",
+    "qdwin_popup_grab_end_if_installed",
     "qdwin_popup_teardown",
     "qdwin_move_grab_end_if_installed",
     "qdwin_move_grab_end_for",
@@ -1416,9 +1417,6 @@ static int case_grab_suppression(void)
 	struct qdwin *q = q_new();
 	qdwin_singleton = q;
 
-	struct weston_pointer_grab foreign = { .pointer = &main_pointer };
-	main_pointer.grab = &foreign;
-
 	/* Stage 1 severs reach-back before anything ends a grab. */
 	qdwin_singleton = NULL;
 	struct qdwin_toplevel *tl = tl_new(q, 11);
@@ -1426,7 +1424,10 @@ static int case_grab_suppression(void)
 	tl->popup = calloc(1, sizeof *tl->popup);
 	tl->popup->parent = tl;
 	tl->popup->grab_active = 1;
+	/* Installed, as weston_pointer_start_grab() leaves it: popup teardown
+	 * only ends the popup grab while it is still the pointer's grab. */
 	tl->popup->grab.pointer = &main_pointer;
+	main_pointer.grab = &tl->popup->grab;
 	tl->popup->resource = res_new(tl->popup, NULL);
 	struct wl_resource *popup_res = tl->popup->resource;
 	probe_dsurf_destroy = NULL;

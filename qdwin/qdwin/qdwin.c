@@ -4397,10 +4397,22 @@ static void
 qdwin_popup_grab_cancel(struct weston_pointer_grab *grab)
 {
 	struct qdwin_popup *p = wl_container_of(grab, p, grab);
-	/* libweston has cancelled the grab; mark it inactive so teardown
-	 * doesn't try to end it again. Defer actual teardown to the
+	/* weston_pointer_cancel_grab() (pointer-device release on VT switch
+	 * or seat teardown, keyboard focus-out) only invokes this callback —
+	 * it does NOT reset pointer->grab. Leaving the grab installed while
+	 * the client tears the popup down would leave pointer->grab pointing
+	 * into the freed qdwin_popup: a use-after-free on the next pointer
+	 * event. End it ourselves (end_grab restores the default grab),
+	 * guarded on ours still being the installed grab, as
+	 * qdwin_move_grab_cancel does. Then drop the cached pointer: the
+	 * grab is over, and weston may free that pointer together with its
+	 * seat right after this cancel (weston_seat_release), so teardown
+	 * must not dereference it. Defer the popup's own teardown to the
 	 * client resource-destroy path (same reasoning as button). */
 	p->grab_active = 0;
+	if (grab->pointer && grab->pointer->grab == grab)
+		weston_pointer_end_grab(grab->pointer);
+	grab->pointer = NULL;
 	if (p->resource)
 		qdwin_popup_v1_send_dismissed(p->resource);
 }
@@ -5041,13 +5053,28 @@ qdwin_popup_surface_destroyed(struct wl_listener *listener, void *data)
 	qdwin_popup_teardown(p);
 }
 
+/* End the popup's pointer grab only while it is still the installed grab,
+ * whatever grab_active says. weston_pointer_start_grab() replaces
+ * pointer->grab without cancelling the previous grab, so:
+ *  - a grab that was replaced (another toplevel's popup, a move or
+ *    confine grab) must NOT be ended — that would end someone else's;
+ *  - a grab still installed must be ended before the popup is freed even
+ *    if grab_active was cleared, or pointer->grab dangles into the freed
+ *    qdwin_popup. */
+static void
+qdwin_popup_grab_end_if_installed(struct qdwin_popup *p)
+{
+	struct weston_pointer *pointer = p->grab.pointer;
+
+	p->grab_active = 0;
+	if (pointer && pointer->grab == &p->grab)
+		weston_pointer_end_grab(pointer);
+}
+
 static void
 qdwin_popup_teardown(struct qdwin_popup *p)
 {
-	if (p->grab_active) {
-		weston_pointer_end_grab(p->grab.pointer);
-		p->grab_active = 0;
-	}
+	qdwin_popup_grab_end_if_installed(p);
 	if (p->parent && p->parent->popup == p)
 		p->parent->popup = NULL;
 	if (p->view) {
