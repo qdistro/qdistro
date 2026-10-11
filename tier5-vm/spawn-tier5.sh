@@ -450,6 +450,58 @@ PY
 # renders into a private 0700 dir under the admin runtime. (A local definition
 # here would be shadowed by that source anyway.)
 
+# _read_owner_record <path> — read "<appId> <dev> <ino>" plus the
+# record file's OWN dev/ino (_sfid) through an open fd, so contents and
+# identity provably come from the SAME inode. A check→open swap can
+# hand us a foreign file, but _sfid then describes what we ACTUALLY
+# read and _unlink_verified below still removes only the inode that
+# passed the checks — the pair can never be split across two files
+# (sol r25). Sets _sapp _sident _sfid; empty _sapp means not a
+# readable regular file — callers treat that as unproven.
+_read_owner_record() {
+    _sapp="" _sident="" _sfid=""
+    local _p=$1 _rfd
+    [ -f "$_p" ] && [ ! -L "$_p" ] || return 0
+    # NB: `exec {_rfd}< file 2>/dev/null` would apply 2>/dev/null to the
+    # SHELL permanently (redirections on bare exec are not scoped) —
+    # the brace group carries the error suppression instead.
+    { exec {_rfd}< "$_p"; } 2>/dev/null || return 0
+    read -r _sapp _sident <&$_rfd 2>/dev/null || true
+    _sfid=$(stat -Lc '%d %i' "/proc/$$/fd/$_rfd" 2>/dev/null)
+    exec {_rfd}<&-
+}
+
+# _unlink_verified <path> <dev-ino> — remove <path> only if it still
+# names the verified inode. A check→rm window lets a co-admin swap the
+# entry so `rm` deletes the replacement (sol r25): rename(2) instead
+# atomically CAPTURES whatever the path names into a root-owned
+# private same-fs dir, we re-verify the captured inode, and unlink it
+# there. A swapped entry fails verification and its name is restored
+# (mv -n — never clobbering a re-appeared path); if restore fails it
+# stays preserved inside our dir and we warn. rc 0 = removed,
+# 1 = kept.
+_unlink_verified() {
+    local _p=$1 _want=$2 _d _v _got
+    [ -n "$_want" ] || return 1
+    _d=$(mktemp -d "$(dirname "$_p")/.t5u.XXXXXX" 2>/dev/null) || return 1
+    _v="$_d/v"
+    if ! mv -T -- "$_p" "$_v" 2>/dev/null; then
+        rmdir "$_d" 2>/dev/null
+        return 1
+    fi
+    _got=$(stat -c '%d %i' "$_v" 2>/dev/null)
+    if [ -L "$_v" ] || [ -z "$_got" ] || [ "$_got" != "$_want" ]; then
+        if mv -n -T -- "$_v" "$_p" 2>/dev/null; then
+            rmdir "$_d" 2>/dev/null
+        else
+            echo "[tier5] WARN: preserved foreign entry at $_v" >&2
+        fi
+        return 1
+    fi
+    rm -f "$_v" 2>/dev/null
+    rmdir "$_d" 2>/dev/null
+}
+
 NO_GPU="${TIER5_NO_GPU:-1}"
 DEBUG="${TIER5_DEBUG:-0}"
 
@@ -545,7 +597,7 @@ else
             install -d -m 0700 "$_holddir" 2>/dev/null || true
             _holdf="$_holddir/hold-$base"
             [ -f "$_holdf" ] || install -m 0600 /dev/null "$_holdf" 2>/dev/null
-            exec {hfd}>>"$_holdf" 2>/dev/null || continue
+            { exec {hfd}>>"$_holdf"; } 2>/dev/null || continue
             flock -n -x "$hfd" 2>/dev/null || { exec {hfd}>&-; continue; }
             # Domain still alive? Only a CONFIRMED-dead oracle verdict
             # permits reaping — live OR unverifiable skips, so a false
@@ -568,13 +620,12 @@ else
             # relaunches under its own name. A missing/unreadable
             # sidecar, an inode mismatch, a foreign derivation, or an
             # unverifiable verdict all preserve (sol r12–r19).
-            _sapp="" _sident=""
+            _read_owner_record "$overlay.appid"
             [ -f "$overlay" ] && [ ! -L "$overlay" ] \
-                && [ -f "$overlay.appid" ] && [ ! -L "$overlay.appid" ] \
-                && read -r _sapp _sident 2>/dev/null \
-                    < "$overlay.appid" || true
-            [ -n "$_sapp" ] || { exec {hfd}>&-; continue; }
-            [ "$_sident" = "$(stat -c '%d %i' "$overlay" 2>/dev/null)" ] \
+                || { exec {hfd}>&-; continue; }
+            _oino=$(stat -c '%d %i' "$overlay" 2>/dev/null)
+            [ -n "$_sapp" ] && [ -n "$_oino" ] \
+                && [ "$_sident" = "$_oino" ] \
                 || { exec {hfd}>&-; continue; }
             [ "$(tier5_derived_name "$_sapp")" = "$base" ] \
                 || { exec {hfd}>&-; continue; }
@@ -603,21 +654,30 @@ else
             # during the settle) and must still bind this inode,
             # re-derive to $base, and still be manifest-retired
             # (sol r16/r17/r19).
-            _sapp="" _sident=""
+            _read_owner_record "$overlay.appid"
             [ -f "$overlay" ] && [ ! -L "$overlay" ] \
-                && [ -f "$overlay.appid" ] && [ ! -L "$overlay.appid" ] \
-                && read -r _sapp _sident 2>/dev/null \
-                    < "$overlay.appid" || true
-            [ -n "$_sapp" ] || { exec {hfd}>&-; continue; }
-            [ "$_sident" = "$(stat -c '%d %i' "$overlay" 2>/dev/null)" ] \
+                || { exec {hfd}>&-; continue; }
+            _oino=$(stat -c '%d %i' "$overlay" 2>/dev/null)
+            [ -n "$_sapp" ] && [ -n "$_oino" ] \
+                && [ "$_sident" = "$_oino" ] \
                 || { exec {hfd}>&-; continue; }
             [ "$(tier5_derived_name "$_sapp")" = "$base" ] \
                 || { exec {hfd}>&-; continue; }
             manifest_app_state "$_sapp" "$DISK_BASE"; _ms=$?
             [ "$_ms" -eq 1 ] || { exec {hfd}>&-; continue; }
-            rm -f "$overlay" "$overlay.appid" 2>/dev/null || true
+            # Check→rm is a swap window: a co-admin can replace the
+            # verified entry so the rm deletes the replacement
+            # (sol r25). _unlink_verified captures the entry by rename
+            # and removes only the inode that passed these checks.
+            if _unlink_verified "$overlay" "$_oino"; then
+                _unlink_verified "$overlay.appid" "$_sfid" \
+                    2>/dev/null || true
+                echo "[tier5] reaped orphan overlay $overlay" >&2
+            else
+                echo "[tier5] orphan $base swapped during reap —" >&2
+                echo "        keeping overlay" >&2
+            fi
             exec {hfd}>&-
-            echo "[tier5] reaped orphan overlay $overlay" >&2
         done
     fi
     # Make sure admin can read the base disk (qemu-img create -b reads it).
@@ -695,8 +755,17 @@ fi
 CLIENT_LOG="$ADMIN_RUNTIME/tier5-${SILO_TAG}-${APP_BASENAME}-${LAUNCH_TOKEN:0:8}-client.log"
 SERVER_LOG="$ADMIN_RUNTIME/tier5-${SILO_TAG}-${APP_BASENAME}-${LAUNCH_TOKEN:0:8}-server.log"
 mkdir -p "$ADMIN_RUNTIME"
-: >"$CLIENT_LOG" >"$SERVER_LOG"
-chown "$ADMIN_USER" "$CLIENT_LOG" "$SERVER_LOG" 2>/dev/null || true
+# Log files are created AS ADMIN — a root-opened `>` (or a root chown)
+# on a path inside admin's runtime dir would follow a swapped symlink
+# at a privilege the planter does not hold; as admin the worst a swap
+# reaches is a file admin could truncate anyway (sol r25). For the
+# same reason every waypipe/qga redirect below is opened INSIDE the
+# admin shell, not by the root shell wrapping runuser.
+if ! run_as_admin sh -c ': >"$1" && : >"$2"' _ \
+        "$CLIENT_LOG" "$SERVER_LOG"; then
+    echo "[tier5] FAIL: cannot create waypipe logs under $ADMIN_RUNTIME" >&2
+    exit 4
+fi
 
 # --- tier-5 VM lifecycle policy (graceful shutdown / idle timeout / low-mem) --
 # How a finished/closed tier-5 VM is torn down. Policy is PER-APP: each value
@@ -1067,17 +1136,24 @@ cleanup() {
                         # symlinked, or unreadable one is an
                         # unrecognized record and is preserved
                         # (sol r22).
-                        _sapp="" _sident=""
-                        [ -f "$DISK.appid" ] && [ ! -L "$DISK.appid" ] \
-                            && read -r _sapp _sident 2>/dev/null \
-                                < "$DISK.appid" || true
+                        _read_owner_record "$DISK.appid"
                         if [ -f "$DISK" ] && [ ! -L "$DISK" ]; then
+                            _dino=$(stat -c '%d %i' "$DISK" 2>/dev/null)
                             if [ "$_sapp" != "$POLICY_KEY" ] \
-                                || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ]; then
+                                || [ -z "$_dino" ] \
+                                || [ "$_sident" != "$_dino" ]; then
                                 domain_reaped=0
                                 echo "[tier5] WARN: keeping $DISK — overlay owner unproven" >&2
+                            elif _unlink_verified "$DISK" "$_dino"; then
+                                # verified-unlink the record too — a
+                                # check→rm swap could otherwise delete a
+                                # foreign replacement (sol r25)
+                                _unlink_verified "$DISK.appid" "$_sfid" \
+                                    2>/dev/null || true
                             else
-                                rm -f "$DISK" "$DISK.appid" 2>/dev/null || true
+                                domain_reaped=0
+                                echo "[tier5] WARN: keeping $DISK — it" >&2
+                                echo "        changed under verification" >&2
                             fi
                         elif [ -e "$DISK" ] || [ -L "$DISK" ]; then
                             # A symlinked or non-regular $DISK is foreign
@@ -1089,9 +1165,9 @@ cleanup() {
                             echo "        regular file (foreign construction)" >&2
                         elif [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
                             if [ "$_sapp" = "$POLICY_KEY" ] \
-                                && [ -f "$DISK.appid" ] \
-                                && [ ! -L "$DISK.appid" ]; then
-                                rm -f "$DISK.appid" 2>/dev/null || true
+                                && [ -n "$_sfid" ]; then
+                                _unlink_verified "$DISK.appid" "$_sfid" \
+                                    || domain_reaped=0
                             else
                                 domain_reaped=0
                                 echo "[tier5] WARN: keeping $DISK.appid —" >&2
@@ -1168,7 +1244,7 @@ if [ "$USE_SECCTX" = "1" ]; then
     LAUNCHREC_TOKEN="$(gen_launch_token "[tier5] FAIL")"
     LAUNCHREC_FILE_ID="$(gen_launch_token "[tier5] FAIL")"
     LAUNCHREC_PATH="$ADMIN_RUNTIME/qdistro-tier5-launchrec-$LAUNCHREC_FILE_ID.pid"
-    rm -f "$LAUNCHREC_PATH" 2>/dev/null || true
+    run_as_admin rm -f "$LAUNCHREC_PATH" 2>/dev/null || true
     SECCTX_WRAP=(env QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
         QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH"
         QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN"
@@ -1183,7 +1259,9 @@ runuser -u "$ADMIN_USER" -- env \
     WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
     XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
     HOME="$ADMIN_HOME" \
-    "${SECCTX_WRAP[@]}" waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
+    "${SECCTX_WRAP[@]}" \
+    sh -c 'exec >"$0" 2>&1; exec "$@"' \
+    "$CLIENT_LOG" waypipe "${CLIENT_OPTS[@]}" client &
 CLIENT_PID=$!
 
 # Permission-lineage: register the inner waypipe-client pid (published by
@@ -1218,7 +1296,8 @@ if [ "$MODE" = "loopback" ]; then
         HOME="$ADMIN_HOME" \
         USER="$ADMIN_USER" \
         LOGNAME="$ADMIN_USER" \
-        waypipe "${SERVER_OPTS[@]}" server -- "$@" 2>"$SERVER_LOG" &
+        sh -c 'exec 2>"$0"; exec "$@"' \
+        "$SERVER_LOG" waypipe "${SERVER_OPTS[@]}" server -- "$@" &
     SERVER_PID=$!
 
     wait "$SERVER_PID" 2>/dev/null
@@ -1339,9 +1418,7 @@ create_domain() {
     # its record (the create goes through .partial), so an unproven
     # file here is not ours to delete either (sol r12/r19/r20/r21).
     if [ -f "$DISK" ] && [ ! -L "$DISK" ]; then
-        _sapp="" _sident=""
-        [ -f "$DISK.appid" ] && [ ! -L "$DISK.appid" ] \
-            && read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
+        _read_owner_record "$DISK.appid"
         _back=$(run_as_admin qemu-img info --output=json "$DISK" \
             2>/dev/null \
             | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
@@ -1362,10 +1439,9 @@ create_domain() {
         # a foreign record, a symlink, or an unreadable/empty file is
         # an unrecognized owner record — preserve it and refuse, never
         # overwrite it (sol r21/r22).
-        _sapp="" _sident="" _recover=""
+        _recover=""
         if [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
-            [ -f "$DISK.appid" ] && [ ! -L "$DISK.appid" ] \
-                && read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
+            _read_owner_record "$DISK.appid"
             if [ "$_sapp" != "$POLICY_KEY" ]; then
                 echo "[tier5] FAIL: $DISK.appid holds a foreign or" >&2
                 echo "        unreadable record — preserving it" >&2
@@ -1380,12 +1456,33 @@ create_domain() {
             done
         fi
         if [ -n "$_recover" ]; then
-            if ln -T "$_recover" "$DISK" 2>/dev/null \
-                    && [ "$DISK" -ef "$_recover" ]; then
-                rm -f "$_recover" 2>/dev/null
-                echo "[tier5] recovered crashed create at $DISK" >&2
+            # The scan→link window can substitute the partial's path:
+            # ln -T then links the REPLACEMENT inode and -ef would still
+            # verify (it compares to whatever the path held at link
+            # time). The only trustworthy check is against the sidecar's
+            # recorded dev/ino — the installed disk must BE the bound
+            # inode, plus a provenance recheck before we ever start it
+            # (sol r25). On mismatch drop only OUR link name; the
+            # planted file keeps its own path.
+            if ln -T "$_recover" "$DISK" 2>/dev/null; then
+                _rino=$(stat -c '%d %i' "$DISK" 2>/dev/null)
+                _rback=$(run_as_admin qemu-img info --output=json "$DISK" \
+                    2>/dev/null \
+                    | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
+                if [ "$_rino" = "$_sident" ] && [ "$_rback" = "$DISK_BASE" ]; then
+                    [ "$_recover" -ef "$DISK" ] \
+                        && rm -f "$_recover" 2>/dev/null
+                    echo "[tier5] recovered crashed create at $DISK" >&2
+                else
+                    # drop only OUR link name, only while it still
+                    # points at the inode we linked — a re-swap is
+                    # foreign and is restored (sol r25)
+                    _unlink_verified "$DISK" "$_rino" 2>/dev/null || true
+                    echo "[tier5] FAIL: recovered partial was swapped" >&2
+                    echo "        — refusing to boot an unproven disk" >&2
+                    exit 4
+                fi
             else
-                rm -f "$_recover" 2>/dev/null
                 echo "[tier5] FAIL: $DISK appeared during create" >&2
                 echo "        recovery — refusing to clobber it" >&2
                 exit 4
@@ -1467,7 +1564,7 @@ _create_domain_define() {
         -e "s|__MEM_KIB__|$MEM_KIB|g" \
         -e "s|__CID__|$CID|g" \
         -e "s|__DISK_PATH__|$DISK|g" \
-        "$TMPL" >"$TMP_XML"
+        "$TMPL" | run_as_admin tee "$TMP_XML" >/dev/null
 
     if grep -q '__[A-Z_]*__' "$TMP_XML"; then
         echo "[tier5] FAIL: unsubstituted markers in domain XML:" >&2
@@ -1657,7 +1754,9 @@ done
 
 QGA_REQ="{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/usr/local/bin/qdistro-tier5-publisher.sh\",\"arg\":[$QGA_ARGS_JSON],\"capture-output\":true}}"
 
-QGA_REPLY=$(run_as_admin virsh qemu-agent-command "$VM_NAME" "$QGA_REQ" 2>"$SERVER_LOG" || true)
+QGA_REPLY=$(run_as_admin sh -c \
+    'virsh qemu-agent-command "$1" "$2" 2>>"$3"' \
+    _ "$VM_NAME" "$QGA_REQ" "$SERVER_LOG" || true)
 if [ -z "$QGA_REPLY" ] || ! echo "$QGA_REPLY" | grep -q '"pid"'; then
     echo "[tier5] FAIL: guest-exec didn't return a pid" >&2
     echo "[tier5] reply: $QGA_REPLY" >&2

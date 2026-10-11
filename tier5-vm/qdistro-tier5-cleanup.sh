@@ -98,6 +98,46 @@ print("t5-" + (stub or "vmapp") + f"-{fnv:08x}{djb:08x}")
 PY
 }
 
+# _read_owner_record / _unlink_verified — same contracts as
+# spawn-tier5.sh: the record read binds contents and file-identity to
+# one open fd (a swap can't split the pair), and the unlink captures
+# the entry by rename into a private same-fs dir so only the verified
+# inode is ever removed — a check→rm swap restores the replacement
+# instead of deleting it (sol r25).
+_read_owner_record() {
+    _sapp="" _sident="" _sfid=""
+    local _p=$1 _rfd
+    [ -f "$_p" ] && [ ! -L "$_p" ] || return 0
+    # NB: 2>/dev/null on bare exec would apply to the shell
+    # permanently — the brace group carries the suppression instead.
+    { exec {_rfd}< "$_p"; } 2>/dev/null || return 0
+    read -r _sapp _sident <&$_rfd 2>/dev/null || true
+    _sfid=$(stat -Lc '%d %i' "/proc/$$/fd/$_rfd" 2>/dev/null)
+    exec {_rfd}<&-
+}
+
+_unlink_verified() {
+    local _p=$1 _want=$2 _d _v _got
+    [ -n "$_want" ] || return 1
+    _d=$(mktemp -d "$(dirname "$_p")/.t5u.XXXXXX" 2>/dev/null) || return 1
+    _v="$_d/v"
+    if ! mv -T -- "$_p" "$_v" 2>/dev/null; then
+        rmdir "$_d" 2>/dev/null
+        return 1
+    fi
+    _got=$(stat -c '%d %i' "$_v" 2>/dev/null)
+    if [ -L "$_v" ] || [ -z "$_got" ] || [ "$_got" != "$_want" ]; then
+        if mv -n -T -- "$_v" "$_p" 2>/dev/null; then
+            rmdir "$_d" 2>/dev/null
+        else
+            echo "[tier5-cleanup] WARN: preserved foreign entry at $_v" >&2
+        fi
+        return 1
+    fi
+    rm -f "$_v" 2>/dev/null
+    rmdir "$_d" 2>/dev/null
+}
+
 # domain_defined_state — rc 0 defined, 1 CONFIRMED absent, 2 cannot
 # determine. Uses `virsh list --all --name`: an enumeration that
 # succeeds is authoritative; ANY failure is unverifiable. Dominfo
@@ -225,9 +265,8 @@ if [ -e "$DISK" ] || [ -L "$DISK" ]; then
         echo "        (backing '${_back:-<unknown>}') — keeping it" >&2
         exit 5
     fi
-    _sapp="" _sident=""
-    [ -f "$DISK.appid" ] && [ ! -L "$DISK.appid" ] \
-        && read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
+    _read_owner_record "$DISK.appid"
+    _dino=$(stat -c '%d %i' "$DISK" 2>/dev/null)
     if [ -z "$_sapp" ]; then
         if [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
             echo "[tier5-cleanup] FAIL: $DISK.appid is not a readable" >&2
@@ -245,7 +284,7 @@ if [ -e "$DISK" ] || [ -L "$DISK" ]; then
         echo "[tier5-cleanup] WARN: $DISK has no appId sidecar —" >&2
         echo "        unowned orphan (explicitly allowed)" >&2
     else
-        if [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ]; then
+        if [ -z "$_dino" ] || [ "$_sident" != "$_dino" ]; then
             echo "[tier5-cleanup] FAIL: $DISK.appid does not bind this" >&2
             echo "        disk (copied or stale record) — keeping it" >&2
             exit 5
@@ -259,8 +298,18 @@ if [ -e "$DISK" ] || [ -L "$DISK" ]; then
     fi
     qemu_pids_for_domain; _lv=$?
     if [ "$_lv" -eq 1 ]; then
-        rm -f "$DISK" "$DISK.appid"
-        echo "[tier5-cleanup] removed $DISK (bound to '$_sapp')"
+        # Check→rm is a swap window (sol r25): verified-unlink removes
+        # only the inode these checks passed; for the ownerless opt-in
+        # path _dino still binds the disk itself, and a sidecar that
+        # never existed simply has nothing to unlink.
+        if _unlink_verified "$DISK" "$_dino"; then
+            _unlink_verified "$DISK.appid" "${_sfid:-}" 2>/dev/null || true
+            echo "[tier5-cleanup] removed $DISK (bound to '$_sapp')"
+        else
+            echo "[tier5-cleanup] FAIL: $DISK changed under" >&2
+            echo "        verification — keeping it" >&2
+            exit 5
+        fi
     else
         echo "[tier5-cleanup] FAIL: $VM_NAME qemu live or unverifiable" >&2
         echo "        — keeping $DISK" >&2

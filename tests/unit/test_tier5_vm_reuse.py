@@ -17,6 +17,7 @@ import re
 ROOT = Path(__file__).resolve().parents[2]
 SPAWN = (ROOT / "tier5-vm/spawn-tier5.sh").read_text()
 CLEANUP = (ROOT / "tier5-vm/qdistro-tier5-cleanup.sh").read_text()
+T4SPAWN = (ROOT / "tier4-vm/spawn-tier4.sh").read_text()
 VMAPS = (ROOT / "qdshell/Services/Qdistro/VMApps.qml").read_text()
 PROVIDER = (
     ROOT / "qdshell/Modules/Panels/Launcher/Providers/VMAppsProvider.qml"
@@ -453,7 +454,7 @@ def test_overlay_reuse_requires_an_inode_bound_owner_record():
     #          record is never our residue — not ours to boot OR to
     #          delete (sol r20)
     body = _section("create_domain")
-    assert 'read -r _sapp _sident' in body
+    assert '_read_owner_record "$DISK.appid"' in body
     assert '[ "$_sident" != "$(stat -c \'%d %i\' "$DISK"' in body
     assert '"backing-filename"' in body
     assert 'refusing to boot an unproven disk' in body
@@ -477,8 +478,9 @@ def test_overlay_reuse_requires_an_inode_bound_owner_record():
     assert '_claim_ds' not in body
     assert 'keeping $DISK.appid' in body
     assert 'foreign or unreadable record' in body
-    assert '[ ! -L "$DISK.appid" ]' in body
-    assert 'rm -f "$DISK.appid"' in body
+    assert '_read_owner_record "$DISK.appid"' in body
+    assert '_unlink_verified "$DISK.appid" "$_sfid"' in body
+    assert '_unlink_verified "$DISK" "$_dino"' in body
     # a symlinked or non-regular $DISK is foreign construction — a
     # symlink to the bound inode would satisfy the dev/ino check while
     # the path is unowned: preserve BOTH the path and its record
@@ -542,13 +544,25 @@ def test_create_goes_through_a_recoverable_partial():
     assert 'ln -T "$_recover" "$DISK"' in rec
     assert 'refusing to clobber' in rec
     assert 'holds a foreign or' in rec
-    assert '[ ! -L "$DISK.appid" ]' in rec
+    assert '[ -L "$DISK.appid" ]' in rec
     # the record refuse precedes any write to $DISK.appid
     assert rec.index('holds a foreign or') \
         < rec.index('_create_overlay_disk')
-    assert 'rm -f "$DISK" "$DISK.appid"' in SPAWN
-    assert 'rm -f "$overlay" "$overlay.appid"' in SPAWN
-    assert 'rm -f "$DISK" "$DISK.appid"' in CLEANUP
+    # the scan→link window can substitute the partial's path: the
+    # installed disk is re-verified against the sidecar's recorded
+    # dev/ino AND its backing before it may boot, the source name is
+    # dropped only while it still names that inode, and a swapped link
+    # is dropped by verified-unlink (sol r25)
+    assert '_rino=$(stat -c \'%d %i\' "$DISK"' in rec
+    assert '[ "$_rino" = "$_sident" ]' in rec
+    assert '"$_recover" -ef "$DISK"' in rec
+    assert '_unlink_verified "$DISK" "$_rino"' in rec
+    # teardown, reaper and cleanup all unlink via the rename-capture
+    # verified unlink — never a bare check-then-rm on a mutable name
+    # (sol r25)
+    assert '_unlink_verified "$DISK"' in SPAWN
+    assert '_unlink_verified "$overlay"' in SPAWN
+    assert '_unlink_verified "$DISK"' in CLEANUP
 
 
 def test_reaper_preserves_owned_orphan_overlays():
@@ -571,17 +585,20 @@ def test_reaper_preserves_owned_orphan_overlays():
     # empty one preserves, and it must BOTH bind the overlay's own
     # dev/ino (a copied record is not proof — sol r19) AND re-derive
     # to the disk's name — a t5-shaped name is only a shape (sol r17)
-    assert 'read -r _sapp _sident' in reaper
+    assert '_read_owner_record "$overlay.appid"' in reaper
     assert '[ -n "$_sapp" ]' in reaper
-    assert '[ "$_sident" = "$(stat -c \'%d %i\' "$overlay"' in reaper
+    assert '[ "$_sident" = "$_oino" ]' in reaper
+    assert '_oino=$(stat -c \'%d %i\' "$overlay"' in reaper
     assert '[ "$(tier5_derived_name "$_sapp")" = "$base" ]' in reaper
     # a symlinked overlay or record is foreign construction, not
-    # proof — preserve (sol r23)
+    # proof — preserve (sol r23); the record read itself requires a
+    # regular non-symlink file inside _read_owner_record
     assert '[ ! -L "$overlay" ]' in reaper
-    assert '[ ! -L "$overlay.appid" ]' in reaper
-    # the ownership gate sits between confirmed-absent and the rm
+    assert '[ ! -L "$_p" ]' in SPAWN
+    # the ownership gate sits between confirmed-absent and the
+    # verified unlink
     assert reaper.index('manifest_app_state') \
-        < reaper.index('rm -f "$overlay"')
+        < reaper.index('_unlink_verified "$overlay"')
 
 
 def test_reaper_only_touches_tier5_namespace():
@@ -596,7 +613,8 @@ def test_reaper_only_touches_tier5_namespace():
     assert '[0-9a-f]{16}' in reaper
     # the namespace gate precedes the backing probe and the rm
     assert reaper.index('$base" =~') < reaper.index('qemu-img info')
-    assert reaper.index('$base" =~') < reaper.index('rm -f "$overlay"')
+    assert reaper.index('$base" =~') \
+        < reaper.index('_unlink_verified "$overlay"')
 
 
 def test_reaper_reverifies_after_settle():
@@ -612,17 +630,20 @@ def test_reaper_reverifies_after_settle():
     assert tail.count("domain_defined_state") >= 1
     assert tail.count("manifest_app_state") >= 1
     assert tail.index("domain_defined_state") \
-        < tail.index('rm -f "$overlay"')
+        < tail.index('_unlink_verified "$overlay"')
     assert tail.index("manifest_app_state") \
-        < tail.index('rm -f "$overlay"')
+        < tail.index('_unlink_verified "$overlay"')
     # a sidecar that APPEARED/changed/vanished during the settle is
     # re-read and re-validated, not assumed — inode binding included
     # (sol r16/r17/r19)
-    assert tail.count('read -r _sapp _sident') >= 1
+    assert tail.count('_read_owner_record') >= 1
     assert tail.count('tier5_derived_name "$_sapp"') >= 1
     assert tail.count('stat -c \'%d %i\' "$overlay"') >= 1
-    # sidecar removal rides along with the overlay rm
-    assert 'rm -f "$overlay" "$overlay.appid"' in reaper
+    # sidecar removal rides along with the overlay's verified unlink —
+    # bound to the record's OWN fd-read inode (_sfid), so a swapped
+    # record is restored not deleted (sol r25)
+    assert '_unlink_verified "$overlay.appid" "$_sfid"' in reaper
+    assert 'swapped during reap' in SPAWN
 
 
 def test_manifest_app_state_is_exact_parse_with_stale_ambiguity():
@@ -674,8 +695,9 @@ def test_cleanup_unlink_requires_confirmed_dead():
     gate = body[body.index("reap_domain"):]
     assert "domain_is_live; _lv=$?" in gate
     assert '[ "$_lv" -eq 1 ]' in gate
-    # the rm sits INSIDE the confirmed-dead branch, after the check
-    assert gate.index('[ "$_lv" -eq 1 ]') < gate.index('rm -f "$DISK"')
+    # the unlink sits INSIDE the confirmed-dead branch, after the check
+    assert gate.index('[ "$_lv" -eq 1 ]') \
+        < gate.index('_unlink_verified "$DISK"')
     assert "live or unverifiable" in gate
 
 
@@ -728,11 +750,12 @@ def test_cleanup_helper_requires_absent_definition_for_unlink():
     assert "cannot verify" in tail
     assert "qemu_pids_for_domain; _lv=$?" in tail
     assert '[ "$_lv" -eq 1 ]' in tail
-    assert 'rm -f "$DISK"' in tail
-    # definition check precedes the qemu check precedes the rm
+    assert '_unlink_verified "$DISK" "$_dino"' in tail
+    # definition check precedes the qemu check precedes the unlink
     assert tail.index("domain_defined_state") \
         < tail.index("qemu_pids_for_domain")
-    assert tail.index("qemu_pids_for_domain") < tail.index('rm -f "$DISK"')
+    assert tail.index("qemu_pids_for_domain") \
+        < tail.index('_unlink_verified "$DISK"')
     # an orphan disk has no definition to carry the binding — the rm
     # additionally requires tier-5 provenance (backing == our base)
     # and surfaces the sidecar's bound appId (sol r13)
@@ -740,7 +763,7 @@ def test_cleanup_helper_requires_absent_definition_for_unlink():
     assert "not a tier-5 overlay" in tail
     assert '"$DISK.appid"' in tail
     assert tail.index('"backing-filename"') \
-        < tail.index('rm -f "$DISK"')
+        < tail.index('_unlink_verified "$DISK"')
     # undefine failure is surfaced, not swallowed into "not present"
     assert "WARN: undefine" in CLEANUP
 
@@ -802,12 +825,72 @@ def test_owner_records_must_rederive_to_the_artifact_name():
     assert 'stat -c \'%d %i\' "$DISK"' in tail
     assert "does not bind this" in tail
     # a present-but-incoherent record (symlink, unreadable) is kept
-    # even with the opt-in — only a genuinely ABSENT sidecar qualifies
-    assert '[ ! -L "$DISK.appid" ]' in tail
+    # even with the opt-in — only a genuinely ABSENT sidecar qualifies;
+    # the read itself requires a regular non-symlink file inside
+    # _read_owner_record
+    assert '[ -L "$DISK.appid" ]' in tail
     assert "not a readable" in tail
     # and a symlinked/non-regular $DISK itself is foreign construction —
     # kept before any provenance read (sol r24)
     assert '[ ! -f "$DISK" ] || [ -L "$DISK" ]' in tail
     assert 'not a regular file' in tail
     assert tail.index("TIER5_CLEANUP_ALLOW_OWNERLESS") \
-        < tail.index('rm -f "$DISK"')
+        < tail.index('_unlink_verified "$DISK"')
+
+
+def test_record_reads_and_unlinks_are_race_bound():
+    # ensures: a co-admin with access to the image directory cannot win
+    #          a check→use race — owner records are read through an open
+    #          fd that binds contents and file-identity to ONE inode
+    #          (_sfid), and every final unlink captures the entry by
+    #          rename into a private same-fs dir so only the verified
+    #          inode is removed; a swapped entry is restored, never
+    #          deleted (sol r25)
+    for src in (SPAWN, CLEANUP):
+        assert '_read_owner_record()' in src
+        assert 'exec {_rfd}< "$_p"' in src
+        assert 'read -r _sapp _sident <&$_rfd' in src
+        # the record's own dev/ino is taken from the OPEN fd, not the
+        # mutable path — contents and identity provably share one inode
+        assert 'stat -Lc \'%d %i\' "/proc/$$/fd/$_rfd"' in src
+        assert '_unlink_verified()' in src
+        # rename captures the entry; verification happens on the
+        # captured inode; a foreign capture is restored with no-clobber
+        assert 'mv -T -- "$_p" "$_v"' in src
+        assert 'mv -n -T -- "$_v" "$_p"' in src
+        assert 'mktemp -d "$(dirname "$_p")/.t5u.XXXXXX"' in src
+        # an empty expected-ident can never authorize a removal
+        assert '[ -n "$_want" ] || return 1' in src
+        # the temp dir is created NEXT TO the target — rename stays
+        # inside one filesystem
+        assert 'preserved foreign entry' in src
+
+
+def test_no_root_writes_into_admin_controlled_paths():
+    # ensures: root never opens a write on a path inside admin's
+    #          runtime dir — a swapped symlink would otherwise let an
+    #          admin-level actor make root truncate or chown a foreign
+    #          file. Logs, the domain XML, and the launch record are
+    #          all opened/written INSIDE the admin shell (sol r25)
+    assert ': >"$CLIENT_LOG"' not in SPAWN
+    assert ': >"$SERVER_LOG"' not in SPAWN
+    assert '>"$CLIENT_LOG"' not in SPAWN
+    assert '>"$SERVER_LOG"' not in SPAWN
+    assert '>"$TMP_XML"' not in SPAWN
+    assert 'chown "$ADMIN_USER"' not in SPAWN
+    # both waypipe redirects are opened inside the admin shell
+    assert SPAWN.count("sh -c 'exec >") + SPAWN.count("sh -c 'exec 2>") \
+        >= 2
+    assert 'run_as_admin sh -c' in SPAWN
+    # the domain XML is rendered through an admin tee, not a root `>`
+    assert 'run_as_admin tee "$TMP_XML"' in SPAWN
+    # qemu-agent-command's stderr redirect likewise opens inside admin
+    assert '2>>"$3"' in SPAWN
+    # tier4 shares the pattern — same invariant, no regressions (its
+    # overlay chown targets a root-owned image dir, not an admin path)
+    assert ': >"$CLIENT_LOG"' not in T4SPAWN
+    assert '>"$TMP_XML"' not in T4SPAWN
+    assert 'chown "$ADMIN_USER" "$CLIENT_LOG"' not in T4SPAWN
+    assert 'chown "$ADMIN_USER" "$RDP_' not in T4SPAWN
+    assert 'run_as_admin tee "$TMP_XML"' in T4SPAWN
+    assert T4SPAWN.count("sh -c 'exec >>") >= 2

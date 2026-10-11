@@ -159,7 +159,10 @@ silently merge:
   destination is never a sink and link(2) never clobbers an existing
   path — so crash residue is always provable — a
   partial whose inode the sidecar binds is recovered (the create is
-  finished), a bare partial is a harmless leak, and a file AT the
+  finished, then the installed disk is re-verified against the bound
+  dev/ino and its backing — a scan→link swap can never slide a
+  substituted inode into place), a bare partial is a harmless leak,
+  and a file AT the
   disk path without its record is never our residue. If the
   definition is ever lost the disk still proves its owner.
   Adoption verifies bound == `--policy-key`: a
@@ -178,9 +181,13 @@ silently merge:
   a lone sidecar is removed only when it is OUR regular-file record,
   a foreign, symlinked, or unreadable sidecar is never
   overwritten — every record read site requires a regular,
-  non-symlink file — and a symlinked or non-regular `$DISK` itself is
-  foreign construction even when it points at the bound inode, so it
-  is preserved rather than unlinked) — confirmed qemu
+  non-symlink file read through an open fd that binds the record's
+  contents to its own inode — and a symlinked or non-regular `$DISK`
+  itself is foreign construction even when it points at the bound
+  inode, so it is preserved rather than unlinked. Every final unlink
+  captures the entry by rename into a private same-fs dir and removes
+  only the inode that passed the checks — a swapped replacement is
+  restored, never deleted) — confirmed qemu
   death proves no live guest is killed, but it does not make a
   foreign definition or disk ours; the owner relaunches under its own
   name and an admin removes a genuinely stale squatter deliberately.

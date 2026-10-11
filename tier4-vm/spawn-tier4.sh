@@ -754,7 +754,7 @@ sed \
     -e "s|__CID__|$CID|g" \
     -e "s|__DISK_PATH__|$DISK_PATH|g" \
     -e "s|__VIRTIOFS_DIR__|$VIRTIOFS_DIR|g" \
-    "$TEMPLATE" >"$TMP_XML"
+    "$TEMPLATE" | run_as_admin tee "$TMP_XML" >/dev/null
 
 if grep -q '__[A-Z_]*__' "$TMP_XML"; then
     echo "[tier4] FAIL: unsubstituted markers in domain XML:" >&2
@@ -1006,8 +1006,12 @@ fi
 build_secctx_wrap "$USE_SECCTX" "$SECCTX_ENGINE" "$SECCTX_APPID" "$SECCTX_INSTANCE"
 
 CLIENT_LOG="$ADMIN_RUNTIME/tier4-${VM_NAME}-client.log"
-: >"$CLIENT_LOG"
-chown "$ADMIN_USER" "$CLIENT_LOG" 2>/dev/null || true
+# Created AS ADMIN — a root-opened `>` or root chown on a path inside
+# admin's runtime dir would follow a swapped symlink at a privilege
+# the planter does not hold; the client redirect below likewise opens
+# the log inside the admin shell (sol r25).
+run_as_admin sh -c ': >"$1"' _ "$CLIENT_LOG" \
+    || { echo "[tier4] FAIL: cannot create client log" >&2; exit 4; }
 
 if [ "$TIER4_DISPLAY" = "rdp" ]; then
     RDP_CREDS=""
@@ -1050,12 +1054,14 @@ if [ "$TIER4_DISPLAY" = "rdp" ]; then
         exit 1
     fi
     RDP_BRIDGE_LOG="$ADMIN_RUNTIME/tier4-${VM_NAME}-rdp-bridge.log"
-    : >"$RDP_BRIDGE_LOG"
-    chown "$ADMIN_USER" "$RDP_BRIDGE_LOG" 2>/dev/null || true
+    run_as_admin sh -c ': >"$1"' _ "$RDP_BRIDGE_LOG" \
+        || { echo "[tier4] FAIL: cannot create RDP bridge log" >&2; exit 4; }
     setsid runuser -u "$ADMIN_USER" -- env \
         XDG_RUNTIME_DIR="$ADMIN_RUNTIME" HOME="$ADMIN_HOME" \
+        sh -c 'exec >>"$0" 2>&1; exec "$@"' \
+        "$RDP_BRIDGE_LOG" \
         socat "TCP-LISTEN:$RDP_LOCAL_PORT,bind=127.0.0.1,reuseaddr,fork" \
-              "VSOCK-CONNECT:$CID:$PORT" >>"$RDP_BRIDGE_LOG" 2>&1 &
+              "VSOCK-CONNECT:$CID:$PORT" &
     RDP_BRIDGE_PID=$!
     RDP_BRIDGE_READY=0
     for _ in $(seq 1 20); do
@@ -1075,8 +1081,14 @@ if [ "$TIER4_DISPLAY" = "rdp" ]; then
     fi
 
     RDP_PASSWORD_FILE="$ADMIN_RUNTIME/tier4-${VM_NAME}-rdp-password"
-    (umask 077 && printf '%s\n' "$RDP_PASSWORD" >"$RDP_PASSWORD_FILE")
-    chown "$ADMIN_USER" "$RDP_PASSWORD_FILE" 2>/dev/null || true
+    # Written AS ADMIN with its restrictive umask — a root-opened `>`
+    # (or root chown) on a path inside admin's runtime dir would follow
+    # a swapped symlink at a privilege the planter does not hold,
+    # leaking the password into — or handing ownership of — a foreign
+    # file (sol r25).
+    run_as_admin sh -c 'umask 077 && printf "%s\n" "$2" >"$1"' \
+        _ "$RDP_PASSWORD_FILE" "$RDP_PASSWORD" \
+        || { echo "[tier4] FAIL: cannot write RDP password file" >&2; exit 4; }
     RDP_ARGV=("$RDP_CLIENT" "/v:127.0.0.1:$RDP_LOCAL_PORT" "/u:qdistro" "/cert:ignore" "/from-stdin")
     [ "${TIER4_DEBUG:-0}" = "1" ] && RDP_ARGV+=("/log-level:DEBUG")
     DISPLAY_ARGV=("${RDP_ARGV[@]}")
@@ -1125,7 +1137,9 @@ setsid runuser -u "$ADMIN_USER" -- env \
     WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=$ADMIN_RUNTIME/bus" \
     QDISTRO_TIER4_RDP_PASSWORD_FILE="${RDP_PASSWORD_FILE:-}" \
-    "${SECCTX_WRAP[@]}" "${CLIENT_CMD[@]}" >>"$CLIENT_LOG" 2>&1 &
+    "${SECCTX_WRAP[@]}" \
+    sh -c 'exec >>"$0" 2>&1; exec "$@"' \
+    "$CLIENT_LOG" "${CLIENT_CMD[@]}" &
 CLIENT_PID=$!
 
 # Poll the client log for readiness banner; bail loud if the client
