@@ -99,7 +99,7 @@ qdistro_substrate_base_path() {
 qdistro_substrate_recipe_digest() {
     local kind="$1" vm_dir file digest joined=''
     vm_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    local -a files=("$vm_dir/lib/test-substrate.sh" "$vm_dir/lib/rpm-cache.sh" "$vm_dir/lib/opensuse-cloud-image.sh" "$vm_dir/lib/deps-cache.sh" "$vm_dir/qd-repo-mirror.py")
+    local -a files=("$vm_dir/lib/test-substrate.sh" "$vm_dir/lib/rpm-cache.sh" "$vm_dir/lib/opensuse-cloud-image.sh" "$vm_dir/lib/deps-cache.sh" "$vm_dir/qd-repo-cache.py")
     case "$kind" in
         admin) files+=("$vm_dir/build-baseweed-from-scratch.sh") ;;
         baked) files+=("$vm_dir/build-baked-baseweed.sh" "$vm_dir/install-deps.sh" "$vm_dir/../../tier5-vm/build-guest-image.sh") ;;
