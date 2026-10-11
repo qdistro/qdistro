@@ -436,3 +436,48 @@ EOF
     [ "$status" -eq 1 ]
     [ -f "$repo_dir/mirror.json" ]
 }
+
+@test "a transient package failure finishes the pass, indexes the rest, resumes" {
+    local oss="$SNAP_DIR/oss" d="$WORK/cache/repos/$SNAP/tumbleweed/repo/oss"
+    local good="$oss/noarch/pkg-b-1.0-1.noarch.rpm"
+    cp "$good" "$WORK/pkg-b.good"
+    printf 'flaky-bytes' > "$good"   # non-404 failure: digest mismatch every try
+
+    run_mirror
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"failed after retries"* ]]
+    [[ "$output" == *"rerun to resume"* ]]
+    [ ! -f "$d/mirror.json" ]                     # never marked complete
+    grep -q 'pkg-a-1.0-1' "$d/mirror-index.json"  # the rest was checkpointed
+    ! grep -q 'pkg-b-1.0-1' "$d/mirror-index.json"
+
+    cp "$WORK/pkg-b.good" "$good"
+    run_mirror
+    [ "$status" -eq 0 ]
+    [ -f "$d/mirror.json" ]
+    [[ "$output" == *"1 fetched, 1 warm"* ]]      # pkg-a not refetched
+}
+
+@test "on-disk packages missing from the index are adopted by digest, not refetched" {
+    local oss="$SNAP_DIR/oss" d="$WORK/cache/repos/$SNAP/tumbleweed/repo/oss"
+    run_mirror
+    [ "$status" -eq 0 ]
+    # A run killed before its checkpoint: files on disk, no index, no marker.
+    rm -f "$d/mirror-index.json" "$d/mirror.json"
+    # Upstream bytes now differ — a refetch would fail its digest check, so
+    # success proves the local files were adopted.
+    printf 'changed' > "$oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    printf 'changed' > "$oss/noarch/pkg-b-1.0-1.noarch.rpm"
+    run_mirror
+    [ "$status" -eq 0 ]
+    [ -f "$d/mirror.json" ]
+    grep -q 'pkg-a-1.0-1' "$d/mirror-index.json"
+    grep -q 'pkg-b-1.0-1' "$d/mirror-index.json"
+
+    # A corrupt on-disk file is NOT adopted (it is refetched and must verify).
+    rm -f "$d/mirror-index.json" "$d/mirror.json"
+    printf 'corrupt' > "$d/noarch/pkg-a-1.0-1.noarch.rpm"
+    run_mirror
+    [ "$status" -ne 0 ]
+    [ ! -f "$d/mirror.json" ]
+}

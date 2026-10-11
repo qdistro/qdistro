@@ -69,13 +69,18 @@ def digest_file(path, algo="sha256"):
     return h.hexdigest()
 
 
+class FetchError(Exception):
+    """A download that failed every retry (raised only with fatal=False)."""
+
+
 def fetch(url, dest, want_sha=None, want_algo="sha256", retries=3,
-          allow_404=False):
+          allow_404=False, fatal=True):
     """Download url to dest via a temp file in dest's dir; verify sha256.
 
     With allow_404, a persistent HTTP 404 (the file upstream metadata names
     but never published — some snapshots ship such gaps) returns None
-    instead of dying; every other failure is still fatal."""
+    instead of dying; every other failure is fatal — or, with fatal=False,
+    raises FetchError so a parallel caller can finish its pass and report."""
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest), prefix=".dl.")
     os.close(fd)
@@ -104,6 +109,8 @@ def fetch(url, dest, want_sha=None, want_algo="sha256", retries=3,
     if allow_404 and isinstance(last, urllib.error.HTTPError) \
             and last.code == 404:
         return None
+    if not fatal:
+        raise FetchError(f"{url}: {last}")
     die(f"download failed after {retries} tries: {url}: {last}")
 
 
@@ -423,36 +430,63 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
     # main thread as futures complete. A persistent upstream 404 records the
     # href as absent rather than dying: the snapshot's own publication has
     # gaps, and an immutable history snapshot will not grow them later.
+    # A file already on disk but missing from the index (a run that died
+    # before its next checkpoint) is adopted by digest instead of refetched.
+    # A transient failure (DNS/IPv6 wobble, reset) must not kill the pass:
+    # it is collected, the rest of the pass still lands and is indexed, and
+    # the run fails at the end without the complete marker — a rerun
+    # resumes with only the failed hrefs missing.
     def _one(href, sha, algo):
         local = os.path.join(dest, href)
-        got = fetch(src + href, local, want_sha=sha, want_algo=algo,
-                    allow_404=True)
-        return href, sha, algo, (None if got is None
-                                 else os.path.getsize(local))
+        if os.path.isfile(local) and digest_file(local, algo) == sha:
+            return href, sha, algo, os.path.getsize(local), "adopted"
+        try:
+            got = fetch(src + href, local, want_sha=sha, want_algo=algo,
+                        allow_404=True, fatal=False)
+        except FetchError as e:
+            return href, sha, algo, None, f"failed: {e}"
+        if got is None:
+            return href, sha, algo, None, "absent"
+        return href, sha, algo, os.path.getsize(local), "downloaded"
 
+    failed = []
     if missing:
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=jobs, thread_name_prefix="qd-mirror") as pool:
             futures = [pool.submit(_one, h, s, a) for h, s, a in missing]
+            last_save = time.monotonic()
             for fut in concurrent.futures.as_completed(futures):
-                href, sha, algo, size = fut.result()
-                if size is None:
+                href, sha, algo, size, how = fut.result()
+                if how == "absent":
                     absent.add(href)
                     stats["absent"] = stats.get("absent", 0) + 1
                     continue
-                new_index[href] = {"sum": sha, "algo": algo, "size": size}
-                stats["downloaded"] += 1
-                if stats["downloaded"] % 500 == 0:
-                    print(f"[repo-mirror] {repo}: {stats['downloaded']} rpm "
-                          f"fetched, {stats['skipped']} warm, "
-                          f"{stats.get('absent', 0)} upstream-absent",
+                if how.startswith("failed"):
+                    failed.append(how)
+                    print(f"[repo-mirror] {repo}: {how} (continuing)",
                           file=sys.stderr)
+                    continue
+                new_index[href] = {"sum": sha, "algo": algo, "size": size}
+                stats[how] = stats.get(how, 0) + 1
+                done = stats["downloaded"] + stats.get("adopted", 0)
+                if done % 500 == 0 or time.monotonic() - last_save > 60:
+                    print(f"[repo-mirror] {repo}: {stats['downloaded']} rpm "
+                          f"fetched, {stats.get('adopted', 0)} adopted, "
+                          f"{stats['skipped']} warm, "
+                          f"{stats.get('absent', 0)} upstream-absent, "
+                          f"{len(failed)} failed", file=sys.stderr)
                     save_index(dest, new_index, absent)  # checkpoint
+                    last_save = time.monotonic()
     if stats.get("absent"):
         print(f"[repo-mirror] {repo}: {stats['absent']} package(s) "
               f"upstream-absent (named by primary, 404 at source) — recorded",
               file=sys.stderr)
     absent.intersection_update(seen)  # drop records for hrefs primary dropped
+    if failed:
+        # Checkpoint what did land, then stop short of the complete marker.
+        save_index(dest, new_index, absent)
+        die(f"{repo}: {len(failed)} package(s) failed after retries — "
+            f"rerun to resume; first: " + "; ".join(failed[:5]))
     stats["packages"] = len(new_index)
 
     # 4. complete-run cleanup + manifest (skipped under --limit: not done).
@@ -481,7 +515,8 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
             json.dump(manifest, f, indent=2)
         os.replace(tmp, marker)
     print(f"[repo-mirror] {repo}: done — {stats['downloaded']} fetched, "
-          f"{stats['skipped']} warm, {stats['packages']} indexed", file=sys.stderr)
+          f"{stats['skipped']} warm, {stats.get('adopted', 0)} adopted, "
+          f"{stats['packages']} indexed", file=sys.stderr)
     return stats
 
 
