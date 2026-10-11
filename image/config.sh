@@ -372,6 +372,7 @@ for pyapp in qdgreeter qdlocker; do
     if [ -f "$SRC/$pyapp/pyproject.toml" ]; then
         echo "[qdistro-image] pip installing $pyapp -> /usr ..."
         python3 -m pip install --break-system-packages --no-deps \
+            --no-index --no-build-isolation \
             --prefix=/usr "$SRC/$pyapp" \
             || { echo "[qdistro-image] FATAL: pip install $pyapp failed. Aborting build." >&2; exit 1; }
     else

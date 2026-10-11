@@ -6,13 +6,29 @@ snap=${QDISTRO_SUBSTRATE_SNAPSHOT:?}
 [[ "$snap" =~ ^20[0-9]{6}$ ]] || { echo "invalid snapshot: $snap" >&2; exit 2; }
 
 rm -f /etc/zypp/repos.d/*.repo /etc/zypp/services.d/*.service
+# QDISTRO_REPO_BASE swaps the history base for a local mirror; the layout
+# below it is upstream's. Inside a container the mirror must be mounted at
+# the same path or the base must be a reachable http:// endpoint. Offline
+# without it we fail closed rather than emit an unreachable upstream URL.
+base="${QDISTRO_REPO_BASE:-}"
+if [ -z "$base" ]; then
+    _v_off=
+    for _v in "${QDISTRO_DEPS_OFFLINE:-}" "${QCI_OFFLINE:-}"; do
+        case "$_v" in 1|true|yes|on) _v_off=1 ;; esac
+    done
+    if [ -n "$_v_off" ]; then
+        echo "container-native-deps: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snap)" >&2
+        exit 3
+    fi
+    base="https://download.opensuse.org/history"
+fi
 cat > /etc/zypp/repos.d/qdistro-snapshot-oss.repo <<EOF
 [qdistro-snapshot-oss]
 name=qdistro Tumbleweed OSS $snap
 enabled=1
 autorefresh=0
 keeppackages=1
-baseurl=https://download.opensuse.org/history/$snap/tumbleweed/repo/oss/
+baseurl=$base/$snap/tumbleweed/repo/oss/
 gpgcheck=1
 EOF
 cat > /etc/zypp/repos.d/qdistro-snapshot-nonoss.repo <<EOF
@@ -21,7 +37,7 @@ name=qdistro Tumbleweed NonOSS $snap
 enabled=1
 autorefresh=0
 keeppackages=1
-baseurl=https://download.opensuse.org/history/$snap/tumbleweed/repo/non-oss/
+baseurl=$base/$snap/tumbleweed/repo/non-oss/
 gpgcheck=1
 EOF
 zypper -n refresh

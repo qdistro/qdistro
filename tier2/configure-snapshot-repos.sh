@@ -24,12 +24,28 @@ esac
 mkdir -p "$repo_dir"
 rm -f "$repo_dir"/*.repo
 
+# QDISTRO_REPO_BASE swaps the history base for a local mirror; the layout
+# below it is upstream's (<base>/<snapshot>/tumbleweed/repo/<name>/). Offline
+# without it we fail closed rather than emit an unreachable upstream URL.
+base="${QDISTRO_REPO_BASE:-}"
+if [ -z "$base" ]; then
+    _v_off=
+    for _v in "${QDISTRO_DEPS_OFFLINE:-}" "${QCI_OFFLINE:-}"; do
+        case "$_v" in 1|true|yes|on) _v_off=1 ;; esac
+    done
+    if [ -n "$_v_off" ]; then
+        echo "tier2-snapshot-repos: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snapshot)" >&2
+        exit 3
+    fi
+    base="https://download.opensuse.org/history"
+fi
+
 cat >"$repo_dir/qdistro-snapshot-oss.repo" <<EOF
 [qdistro-snapshot-oss]
 name=qdistro Tumbleweed OSS $snapshot
 enabled=1
 autorefresh=0
-baseurl=https://download.opensuse.org/history/$snapshot/tumbleweed/repo/oss/
+baseurl=$base/$snapshot/tumbleweed/repo/oss/
 gpgcheck=1
 EOF
 cat >"$repo_dir/qdistro-snapshot-nonoss.repo" <<EOF
@@ -37,7 +53,7 @@ cat >"$repo_dir/qdistro-snapshot-nonoss.repo" <<EOF
 name=qdistro Tumbleweed NonOSS $snapshot
 enabled=1
 autorefresh=0
-baseurl=https://download.opensuse.org/history/$snapshot/tumbleweed/repo/non-oss/
+baseurl=$base/$snapshot/tumbleweed/repo/non-oss/
 gpgcheck=1
 EOF
 chmod 0644 "$repo_dir/qdistro-snapshot-oss.repo" \

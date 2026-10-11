@@ -92,7 +92,7 @@ qdistro_substrate_base_path() {
 qdistro_substrate_recipe_digest() {
     local kind="$1" vm_dir file digest joined=''
     vm_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    local -a files=("$vm_dir/lib/test-substrate.sh" "$vm_dir/lib/rpm-cache.sh" "$vm_dir/lib/opensuse-cloud-image.sh")
+    local -a files=("$vm_dir/lib/test-substrate.sh" "$vm_dir/lib/rpm-cache.sh" "$vm_dir/lib/opensuse-cloud-image.sh" "$vm_dir/lib/deps-cache.sh" "$vm_dir/qd-repo-mirror.py")
     case "$kind" in
         admin) files+=("$vm_dir/build-baseweed-from-scratch.sh") ;;
         baked) files+=("$vm_dir/build-baked-baseweed.sh" "$vm_dir/install-deps.sh" "$vm_dir/../../tier5-vm/build-guest-image.sh") ;;
@@ -113,14 +113,32 @@ qdistro_substrate_recipe_digest() {
 
 # Guest shell command. Remove cloud-image rolling repos and services before the
 # first refresh, then install only the two signed history repositories.
+# QDISTRO_REPO_BASE replaces the upstream history base when set — the caller
+# picks a transport that works in its context (file:// on the host, an
+# http:// host bridge for guests); the layout below the base is upstream's.
+# Offline without an override this fails closed instead of emitting an
+# unreachable upstream URL: warm the mirror, qd_serve_start, then export
+# QDISTRO_REPO_BASE from qd_serve_guest_base.
 qdistro_substrate_repo_command() {
     local snap="${QDISTRO_SUBSTRATE_SNAPSHOT:?}" digest="${QDISTRO_SUBSTRATE_CLOUD_SHA256:?}"
+    local base="${QDISTRO_REPO_BASE:-}"
+    if [ -z "$base" ]; then
+        _v_off=
+        for _v in "${QDISTRO_DEPS_OFFLINE:-}" "${QCI_OFFLINE:-}"; do
+            case "$_v" in 1|true|yes|on) _v_off=1 ;; esac
+        done
+        if [ -n "$_v_off" ]; then
+                echo "ERROR: offline — export QDISTRO_REPO_BASE (host: qd_serve_start + qd_serve_guest_base $snap)" >&2
+                return 1
+        fi
+        base="https://download.opensuse.org/history"
+    fi
     cat <<EOF
 mkdir -p /etc/zypp/repos.d /etc/qdistro
 find /etc/zypp/repos.d -maxdepth 1 -name '*.repo' -delete
 find /etc/zypp/services.d -maxdepth 1 -name '*.service' -delete 2>/dev/null || true
-printf '[qdistro-snapshot-oss]\\nname=qdistro Tumbleweed OSS $snap\\nenabled=1\\nautorefresh=0\\nkeeppackages=1\\nbaseurl=https://download.opensuse.org/history/$snap/tumbleweed/repo/oss/\\ngpgcheck=1\\n' > /etc/zypp/repos.d/qdistro-snapshot-oss.repo
-printf '[qdistro-snapshot-nonoss]\\nname=qdistro Tumbleweed NonOSS $snap\\nenabled=1\\nautorefresh=0\\nkeeppackages=1\\nbaseurl=https://download.opensuse.org/history/$snap/tumbleweed/repo/non-oss/\\ngpgcheck=1\\n' > /etc/zypp/repos.d/qdistro-snapshot-nonoss.repo
+printf '[qdistro-snapshot-oss]\\nname=qdistro Tumbleweed OSS $snap\\nenabled=1\\nautorefresh=0\\nkeeppackages=1\\nbaseurl=$base/$snap/tumbleweed/repo/oss/\\ngpgcheck=1\\n' > /etc/zypp/repos.d/qdistro-snapshot-oss.repo
+printf '[qdistro-snapshot-nonoss]\\nname=qdistro Tumbleweed NonOSS $snap\\nenabled=1\\nautorefresh=0\\nkeeppackages=1\\nbaseurl=$base/$snap/tumbleweed/repo/non-oss/\\ngpgcheck=1\\n' > /etc/zypp/repos.d/qdistro-snapshot-nonoss.repo
 printf 'SNAPSHOT=$snap\\nCLOUD_SHA256=$digest\\n' > /etc/qdistro/test-substrate
 EOF
 }

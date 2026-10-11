@@ -54,10 +54,15 @@ VM_PASSWORD='Pa_ssw0rd45'
 IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 . "$SCRIPT_DIR/lib/test-substrate.sh"
 . "$SCRIPT_DIR/lib/rpm-cache.sh"
+. "$SCRIPT_DIR/lib/deps-cache.sh"
 qdistro_load_test_substrate
 CACHE_DIR="${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}"
 CLOUD_URL="$QDISTRO_SUBSTRATE_CLOUD_URL"
-CLOUD_CACHE="$CACHE_DIR/cloud/$QDISTRO_SUBSTRATE_CLOUD_SHA256.qcow2"
+# deps-cache layout: cloud/<sha256>/<upstream-name>.qcow2 (content-keyed,
+# manifest + signature sidecars). Adopt the pre-cache flat file if present.
+CLOUD_CACHE="$(qd_path cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$(basename "$CLOUD_URL")")"
+qd_adopt cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" \
+    "$CACHE_DIR/cloud/$QDISTRO_SUBSTRATE_CLOUD_SHA256.qcow2" "$CLOUD_URL"
 DEST="$(qdistro_substrate_base_path admin "$IMG")"
 PARTIAL="$DEST.partial"
 
@@ -86,6 +91,7 @@ install -d "$(dirname "$CLOUD_CACHE")" "$IMG"
 . "$SCRIPT_DIR/lib/opensuse-cloud-image.sh"
 download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" \
     || { echo "[scratch] ERROR: base cloud image failed openSUSE signature/digest verification; refusing to build on an unverified root image" >&2; exit 4; }
+qd_write_manifest cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$CLOUD_URL" "$(basename "$CLOUD_URL")"
 
 # A rolling cloud URL can move ahead of the pinned history repositories even
 # when only its signed checksum changes. zypper install then cannot add
@@ -116,11 +122,15 @@ virt-resize --quiet --expand /dev/sda3 "$CLOUD_CACHE" "$PARTIAL" >/dev/null || {
 
 echo "[scratch] customizing: admin user + qga + SELinux + cloud-init mask..."
 qdistro_rpm_cache_import "$PARTIAL"
+repo_cmd="$(qdistro_substrate_repo_command)" || {
+    echo "ERROR: substrate repo command failed (offline without QDISTRO_REPO_BASE?)" >&2
+    exit 3
+}
 virt-customize \
     --memsize 2048 \
     --smp 2 \
     -a "$PARTIAL" \
-    --run-command "$(qdistro_substrate_repo_command)" \
+    --run-command "$repo_cmd" \
     --root-password "password:${VM_PASSWORD}" \
     --run-command 'getent passwd admin >/dev/null || useradd -m -u 1000 -U -s /bin/bash admin' \
     --run-command 'getent group wheel >/dev/null && usermod -aG wheel admin || true' \

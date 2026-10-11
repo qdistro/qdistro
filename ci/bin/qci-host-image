@@ -11,11 +11,12 @@ command -v podman >/dev/null || { echo 'ERROR: rootless Podman is required' >&2;
     echo 'ERROR: Podman must run rootless' >&2; exit 2;
 }
 offline() { case "${QCI_OFFLINE:-0}" in 1|true|yes|on) return 0;; *) return 1;; esac; }
+. "$repo/scripts/vm/lib/deps-cache.sh"
 base=${QCI_PODMAN_IMAGE:-registry.opensuse.org/opensuse/tumbleweed:$QDISTRO_SUBSTRATE_SNAPSHOT}
-if ! podman image exists "$base"; then
-    offline && { echo "ERROR: missing base $base (QCI_OFFLINE=1)" >&2; exit 3; }
-    podman pull "$base" >&2
-fi
+# Verified, cached acquisition — local store, digest-keyed saved archive
+# (podman load, zero network), or a pull that is itself archived. Offline
+# fails closed naming the dep.
+qd_oci_ensure "$base" >/dev/null || exit 3
 base_id=$(podman image inspect "$base" --format '{{.Id}}')
 cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}
 mkdir -p "$cache/host-podman"
@@ -59,6 +60,9 @@ else
     podman build --pull=never --layers --security-opt label=disable \
         --volume "$rpm_cache:/var/cache/zypp/packages:rw" \
         --build-arg "BASE_IMAGE=$base_id" --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
+        --build-arg "QDISTRO_REPO_BASE=${QDISTRO_REPO_BASE:-}" \
+        --build-arg "QDISTRO_DEPS_OFFLINE=${QDISTRO_DEPS_OFFLINE:-}" \
+        --build-arg "QCI_OFFLINE=${QCI_OFFLINE:-}" \
         --file "$work/Containerfile.host" --tag "$image" "$work" >&2
 fi
 [ "$(podman image inspect "$image" --format '{{index .Labels "org.qdistro.test-snapshot"}}')" = "$QDISTRO_SUBSTRATE_SNAPSHOT" ] || {

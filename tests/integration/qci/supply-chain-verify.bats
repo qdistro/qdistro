@@ -384,9 +384,10 @@ SH
     for script in build-native-podman.sh build-tier2-podman-cache.sh; do
         : > "$calls"
         run env -u QCI_PODMAN_IMAGE PATH="$fake:$PATH" QCI_OFFLINE=0 \
+            QDISTRO_DEPS_CACHE_DIR="$WORK/deps" \
             bash "$REPO_ROOT/scripts/vm/$script"
         [ "$status" -ne 0 ]
-        grep -qx "pull registry.opensuse.org/opensuse/tumbleweed:$snap" "$calls"
+        grep -qx "pull --quiet registry.opensuse.org/opensuse/tumbleweed:$snap" "$calls"
         run grep -c ':latest' "$calls"
         [ "$output" = 0 ]
     done

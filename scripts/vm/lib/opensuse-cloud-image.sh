@@ -157,11 +157,20 @@ verify_cached_cloud_image() {
     return 0
 }
 
+# Offline contract shared with deps-cache.sh (this lib stands alone, so it
+# checks the env directly rather than calling qd_deps_offline).
+_osci_deps_offline() {
+    [ "${QDISTRO_DEPS_OFFLINE:-0}" = 1 ] || [ "${QCI_OFFLINE:-0}" = 1 ]
+}
+
 # download_verified_cloud_image <url> <cache_path>
 # Ensures <cache_path> holds an openSUSE-signed image. Re-verifies an existing
 # cache (with sidecars); otherwise downloads image+.sha256+.sha256.asc to a
 # private temp dir, verifies, and only then promotes into the cache. Fails
 # closed: on any verification failure nothing is promoted and rc is non-zero.
+# Offline mode (QDISTRO_DEPS_OFFLINE/QCI_OFFLINE) forbids every network
+# branch — a complete warm entry still verifies, anything missing fails
+# closed naming what is absent.
 _osci_download_verified_cloud_image() {
     local url="$1" cache="$2" expected_pin="${3:-}" tmp base image sha sig cache_dir actual
 
@@ -182,6 +191,9 @@ _osci_download_verified_cloud_image() {
             # re-checked, so the cache still fails closed on anything that
             # is not a genuine openSUSE-signed artifact for this name.
             echo "[cloud] cached sidecars do not name $base; refreshing sidecars" >&2
+            _osci_deps_offline && {
+                _osci_die "offline: signed sidecars for $base are absent/mismatched beside $cache — cannot refresh them without network"; return 1
+            }
             local rtmp
             rtmp="$(mktemp -d "$cache_dir/cloud-sidecar.XXXXXX")" || { _osci_die "mktemp under $cache_dir failed"; return 1; }
             if ! wget -q -O "$rtmp/$base.sha256" "$url.sha256" \
@@ -203,6 +215,9 @@ _osci_download_verified_cloud_image() {
         return 0
     fi
     [ -s "$cache" ] && echo "[cloud] cached image lacks signed sidecars; re-downloading a verified copy" >&2
+    _osci_deps_offline && {
+        _osci_die "offline: no fully verified cloud entry at $cache — warm the cache first"; return 1
+    }
 
     tmp="$(mktemp -d "$cache_dir/cloud-download.XXXXXX")" || { _osci_die "mktemp under $cache_dir failed"; return 1; }
     chmod 0700 "$tmp"

@@ -16,17 +16,12 @@ command -v podman >/dev/null || { echo 'ERROR: rootless Podman is required' >&2;
     echo 'ERROR: Podman must run rootless' >&2; exit 2;
 }
 # These Containerfiles name this image in FROM (tumbleweed:${SNAPSHOT}, passed
-# below). Its resolved ID is part of the cache key.
+# below). Its resolved ID is part of the cache key. qd_oci_ensure acquires
+# it verified + archived in the dep cache (local store, saved archive via
+# podman load, or a pull that is itself archived); offline fails closed.
+. "$here/lib/deps-cache.sh"
 base_image=registry.opensuse.org/opensuse/tumbleweed:$QDISTRO_SUBSTRATE_SNAPSHOT
-if ! podman image exists "$base_image"; then
-    case "${QCI_OFFLINE:-0}" in
-        1|true|yes|on)
-            echo "ERROR: tier-2 base image $base_image is missing (QCI_OFFLINE=1)" >&2
-            exit 3
-            ;;
-    esac
-    podman pull "$base_image" >&2
-fi
+qd_oci_ensure "$base_image" >/dev/null || exit 3
 base_id=$(podman image inspect "$base_image" --format '{{.Id}}')
 
 cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}/tier2-podman/$QDISTRO_SUBSTRATE_SNAPSHOT/$QDISTRO_SUBSTRATE_ARCH
@@ -94,6 +89,9 @@ for workload in "${workloads[@]}"; do
     podman build --pull=never --layers \
         --file "$wcontext/Containerfile.$workload" \
         --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
+        --build-arg "QDISTRO_REPO_BASE=${QDISTRO_REPO_BASE:-}" \
+        --build-arg "QDISTRO_DEPS_OFFLINE=${QDISTRO_DEPS_OFFLINE:-}" \
+        --build-arg "QCI_OFFLINE=${QCI_OFFLINE:-}" \
         --tag "$tag" \
         --label "org.qdistro.test-snapshot=$QDISTRO_SUBSTRATE_SNAPSHOT" \
         "$wcontext" >&2

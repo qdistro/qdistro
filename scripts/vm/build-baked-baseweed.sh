@@ -62,8 +62,13 @@ TIER5_BUILD_GUEST="$SCRIPT_DIR/../../tier5-vm/build-guest-image.sh"
 CACHE_DIR="${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}"
 . "$SCRIPT_DIR/lib/test-substrate.sh"
 . "$SCRIPT_DIR/lib/rpm-cache.sh"
+. "$SCRIPT_DIR/lib/deps-cache.sh"
 qdistro_load_test_substrate
-CLOUD_CACHE="$CACHE_DIR/cloud/$QDISTRO_SUBSTRATE_CLOUD_SHA256.qcow2"
+# deps-cache layout: cloud/<sha256>/<upstream-name>.qcow2 (content-keyed,
+# manifest + signature sidecars). Adopt the pre-cache flat file if present.
+CLOUD_CACHE="$(qd_path cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$(basename "$QDISTRO_SUBSTRATE_CLOUD_URL")")"
+qd_adopt cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" \
+    "$CACHE_DIR/cloud/$QDISTRO_SUBSTRATE_CLOUD_SHA256.qcow2" "$QDISTRO_SUBSTRATE_CLOUD_URL"
 BAKED_RECIPE="$(qdistro_substrate_recipe_digest baked)"
 BAKED_CACHE="$CACHE_DIR/tier5-$QDISTRO_SUBSTRATE_CLOUD_SHA256-$QDISTRO_SUBSTRATE_SNAPSHOT-${BAKED_RECIPE:0:12}.qcow2"
 CLOUD_URL="$QDISTRO_SUBSTRATE_CLOUD_URL"
@@ -72,6 +77,13 @@ CLOUD_URL="$QDISTRO_SUBSTRATE_CLOUD_URL"
 # libguestfs must never parse an unauthenticated cached cloud disk.
 # shellcheck source=lib/opensuse-cloud-image.sh
 . "$SCRIPT_DIR/lib/opensuse-cloud-image.sh"
+
+# Every download_verified_cloud_image path goes through here so the entry
+# keeps its manifest.txt (the osci helper manages signature sidecars only).
+cloud_fetch_verified() {
+    download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" \
+        && qd_write_manifest cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$CLOUD_URL" "$(basename "$CLOUD_URL")"
+}
 
 BASE="$(qdistro_substrate_base_path admin "$IMG")"
 BAKED="$(qdistro_substrate_base_path baked "$IMG")"
@@ -259,7 +271,7 @@ if [ "$NETWORK_PROBE_ONLY" -eq 1 ]; then
         echo "[bake] tier-5 network probe skipped (QDWIN_SKIP_TIER5_BAKE=1)"
     else
         # Authenticate before qemu-img or libguestfs opens any probe disk.
-        download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" || {
+        cloud_fetch_verified || {
             echo "[bake] FAIL: tier-5 cloud cache could not be authenticated; refusing to open it" >&2
             exit 6
         }
@@ -276,7 +288,7 @@ fi
 # unless the caller explicitly requested the documented tier-5-free variant.
 if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
     install -d "$(dirname "$CLOUD_CACHE")"
-    download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" || {
+    cloud_fetch_verified || {
         echo "[bake] FAIL: tier-5 cloud cache could not be authenticated" >&2
         exit 6
     }
@@ -334,12 +346,16 @@ echo "[bake]   (this is the slow step — typically 10–25 min)"
 #   mode-setting it and the kernel never loads (qci vm-smoke timed out
 #   in vm_provision). Re-applied here so a baked rebuild from an older
 #   admin image without the fix still boots.
+repo_cmd="$(qdistro_substrate_repo_command)" || {
+    echo "ERROR: substrate repo command failed (offline without QDISTRO_REPO_BASE?)" >&2
+    exit 3
+}
 virt-customize \
     --memsize 4096 \
     --smp 4 \
     -a "$PARTIAL" \
     "${LIBGUESTFS_NET_ARGS[@]}" \
-    --run-command "$(qdistro_substrate_repo_command)" \
+    --run-command "$repo_cmd" \
     --run-command 'zypper -n refresh' \
     `# qdshell's runtime is the vendored Quickshell build staged by the` \
     `# native builder — the archived noctalia-qs fork was never a real` \
@@ -390,7 +406,7 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
     # baked into every --from-baked overlay, so bake ONLY when it verifies.
     # Gating on the helper's EXIT STATUS — not `[ -s cache ]` — means a
     # stale/unverified pre-existing cache the helper refused is never baked in.
-    if download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256"; then
+    if cloud_fetch_verified; then
         # J25 (fail-closed): the customized derivative (tier5-base-customized.qcow2)
         # is bound to THIS verified cloud digest via a provenance stamp. Reuse it
         # only when the stamp matches; otherwise rebuild from the verified base so
@@ -435,9 +451,13 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
                 "$TIER5_BUILD_GUEST" \
                 | sed '1d;$d' >"$PUBLISHER_TMP"
             chmod +x "$PUBLISHER_TMP"
+            repo_cmd="$(qdistro_substrate_repo_command)" || {
+                echo "ERROR: substrate repo command failed (offline without QDISTRO_REPO_BASE?)" >&2
+                exit 3
+            }
             virt-customize -a "$BAKED_CACHE.partial" \
                 "${LIBGUESTFS_NET_ARGS[@]}" \
-                --run-command "$(qdistro_substrate_repo_command)" \
+                --run-command "$repo_cmd" \
                 --run-command 'zypper -n refresh' \
                 `# weston provides weston-terminal (the tier-5 cold-start app);` \
                 `# dejavu-fonts gives it a monospace face. Without these the` \

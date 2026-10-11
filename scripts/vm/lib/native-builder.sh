@@ -21,12 +21,12 @@
 qdistro_native_builder_base_image() {
     local image image_id
     image=${QCI_PODMAN_IMAGE:-registry.opensuse.org/opensuse/tumbleweed:$QDISTRO_SUBSTRATE_SNAPSHOT}
-    if ! podman image exists "$image"; then
-        case "${QCI_OFFLINE:-0}" in
-            1|true|yes|on) echo "ERROR: native base image $image is missing (QCI_OFFLINE=1)" >&2; return 3 ;;
-        esac
-        podman pull "$image" >&2 || return 3
-    fi
+    # Verified, cached acquisition: local store, else digest-keyed saved
+    # archive (podman load, zero network), else a verified pull that is
+    # itself archived for the next cold host. Offline fails closed.
+    # shellcheck source=deps-cache.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/deps-cache.sh"
+    qd_oci_ensure "$image" >/dev/null || return 3
     printf '%s\n' "$image"
 }
 
@@ -74,6 +74,9 @@ qdistro_ensure_native_builder_image() {
             --volume "$rpm_cache:/var/cache/zypp/packages:rw,Z" \
             --build-arg "BASE_IMAGE=$image" \
             --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
+            --build-arg "QDISTRO_REPO_BASE=${QDISTRO_REPO_BASE:-}" \
+            --build-arg "QDISTRO_DEPS_OFFLINE=${QDISTRO_DEPS_OFFLINE:-}" \
+            --build-arg "QCI_OFFLINE=${QCI_OFFLINE:-}" \
             --file "$work/builder-context/Containerfile.native-builder" \
             --tag "$builder_image" "$work/builder-context" >&2; then
             rm -rf "$work"
