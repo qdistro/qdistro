@@ -291,22 +291,10 @@ silently merge:
   distinct cannot-determine rc. A
   regex scan would let a manual name like `t5.a` match `t5xa`, and
   a raw substring would match inside a foreign argument; both
-  would hand the cleanup helper foreign pids to signal. Even so, the
-  post-destroy signal path runs AS ADMIN and can only ever reach the
-  process libvirt itself bound to the domain: the pre-destroy
-  `dompid` is pinned with `pidfd_open` FIRST, and only then is the
-  pinned process verified — its own `/proc/<pid>/cmdline` (while a
-  process lives, its number cannot alias, so that read describes
-  exactly the pinned task) must carry a `-name`/`guest=<name>,` argv
-  pair and its parent must be the session libvirt daemon, the one
-  spawn relationship a co-admin cannot fabricate. Signals go through
-  `pidfd_send_signal` on the pinned fd: a pid NUMBER can be recycled,
-  a pidfd cannot, and a dead pinned process fails ESRCH instead of
-  aliasing a reuser — no scan result or cached flag authorizes a
-  signal, so no exit+reuse window before or after pinning can
-  redirect it onto a same-name decoy (sol r37–r40). When the pin or
-  the verification fails nothing is signalled and the
-  confirmed-dead gate preserves the overlay.
+  would misjudge liveness on a foreign qemu. Teardown never signals
+  a qemu by pid: when `virsh destroy` no-ops (nested-KVM domstate can
+  lie), nothing else is killed — the confirmed-dead gate preserves the
+  overlay and the next launch adopts the still-running guest.
   `domstate` is not consulted for liveness at all: nested-virt libvirt
   can lie in both directions — "shut off" for a live qemu and stale
   "running" for a dead one — and no backing qemu process means death,
@@ -383,6 +371,14 @@ flock(2) protocol on `/run/qdistro-tier5/hold-<vm_name>` — no daemon:
   leftover running/defined domain is adopted or reaped by the next
   spawn. `TIER5_KEEP_DOMAIN=1` still leaves the domain untouched for
   debugging — the next launch then adopts it.
+
+Threat scope of the ownership protocol: libvirt here is
+`qemu:///session`, so qemu, virtqemud and every lifecycle actor run as
+the admin uid — which [doc/threat-model.md](../doc/threat-model.md)
+places inside the TCB. The protocol defends against confused or racing
+wrappers, guest-supplied data, and any root-side action authorized by
+an admin-writable input; it does not try to defeat a hostile process
+already running as admin.
 
 Deliberately out of scope: cross-APP pooling (a shared guest for
 different appIds would break the appId==silo identity) and longest-idle

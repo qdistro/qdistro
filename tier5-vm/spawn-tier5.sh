@@ -1099,73 +1099,6 @@ undefine_domain() {
     return 1
 }
 
-# _destroy_dompid_qemu <name> <dompid> — `virsh destroy` the domain
-# and, when libvirt named a qemu pid, make its death stick through a
-# pidfd. The whole pin+verify+signal sequence runs AS ADMIN in ONE
-# python process, so the identity verified is the identity pinned:
-# pidfd_open FIRST, then the pinned process's own /proc/<pid>/cmdline
-# (while a process lives its number cannot alias, so that read
-# describes exactly the pinned process) must carry a
-# `-name`/`guest=<name>,` argv pair, and its parent must be the
-# session libvirt daemon — the one spawn relationship a co-admin
-# cannot fabricate (sol r40). No scan-derived number or cached
-# boolean authorizes anything. A dead, unpinnable, or unverified pin
-# signals nothing: the confirmed-dead gate preserves the overlay —
-# fail-closed.
-_destroy_dompid_qemu() {
-    run_as_admin python3 - "$1" "${2:-}" <<'PY'
-import ctypes, os, subprocess, sys, time
-name, pid_s = sys.argv[1], sys.argv[2]
-libc = ctypes.CDLL("libc.so.6", use_errno=True)
-fd = -1
-if pid_s.isdigit():
-    try:
-        fd = os.pidfd_open(int(pid_s))
-    except (AttributeError, OSError):
-        fd = libc.syscall(434, int(pid_s), 0)   # pidfd_open
-
-def _sig(n):
-    return fd >= 0 and libc.syscall(424, fd, n, None, 0) == 0
-
-def _pinned_is_domain_qemu():
-    # Verify the process the fd names — while it is alive its pid
-    # number cannot alias another process, so these /proc reads
-    # describe exactly the pinned task.
-    if not _sig(0):
-        return False
-    try:
-        argv = open("/proc/%s/cmdline" % pid_s, "rb").read().split(b"\0")
-    except OSError:
-        return False
-    needle = ("guest=" + name + ",").encode()
-    if not any(a == b"-name" and argv[i + 1].startswith(needle)
-               for i, a in enumerate(argv[:-1])):
-        return False
-    try:
-        ppid = next(int(l.split()[1]) for l in
-                    open("/proc/%s/status" % pid_s)
-                    if l.startswith("PPid:"))
-        comm = open("/proc/%d/comm" % ppid).read().strip()
-    except (OSError, StopIteration):
-        return False
-    return comm in ("virtqemud", "libvirtd")
-
-pinned = fd >= 0 and _pinned_is_domain_qemu()
-subprocess.run(["virsh", "destroy", name],
-               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-if pinned and _sig(0):
-    _sig(15)
-    for _ in range(6):
-        if not _sig(0):
-            break
-        time.sleep(0.5)
-    _sig(9)
-if fd >= 0:
-    os.close(fd)
-sys.exit(0)
-PY
-}
-
 # reap_domain [force] — stop the domain, undefine it, unlink the overlay.
 # Graceful (default): ACPI power-button (`virsh shutdown --mode acpi`, the owner-
 # requested mechanism). If the guest is still up after SHUTDOWN_GRACE_SECS, try
@@ -1204,24 +1137,12 @@ reap_domain() {
                 ;;
         esac
     fi
-    # Capture the domain's own qemu pid BEFORE destroy while libvirt's
-    # record still exists: libvirt's dompid is the only domain↔process
-    # binding we can ask for, and _destroy_dompid_qemu then pins the
-    # LIVE pid with a pidfd and verifies the pinned process itself
-    # (its own cmdline + libvirt parentage) — a pid number can be
-    # recycled, a pidfd cannot, and no scan result or cached flag
-    # authorizes the signal (sol r37/r38/r39/r40). When the pin or the
-    # verification fails nothing is signalled: the confirmed-dead
-    # check below then preserves the overlay — fail-closed.
-    local _dpid
-    _dpid=$(run_as_admin virsh dompid "$VM_NAME" 2>/dev/null) || _dpid=""
     # Force-destroy if still running (or method=force). Harmless if already off.
-    # Nested-KVM safety net: domstate can falsely report "shut off" while qemu is
-    # still ALIVE, so `virsh destroy` no-ops and the undefine below then drops only
-    # the persistent config — leaving a live TRANSIENT domain that dominfo keeps
-    # reporting, so it never undefines (perm-gui/21 S4). If qemu survived destroy,
-    # the pidfd signal inside finishes it.
-    _destroy_dompid_qemu "$VM_NAME" "$_dpid"
+    # Nested-KVM: domstate can falsely report "shut off" while qemu is still
+    # alive, so `virsh destroy` no-ops and a live TRANSIENT domain keeps
+    # reporting (perm-gui/21 S4). No pid-signalling fallback: the confirmed-dead
+    # gate then retains the overlay and the next launch adopts the live guest.
+    run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         undefine_domain || true
         domain_defined_state; _ds=$?
