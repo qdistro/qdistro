@@ -196,10 +196,13 @@ silently merge:
   because the record binds the DISK pair rather than whichever domain
   currently holds the name, a same-tag domain replacement on a
   different disk must still be refused: a RUNNING guest is only ours
-  when a backing qemu holds the recorded inode open on the fd that
-  names the declared source — a post-boot path swap cannot fake an
-  open fd — while a STOPPED one must declare our pinned boot path or
-  the recorded inode itself (sol r35). Every
+  when THE DOMAIN's qemu — libvirt's `dompid`, cross-checked against
+  the argv-verified name-scan so a hand-run same-name decoy or a
+  stale dompid can never satisfy it — holds the recorded inode open
+  on the fd that names the declared source (a post-boot path swap
+  cannot fake an open fd), while a STOPPED one must declare our
+  pinned boot path or the recorded inode itself; an unreliable qemu
+  scan is ambiguity, never a stopped-domain proof (sol r35/r36). Every
   unproven disk at our name — missing
   sidecar, foreign appId, inode mismatch, wrong provenance — is
   refused AND preserved, never booted and never deleted by the

@@ -1120,6 +1120,19 @@ def test_registry_domain_binding_requires_recorded_disk():
         # stopped domains also accept the pinned boot path itself — a
         # host reboot drops BOOT_DIR but the def remains ours
         assert '[ "$src" = "$' in src
+        # the fd proof must pin THE DOMAIN's qemu: virsh dompid is
+        # libvirt's own pid binding, cross-checked against the
+        # argv-verified name-scan — a hand-run same-name decoy or a
+        # stale/reused dompid can never satisfy it (sol r36)
+        assert 'virsh dompid' in src
+        assert 'case " $qp " in *" $pid "*) ;; *) return 1 ;; esac' in src
+        # an unreliable qemu scan is ambiguity — NEVER converted into
+        # the stopped-domain proof (the scan rc is kept, not
+        # discarded with `|| true`) (sol r36)
+        assert 'qrc=$?' in src
+        assert '[ "$qrc" -eq 2 ] && return 1' in src
+        assert ' qp=$(qemu_pids_for_domain "$name") || true' not in src
+        assert ' qp=$(qemu_pids_for_domain) || true' not in src
     # adoption gates: both the unlocked and post-exclusive paths
     decision = SPAWN[SPAWN.index("ADOPTED=0"):]
     assert decision.count('domain_holds_owned_disk "$_oident"') >= 2

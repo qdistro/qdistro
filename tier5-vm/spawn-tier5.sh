@@ -1208,31 +1208,41 @@ if p:
 # vouches for the disk pair, NOT for whichever domain currently holds
 # the name: an actor in the admin libvirt session can replace ours
 # with a same-tag domain on a different disk (sol r35).
-#   RUNNING — a backing qemu must hold the recorded inode open on the
-#   fd that names the declared source path. A post-boot path swap can
-#   alias a stat, but cannot fake an open fd; requiring link AND inode
-#   together also keeps a foreign boot disk from smuggling our inode
-#   through a secondary source (serial log, second drive).
-#   STOPPED — no fd exists, so the single declared source must either
-#   BE our pinned boot path (a host reboot drops BOOT_DIR but the def
+#   RUNNING — the proof must pin THE LIBVIRT DOMAIN's qemu, not just
+#   any process shaped like it: `virsh dompid` binds a pid to this
+#   domain's libvirt record, and that pid must also appear in the
+#   argv-verified name-scan (a stale or reused dompid then fails). A
+#   hand-run same-name decoy holding our disk open can satisfy the fd
+#   match but is never the domain's pid (sol r36). The pid's own fd
+#   must hold the recorded inode open on the link naming the declared
+#   source — a post-boot path swap can alias a stat, not an open fd,
+#   and link+inode together stops a foreign boot disk smuggling our
+#   inode through a secondary source (serial log, second drive).
+#   STOPPED — confirmed no qemu: the single declared source must be
+#   our pinned boot path (a host reboot drops BOOT_DIR but the def
 #   remains ours to reclaim) or stat to the recorded inode.
+#   An UNRELIABLE scan is ambiguity — never converted into the
+#   stopped-domain proof (sol r36).
 domain_holds_owned_disk() {
-    local ident=$1 name=${2:-$VM_NAME} src qp pid fd tgt
+    local ident=$1 name=${2:-$VM_NAME} src qp qrc pid fd tgt
     # An empty expected identity must never match an empty stat.
     [ -n "$ident" ] || return 1
     src=$(domain_disk_source "$name")
     [ -n "$src" ] || return 1
-    qp=$(qemu_pids_for_domain "$name") || true
-    if [ -n "$qp" ]; then
-        for pid in $qp; do
-            for fd in "/proc/$pid"/fd/*; do
-                [ -e "$fd" ] || continue
-                tgt=$(readlink "$fd" 2>/dev/null) || continue
-                [ "$tgt" = "$src" ] || [ "$tgt" = "$src (deleted)" ] \
-                    || continue
-                [ "$(stat -Lc '%d %i' "$fd" 2>/dev/null)" = "$ident" ] \
-                    && return 0
-            done
+    qp=$(qemu_pids_for_domain "$name"); qrc=$?
+    [ "$qrc" -eq 2 ] && return 1
+    if [ "$qrc" -eq 0 ]; then
+        pid=$(run_as_admin virsh dompid "$name" 2>/dev/null) || return 1
+        [ -n "$pid" ] || return 1
+        case " $qp " in *" $pid "*) ;; *) return 1 ;; esac
+        [ -d "/proc/$pid/fd" ] || return 1
+        for fd in "/proc/$pid"/fd/*; do
+            [ -e "$fd" ] || continue
+            tgt=$(readlink "$fd" 2>/dev/null) || continue
+            [ "$tgt" = "$src" ] || [ "$tgt" = "$src (deleted)" ] \
+                || continue
+            [ "$(stat -Lc '%d %i' "$fd" 2>/dev/null)" = "$ident" ] \
+                && return 0
         done
         return 1
     fi
