@@ -1790,7 +1790,9 @@ create_domain() {
         # a foreign record, a symlink, or an unreadable/empty file is
         # an unrecognized owner record — preserve it and refuse, never
         # overwrite it (sol r21/r22).
-        _recover=""
+        # No sidecar leaves no owner record: reset it so `set -u` never
+        # aborts a clean first create below (astra r43).
+        _recover="" _sapp="" _sident="" _sfid=""
         if [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
             _read_owner_record "$DISK.appid"
             if [ "$_sapp" != "$POLICY_KEY" ]; then
@@ -2027,12 +2029,13 @@ fi
 # --- per-VM ownership hold (relaunch reuse) ------------------------
 # flock(2) protocol on $HOLD_FILE, used by every wrapper invocation
 # that touches this domain:
-#   fd9  — session hold: SHARED from the adopt/create decision onward,
-#          so concurrent launches of the same app coexist on one guest.
-#          The create decision RELEASES then retakes it EXCLUSIVELY
-#          (an upgrade would deadlock against a concurrent upgrader),
-#          serializing against a teardown claim or a racing create —
-#          but never against plain SH adopters.
+#   fd9  — session hold: SHARED for the whole session, so concurrent
+#          launches of the same app coexist on one guest, and every EX
+#          actor (teardown claim, orphan reaper, cleanup tool) is
+#          excluded while any session or create decision is in flight.
+#   fd11 — create lock on create-$VM_NAME: EX only around the
+#          dead-guest re-check + create_domain, serializing racing
+#          creators; the loser re-checks and adopts.
 #   fd10 — teardown claim: a BOUNDED EX claim (see decide_teardown). If
 #          it fails, a live session (or an in-flight decision) still
 #          owns the VM and this wrapper must leave it alone; if it wins,
@@ -2102,9 +2105,14 @@ elif [ "$_lv" -eq 2 ]; then
     echo "[tier5] FAIL: cannot determine liveness of $VM_NAME — refusing" >&2
     REAP=0; exit 3
 else
-    flock -u 9 2>/dev/null || true
-    if ! flock -w 120 -x 9; then
-        echo "[tier5] FAIL: timed out waiting for the $VM_NAME decision hold" >&2
+    # Creators serialize on a SEPARATE create lock while keeping the fd9
+    # SH: a session hold would block an fd9 EX until the racing winner's
+    # whole session ended (astra r43). Our SH alone already excludes a
+    # teardown claim, the orphan reaper and the cleanup tool (all EX).
+    ( umask 077; : >>"$HOLD_DIR/create-$VM_NAME" )
+    exec 11>>"$HOLD_DIR/create-$VM_NAME"
+    if ! flock -w 120 -x 11; then
+        echo "[tier5] FAIL: timed out waiting for the $VM_NAME create lock" >&2
         exit 3
     fi
     domain_is_live; _lv=$?
@@ -2164,7 +2172,7 @@ else
         fi
         create_domain
     fi
-    flock -s 9
+    exec 11>&-
 fi
 if [ "$ADOPTED" = "1" ]; then
     echo "[tier5] adopted running domain $VM_NAME (per-app guest shared across relaunches)" >&2

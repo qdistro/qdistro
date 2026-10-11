@@ -3,7 +3,8 @@
 The per-app guest is shared across relaunches of the same catalogue
 appId via an flock(2) ownership protocol on
 /run/qdistro-tier5/hold-<vm_name>: a shared session hold (fd9), a short
-exclusive decision hold for adopt-or-create, and a nonblocking exclusive
+exclusive create lock (fd11, create-<vm_name>) for racing creators, and a
+bounded exclusive
 teardown claim (fd10) that the LAST holder out of the idle window wins.
 These are source invariants — the lock protocol is what keeps an earlier
 wrapper's exit from reaping a VM a relaunch adopted, and keeps create
@@ -42,17 +43,21 @@ def test_hold_file_and_fds_are_per_vm_and_locked_shared():
 
 def test_create_path_serializes_under_exclusive_hold():
     # ensures: two racing cold-starts can never double-define the domain
-    #          — the create runs under an exclusive lock and re-checks
-    #          liveness (the qemu oracle, not bare domstate) after
-    #          acquiring it
-    assert "flock -u 9 2>/dev/null || true" in SPAWN
-    assert "flock -w 120 -x 9" in SPAWN
+    #          — creators serialize on a SEPARATE create lock (fd11) and
+    #          re-check liveness (the qemu oracle, not bare domstate)
+    #          after acquiring it, while KEEPING the fd9 session SH. An
+    #          fd9 EX would wait out the winner's whole session, failing
+    #          the loser after 120s instead of adopting (astra r43)
     decision = SPAWN[SPAWN.index("ADOPTED=0"):]
-    upgrade = decision.index("flock -w 120 -x 9")
-    recheck = decision.index("domain_is_live", upgrade)
-    create = decision.index("create_domain", upgrade)
-    assert upgrade < recheck < create
-    assert "flock -s 9" in decision[: decision.index("DOMAIN_DEFINED=1") if "DOMAIN_DEFINED=1" in decision else len(decision)]
+    assert "flock -u 9" not in decision[:decision.index("create_domain\n")]
+    assert "flock -w 120 -x 9" not in SPAWN
+    assert "flock -s 9\n" not in decision
+    lock = decision.index("flock -w 120 -x 11")
+    assert decision.index('exec 11>>"$HOLD_DIR/create-$VM_NAME"') < lock
+    recheck = decision.index("domain_is_live", lock)
+    create = decision.index("create_domain\n", lock)
+    assert lock < recheck < create
+    assert decision.index("exec 11>&-", create) > create
     assert "[tier5] adopted running domain" in SPAWN
 
 
@@ -205,7 +210,7 @@ def test_stopped_foreign_domain_is_refused_not_reclaimed():
     #          refuses outright: no domstate terminal check, no
     #          undefine, no overlay rm against the foreign guest.
     start = SPAWN.index('if [ "$_ds" -eq 0 ] && [ "$(domain_appid)" != "$POLICY_KEY" ]')
-    end = SPAWN.index("create_domain\n    fi\n    flock -s 9")
+    end = SPAWN.index("create_domain\n    fi\n    exec 11>&-")
     block = SPAWN[start:end]
     assert "refusing to reclaim another app's guest" in block
     assert "REAP=0; exit 3" in block
@@ -418,7 +423,7 @@ def test_locked_decision_refuses_unverifiable_defined_state():
     #          precise defined-state, and an unverifiable query refuses
     #          to create (sol r8)
     decision = SPAWN[SPAWN.index("timed out waiting for the"):
-                     SPAWN.index("create_domain\n    fi\n    flock -s 9")]
+                     SPAWN.index("create_domain\n    fi\n    exec 11>&-")]
     assert "domain_defined_state; _ds=$?" in decision
     assert '[ "$_ds" -eq 2 ]' in decision
     assert "refusing to create over it" in decision

@@ -196,9 +196,8 @@ silently merge:
   because the record binds the DISK pair rather than whichever domain
   currently holds the name, a same-tag domain replacement on a
   different disk must still be refused: a RUNNING guest is only ours
-  when THE DOMAIN's qemu — libvirt's `dompid`, cross-checked against
-  the argv-verified name-scan so a hand-run same-name decoy or a
-  stale dompid can never satisfy it — holds the recorded inode open
+  when an argv-verified `-name guest=<name>,` qemu holds the recorded
+  inode open
   on the fd that names the declared source (a post-boot path swap
   cannot fake an open fd), while a STOPPED one must declare our
   pinned boot path or the recorded inode itself; an unreliable qemu
@@ -356,8 +355,10 @@ flock(2) protocol on `/run/qdistro-tier5/hold-<vm_name>` — no daemon:
   mismatched launch can never starve the true owner's teardown.
 - A launch that finds the domain **running adopts it** under its own
   session hold (no cold start); a missing/stopped domain is (re)created
-  under a short **exclusive** decision hold that serializes racing
-  creators and teardown claims.
+  under a short **exclusive create lock** (`create-<vm>`) that
+  serializes racing creators — the loser re-checks and adopts. The
+  creator keeps its shared session hold throughout, which alone
+  excludes teardown claims, the orphan reaper and the cleanup tool.
 - On app exit the wrapper drops its hold and runs the idle window
   (`IDLE_SHUTDOWN_SECS`, low-mem early end): a relaunch adopting during
   the window cancels teardown. The **last lock holder** wins a

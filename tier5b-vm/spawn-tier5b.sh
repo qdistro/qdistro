@@ -661,7 +661,7 @@ if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
         -e "s|__MEM_KIB__|$MEM_KIB|g" \
         -e "s|__CID__|$CID|g" \
         -e "s|__DISK_PATH__|$DISK|g" \
-        "$TMPL" >"$TMP_XML"
+        "$TMPL" | run_as_admin tee "$TMP_XML" >/dev/null
 
     if grep -q '__[A-Z_]*__' "$TMP_XML"; then
         echo "[tier5b] FAIL: unsubstituted markers in domain XML:" >&2
