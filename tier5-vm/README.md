@@ -291,7 +291,12 @@ silently merge:
   distinct cannot-determine rc. A
   regex scan would let a manual name like `t5.a` match `t5xa`, and
   a raw substring would match inside a foreign argument; both
-  would hand the cleanup helper foreign pids to signal.
+  would hand the cleanup helper foreign pids to signal. Even so, the
+  post-destroy signal fallback never signals on the argv tag alone:
+  a scan pid is killable only when libvirt bound it to the domain
+  (pre-destroy `dompid`) or it holds the domain's declared disk
+  source open — a hand-run same-name decoy that never opened our
+  disk is left alone (sol r37).
   `domstate` is not consulted for liveness at all: nested-virt libvirt
   can lie in both directions — "shut off" for a live qemu and stale
   "running" for a dead one — and no backing qemu process means death,
