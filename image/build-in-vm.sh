@@ -180,8 +180,11 @@ qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2
 # cache. Stage the digest-verified tarball beside the sources — config.sh
 # hands it to build-libweston.sh and deletes it before the image is sealed.
 DI_TARBALL="$(qd_display_info_tarball)" || die "display-info tarball unavailable (warm the deps cache: scripts/vm/qd-cache-warm)"
-install -d "$HERE/root/root/qdistro-deps"
-cp "$DI_TARBALL" "$HERE/root/root/qdistro-deps/display-info.tar.gz"
+# A fresh real directory: never write through a pre-existing symlink.
+DI_STAGE="$HERE/root/root/qdistro-deps"
+rm -rf -- "$DI_STAGE"
+mkdir -- "$DI_STAGE" || die "cannot create $DI_STAGE"
+cp -- "$DI_TARBALL" "$DI_STAGE/display-info.tar.gz" || die "cannot stage display-info tarball"
 BAKED_BASE="$(qdistro_substrate_base_path baked)"
 [ -f "$BAKED_BASE" ] || die "$BAKED_BASE missing (build it via scripts/vm/build-baked-baseweed.sh)"
 # clone-baseweed.sh dumps QDWIN_VM_TEMPLATE (default qdistro-template), so

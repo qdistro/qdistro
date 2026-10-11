@@ -37,14 +37,18 @@ _qdc_die() { echo "ERROR: $*" >&2; return 1; }
 # root (shared with the rpm/npm/baseweed caches), then the XDG default.
 # HOME may be unset (kiwi chroot scripts, systemd units) — callers run
 # under set -u, so resolve it from passwd rather than abort.
+# Callers must check the status: `root="$(qd_deps_root)" || return 1`.
 qd_deps_root() {
-    local home="${HOME:-}"
-    [ -n "$home" ] || home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
-    if [ -z "${QDISTRO_DEPS_CACHE_DIR:-}${QDWIN_CACHE_DIR:-}" ] && [ -z "$home" ]; then
-        _qdc_die "no deps cache root: HOME unset — set QDISTRO_DEPS_CACHE_DIR"
-        return 1
+    local root="${QDISTRO_DEPS_CACHE_DIR:-${QDWIN_CACHE_DIR:-}}" home
+    if [ -z "$root" ]; then
+        home="${HOME:-}"
+        if [ -z "$home" ]; then
+            home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)" || home=
+        fi
+        [ -n "$home" ] || { _qdc_die "no deps cache root: HOME unset and no passwd entry — set QDISTRO_DEPS_CACHE_DIR"; return 1; }
+        root="$home/.cache/qdistro"
     fi
-    printf '%s\n' "${QDISTRO_DEPS_CACHE_DIR:-${QDWIN_CACHE_DIR:-$home/.cache/qdistro}}"
+    printf '%s\n' "$root"
 }
 
 qd_deps_offline() {
@@ -58,7 +62,7 @@ qd_deps_offline() {
 # Write/refresh the root MANIFEST (schema marker; cheap, idempotent).
 qd_deps_init() {
     local root
-    root="$(qd_deps_root)"
+    root="$(qd_deps_root)" || return 1
     install -d "$root" "$root/.locks" "$root/.partial" || return 1
     if [ ! -s "$root/MANIFEST" ]; then
         printf 'schema=1\ncreated=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$root/MANIFEST" || return 1
@@ -80,8 +84,10 @@ qd_deps_init() {
 
 # qd_repo_dir <snapshot> — local repo root for a snapshot.
 qd_repo_dir() {
+    local root
     case "$1" in ''|*[!0-9]*) _qdc_die "qd_repo_dir: bad snapshot '$1'"; return 1 ;; esac
-    printf '%s/repos/%s\n' "$(qd_deps_root)" "$1"
+    root="$(qd_deps_root)" || return 1
+    printf '%s/repos/%s\n' "$root" "$1"
 }
 
 # qd_repo_present <snapshot> <repo> — that repo's METADATA is cached and was
@@ -153,10 +159,11 @@ qd_repo_base_or_upstream() {
 # (metadata | prefetch --list F | audit [--list F] [--deep] | export-list |
 # prune --list F) against this deps root.
 qd_repo_cache() {
-    local cmd="$1" snap="$2" script; shift 2
+    local cmd="$1" snap="$2" script root; shift 2
     script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/qd-repo-cache.py"
     [ -f "$script" ] || { _qdc_die "repo cache worker missing: $script"; return 1; }
-    python3 "$script" --root "$(qd_deps_root)" "$cmd" --snapshot "$snap" "$@"
+    root="$(qd_deps_root)" || return 1
+    python3 "$script" --root "$root" "$cmd" --snapshot "$snap" "$@"
 }
 
 # qd_repo_list — the committed package list (`<repo> <name>.<arch>`): every
@@ -226,12 +233,13 @@ _qd_oci_complete() {
 
 # _qd_oci_save <ref> <digest> — save the archive under a per-digest lock.
 _qd_oci_save() {
-    local ref="$1" digest="$2" hex dir lock tmp
+    local ref="$1" digest="$2" hex dir lock tmp root
     hex="${digest#sha256:}"
-    dir="$(qd_deps_root)/oci/$hex"
+    root="$(qd_deps_root)" || return 1
+    dir="$root/oci/$hex"
     _qd_oci_complete "$dir" && return 0
-    install -d "$dir" "$(qd_deps_root)/.locks" || return 1
-    lock="$(qd_deps_root)/.locks/oci-$hex.lock"
+    install -d "$dir" "$root/.locks" || return 1
+    lock="$root/.locks/oci-$hex.lock"
     (
         flock -x 9
         _qd_oci_complete "$dir" && exit 0
@@ -257,7 +265,7 @@ _qd_oci_save() {
 # the same proof qd_oci_ensure runs before podman load.
 qd_oci_cached() {
     local ref="$1" root refmap digest dir
-    root="$(qd_deps_root)"
+    root="$(qd_deps_root)" || return 1
     refmap="$root/oci/refs/$(_qd_oci_ref_key "$ref").digest"
     [ -s "$refmap" ] || return 1
     digest="$(cat "$refmap")"
@@ -273,7 +281,7 @@ qd_oci_ensure() {
     [ -n "$ref" ] || { _qdc_die "qd_oci_ensure: empty ref"; return 1; }
     command -v podman >/dev/null || { _qdc_die "qd_oci_ensure: podman required"; return 2; }
     qd_deps_init || return 1
-    root="$(qd_deps_root)"
+    root="$(qd_deps_root)" || return 1
     refdir="$root/oci/refs"
     refmap="$refdir/$(_qd_oci_ref_key "$ref").digest"
 
@@ -374,7 +382,7 @@ qd_guest_host_addr() {
 qd_serve_start() {
     local root pid_file port_file pid mode
     qd_deps_init || return 1
-    root="$(qd_deps_root)"
+    root="$(qd_deps_root)" || return 1
     pid_file="$root/.serve.pid" port_file="$root/.serve.port"
     (
         flock -x 9
@@ -419,7 +427,7 @@ qd_serve_start() {
 
 qd_serve_port() {
     local root pid_file port_file pid
-    root="$(qd_deps_root)"
+    root="$(qd_deps_root)" || return 1
     pid_file="$root/.serve.pid" port_file="$root/.serve.port"
     [ -s "$pid_file" ] && [ -s "$port_file" ] || return 1
     pid="$(cat "$pid_file")"
@@ -429,7 +437,7 @@ qd_serve_port() {
 
 qd_serve_stop() {
     local root pid_file port_file pid
-    root="$(qd_deps_root)"
+    root="$(qd_deps_root)" || return 1
     pid_file="$root/.serve.pid" port_file="$root/.serve.port"
     [ -s "$pid_file" ] || { rm -f "$port_file"; return 0; }
     pid="$(cat "$pid_file")"
@@ -628,15 +636,16 @@ _qdc_valid_basename() {
 }
 
 qd_path() {
-    local class="$1" key="$2" base="${3:-}"
+    local class="$1" key="$2" base="${3:-}" root
     case "$class" in
         .|..|*/*|*[!a-z0-9._-]*|'') _qdc_die "qd_path: bad class '$class'"; return 1 ;;
     esac
+    root="$(qd_deps_root)" || return 1
     [[ "$key" =~ ^[0-9a-f]{64}$ ]] || { _qdc_die "qd_path: bad sha256 key '$key'"; return 1; }
     case "$base" in
-        '') printf '%s/%s/%s\n' "$(qd_deps_root)" "$class" "$key" ;;
+        '') printf '%s/%s/%s\n' "$root" "$class" "$key" ;;
         *) _qdc_valid_basename "$base" || { _qdc_die "qd_path: bad basename '$base'"; return 1; }
-           printf '%s/%s/%s/%s\n' "$(qd_deps_root)" "$class" "$key" "$base" ;;
+           printf '%s/%s/%s/%s\n' "$root" "$class" "$key" "$base" ;;
     esac
 }
 

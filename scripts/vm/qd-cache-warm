@@ -32,6 +32,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/deps-cache.sh"
 # shellcheck source=lib/opensuse-cloud-image.sh
 . "$HERE/lib/opensuse-cloud-image.sh"
+DEPS_ROOT="$(qd_deps_root)" || exit 1
 
 check=0 quick=0 record=0
 for arg in "$@"; do
@@ -114,7 +115,7 @@ if [ "$check" -eq 1 ]; then
     if [ "$quick" -eq 0 ]; then
         extras=0 bad=0
         for class in agama openwrt ubuntu; do
-            cdir="$(qd_deps_root)/$class"
+            cdir="$DEPS_ROOT/$class"
             [ -d "$cdir" ] || continue
             for kdir in "$cdir"/*/; do
                 [ -d "$kdir" ] || continue
@@ -138,7 +139,7 @@ if [ "$check" -eq 1 ]; then
         done
         # ubuntu's image lives in the cloud class (qd_fetch cloud …) —
         # audit every non-substrate cloud entry the same way.
-        for kdir in "$(qd_deps_root)/cloud"/*/; do
+        for kdir in "$DEPS_ROOT/cloud"/*/; do
             [ -d "$kdir" ] || continue
             key="$(basename "$kdir")"
             [ "$key" = "$QDISTRO_SUBSTRATE_CLOUD_SHA256" ] && continue
@@ -167,7 +168,7 @@ if [ "$record" -eq 1 ]; then
     exit 0
 fi
 
-echo "[qd-cache-warm] warming snapshot $snap into $(qd_deps_root)"
+echo "[qd-cache-warm] warming snapshot $snap into $DEPS_ROOT"
 
 echo "[qd-cache-warm] repo cache: metadata + $(grep -c . "$(qd_repo_list)" 2>/dev/null || echo 0) listed packages"
 qd_repo_cache prefetch "$snap" --list "$(qd_repo_list)"

@@ -101,6 +101,24 @@ runq() {
     [ "$output" = "$WORK/cache" ]
 }
 
+@test "qd_deps_root failure propagates: no root means no path, override still wins" {
+    mkdir -p "$WORK/bin"
+    printf '#!/bin/sh\nexit 2\n' > "$WORK/bin/getent"; chmod +x "$WORK/bin/getent"
+    run env -u HOME -u QDISTRO_DEPS_CACHE_DIR -u QDWIN_CACHE_DIR PATH="$WORK/bin:$PATH" \
+        bash -c 'set -euo pipefail; . "$1"; qd_deps_root' _ "$LIB"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"set QDISTRO_DEPS_CACHE_DIR"* ]]
+    for fn in "qd_repo_dir 20260101" "qd_path src $GOOD_SHA blob.bin"; do
+        run env -u HOME -u QDISTRO_DEPS_CACHE_DIR -u QDWIN_CACHE_DIR PATH="$WORK/bin:$PATH" \
+            bash -c '. "$1"; $2' _ "$LIB" "$fn"
+        [ "$status" -ne 0 ]
+        [[ "$output" != *"/repos/"* && "$output" != *"/src/"* ]]
+    done
+    run env -u HOME PATH="$WORK/bin:$PATH" bash -c 'set -euo pipefail; . "$1"; qd_deps_root' _ "$LIB"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$WORK/cache" ]
+}
+
 @test "qd_fetch cold-stores an artifact under class/sha256/basename" {
     runq "qd_fetch blob '$URL/blob.bin' '$GOOD_SHA'"
     [ "$status" -eq 0 ]

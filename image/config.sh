@@ -295,6 +295,10 @@ echo "[qdistro-image] building + staging vendored libweston (production)..."
 # build-in-vm.sh stages the verified display-info tarball here; a build
 # without it fetches through a throwaway deps root, never into the image's
 # /root/.cache. Both are gone before the image is sealed.
+if [ -L /root/qdistro-deps ] || [ -L /root/qdistro-deps/display-info.tar.gz ]; then
+    echo "[qdistro-image] ERROR: /root/qdistro-deps staging must not be a symlink" >&2
+    exit 1
+fi
 QDISTRO_DEPS_CACHE_DIR=/root/qdistro-deps/cache
 export QDISTRO_DEPS_CACHE_DIR
 if [ -f /root/qdistro-deps/display-info.tar.gz ]; then
