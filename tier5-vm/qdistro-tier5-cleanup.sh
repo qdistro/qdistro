@@ -186,7 +186,15 @@ else
     echo "[tier5-cleanup] WARN: cannot query $VM_NAME — libvirt error" >&2
 fi
 
-if [ -f "$DISK" ]; then
+if [ -e "$DISK" ] || [ -L "$DISK" ]; then
+    # A symlinked or non-regular $DISK is foreign construction — a
+    # symlink to the bound inode would satisfy the dev/ino check
+    # below while the path itself is unowned (sol r24). Preserve it.
+    if [ ! -f "$DISK" ] || [ -L "$DISK" ]; then
+        echo "[tier5-cleanup] FAIL: $DISK is not a regular file —" >&2
+        echo "        keeping it" >&2
+        exit 5
+    fi
     # Both proofs are required before the overlay goes: NO startable
     # definition remains (a still-defined domain can be started against
     # a disk we are about to delete) AND no backing qemu lives.

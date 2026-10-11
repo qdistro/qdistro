@@ -152,7 +152,9 @@ silently merge:
   `<disk>.partial.XXXXXX` name claimed by mktemp's O_EXCL (the
   sidecar temp gets the same treatment, so a foreign file at a
   predictable temp path is never overwritten or unlinked by our
-  create): the clone is built, stamped, then
+  create): the clone is built, stamped (the record write runs as
+  admin, so a swapped temp name can never make the root wrapper
+  truncate a foreign file through a symlink), then
   hard-linked into place with `ln -T` — a directory or symlink at the
   destination is never a sink and link(2) never clobbers an existing
   path — so crash residue is always provable — a
@@ -174,9 +176,11 @@ silently merge:
   refused AND preserved, never booted and never deleted by the
   launch path (the teardown unlink needs the same inode-bound record,
   a lone sidecar is removed only when it is OUR regular-file record,
-  and a foreign, symlinked, or unreadable sidecar is never
+  a foreign, symlinked, or unreadable sidecar is never
   overwritten — every record read site requires a regular,
-  non-symlink file) — confirmed qemu
+  non-symlink file — and a symlinked or non-regular `$DISK` itself is
+  foreign construction even when it points at the bound inode, so it
+  is preserved rather than unlinked) — confirmed qemu
   death proves no live guest is killed, but it does not make a
   foreign definition or disk ours; the owner relaunches under its own
   name and an admin removes a genuinely stale squatter deliberately.

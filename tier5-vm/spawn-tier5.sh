@@ -1071,7 +1071,7 @@ cleanup() {
                         [ -f "$DISK.appid" ] && [ ! -L "$DISK.appid" ] \
                             && read -r _sapp _sident 2>/dev/null \
                                 < "$DISK.appid" || true
-                        if [ -f "$DISK" ]; then
+                        if [ -f "$DISK" ] && [ ! -L "$DISK" ]; then
                             if [ "$_sapp" != "$POLICY_KEY" ] \
                                 || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ]; then
                                 domain_reaped=0
@@ -1079,6 +1079,14 @@ cleanup() {
                             else
                                 rm -f "$DISK" "$DISK.appid" 2>/dev/null || true
                             fi
+                        elif [ -e "$DISK" ] || [ -L "$DISK" ]; then
+                            # A symlinked or non-regular $DISK is foreign
+                            # construction: a symlink to the bound inode
+                            # would satisfy the dev/ino check while the
+                            # path itself is unowned (sol r24). Preserve.
+                            domain_reaped=0
+                            echo "[tier5] WARN: keeping $DISK — not a" >&2
+                            echo "        regular file (foreign construction)" >&2
                         elif [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
                             if [ "$_sapp" = "$POLICY_KEY" ] \
                                 && [ -f "$DISK.appid" ] \
@@ -1244,7 +1252,8 @@ _create_overlay_disk() {
     # admin so the partial is admin-owned like every overlay here.
     _tmp=$(run_as_admin mktemp "$DISK.partial.XXXXXX" 2>/dev/null) \
         || { echo "[tier5] FAIL: cannot create partial under $DISK_DIR" >&2; exit 4; }
-    if ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$_tmp" >/dev/null 2>&1; then
+    if [ -L "$_tmp" ] \
+            || ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$_tmp" >/dev/null 2>&1; then
         rm -f "$_tmp" 2>/dev/null
         echo "[tier5] FAIL: qemu-img create -b $DISK_BASE failed at $DISK" >&2
         exit 4
@@ -1254,27 +1263,30 @@ _create_overlay_disk() {
     # $DISK.appid.$$ path could otherwise overwrite (or on failure
     # unlink) a foreign file/symlink squatting there (sol r22).
     _stmp=$(run_as_admin mktemp "$DISK.appid.tmp.XXXXXX" 2>/dev/null)
-    if [ -z "$_di" ] || [ -z "$_stmp" ] \
-            || ! printf '%s %s\n' "$POLICY_KEY" "$_di" > "$_stmp"; then
+    # The record write goes through tee AS ADMIN — a root shell
+    # reopening the admin-claimed name would write through a swapped
+    # symlink at a privilege the planter does not hold; as admin the
+    # worst a symlink reaches is a file admin could write anyway
+    # (sol r24). The -L check is the explicit belt.
+    if [ -z "$_di" ] || [ -z "$_stmp" ] || [ -L "$_stmp" ] \
+            || ! printf '%s %s\n' "$POLICY_KEY" "$_di" \
+                | run_as_admin tee "$_stmp" >/dev/null; then
         rm -f "$_tmp" ${_stmp:+"$_stmp"} 2>/dev/null
         echo "[tier5] FAIL: could not stamp binding sidecar $DISK.appid" >&2
         exit 4
     fi
-    # Install the record first — but never clobber one that is not
-    # ours: the caller gates readable foreign records, yet a record
-    # could still appear in the gap (sol r22). Our OWN stale record
-    # (same appId) is removed so the new binding can land.
+    # ANY record already at the destination is unproven — a matching
+    # appId alone is not ownership: a lone record binds no inode this
+    # create can verify (a recoverable record+partial pair was already
+    # finished by the caller). Preserve it and refuse — removing it
+    # would convert an unproven record into permission to unlink it
+    # (sol r24); link(2) below fails closed the same way on a record
+    # raced in after this check.
     if [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
-        _ca=""
-        [ -f "$DISK.appid" ] && [ ! -L "$DISK.appid" ] \
-            && read -r _ca _ci 2>/dev/null < "$DISK.appid" || true
-        if [ "$_ca" != "$POLICY_KEY" ]; then
-            rm -f "$_tmp" "$_stmp" 2>/dev/null
-            echo "[tier5] FAIL: $DISK.appid holds a foreign or" >&2
-            echo "        unreadable record — preserving it" >&2
-            exit 4
-        fi
-        rm -f "$DISK.appid" 2>/dev/null
+        rm -f "$_tmp" "$_stmp" 2>/dev/null
+        echo "[tier5] FAIL: $DISK.appid holds an unproven record —" >&2
+        echo "        preserving it" >&2
+        exit 4
     fi
     # ln -T: the destination is a filename, never a directory sink —
     # link(2) also refuses any existing path, so nothing can be

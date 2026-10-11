@@ -479,6 +479,12 @@ def test_overlay_reuse_requires_an_inode_bound_owner_record():
     assert 'foreign or unreadable record' in body
     assert '[ ! -L "$DISK.appid" ]' in body
     assert 'rm -f "$DISK.appid"' in body
+    # a symlinked or non-regular $DISK is foreign construction — a
+    # symlink to the bound inode would satisfy the dev/ino check while
+    # the path is unowned: preserve BOTH the path and its record
+    # (sol r24)
+    assert '[ -f "$DISK" ] && [ ! -L "$DISK" ]' in body
+    assert 'foreign construction' in body
 
 
 def test_create_goes_through_a_recoverable_partial():
@@ -508,15 +514,23 @@ def test_create_goes_through_a_recoverable_partial():
     assert create.count('"$DISK" -ef') + create.count('$DISK.appid" -ef') \
         >= 2
     assert 'mv -f' not in create
-    # an existing record that is not ours (foreign, unreadable,
-    # raced-in, symlinked) refuses — the install re-checks inside
-    # with the same regular-non-symlink requirement (sol r22/r23)
-    assert 'holds a foreign or' in create
-    assert '[ "$_ca" != "$POLICY_KEY" ]' in create
-    assert '[ ! -L "$DISK.appid" ]' in create
-    # the failure paths only ever remove OUR O_EXCL temps — never
-    # $DISK or a pre-existing $DISK.appid (sol r19/r22)
+    # ANY pre-existing record refuses — a matching appId alone is not
+    # ownership: a lone record binds no inode this create can verify
+    # (the recoverable pair was already finished by the caller), so
+    # removing it would convert unproven ownership into permission to
+    # unlink. The create never removes a present record at all — its
+    # failure paths only ever remove OUR O_EXCL temps (sol r24)
+    assert 'holds an unproven record' in create
+    assert '[ -L "$DISK.appid" ]' in create
+    assert 'rm -f "$DISK.appid"' not in create
     assert 'rm -f "$DISK"' not in create
+    # the record temp is written AS ADMIN (tee), never reopened by the
+    # root shell — a swapped symlink cannot make root truncate a
+    # foreign file (sol r24)
+    assert 'run_as_admin tee "$_stmp"' in create
+    assert '> "$_stmp"' not in create
+    assert '[ -L "$_stmp" ]' in create
+    assert '[ -L "$_tmp" ]' in create
     # recovery: only a partial whose dev/ino the sidecar binds is
     # finished — dev+ino cannot be forged by a planted file — and a
     # non-regular/foreign/unreadable record is preserved, never
@@ -706,7 +720,7 @@ def test_cleanup_helper_requires_absent_definition_for_unlink():
     #          verified-absent definition (a successful enumeration
     #          without the name — a query failure is ambiguity, never
     #          absence) AND confirmed-dead qemu (sol r7/r11)
-    tail = CLEANUP[CLEANUP.index('if [ -f "$DISK" ]'):]
+    tail = CLEANUP[CLEANUP.index('if [ -e "$DISK" ]'):]
     assert "domain_defined_state; _ds=$?" in tail
     assert '[ "$_ds" -eq 0 ]' in tail
     assert '[ "$_ds" -ne 1 ]' in tail
@@ -782,7 +796,7 @@ def test_owner_records_must_rederive_to_the_artifact_name():
     # explicit ownerless opt-in), and a t5 name demands derivation
     # coherence — a record copied beside a different disk is refused
     # even WITH the opt-in (sol r19)
-    tail = CLEANUP[CLEANUP.index('if [ -f "$DISK" ]'):]
+    tail = CLEANUP[CLEANUP.index('if [ -e "$DISK" ]'):]
     assert "TIER5_CLEANUP_ALLOW_OWNERLESS" in tail
     assert 'tier5_derived_name "$_sapp")" != "$VM_NAME"' in tail
     assert 'stat -c \'%d %i\' "$DISK"' in tail
@@ -791,5 +805,9 @@ def test_owner_records_must_rederive_to_the_artifact_name():
     # even with the opt-in — only a genuinely ABSENT sidecar qualifies
     assert '[ ! -L "$DISK.appid" ]' in tail
     assert "not a readable" in tail
+    # and a symlinked/non-regular $DISK itself is foreign construction —
+    # kept before any provenance read (sol r24)
+    assert '[ ! -f "$DISK" ] || [ -L "$DISK" ]' in tail
+    assert 'not a regular file' in tail
     assert tail.index("TIER5_CLEANUP_ALLOW_OWNERLESS") \
         < tail.index('rm -f "$DISK"')
