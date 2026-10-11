@@ -94,7 +94,7 @@ qd_adopt openwrt "$IB_SHA256" "$CACHE_DIR/${IB_NAME}.tar.zst" "$IB_URL" || true
 # under a different basename than the URL's.
 IB_TARBALL="$(qd_fetch openwrt "$IB_URL" "$IB_SHA256" "${IB_NAME}.tar.zst")" \
     || { echo "[netvm-build] ImageBuilder fetch failed (digest or offline-missing): $IB_URL" >&2; exit 4; }
-qd_write_manifest openwrt "$IB_SHA256" "$IB_URL" "${IB_NAME}.tar.zst"
+qd_write_manifest openwrt "$IB_SHA256" "$IB_URL" "$(basename "$IB_TARBALL")"
 
 WORK="$(mktemp -d /tmp/netvm-build.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT

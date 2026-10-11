@@ -22,6 +22,11 @@ if [ -z "$base" ]; then
     fi
     base="https://download.opensuse.org/history"
 fi
+# The base interpolates into .repo baseurl lines — only a plain URL token
+# is legal (mirrors deps-cache.sh's qd_repo_base_safe; this script runs
+# inside the container where that lib is not reachable).
+base_re='^(https?|file)://[A-Za-z0-9._~:/?=%+@-]+$'
+[[ "$base" =~ $base_re ]] || { echo "container-native-deps: QDISTRO_REPO_BASE is not a plain URL: ${base:0:80}" >&2; exit 3; }
 cat > /etc/zypp/repos.d/qdistro-snapshot-oss.repo <<EOF
 [qdistro-snapshot-oss]
 name=qdistro Tumbleweed OSS $snap

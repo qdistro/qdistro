@@ -40,7 +40,7 @@ if [ -z "$STOCK_ISO" ]; then
             echo "stock ISO failed digest verification (or missing under offline): $AGAMA_STOCK_ISO_URL" >&2
             exit 1
         }
-        qd_write_manifest agama "$AGAMA_STOCK_ISO_SHA256" "$AGAMA_STOCK_ISO_URL" "$(basename "$AGAMA_STOCK_ISO_URL")"
+        qd_write_manifest agama "$AGAMA_STOCK_ISO_SHA256" "$AGAMA_STOCK_ISO_URL" "$(basename "$STOCK_ISO")"
     else
         STOCK_ISO=$QDISTRO_BUILD_TMP/agama-installer-stock.iso
         # The cache is keyed to its source URL — a changed AGAMA_STOCK_ISO_URL

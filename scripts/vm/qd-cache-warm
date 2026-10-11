@@ -60,11 +60,10 @@ if [ "$check" -eq 1 ]; then
     if qd_repo_present "$snap" oss && qd_repo_present "$snap" non-oss; then
         repo_state=ok
         if [ "$quick" -eq 0 ]; then
-            # Deep audit: re-verify every file repomd/primary names.
-            # Offline env makes --verify audit-only (dies, never refetches).
-            if ! QDISTRO_DEPS_OFFLINE=1 QCI_OFFLINE=1 \
-                    "$HERE/qd-repo-mirror.py" --root "$(qd_deps_root)" \
-                    --snapshot "$snap" --verify; then
+            # Deep audit: --audit re-checks every file repomd/primary names
+            # read-only — no marker mutation, no refetch, no network.
+            if ! "$HERE/qd-repo-mirror.py" --root "$(qd_deps_root)" \
+                    --snapshot "$snap" --audit; then
                 repo_state=missing
             fi
         fi
@@ -115,8 +114,15 @@ if [ "$check" -eq 1 ]; then
                 [ -d "$kdir" ] || continue
                 key="$(basename "$kdir")"
                 # Lock-file-only residue from an aborted fetch is not an
-                # entry — only audit keys that hold an artifact.
-                qd_has "$class" "$key" || continue
+                # entry — but a manifest WITHOUT its artifact is a broken
+                # entry and must surface as corrupt, not be skipped.
+                if ! qd_has "$class" "$key"; then
+                    if [ -s "$kdir/manifest.txt" ]; then
+                        echo "  CORRUPT $class/$key (manifest without artifact)"
+                        bad=$((bad + 1))
+                    fi
+                    continue
+                fi
                 extras=$((extras + 1))
                 if ! qd_verify "$class" "$key" >/dev/null 2>&1; then
                     echo "  CORRUPT $class/$key"
@@ -130,7 +136,13 @@ if [ "$check" -eq 1 ]; then
             [ -d "$kdir" ] || continue
             key="$(basename "$kdir")"
             [ "$key" = "$QDISTRO_SUBSTRATE_CLOUD_SHA256" ] && continue
-            qd_has cloud "$key" || continue
+            if ! qd_has cloud "$key"; then
+                if [ -s "$kdir/manifest.txt" ]; then
+                    echo "  CORRUPT cloud/$key (manifest without artifact)"
+                    bad=$((bad + 1))
+                fi
+                continue
+            fi
             extras=$((extras + 1))
             qd_verify cloud "$key" >/dev/null 2>&1 || { echo "  CORRUPT cloud/$key"; bad=$((bad + 1)); }
         done

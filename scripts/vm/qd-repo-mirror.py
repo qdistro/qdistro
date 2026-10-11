@@ -171,16 +171,20 @@ def save_index(dest, index):
     os.replace(tmp, os.path.join(dest, "mirror-index.json"))
 
 
-def audit_repo(base, dest):
-    """Re-verify a mirror locally; self-heal files still online.
+def audit_repo(base, dest, mutate=True):
+    """Re-verify a mirror locally.
 
-    Two phases: repomd-named metadata FIRST (a missing/corrupt primary can
-    be repaired before it is parsed), then EVERY package primary names —
-    never just index entries. The completion marker is invalidated up
-    front and republished only after the full audit verifies, so a failed
-    or interrupted audit never leaves a stale "complete"."""
+    mutate=True (--verify): self-heals files still online. Two phases —
+    repomd-named metadata FIRST (a missing/corrupt primary can be repaired
+    before it is parsed), then EVERY package primary names — never just
+    index entries. The completion marker is invalidated up front and
+    republished only after the full audit verifies, so a failed or
+    interrupted audit never leaves a stale "complete".
+
+    mutate=False (--audit): read-only check for --check callers — never
+    touches the marker and never fetches; reports and fails nonzero."""
     marker = os.path.join(dest, "mirror.json")
-    if os.path.isfile(marker):
+    if mutate and os.path.isfile(marker):
         # Incomplete until re-proven — invalidate BEFORE any audit failure
         # can die, or a deleted repomd leaves a stale "complete" behind.
         os.unlink(marker)
@@ -191,6 +195,9 @@ def audit_repo(base, dest):
     def repair(bad, what):
         if not bad:
             return
+        if not mutate:
+            die(f"audit: {len(bad)} {what} file(s) corrupt/missing: "
+                + ", ".join(h for h, _s, _a in bad[:10]))
         print(f"[repo-mirror] verify: {len(bad)} {what} file(s) "
               f"corrupt/missing, refetching", file=sys.stderr)
         if offline():
@@ -241,6 +248,10 @@ def audit_repo(base, dest):
             + ", ".join(h for h, _s, _a in bad[:10]))
 
     total = sum(1 for _ in pkgs())
+    if not mutate:
+        print(f"[repo-mirror] audit OK: {total} packages + repodata under "
+              f"{dest}", file=sys.stderr)
+        return
     manifest = {"schema": 1, "verified_at": time.strftime(
         "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "packages": total, "source": base}
@@ -253,7 +264,7 @@ def audit_repo(base, dest):
 
 
 def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
-                force, verify):
+                force, verify, audit):
     src = f"{base}/{snapshot}/tumbleweed/repo/{repo}/"
     dest = os.path.join(dest_root, snapshot, "tumbleweed", "repo", repo)
     os.makedirs(dest, exist_ok=True)
@@ -266,8 +277,8 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
         die(f"could not lock {lock_path}: {e}")
     print(f"[repo-mirror] {repo}: {src} -> {dest}", file=sys.stderr)
 
-    if verify:
-        audit_repo(src.rstrip("/"), dest)
+    if verify or audit:
+        audit_repo(src.rstrip("/"), dest, mutate=not audit)
         return
     # Completed-mirror fast path: mirror.json is written only after a full
     # successful pass, so its presence means every repodata+package file was
@@ -385,11 +396,16 @@ def main():
                    help="fetch at most N packages per repo (smoke tests)")
     p.add_argument("--verify", action="store_true",
                    help="audit a completed mirror locally; refetch corrupt files")
+    p.add_argument("--audit", action="store_true",
+                   help="read-only mirror check: never fetches, never "
+                        "touches mirror.json — for --check preflights")
     p.add_argument("--force", action="store_true",
                    help="re-mirror even when mirror.json marks the repo complete")
     args = p.parse_args()
 
-    if offline() and not args.verify:
+    if args.verify and args.audit:
+        die("--verify and --audit are mutually exclusive")
+    if offline() and not (args.verify or args.audit):
         die("offline mode: repo mirror is the cache warmer — run it online")
 
     repos = args.repo or ["oss", "non-oss"]
@@ -398,7 +414,8 @@ def main():
         mirror_repo(args.base.rstrip("/"), args.snapshot, repo,
                     dest_root, limit=args.limit,
                     metadata_only=args.metadata_only,
-                    force=args.force, verify=args.verify)
+                    force=args.force, verify=args.verify,
+                    audit=args.audit)
 
 
 if __name__ == "__main__":

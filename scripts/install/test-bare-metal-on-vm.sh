@@ -136,7 +136,7 @@ prep_image() {
         # live under a different basename than the URL's.
         cache="$(qd_fetch cloud "$url" "$ubuntu_sha" "$(basename "$url")")" \
             || { log "[$distro] ERROR: ubuntu image failed digest verification (or is missing under offline mode)"; return 1; }
-        qd_write_manifest cloud "$ubuntu_sha" "$url" "$(basename "$url")"
+        qd_write_manifest cloud "$ubuntu_sha" "$url" "$(basename "$cache")"
         log "[$distro] verified image: $cache"
     else
         log "[$distro] reusing cached image: $cache ($(du -h "$cache" | cut -f1))"

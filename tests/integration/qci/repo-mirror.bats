@@ -360,3 +360,14 @@ print(urllib.request.urlopen('http://127.0.0.1:$port/repos/$SNAP/tumbleweed/repo
     [ "$(cat "$d/noarch/pkg-a-1.0-1.noarch.rpm")" = "rpm-A-bytes" ]
     [ "$(cat "$d/noarch/pkg-b-1.0-1.noarch.rpm")" = "rpm-B-bytes" ]
 }
+
+@test "--audit is read-only: fails on broken mirror, marker survives" {
+    local snap=20260101 repo_dir="$WORK/cache/repos/$snap/tumbleweed/repo/oss"
+    mkdir -p "$repo_dir"
+    printf '{}' > "$repo_dir/mirror.json"
+    # Marker present but no repomd — audit must fail WITHOUT deleting it.
+    run python3 "$MIRROR" \
+        --root "$WORK/cache" --snapshot "$snap" --repo oss --audit
+    [ "$status" -eq 1 ]
+    [ -f "$repo_dir/mirror.json" ]
+}

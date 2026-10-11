@@ -39,6 +39,13 @@ if [ -z "$base" ]; then
     fi
     base="https://download.opensuse.org/history"
 fi
+# The base interpolates into .repo baseurl lines — only a plain URL token
+# is legal (same charset as deps-cache.sh's qd_repo_base_safe; this script
+# runs inside the container where that lib is not reachable).
+if ! printf '%s' "$base" | grep -qE '^(https?|file)://[A-Za-z0-9._~:/?=%+@-]+$'; then
+    echo "tier2-snapshot-repos: QDISTRO_REPO_BASE is not a plain URL: ${base%% *}" >&2
+    exit 3
+fi
 
 cat >"$repo_dir/qdistro-snapshot-oss.repo" <<EOF
 [qdistro-snapshot-oss]
