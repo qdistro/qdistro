@@ -51,6 +51,11 @@ Cases:
      dangle into the freed popup).
  16. A popup whose grab was replaced by another grab while grab_active is
      still set: teardown leaves the foreign grab installed.
+ 17. Stream confinement cancel: the real cancel callback ends the
+     still-installed confine grab and drops its cached pointer, so the
+     later seat release finds the default grab and nothing ends twice.
+ 18. A confine grab still installed with confine_grab_active clear: the
+     teardown ends it anyway, before the stream's pointer dies.
 """
 
 from pathlib import Path
@@ -873,6 +878,72 @@ static int scenario_popup_teardown_grab_replaced(void)
 	return 0;
 }
 
+/* weston_pointer_cancel_grab() only calls the confine grab's cancel; a
+ * cancel that only cleared the flag left the grab installed, and grab_end
+ * then returned early on the flag. */
+static int scenario_confine_cancel(void)
+{
+	struct weston_view curtain = { 0 };
+	struct weston_pointer *stream_pointer;
+	struct qdwin_view_stream *s;
+	struct qdwin_toplevel *tl;
+	int before = focus_handler_calls;
+
+	tl = make_proxy(33, &curtain);
+	s = make_stream(tl);
+	stream_pointer = confine(s);
+	pick_result = NULL;
+
+	qdwin_stream_confine_cancel(stream_pointer->grab);
+
+	CHECK(stream_pointer->grab == &stream_pointer->default_grab,
+	      "confine cancel left the confine grab installed");
+	CHECK(focus_handler_calls == before + 1,
+	      "confine cancel did not end the grab through end_grab");
+	CHECK(!s->confine_grab_active, "confine cancel left the flag set");
+	CHECK(s->confine_grab.pointer == NULL,
+	      "confine cancel kept a pointer the seat release frees");
+
+	qdwin_nested_proxy_destroy(tl);
+
+	/* Address only: the pointer itself is freed by now. */
+	CHECK(grab_at_release == (void *)&stream_pointer->default_grab,
+	      "the pointer was not on its default grab when it died");
+	CHECK(focus_handler_calls == before + 1,
+	      "teardown after cancel ended a grab a second time");
+	wl_resource_destroy(s->resource);
+	return 0;
+}
+
+/* The flag is not what keeps pointer->grab out of a freed view_stream: a
+ * confine grab still installed is ended whatever confine_grab_active says. */
+static int scenario_confine_installed_flag_clear(void)
+{
+	struct weston_view curtain = { 0 };
+	struct weston_pointer *stream_pointer;
+	struct qdwin_view_stream *s;
+	struct qdwin_toplevel *tl;
+	int before = focus_handler_calls;
+
+	tl = make_proxy(34, &curtain);
+	s = make_stream(tl);
+	stream_pointer = confine(s);
+	s->confine_grab_active = 0;
+	pick_result = NULL;
+	grab_at_release = NULL;
+
+	qdwin_nested_proxy_destroy(tl);
+
+	CHECK(grab_at_release != NULL &&
+	      grab_at_release != (void *)&s->confine_grab,
+	      "teardown left an installed confine grab on the pointer because "
+	      "confine_grab_active was clear");
+	CHECK(focus_handler_calls == before + 1,
+	      "teardown did not end the installed confine grab via end_grab");
+	wl_resource_destroy(s->resource);
+	return 0;
+}
+
 static int scenario_pending_and_idempotence(void)
 {
 	struct weston_view other_curtain = { 0 };
@@ -947,8 +1018,12 @@ int main(void)
 		return rc;
 	if ((rc = scenario_popup_teardown_grab_replaced()))
 		return rc;
+	if ((rc = scenario_confine_cancel()))
+		return rc;
+	if ((rc = scenario_confine_installed_flag_clear()))
+		return rc;
 
-	printf("ok: nested-proxy destroy teardown (16 cases)\n");
+	printf("ok: nested-proxy destroy teardown (18 cases)\n");
 	return 0;
 }
 """
@@ -964,6 +1039,7 @@ QDWIN_FNS = [
     ("void", "qdwin_popup_teardown"),
     ("void", "qdwin_popup_resource_destroyed"),
     ("void", "qdwin_popup_surface_destroyed"),
+    ("void", "qdwin_stream_confine_cancel"),
     ("void", "qdwin_stream_confine_grab_end"),
     ("void", "qdwin_stream_seat_release"),
     ("void", "qdwin_stream_input_handle_resource_destroyed"),

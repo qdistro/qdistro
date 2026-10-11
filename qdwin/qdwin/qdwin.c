@@ -6159,13 +6159,21 @@ qdwin_stream_confine_frame(struct weston_pointer_grab *grab)
 static void
 qdwin_stream_confine_cancel(struct weston_pointer_grab *grab)
 {
-	/* Weston calls cancel when another grab replaces ours (or on teardown).
-	 * After that our grab is no longer the pointer's active grab, so clear
-	 * the active flag — otherwise a later grab_end would call
-	 * weston_pointer_end_grab on a pointer whose grab is now someone else's
-	 * and tear down the wrong grab (codex impl-20). */
+	/* Weston does NOT call cancel when another grab replaces ours —
+	 * weston_pointer_start_grab() just swaps pointer->grab (grab_end below
+	 * guards for that). Cancel comes from weston_pointer_cancel_grab()
+	 * (pointer-device release, keyboard focus-out), which only invokes
+	 * this callback and leaves pointer->grab alone: our grab is still the
+	 * installed one. Clearing the flag alone would leave it installed with
+	 * grab_end then returning early, so pointer->grab would outlive the
+	 * view_stream. End it ourselves (guarded on it still being ours) and
+	 * drop the cached pointer: the grab is over, and weston may free that
+	 * pointer with its seat. */
 	struct qdwin_view_stream *s = wl_container_of(grab, s, confine_grab);
 	s->confine_grab_active = 0;
+	if (grab->pointer && grab->pointer->grab == grab)
+		weston_pointer_end_grab(grab->pointer);
+	grab->pointer = NULL;
 }
 
 static const struct weston_pointer_grab_interface qdwin_stream_confine_grab_iface = {
@@ -6197,13 +6205,16 @@ qdwin_stream_confine_grab_start(struct qdwin_view_stream *s)
 static void
 qdwin_stream_confine_grab_end(struct qdwin_view_stream *s)
 {
-	if (!s->confine_grab_active)
-		return;
-	s->confine_grab_active = 0;
 	/* Only end the grab if OURS is still the pointer's active grab — if it
-	 * was already replaced/cancelled, ending here would tear down whatever
-	 * grab is active now (codex impl-20). */
+	 * was already replaced, ending here would tear down whatever grab is
+	 * active now (codex impl-20). Conversely a grab that is still installed
+	 * is ended whatever confine_grab_active says, so pointer->grab can never
+	 * outlive the view_stream. The cached pointer is dropped once the grab
+	 * is over: the stream seat release frees it, and later callers (the
+	 * compositor-teardown drain) must not dereference it. */
 	struct weston_pointer *ptr = s->confine_grab.pointer;
+	s->confine_grab_active = 0;
+	s->confine_grab.pointer = NULL;
 	if (ptr && ptr->grab == &s->confine_grab)
 		weston_pointer_end_grab(ptr);
 }
