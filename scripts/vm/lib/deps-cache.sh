@@ -357,9 +357,23 @@ qd_oci_ensure() {
 # qd_serve_port_default — the proxy's STABLE per-user port. Guest images
 # persist the repo URL they were built with (baked substrates, goldens), so
 # the proxy must come back on the same port in every later run.
-# QDISTRO_SERVE_PORT overrides; 0 = kernel-assigned (tests).
+# Only the default cache root (~/.cache/qdistro) owns that port: any other
+# root (tests, scratch caches) gets a kernel-assigned one, so a throwaway
+# server can never squat the real cache's port. QDISTRO_SERVE_PORT
+# overrides either way; 0 = kernel-assigned.
 qd_serve_port_default() {
-    printf '%s\n' "${QDISTRO_SERVE_PORT:-$((20000 + $(id -u) % 10000))}"
+    local root home
+    if [ -n "${QDISTRO_SERVE_PORT:-}" ]; then
+        printf '%s\n' "$QDISTRO_SERVE_PORT"; return 0
+    fi
+    root="$(qd_deps_root)" || return 1
+    home="${HOME:-}"
+    [ -n "$home" ] || { home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)" || home=; }
+    if [ -n "$home" ] && [ "$(realpath -m -- "$root")" = "$(realpath -m -- "$home/.cache/qdistro")" ]; then
+        printf '%s\n' "$((20000 + $(id -u) % 10000))"
+    else
+        printf '0\n'
+    fi
 }
 
 # qd_guest_host_addr — the host address EVERY guest transport reaches: the
@@ -380,9 +394,10 @@ qd_guest_host_addr() {
 # Serialized on .locks/serve.lock: racing starters would otherwise each
 # spawn a server and tear the pid/port files.
 qd_serve_start() {
-    local root pid_file port_file pid mode
+    local root pid_file port_file pid mode port launcher
     qd_deps_init || return 1
     root="$(qd_deps_root)" || return 1
+    port="$(qd_serve_port_default)" || return 1
     pid_file="$root/.serve.pid" port_file="$root/.serve.port"
     (
         flock -x 9
@@ -400,26 +415,38 @@ qd_serve_start() {
             kill "$pid" 2>/dev/null || true
             rm -f "$pid_file" "$port_file"
         fi
-        rm -f "$port_file.next"
+        rm -f "$port_file.next" "$pid_file.next"
         # The server binds port 0 and writes the kernel-assigned port
         # itself — no pick-then-bind race. 9>&- is load-bearing: without
         # it the server inherits the lock fd and holds flock forever,
-        # hanging every later starter.
-        python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/qd-repo-cache.py" \
-            --root "$root" serve --port "$(qd_serve_port_default)" --port-file "$port_file.next" \
+        # hanging every later starter. setsid: the server outlives the
+        # starter's session and process group (a test or CI step that
+        # signals its group must not take the shared proxy down with it).
+        setsid python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/qd-repo-cache.py" \
+            --root "$root" serve --port "$port" --port-file "$port_file.next" --pid-file "$pid_file.next" \
             >>"$root/.serve.log" 2>&1 9>&- </dev/null &
-        pid=$!
+        # $! is setsid when it forks: wait on the server's own files, bail
+        # early only once the launched process is gone without them.
+        launcher=$!
         for _ in $(seq 1 50); do
-            kill -0 "$pid" 2>/dev/null || break
             [ -s "$port_file.next" ] && break
+            kill -0 "$launcher" 2>/dev/null || [ -s "$pid_file.next" ] || {
+                sleep 0.2; [ -s "$port_file.next" ] || break; }
             sleep 0.1
         done
-        if [ ! -s "$port_file.next" ] || ! kill -0 "$pid" 2>/dev/null; then
-            _qdc_die "qd_serve_start: http server failed to start (see $root/.serve.log)"
+        pid="$(cat "$pid_file.next" 2>/dev/null)"
+        case "$pid" in ''|*[!0-9]*) pid= ;; esac
+        if [ ! -s "$port_file.next" ] || [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+            if [ "$port" != 0 ] && command -v ss >/dev/null 2>&1 \
+                    && ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
+                _qdc_die "qd_serve_start: port $port is held by another process: $(ss -ltnpH "sport = :$port" 2>/dev/null | sed -n 's/.*users:((\(.*\)))/\1/p' | head -1) (set QDISTRO_SERVE_PORT, or stop it)"
+            else
+                _qdc_die "qd_serve_start: http server failed to start (see $root/.serve.log)"
+            fi
             exit 1
         fi
         mv "$port_file.next" "$port_file"
-        echo "$pid" >"$pid_file"
+        mv "$pid_file.next" "$pid_file"
         if qd_deps_offline; then echo offline; else echo online; fi >"$root/.serve.mode"
         cat "$port_file"
     ) 9>"$root/.locks/serve.lock"

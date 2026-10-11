@@ -6,6 +6,10 @@ setup() {
     # Resolved before the stub bin dir shadows it. Optional: only the cases
     # that build real qcow2 chains need it (require_real_qemu_img).
     REAL_QEMU_IMG="$(command -v qemu-img || true)"
+    # Never reach the real deps cache or start a proxy: guest repo wiring
+    # stays upstream (QDISTRO_REPO_PROXY=0), the cache root is a temp dir.
+    export QDISTRO_DEPS_CACHE_DIR="$BATS_TEST_TMPDIR/deps" QDISTRO_SERVE_PORT=0 QDISTRO_REPO_PROXY=0
+    unset QDISTRO_REPO_BASE _QD_REPO_BASE_WIRED QDWIN_CACHE_DIR
     TMP="$(mktemp -d)"
     RDIR="$TMP/run"; mkdir -p "$RDIR/host"
     QDWIN_IMG_DIR="$TMP/images"; mkdir -p "$QDWIN_IMG_DIR"

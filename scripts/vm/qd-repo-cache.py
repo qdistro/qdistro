@@ -36,7 +36,6 @@ Subcommands:
 
 import argparse
 import fcntl
-import functools
 import gzip
 import hashlib
 import http.server
@@ -209,7 +208,7 @@ def fetch_stream(url, dest, want_sha, want_algo, sink, retries=3):
                     if stream:
                         sink.start(length)
                     pending, sent, total = None, 0, 0
-                    for chunk in iter(lambda: r.read(1 << 20), b""):
+                    for chunk in iter(lambda r=r: r.read(1 << 20), b""):
                         out.write(chunk)
                         h.update(chunk)
                         total += len(chunk)
@@ -246,7 +245,7 @@ def open_possibly_compressed(path):
             return io.BytesIO(subprocess.run(
                 ["zstd", "-dc", path], check=True, capture_output=True).stdout)
         except (OSError, subprocess.CalledProcessError) as e:
-            raise CacheError(f"cannot decompress {path} (need zstd): {e}")
+            raise CacheError(f"cannot decompress {path} (need zstd): {e}") from e
     return open(path, "rb")
 
 
@@ -708,7 +707,13 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def cmd_serve(args):
+    # A long-lived daemon: drop every fd inherited from the starter (a bats
+    # run waits on its output fd, a CI step on its pipes) — stdio is already
+    # the log and /dev/null.
+    os.closerange(3, os.sysconf("SC_OPEN_MAX"))
     srv = Server(("0.0.0.0", args.port), make_handler(args.root, args.base))
+    if args.pid_file:  # before the port file: the port file means "ready"
+        write_text(args.pid_file, str(os.getpid()))
     if args.port_file:
         write_text(args.port_file, str(srv.server_address[1]))
     log(f"serving {args.root} on :{srv.server_address[1]} "
@@ -828,6 +833,7 @@ def main():
     s = sub.add_parser("serve")
     s.add_argument("--port", type=int, default=0)
     s.add_argument("--port-file")
+    s.add_argument("--pid-file")
     for name in ("metadata", "prefetch", "audit", "export-list", "prune"):
         s = sub.add_parser(name)
         s.add_argument("--snapshot", required=True)

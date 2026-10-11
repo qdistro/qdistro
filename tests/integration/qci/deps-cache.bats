@@ -1000,11 +1000,45 @@ _run_native_builder() {
     [[ "$output" =~ base=http://10\.0\.2\.2:[0-9]+/repos ]]
 }
 
-@test "qd_serve_port_default: stable per-user port, override wins" {
-    run bash -c "unset QDISTRO_SERVE_PORT; . '$LIB'; qd_serve_port_default"
+@test "qd_serve_port_default: stable port only for the default root, override wins" {
+    # the default root (~/.cache/qdistro, here under a fake HOME) owns it
+    run env -u QDISTRO_SERVE_PORT -u QDISTRO_DEPS_CACHE_DIR -u QDWIN_CACHE_DIR HOME="$WORK/h" \
+        bash -c ". '$LIB'; qd_serve_port_default"
     [ "$output" = "$((20000 + $(id -u) % 10000))" ]
-    run bash -c "QDISTRO_SERVE_PORT=31337; . '$LIB'; qd_serve_port_default"
+    run env -u QDISTRO_SERVE_PORT HOME="$WORK/h" QDISTRO_DEPS_CACHE_DIR="$WORK/h/.cache/qdistro" \
+        bash -c ". '$LIB'; qd_serve_port_default"
+    [ "$output" = "$((20000 + $(id -u) % 10000))" ]
+    # any other root (a test's temp cache) never squats it
+    run env -u QDISTRO_SERVE_PORT HOME="$WORK/h" bash -c ". '$LIB'; qd_serve_port_default"
+    [ "$output" = 0 ]
+    run env QDISTRO_SERVE_PORT=31337 bash -c ". '$LIB'; qd_serve_port_default"
     [ "$output" = 31337 ]
+}
+
+@test "qd_serve_start: the server keeps no inherited fd and leaves the caller's session" {
+    exec 7>"$WORK/held"
+    run bash -c ". '$LIB'; qd_serve_start"
+    exec 7>&-
+    [ "$status" -eq 0 ]
+    local pid; pid="$(cat "$WORK/cache/.serve.pid")"
+    kill -0 "$pid"
+    run ls "/proc/$pid/fd"
+    local fds sid; fds="$(printf '%s\n' $output | sort -n | tr '\n' ' ')"
+    sid="$(ps -o sid= -p "$pid" | tr -d ' ')"
+    bash -c ". '$LIB'; qd_serve_stop"
+    [ "$fds" = "0 1 2 3 " ] || [ "$fds" = "0 1 2 3 4 " ]   # stdio + listen socket (+ epoll)
+    [ "$sid" = "$pid" ]   # setsid: its own session leader
+}
+
+@test "qd_serve_start: a squatted port fails naming the holder" {
+    PORT2="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    python3 -c 'import socket,sys,time; s=socket.socket(); s.bind(("0.0.0.0",int(sys.argv[1]))); s.listen(); time.sleep(60)' "$PORT2" 9>&- 3>&- &
+    local squatter=$!
+    for _ in $(seq 1 50); do ss -ltnH "sport = :$PORT2" | grep -q . && break; sleep 0.1; done
+    run env QDISTRO_SERVE_PORT="$PORT2" bash -c ". '$LIB'; qd_serve_start"
+    kill "$squatter" 2>/dev/null || true
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"port $PORT2 is held by another process"* ]]
 }
 
 @test "qd_repo_wire_guest passt: no route and no passt host mapping fails loudly" {
