@@ -18463,9 +18463,16 @@ qdwin_im_grab_cancel(struct weston_keyboard_grab *grab)
 {
 	struct qdwin_im_keyboard_grab *g =
 		wl_container_of(grab, g, base);
-	/* weston is tearing the grab down (e.g. seat/keyboard release). Detach
-	 * from the keyboard so the resource-destroy path does not call
-	 * weston_keyboard_end_grab() on an already-gone grab. */
+	/* weston_keyboard_cancel_grab() (keyboard release on VT switch or
+	 * seat teardown, keyboard focus-out) only invokes this callback — it
+	 * does NOT reset keyboard->grab, so our grab is still the installed
+	 * one. Nulling g->keyboard alone made the resource-destroy path skip
+	 * end_grab and free g with keyboard->grab still pointing into it: a
+	 * use-after-free on the next key. End it ourselves (guarded on it
+	 * still being ours), then detach: the keyboard may be freed with its
+	 * seat right after this cancel. */
+	if (grab->keyboard && grab->keyboard->grab == grab)
+		weston_keyboard_end_grab(grab->keyboard);
 	g->keyboard = NULL;
 }
 
