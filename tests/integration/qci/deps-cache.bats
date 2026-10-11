@@ -1100,6 +1100,24 @@ SH
     kill "$foreign"
 }
 
+@test "qd_serve_start: a process merely naming the script, root and serve is not ours" {
+    mkdir -p "$WORK/cache"
+    # The words appear, but not as `qd-repo-cache.py --root <root> serve`.
+    bash -c 'sleep 60; :' /x/qd-repo-cache.py serve "$WORK/cache" 9>&- 3>&- &
+    local impostor=$!
+    printf '%s\n' "$impostor" > "$WORK/cache/.serve.pid"
+    printf '1' > "$WORK/cache/.serve.port"; echo online > "$WORK/cache/.serve.mode"
+    run bash -c ". '$LIB'; _qd_serve_is_ours $impostor '$WORK/cache'"
+    [ "$status" -ne 0 ]
+    run bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ]
+    [ "$output" != 1 ]
+    kill -0 "$impostor"
+    bash -c ". '$LIB'; qd_serve_stop"
+    kill -0 "$impostor"
+    kill "$impostor"
+}
+
 @test "qd_serve_start: this root's unrecorded server on the stable port is adopted" {
     local p; p="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
     run env QDISTRO_SERVE_PORT="$p" bash -c ". '$LIB'; qd_serve_start"

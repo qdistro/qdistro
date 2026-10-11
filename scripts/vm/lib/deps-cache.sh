@@ -397,11 +397,18 @@ qd_guest_host_addr() {
 # command line), not a reused pid or one recorded from another pid
 # namespace (a container sharing the cache). Gates every reuse AND kill.
 _qd_serve_is_ours() {
-    local pid="$1" root="$2" args
+    local pid="$1" root="$2" i
+    local -a argv
     case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-    args="$(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null)" || return 1
-    grep -q 'qd-repo-cache\.py$' <<<"$args" \
-        && grep -Fxq -- "$root" <<<"$args" && grep -Fxq serve <<<"$args"
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    mapfile -d '' -t argv <"/proc/$pid/cmdline" 2>/dev/null || return 1
+    # The exact launch shape: <...>/qd-repo-cache.py --root <root> serve
+    for ((i = 0; i + 3 < ${#argv[@]}; i++)); do
+        case "${argv[i]}" in */qd-repo-cache.py|qd-repo-cache.py) ;; *) continue ;; esac
+        [ "${argv[i+1]}" = --root ] && [ "${argv[i+2]}" = "$root" ] \
+            && [ "${argv[i+3]}" = serve ] && return 0
+    done
+    return 1
 }
 
 # _qd_serve_pid_offline <pid> — that server was started offline.
@@ -497,7 +504,7 @@ qd_serve_start() {
             # exits), then reap whatever published in the meantime.
             rm -f "$token"
             [ -n "$pid" ] || pid="$(cat "$pid_file.next" 2>/dev/null)"
-            case "$pid" in ''|*[!0-9]*) ;; *) kill "$pid" 2>/dev/null ;; esac
+            _qd_serve_is_ours "$pid" "$root" && kill "$pid" 2>/dev/null
             rm -f "$port_file.next" "$pid_file.next"
             if [ "$port" != 0 ] && command -v ss >/dev/null 2>&1 \
                     && ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
