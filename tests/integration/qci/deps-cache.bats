@@ -44,9 +44,8 @@ teardown() {
         kill "$COUNT_PID" 2>/dev/null
         wait "$COUNT_PID" 2>/dev/null || true
     fi
-    if [ -n "${SERVE_STARTED:-}" ]; then
-        bash -c '. "$1"; qd_serve_stop' _ "$LIB" 2>/dev/null || true
-    fi
+    # Always: any test may start the proxy (online wiring always does).
+    bash -c '. "$1"; qd_serve_stop' _ "$LIB" 2>/dev/null || true
 }
 
 # start_counting_server <serve-dir> <hit-log> <delay-s>
@@ -643,67 +642,90 @@ oci_img_present() {
 }
 
 # ---- lane wiring: qd_repo_wire_guest / qd_repo_wire_container ----------------
-# A "complete mirror" for wiring tests — qd_repo_present checks only the
-# marker qd-repo-mirror.py publishes after a fully verified pass.
+# Cached metadata for wiring tests — qd_repo_present checks only the marker
+# qd-repo-cache.py publishes after repomd + every metadata file verified.
 fab_mirror() {
     local snap="$1"
     mkdir -p "$WORK/cache/repos/$snap/tumbleweed/repo/oss" \
              "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss"
-    echo '{"repo":"oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/oss/mirror.json"
-    echo '{"repo":"non-oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss/mirror.json"
+    echo '{"repo":"oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/oss/metadata.json"
+    echo '{"repo":"non-oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss/metadata.json"
 }
 
-@test "qd_repo_wire_guest: no mirror → no-op, no server, no base" {
-    run bash -c ". '$LIB'; qd_repo_wire_guest 20260101 10.0.2.2; echo base=\${QDISTRO_REPO_BASE:-unset}"
+@test "qd_repo_wire_guest online: cold cache still wires the pull-through proxy" {
+    SERVE_STARTED=1
+    run bash -c ". '$LIB'; qd_repo_wire_guest 20260101 10.0.2.2; echo base=\$QDISTRO_REPO_BASE"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ base=http://10\.0\.2\.2:[0-9]+/repos ]]
+    [ "$(cat "$WORK/cache/.serve.mode")" = online ]
+}
+
+@test "qd_repo_wire_guest offline: no cached metadata → no-op, no server, no base" {
+    run env QCI_OFFLINE=1 bash -c ". '$LIB'; qd_repo_wire_guest 20260101 10.0.2.2; echo base=\${QDISTRO_REPO_BASE:-unset}"
     [ "$status" -eq 0 ]
     [ "$output" = "base=unset" ]
     [ ! -s "$WORK/cache/.serve.port" ]
 }
 
-@test "qd_repo_wire_guest: complete mirror → serve + export guest base" {
+@test "qd_repo_wire_guest offline: cached metadata → cache-only proxy + guest base" {
     fab_mirror 20260101
+    mkdir -p "$WORK/cache/repos/20260101/tumbleweed/repo/oss/repodata"
+    echo '<repomd/>' > "$WORK/cache/repos/20260101/tumbleweed/repo/oss/repodata/repomd.xml"
     SERVE_STARTED=1
-    run bash -c ". '$LIB'; qd_repo_wire_guest 20260101 10.0.2.2; echo base=\$QDISTRO_REPO_BASE"
+    run env QCI_OFFLINE=1 bash -c ". '$LIB'; qd_repo_wire_guest 20260101 169.254.2.2; echo base=\$QDISTRO_REPO_BASE"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ base=http://10\.0\.2\.2:[0-9]+/repos ]]
-    # The exported base actually serves the mirrored tree to a guest.
+    [[ "$output" =~ base=http://169\.254\.2\.2:[0-9]+/repos ]]
+    [ "$(cat "$WORK/cache/.serve.mode")" = offline ]
+    # the proxy serves the cached tree
     port="$(bash -c '. "$1"; qd_serve_port' _ "$LIB")"
-    wget -q -O - "http://127.0.0.1:$port/repos/20260101/tumbleweed/repo/oss/mirror.json" \
-        | grep -q '"repo":"oss"'
+    wget -q -O - "http://127.0.0.1:$port/repos/20260101/tumbleweed/repo/oss/repodata/repomd.xml" \
+        | grep -q '<repomd/>'
 }
 
 @test "qd_repo_wire_guest: explicit QDISTRO_REPO_BASE wins, no server" {
-    fab_mirror 20260101
     run bash -c ". '$LIB'; export QDISTRO_REPO_BASE=http://hand.set/base; qd_repo_wire_guest 20260101; echo base=\$QDISTRO_REPO_BASE"
     [ "$status" -eq 0 ]
     [ "$output" = "base=http://hand.set/base" ]
     [ ! -s "$WORK/cache/.serve.port" ]
 }
 
-@test "qd_repo_wire_guest: only-oss mirror does not wire" {
-    mkdir -p "$WORK/cache/repos/20260101/tumbleweed/repo/oss"
-    echo '{}' > "$WORK/cache/repos/20260101/tumbleweed/repo/oss/mirror.json"
-    run bash -c ". '$LIB'; qd_repo_wire_guest 20260101; echo base=\${QDISTRO_REPO_BASE:-unset}"
+@test "qd_repo_wire_guest: QDISTRO_REPO_PROXY=0 bypasses the proxy" {
+    run env QDISTRO_REPO_PROXY=0 bash -c ". '$LIB'; qd_repo_wire_guest 20260101; echo base=\${QDISTRO_REPO_BASE:-unset}"
     [ "$status" -eq 0 ]
     [ "$output" = "base=unset" ]
     [ ! -s "$WORK/cache/.serve.port" ]
 }
 
-@test "qd_repo_wire_container: file:// base survives in THIS shell" {
-    fab_mirror 20260101
-    # The whole contract is that the export reaches the CALLER — invoking
-    # through `run`/a subshell would hide exactly the bug this pins.
-    . "$LIB"
-    local mirror_args=()
-    qd_repo_wire_container 20260101 /qdistro-mirror
-    [ "$QDISTRO_REPO_BASE" = "file:///qdistro-mirror" ]
-    mirror_args=(--volume "$(qd_deps_root)/repos:/qdistro-mirror:ro,z")
-    [ "${mirror_args[0]}" = "--volume" ]
-    [ "${mirror_args[1]}" = "$WORK/cache/repos:/qdistro-mirror:ro,z" ]
+@test "qd_repo_wire_guest offline: only-oss metadata does not wire" {
+    mkdir -p "$WORK/cache/repos/20260101/tumbleweed/repo/oss"
+    echo '{}' > "$WORK/cache/repos/20260101/tumbleweed/repo/oss/metadata.json"
+    run env QCI_OFFLINE=1 bash -c ". '$LIB'; qd_repo_wire_guest 20260101; echo base=\${QDISTRO_REPO_BASE:-unset}"
+    [ "$status" -eq 0 ]
+    [ "$output" = "base=unset" ]
 }
 
-@test "qd_repo_wire_container: no mirror → rc 1, no base" {
+@test "qd_repo_wire_container offline: ro file:// mount + --network=none, in THIS shell" {
+    fab_mirror 20260101
+    # The contract is that the export reaches the CALLER — invoking
+    # through `run`/a subshell would hide exactly the bug this pins.
     . "$LIB"
+    export QCI_OFFLINE=1
+    qd_repo_wire_container 20260101 /qdistro-mirror
+    [ "$QDISTRO_REPO_BASE" = "file:///qdistro-mirror" ]
+    [ "${QD_REPO_CONTAINER_ARGS[*]}" = "--volume $WORK/cache/repos:/qdistro-mirror:ro,z --network=none" ]
+}
+
+@test "qd_repo_wire_container online: proxy via host.containers.internal, no extra args" {
+    SERVE_STARTED=1
+    . "$LIB"
+    qd_repo_wire_container 20260101 /qdistro-mirror
+    [[ "$QDISTRO_REPO_BASE" =~ ^http://host\.containers\.internal:[0-9]+/repos$ ]]
+    [ "${#QD_REPO_CONTAINER_ARGS[@]}" -eq 0 ]
+}
+
+@test "qd_repo_wire_container offline: no metadata → rc 1, no base" {
+    . "$LIB"
+    export QCI_OFFLINE=1
     run qd_repo_wire_container 20260101 /qdistro-mirror
     [ "$status" -eq 1 ]
     [ -z "${QDISTRO_REPO_BASE:-}" ]
@@ -836,21 +858,21 @@ _run_native_builder() {
         qdistro_ensure_native_builder_image"
 }
 
-@test "native builder: offline with no warm mirror fails closed, never builds" {
+@test "native builder: offline with no cached repo metadata fails closed, never builds" {
     _native_builder_stub
     export QCI_OFFLINE=1
     _run_native_builder
     [ "$status" -eq 3 ]
-    [[ "$output" == *"no warm repo mirror"* ]]
+    [[ "$output" == *"no cached repo metadata"* ]]
     ! grep -q 'podman build' "$PODMAN_LOG"
 }
 
-@test "native builder: offline with a warm mirror builds from cache under --network=none" {
+@test "native builder: offline with cached metadata builds from cache under --network=none" {
     _native_builder_stub
     local snap=20260101
     mkdir -p "$WORK/cache/repos/$snap/tumbleweed/repo/oss" "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss"
-    echo '{"repo":"oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/oss/mirror.json"
-    echo '{"repo":"non-oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss/mirror.json"
+    echo '{"repo":"oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/oss/metadata.json"
+    echo '{"repo":"non-oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss/metadata.json"
     export QCI_OFFLINE=1
     _run_native_builder
     [ "$status" -eq 0 ]
@@ -865,13 +887,13 @@ _run_native_builder() {
     export QCI_OFFLINE=1 QDISTRO_REPO_BASE=https://download.example.org/history
     _run_native_builder
     [ "$status" -eq 3 ]
-    [[ "$output" == *"no warm repo mirror"* ]]
+    [[ "$output" == *"no cached repo metadata"* ]]
     ! grep -q 'podman build' "$PODMAN_LOG"
 
     local snap=20260101
     mkdir -p "$WORK/cache/repos/$snap/tumbleweed/repo/oss" "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss"
-    echo '{"repo":"oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/oss/mirror.json"
-    echo '{"repo":"non-oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss/mirror.json"
+    echo '{"repo":"oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/oss/metadata.json"
+    echo '{"repo":"non-oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss/metadata.json"
     _run_native_builder
     [ "$status" -eq 0 ]
     grep 'podman build' "$PODMAN_LOG" | grep -q -- '--network=none'

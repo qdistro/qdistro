@@ -3,19 +3,26 @@
 # snapshot.conf so lanes can run under QCI_OFFLINE=1/QDISTRO_DEPS_OFFLINE=1.
 # Idempotent and safe to re-run; already-warm classes are skipped.
 #
-# Usage: qd-cache-warm [--check]
+# Usage: qd-cache-warm [--check [--quick]] | --record
 #   (default) warm every class:
-#     repo    verified Tumbleweed history mirror (oss + non-oss)
+#     repo    repo cache: verified metadata of both history repos (~110 MB)
+#             + every package in scripts/vm/repo-packages.list (only what
+#             builds actually install — never the whole repo)
 #     cloud   substrate qcow2 (snapshot.conf's pinned cloud_sha256)
 #     oci     podman base image registry.opensuse.org/opensuse/tumbleweed:<snapshot>
 #     meson   libdisplay-info tarball for the vendored-libweston wrap-git seed
 #   --check audit only: report which classes are warm; no downloads, no
 #           network. Exit 1 when anything is missing — the offline
-#           pre-flight before a QCI_OFFLINE run. The audit is deep: mirror
-#           files are re-verified against repomd/primary digests and cached
-#           artifacts re-hash against their content key, so a deleted or
-#           corrupt file fails the check rather than riding a stale marker.
-#           `--check --quick` audits structure/markers only.
+#           pre-flight before a QCI_OFFLINE run. The audit is deep: repo
+#           metadata re-verifies against repomd, every listed package
+#           re-hashes against primary, and cached artifacts re-hash against
+#           their content key, so a deleted or corrupt file fails the check
+#           rather than riding a stale marker. `--check --quick` audits
+#           structure/markers only.
+#   --record  rewrite scripts/vm/repo-packages.list as the union of the
+#           current list and every package the proxy served for this
+#           snapshot (used.txt) — run after an online build to capture new
+#           dependencies.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,12 +33,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/opensuse-cloud-image.sh
 . "$HERE/lib/opensuse-cloud-image.sh"
 
-check=0 quick=0
+check=0 quick=0 record=0
 for arg in "$@"; do
     case "$arg" in
         --check) check=1 ;;
         --quick) quick=1 ;;
-        *) echo "usage: qd-cache-warm [--check [--quick]]" >&2; exit 2 ;;
+        --record) record=1 ;;
+        *) echo "usage: qd-cache-warm [--check [--quick]] | --record" >&2; exit 2 ;;
     esac
 done
 
@@ -59,13 +67,11 @@ if [ "$check" -eq 1 ]; then
     repo_state=missing
     if qd_repo_present "$snap" oss && qd_repo_present "$snap" non-oss; then
         repo_state=ok
-        if [ "$quick" -eq 0 ]; then
-            # Deep audit: --audit re-checks every file repomd/primary names
-            # read-only — no marker mutation, no refetch, no network.
-            if ! "$HERE/qd-repo-mirror.py" --root "$(qd_deps_root)" \
-                    --snapshot "$snap" --audit; then
-                repo_state=missing
-            fi
+        # Read-only audit: metadata vs repomd, listed packages vs primary
+        # (--quick trusts the verified-files index instead of re-hashing).
+        deep=(--deep); [ "$quick" -eq 1 ] && deep=()
+        if ! qd_repo_cache audit "$snap" --list "$(qd_repo_list)" "${deep[@]}"; then
+            repo_state=missing
         fi
     fi
     mark repo "$repo_state"
@@ -154,10 +160,17 @@ if [ "$check" -eq 1 ]; then
     exit $((1 - ok))
 fi
 
+if [ "$record" -eq 1 ]; then
+    list="$(qd_repo_list)"
+    qd_repo_cache export-list "$snap" --merge "$list" >"$list.tmp" && mv "$list.tmp" "$list"
+    echo "[qd-cache-warm] $list: $(grep -c . "$list") packages"
+    exit 0
+fi
+
 echo "[qd-cache-warm] warming snapshot $snap into $(qd_deps_root)"
 
-echo "[qd-cache-warm] repo mirror (oss + non-oss) — the big download"
-qd_repo_mirror "$snap"
+echo "[qd-cache-warm] repo cache: metadata + $(grep -c . "$(qd_repo_list)" 2>/dev/null || echo 0) listed packages"
+qd_repo_cache prefetch "$snap" --list "$(qd_repo_list)"
 
 echo "[qd-cache-warm] cloud image"
 cloud_dest="$(qd_path cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$cloud_base")"

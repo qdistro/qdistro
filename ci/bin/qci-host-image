@@ -53,17 +53,21 @@ flock 9
 if podman image exists "$image"; then
     echo "[host-podman] image cache hit $image" >&2
 else
-    offline && { echo "ERROR: missing host image $image (QCI_OFFLINE=1)" >&2; exit 3; }
     rpm_cache="$cache/podman-rpm/$QDISTRO_SUBSTRATE_SNAPSHOT/$QDISTRO_SUBSTRATE_ARCH/packages"
     mkdir -p "$rpm_cache"
-    # Mount the verified mirror read-only for the RUN zypper steps — no
-    # qd_serve needed inside a build; wired builds drop the netns. The wire
-    # call must run in THIS shell — a subshell drops the export.
+    # The wire call must run in THIS shell — a subshell drops the export.
     mirror_args=()
     net_args=()
+    # Online: proxy via host.containers.internal (misses fetched + cached).
+    # Offline: ro file:// mount of the cache under --network=none.
     if qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror; then
-        mirror_args=(--volume "$(qd_deps_root)/repos:/qdistro-mirror:ro,z")
-        net_args=(--network=none)
+        mirror_args=("${QD_REPO_CONTAINER_ARGS[@]}")
+    fi
+    # Offline the image is built from the cache alone (cached OCI base +
+    # cached repo, no network) — or not at all.
+    if offline && [ "${#mirror_args[@]}" -eq 0 ]; then
+        echo "ERROR: missing host image $image and no cached repo metadata to build it offline (QCI_OFFLINE=1; run qd-cache-warm)" >&2
+        exit 3
     fi
     echo "[host-podman] image cache miss $image" >&2
     podman build --pull=never --layers --security-opt label=disable "${net_args[@]}" "${mirror_args[@]}" \

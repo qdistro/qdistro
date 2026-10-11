@@ -57,14 +57,18 @@ qd_deps_init() {
     fi
 }
 
-# ---- repo mirror ---------------------------------------------------------
+# ---- repo cache (pull-through proxy) -------------------------------------
 
-# The mirrored TW history repos live at <root>/repos/<snapshot>/tumbleweed/
-# repo/{oss,non-oss}/ — upstream's own layout, so a consumer needs only a
+# The TW history repos are cached at <root>/repos/<snapshot>/tumbleweed/
+# repo/{oss,non-oss}/ in upstream's own layout, so a consumer needs only a
 # different BASE for the same <base>/<snapshot>/tumbleweed/repo/<name>/ URL.
-# qd_repo_base prints the base a caller should use: an explicit
-# QDISTRO_REPO_BASE override, else the local mirror (file://) when complete
-# for both repos, else upstream. Offline with no mirror fails closed.
+# NOT a mirror: metadata (repomd + every file it names, ~110 MB) is cached
+# whole and verified; RPMs are fetched on demand by the qd_serve proxy
+# (scripts/vm/qd-repo-cache.py) and verified against primary.xml, so only
+# what a build actually installs is ever downloaded. Online, every lane goes
+# through the proxy (cache-or-fetch); offline, the proxy serves the cache
+# only and a miss is a 404 — the build fails naming the package.
+# QDISTRO_REPO_PROXY=0 bypasses the proxy (online lanes go upstream).
 
 # qd_repo_dir <snapshot> — local repo root for a snapshot.
 qd_repo_dir() {
@@ -72,27 +76,37 @@ qd_repo_dir() {
     printf '%s/repos/%s\n' "$(qd_deps_root)" "$1"
 }
 
-# qd_repo_present <snapshot> <repo> — the mirror COMPLETED for that repo
-# (mirror.json is written only after repodata + every named package
-# verified; a repodata-only tree does not count).
+# qd_repo_present <snapshot> <repo> — that repo's METADATA is cached and was
+# verified against repomd (metadata.json). Packages are cached on demand;
+# whether an offline run has every package it needs is qd-cache-warm
+# --check's job (against the package list), not this predicate's.
 qd_repo_present() {
-    [ -s "$(qd_repo_dir "$1" 2>/dev/null)/tumbleweed/repo/$2/mirror.json" ]
+    [ -s "$(qd_repo_dir "$1" 2>/dev/null)/tumbleweed/repo/$2/metadata.json" ]
 }
 
-# qd_repo_base <snapshot> — print the history-base URL to hand to consumers.
-# The mirror root is <root>/repos (NOT .../repos/<snap>): consumers append
-# /<snap>/tumbleweed/repo/<name>/ just like they do to the upstream base.
+_qd_repo_proxy_enabled() {
+    case "${QDISTRO_REPO_PROXY:-1}" in 0|false|no|off) return 1 ;; esac
+    return 0
+}
+
+# qd_repo_base <snapshot> — the history base for a HOST-side consumer.
+# Explicit QDISTRO_REPO_BASE wins; online → the proxy on 127.0.0.1;
+# offline → file:// over the cache (metadata required; a missing RPM then
+# fails in the consumer). Offline with no cached metadata fails closed.
 qd_repo_base() {
-    local snap="$1" dir
+    local snap="$1" dir port
     [ -n "${QDISTRO_REPO_BASE:-}" ] && { printf '%s\n' "$QDISTRO_REPO_BASE"; return 0; }
     dir="$(qd_repo_dir "$snap")" || return 1
-    if qd_repo_present "$snap" oss && qd_repo_present "$snap" non-oss; then
-        printf 'file://%s/repos\n' "$(qd_deps_root)"; return 0
-    fi
-    qd_deps_offline && {
-        _qdc_die "offline: no complete repo mirror for snapshot $snap under $dir — warm with qd_repo_mirror"
+    if qd_deps_offline; then
+        if qd_repo_present "$snap" oss && qd_repo_present "$snap" non-oss; then
+            printf 'file://%s/repos\n' "$(qd_deps_root)"; return 0
+        fi
+        _qdc_die "offline: no cached repo metadata for snapshot $snap under $dir — warm with qd-cache-warm"
         return 1
-    }
+    fi
+    if _qd_repo_proxy_enabled && port="$(qd_serve_start)"; then
+        printf 'http://127.0.0.1:%s/repos\n' "$port"; return 0
+    fi
     printf '%s\n' "${QDISTRO_REPO_UPSTREAM:-https://download.opensuse.org/history}"
 }
 
@@ -114,25 +128,21 @@ qd_repo_base_or_upstream() {
     printf '%s\n' "${QDISTRO_REPO_UPSTREAM:-https://download.opensuse.org/history}"
 }
 
-# qd_repo_mirror <snapshot> [oss|non-oss ...] [-- worker flags]
-# Warm the repo mirror: repomd-verified metadata + checksum-verified RPMs
-# via scripts/vm/qd-repo-mirror.py. Refuses under the offline flags.
-# Bare repo names select repos (default both); anything else (--limit N,
-# --verify, --force, --metadata-only, --base U) passes through to the worker.
-qd_repo_mirror() {
-    local snap="$1" script; shift
-    script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/qd-repo-mirror.py"
-    [ -f "$script" ] || { _qdc_die "repo mirror worker missing: $script"; return 1; }
-    local -a repos=() passthru=()
-    local r
-    for r in "$@"; do
-        case "$r" in
-            oss|non-oss) repos+=(--repo "$r") ;;
-            *) passthru+=("$r") ;;
-        esac
-    done
-    [ "${#repos[@]}" -eq 0 ] && repos=(--repo oss --repo non-oss)
-    python3 "$script" --root "$(qd_deps_root)" --snapshot "$snap" "${repos[@]}" "${passthru[@]}"
+# qd_repo_cache <subcommand> <snapshot> [args...] — run scripts/vm/qd-repo-cache.py
+# (metadata | prefetch --list F | audit [--list F] [--deep] | export-list |
+# prune --list F) against this deps root.
+qd_repo_cache() {
+    local cmd="$1" snap="$2" script; shift 2
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/qd-repo-cache.py"
+    [ -f "$script" ] || { _qdc_die "repo cache worker missing: $script"; return 1; }
+    python3 "$script" --root "$(qd_deps_root)" "$cmd" --snapshot "$snap" "$@"
+}
+
+# qd_repo_list — the committed package list (`<repo> <name>.<arch>`): every
+# package a recorded online build fetched through the proxy. qd-cache-warm
+# prefetches it; --check audits it for offline readiness.
+qd_repo_list() {
+    printf '%s\n' "${QDISTRO_REPO_LIST:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/repo-packages.list}"
 }
 
 # ---- vendored-libweston libdisplay-info seed ------------------------------
@@ -318,7 +328,7 @@ qd_oci_ensure() {
 # Serialized on .locks/serve.lock: racing starters would otherwise each
 # spawn a server and tear the pid/port files.
 qd_serve_start() {
-    local root pid_file port_file pid
+    local root pid_file port_file pid mode
     qd_deps_init || return 1
     root="$(qd_deps_root)"
     pid_file="$root/.serve.pid" port_file="$root/.serve.port"
@@ -326,9 +336,14 @@ qd_serve_start() {
         flock -x 9
         if [ -s "$pid_file" ] && [ -s "$port_file" ]; then
             pid="$(cat "$pid_file")"
-            if kill -0 "$pid" 2>/dev/null; then
+            mode=online; qd_deps_offline && mode=offline
+            if kill -0 "$pid" 2>/dev/null \
+                    && [ "$(cat "$root/.serve.mode" 2>/dev/null)" = "$mode" ]; then
                 cat "$port_file"; exit 0
             fi
+            # Dead, or started in the other mode: an online proxy reused by
+            # an offline run would fetch upstream. Replace it.
+            kill "$pid" 2>/dev/null || true
             rm -f "$pid_file" "$port_file"
         fi
         rm -f "$port_file.next"
@@ -336,15 +351,9 @@ qd_serve_start() {
         # itself — no pick-then-bind race. 9>&- is load-bearing: without
         # it the server inherits the lock fd and holds flock forever,
         # hanging every later starter.
-        python3 - "$root" "$port_file.next" >"$root/.serve.log" 2>&1 9>&- <<'PY' &
-import functools, http.server, socketserver, sys
-root, portfile = sys.argv[1], sys.argv[2]
-h = functools.partial(http.server.SimpleHTTPRequestHandler, directory=root)
-with socketserver.TCPServer(("0.0.0.0", 0), h) as s:
-    with open(portfile, "w") as f:
-        f.write(str(s.server_address[1]))
-    s.serve_forever()
-PY
+        python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/qd-repo-cache.py" \
+            --root "$root" serve --port-file "$port_file.next" \
+            >>"$root/.serve.log" 2>&1 9>&- </dev/null &
         pid=$!
         for _ in $(seq 1 50); do
             kill -0 "$pid" 2>/dev/null || break
@@ -357,6 +366,7 @@ PY
         fi
         mv "$port_file.next" "$port_file"
         echo "$pid" >"$pid_file"
+        if qd_deps_offline; then echo offline; else echo online; fi >"$root/.serve.mode"
         cat "$port_file"
     ) 9>"$root/.locks/serve.lock"
 }
@@ -378,11 +388,12 @@ qd_serve_stop() {
     [ -s "$pid_file" ] || { rm -f "$port_file"; return 0; }
     pid="$(cat "$pid_file")"
     kill "$pid" 2>/dev/null || true
-    rm -f "$pid_file" "$port_file"
+    rm -f "$pid_file" "$port_file" "$root/.serve.mode"
 }
 
 # qd_serve_guest_base <snapshot> [host-addr] — the QDISTRO_REPO_BASE value
-# for a guest lane: requires the server running and a complete mirror.
+# for a guest lane: requires the proxy running; offline also requires the
+# snapshot's metadata cached (an online proxy fetches it on first touch).
 # host-addr defaults to slirp's 10.0.2.2; passt lanes pass 169.254.2.2.
 qd_serve_guest_base() {
     local snap="$1" host="${2:-10.0.2.2}" port
@@ -390,29 +401,39 @@ qd_serve_guest_base() {
         _qdc_die "qd_serve_guest_base: server not running — qd_serve_start first"
         return 1
     }
-    if ! qd_repo_present "$snap" oss || ! qd_repo_present "$snap" non-oss; then
-        _qdc_die "qd_serve_guest_base: no complete mirror for $snap — qd_repo_mirror first"
+    if qd_deps_offline && { ! qd_repo_present "$snap" oss || ! qd_repo_present "$snap" non-oss; }; then
+        _qdc_die "qd_serve_guest_base: offline and no cached metadata for $snap — qd-cache-warm first"
         return 1
     fi
     printf 'http://%s:%s/repos\n' "$host" "$port"
 }
 
 # qd_repo_wire_container <snapshot> <mountpoint>
-# Container builds cannot see the host cache — when the caller hasn't set
-# QDISTRO_REPO_BASE and a complete mirror exists, export
-# QDISTRO_REPO_BASE=file://<mountpoint> and return 0; the caller must then
-# add --volume <root>/repos:<mountpoint>:ro,z to its podman argv (file://
-# inside the build resolves only with the mount present). Returns 1 when
-# unwired: explicit base wins, or no mirror → online falls back upstream,
-# offline fails closed downstream. MUST be called in the current shell —
-# a subshell (command substitution, mapfile process substitution) drops
-# the export.
+# Wire a podman build/run to the repo cache. Returns 0 and sets, in THIS
+# shell (never call it in a subshell — the exports would be lost):
+#   QDISTRO_REPO_BASE       exported base for the container
+#   QD_REPO_CONTAINER_ARGS  podman argv the caller MUST add
+# Online: the proxy via host.containers.internal (pasta/slirp4netns map it
+# to the host), no extra args — misses are fetched and cached.
+# Offline: file://<mountpoint> over the cache, read-only, with
+# --network=none — works on a partial cache because the metadata is
+# complete; a package the cache lacks fails the build loudly.
+# Returns 1 (unwired, args empty) when the caller set QDISTRO_REPO_BASE,
+# the proxy is disabled/unstartable online, or offline with no metadata.
 qd_repo_wire_container() {
-    local snap="$1" mnt="$2"
+    local snap="$1" mnt="$2" port
+    QD_REPO_CONTAINER_ARGS=()
     [ -n "${QDISTRO_REPO_BASE:-}" ] && return 1
-    qd_repo_present "$snap" oss || return 1
-    qd_repo_present "$snap" non-oss || return 1
-    QDISTRO_REPO_BASE="file://$mnt"
+    if qd_deps_offline; then
+        qd_repo_present "$snap" oss || return 1
+        qd_repo_present "$snap" non-oss || return 1
+        QD_REPO_CONTAINER_ARGS=(--volume "$(qd_deps_root)/repos:$mnt:ro,z" --network=none)
+        QDISTRO_REPO_BASE="file://$mnt"
+    else
+        _qd_repo_proxy_enabled || return 1
+        port="$(qd_serve_start)" || return 1
+        QDISTRO_REPO_BASE="http://host.containers.internal:$port/repos"
+    fi
     export QDISTRO_REPO_BASE
     echo "[deps-cache] wired QDISTRO_REPO_BASE=$QDISTRO_REPO_BASE" >&2
 }
@@ -487,17 +508,21 @@ GUESTFISH
 }
 
 # qd_repo_wire_guest <snapshot> [host-addr]
-# Wire guest lanes to the mirror automatically: when the caller has not set
-# QDISTRO_REPO_BASE and a complete mirror exists for <snapshot>, start
-# qd_serve and export QDISTRO_REPO_BASE for the guest-reachable host
-# address. With no complete mirror this is a no-op — online callers fall
-# back to upstream and offline consumers still fail closed in
-# qd_repo_base/qdistro_substrate_repo_command.
+# Wire a guest lane (VM over slirp/passt, libguestfs appliance) to the
+# proxy: when the caller has not set QDISTRO_REPO_BASE, start qd_serve and
+# export QDISTRO_REPO_BASE for the guest-reachable host address. Online the
+# proxy fills misses from upstream; offline it needs cached metadata and
+# serves the cache only. No-op (rc 0, unset) when the proxy is disabled or,
+# offline, nothing is cached — consumers then go upstream (online) or fail
+# closed in qdistro_substrate_repo_command (offline).
 qd_repo_wire_guest() {
     local snap="$1" host="${2:-10.0.2.2}"
     [ -n "${QDISTRO_REPO_BASE:-}" ] && return 0
-    qd_repo_present "$snap" oss || return 0
-    qd_repo_present "$snap" non-oss || return 0
+    _qd_repo_proxy_enabled || return 0
+    if qd_deps_offline; then
+        qd_repo_present "$snap" oss || return 0
+        qd_repo_present "$snap" non-oss || return 0
+    fi
     qd_serve_start >/dev/null || return 1
     QDISTRO_REPO_BASE="$(qd_serve_guest_base "$snap" "$host")" || return 1
     export QDISTRO_REPO_BASE

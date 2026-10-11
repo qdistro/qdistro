@@ -1,0 +1,5 @@
+# Packages qdistro builds and tests install from the pinned Tumbleweed
+# history repos: `<repo> <name>.<arch>`, one per line, sorted. Recorded from
+# what consumers actually fetched through the qd_serve repo-cache proxy
+# (`scripts/vm/qd-cache-warm --record` after an online run); qd-cache-warm
+# prefetches exactly this set and `--check` audits it for QCI_OFFLINE runs.

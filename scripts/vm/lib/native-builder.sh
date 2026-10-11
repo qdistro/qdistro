@@ -63,10 +63,8 @@ qdistro_ensure_native_builder_image() {
         work=$(mktemp -d "${TMPDIR:-/tmp}/native-builder.XXXXXXXX")
         mkdir -p "$work/builder-context"
         cp "$here/container-native-deps.sh" "$here/Containerfile.native-builder" "$work/builder-context/"
-        # Mount the verified mirror read-only for the RUN zypper steps —
-        # file:// needs no qd_serve inside a build. With the mirror wired
-        # the build needs no netns at all, so drop it to prove the contract.
-        # Must run in THIS shell — a subshell drops the export.
+        # Route the RUN zypper steps through the repo cache. Must run in
+        # THIS shell — a subshell drops the export.
         local -a mirror_args=() net_args=()
         local build_base
         if qd_deps_offline; then
@@ -74,19 +72,20 @@ qdistro_ensure_native_builder_image() {
             # OCI base (above) plus the warm mirror under --network=none. Any
             # exported QDISTRO_REPO_BASE (an upstream URL, or a slirp
             # 10.0.2.2 base another wiring step exported into this shell)
-            # is not reachable without egress, so it is ignored here.
+            # is not reachable without egress, so it is ignored here. A
+            # package the cache lacks fails the zypper step loudly.
             if ! qd_repo_present "$QDISTRO_SUBSTRATE_SNAPSHOT" oss \
                     || ! qd_repo_present "$QDISTRO_SUBSTRATE_SNAPSHOT" non-oss; then
                 rm -rf "$work"
-                echo "ERROR: no cached native builder image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT and no warm repo mirror to build one offline (run qd-cache-warm)" >&2
+                echo "ERROR: no cached native builder image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT and no cached repo metadata to build one offline (run qd-cache-warm)" >&2
                 return 3
             fi
             mirror_args=(--volume "$(qd_deps_root)/repos:/qdistro-mirror:ro,z")
             net_args=(--network=none)
             build_base=file:///qdistro-mirror
         elif qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror; then
-            mirror_args=(--volume "$(qd_deps_root)/repos:/qdistro-mirror:ro,z")
-            net_args=(--network=none)
+            # online: the pull-through proxy (no extra args, network on)
+            mirror_args=("${QD_REPO_CONTAINER_ARGS[@]}")
             build_base=$QDISTRO_REPO_BASE
         else
             build_base=${QDISTRO_REPO_BASE:-}

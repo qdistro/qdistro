@@ -23,15 +23,14 @@ command -v podman >/dev/null || { echo 'ERROR: rootless Podman is required' >&2;
 base_image=registry.opensuse.org/opensuse/tumbleweed:$QDISTRO_SUBSTRATE_SNAPSHOT
 qd_oci_ensure "$base_image" >/dev/null || exit 3
 
-# Mount the verified mirror read-only into the Containerfile RUN steps —
-# file:// inside the build, no qd_serve needed. Wired builds drop the
-# netns entirely: every zypper byte must come from the mirror. The wire
+# Route the Containerfile RUN zypper steps through the repo cache. The wire
 # call must run in THIS shell — a subshell drops the export.
 mirror_args=()
 net_args=()
+# Online: proxy via host.containers.internal (misses fetched + cached).
+# Offline: ro file:// mount of the cache under --network=none.
 if qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror; then
-    mirror_args=(--volume "$(qd_deps_root)/repos:/qdistro-mirror:ro,z")
-    net_args=(--network=none)
+    mirror_args=("${QD_REPO_CONTAINER_ARGS[@]}")
 fi
 base_id=$(podman image inspect "$base_image" --format '{{.Id}}')
 
