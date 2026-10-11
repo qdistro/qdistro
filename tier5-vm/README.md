@@ -158,7 +158,7 @@ silently merge:
   name and an admin removes a genuinely stale squatter deliberately.
   The teardown unlink applies the same rule when the domain was
   already absent at claim time, and the orphan reaper reaps only
-  unproven overlays (no sidecar) or retired-app disks — retirement
+  retired-app disks — retirement
   needs an exact appId parse of a manifest that is non-stale,
   schema-current, fully row-valid (the scanner's own `_row_ok`
   strictness — an empty `apps` list or a malformed row is a
@@ -174,9 +174,19 @@ silently merge:
   The reaper also only considers names in the tier-5 namespace —
   `t5-<stub>-<16-hex>` as `VMApps._vmNameForApp` derives them — so a
   manually created overlay of our base in the shared image dir is
-  never reaped merely because its backing file matches, and every
-  verdict (defined-state, owner record) is re-checked after the
-  settle window before the unlink.
+  never reaped merely because its backing file matches. The shape
+  alone is not proof either: a reaped disk must carry a nonempty
+  `.appid` sidecar that RE-DERIVES to its own name
+  (`tier5_derived_name` is a byte-exact port of `_vmNameForApp`,
+  pinned by a parity test against the real JS function) — a missing
+  or incoherent owner record is preserved, not treated as "no
+  owner" — and every verdict (defined-state, owner record) is
+  re-checked after the settle window before the unlink. The
+  standalone cleanup helper applies the same coherence: a defined
+  domain under a t5 name is destroyed only when its binding
+  re-derives to that name, and an orphan disk needs a sidecar that
+  does the same — a missing sidecar refuses unless the operator
+  deliberately opts in with `TIER5_CLEANUP_ALLOW_OWNERLESS=1`.
   "Live" is decided by `qemu_pids_for_domain` alone —
   a LITERAL substring scan of the ps table for libvirt's
   `-name guest=<vm>` argv token narrowed to real qemu via

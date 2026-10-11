@@ -58,6 +58,25 @@ qemu_pids_for_domain() {
     printf '%s' "$out"
 }
 
+# tier5_derived_name <appId> — port of VMApps._vmNameForApp so a
+# recorded binding/sidecar can be checked against the artifact's own
+# name: a nonempty tag or a t5-shaped name alone does not prove THIS
+# artifact is the requested identity (sol r17). appIds are ASCII by
+# the --policy-key charset, so JS charCodeAt == ord() here.
+tier5_derived_name() {
+    python3 - "$1" <<'PY'
+import re, sys
+s = sys.argv[1]
+fnv, djb = 0x811c9dc5, 0x00001505
+for c in (ord(ch) for ch in s):
+    fnv = ((fnv ^ c) * 0x01000193) & 0xFFFFFFFF
+    djb = ((djb * 33) ^ c) & 0xFFFFFFFF
+stub = re.sub(r"[^a-zA-Z0-9_-]", "-", s)
+stub = re.sub(r"-{2,}", "-", stub).strip("-")[:43]
+print("t5-" + (stub or "vmapp") + f"-{fnv:08x}{djb:08x}")
+PY
+}
+
 # domain_defined_state — rc 0 defined, 1 CONFIRMED absent, 2 cannot
 # determine. Uses `virsh list --all --name`: an enumeration that
 # succeeds is authoritative; ANY failure is unverifiable. Dominfo
@@ -111,6 +130,16 @@ if [ "$_ds" -eq 0 ]; then
         echo "        binding — not provably ours; refusing to destroy" >&2
         exit 3
     fi
+    # For a t5-namespace name the binding must ALSO re-derive to it —
+    # any nonempty tag is not proof THIS domain is the requested
+    # identity; a foreign-bound guest under a shaped name must be
+    # refused, not destroyed (sol r17).
+    if [[ "$VM_NAME" =~ ^t5- ]] \
+            && [ "$(tier5_derived_name "$_bound")" != "$VM_NAME" ]; then
+        echo "[tier5-cleanup] FAIL: $VM_NAME is bound to '$_bound'," >&2
+        echo "        which derives a different guest — refusing to destroy" >&2
+        exit 3
+    fi
     run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
     # destroy can no-op under a lying domstate — signal leftover qemu
     # directly (mirrors reap_domain's fallback), then demand a
@@ -151,10 +180,13 @@ if [ -f "$DISK" ]; then
     fi
     # Orphan disk: no definition carries the appId binding, so
     # provenance is the file itself — it must clone OUR base to be a
-    # tier-5 artifact at all (sol r13). The sidecar's bound appId is
-    # surfaced for the admin — the tool deliberately cleans ownerless
-    # orphans, so a missing sidecar warns but proceeds; an unreadable
-    # backing is ambiguity -> keep the disk.
+    # tier-5 artifact at all (sol r13), and its .appid sidecar is the
+    # owner record. A MISSING sidecar means unproven ownership: refuse
+    # unless the operator explicitly opts in (a deliberate pre-sidecar
+    # orphan cleanup — sol r17). For a t5-namespace name the sidecar
+    # must also re-derive to it — an owner record for a different
+    # guest is incoherent, not proof. An unreadable backing is
+    # ambiguity -> keep the disk.
     _back=$(run_as_admin qemu-img info --output=json "$DISK" \
         2>/dev/null \
         | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
@@ -164,9 +196,21 @@ if [ -f "$DISK" ]; then
         exit 5
     fi
     if ! _side=$(cat "$DISK.appid" 2>/dev/null) || [ -z "$_side" ]; then
+        if [ "${TIER5_CLEANUP_ALLOW_OWNERLESS:-0}" != "1" ]; then
+            echo "[tier5-cleanup] FAIL: $DISK has no appId sidecar —" >&2
+            echo "        owner unproven; keeping it. To remove a" >&2
+            echo "        deliberate pre-sidecar orphan, re-run with" >&2
+            echo "        TIER5_CLEANUP_ALLOW_OWNERLESS=1" >&2
+            exit 5
+        fi
         _side="<unbound>"
         echo "[tier5-cleanup] WARN: $DISK has no appId sidecar —" >&2
-        echo "        unowned orphan" >&2
+        echo "        unowned orphan (explicitly allowed)" >&2
+    elif [[ "$VM_NAME" =~ ^t5- ]] \
+            && [ "$(tier5_derived_name "$_side")" != "$VM_NAME" ]; then
+        echo "[tier5-cleanup] FAIL: $DISK is bound to '$_side'," >&2
+        echo "        which derives a different guest — keeping it" >&2
+        exit 5
     fi
     qemu_pids_for_domain; _lv=$?
     if [ "$_lv" -eq 1 ]; then

@@ -229,6 +229,43 @@ const win = fs.readFileSync(
         "launch must not accept a manifest-supplied domain name");
 }
 
+// --- bash tier5_derived_name stays in parity with _vmNameForApp ---------
+// ensures: the reaper and the standalone cleanup helper verify a
+//          sidecar/binding by re-deriving the VM name from its recorded
+//          appId (sol r17). The embedded python in BOTH shell scripts is
+//          executed against the real JS function — a drifted port would
+//          let a foreign owner record pass (or refuse a real one).
+{
+    const { execFileSync } = require("child_process");
+    const t5dir = path.resolve(repo, "..", "tier5-vm");
+    const fnSrc = service.slice(
+        service.indexOf("function _appIdHash(appId)"),
+        service.indexOf("function rebuild()"));
+    const make = new Function("Logger",
+        fnSrc + "\nreturn { _vmNameForApp };");
+    const { _vmNameForApp } = make({ e: () => {}, w: () => {} });
+
+    const ids = ["tier5/kate", "tier5/foo.bar", "tier5/foo-bar",
+        "tier5/" + "a".repeat(60) + "n401yffjhjcw",
+        "tier5/" + "a".repeat(60) + "da3or7cef5wj",
+        "weird app (x)!.desktop", "x", "tier5/evil+tool"];
+    for (const script of ["spawn-tier5.sh",
+                          "qdistro-tier5-cleanup.sh"]) {
+        const src = fs.readFileSync(path.join(t5dir, script), "utf8");
+        const m = src.match(
+            /python3 - "\$1" <<'PY'\n([\s\S]*?)\nPY\n/);
+        assert.ok(m, `${script}: tier5_derived_name body not found`);
+        for (const id of ids) {
+            const derived = execFileSync(
+                "python3", ["-", id],
+                { input: m[1], encoding: "utf8" }).trim();
+            assert.strictEqual(derived, _vmNameForApp(id),
+                `${script}: tier5_derived_name('${id}') = '${derived}' ` +
+                `!= _vmNameForApp = '${_vmNameForApp(id)}'`);
+        }
+    }
+}
+
 console.log(
     "vmapps-app-settings: launcher action, enum-id tab nav, appId " +
     "highlight, deterministic VM name invariants passed");

@@ -449,22 +449,28 @@ def test_overlay_reuse_requires_a_provable_owner():
 
 
 def test_reaper_preserves_owned_orphan_overlays():
-    # ensures: a nonempty <overlay>.appid sidecar is an owner record —
-    #          the reaper reaps only overlays with no owner record, or
-    #          whose bound appId the CURRENT non-stale manifest no
-    #          longer publishes (a retired app's disk is provably
-    #          stale). A stale-marker manifest (the reconciler
-    #          publishes a READABLE empty one on scan failure), an
-    #          unparseable one, an unreadable sidecar, or an
-    #          unverifiable verdict are all ambiguity -> preserve
-    #          (sol r12/r13)
+    # ensures: a nonempty <overlay>.appid sidecar is the ONLY owner
+    #          record — the reaper reaps only disks whose sidecar
+    #          re-derives to their own t5 name AND names an appId the
+    #          CURRENT non-stale manifest no longer publishes (a
+    #          retired app's disk is provably stale). A missing
+    #          sidecar is unproven ownership, not "no owner" — a
+    #          hand-made t5-shaped name is only a shape (sol r17). A
+    #          stale-marker manifest (the reconciler publishes a
+    #          READABLE empty one on scan failure), an unparseable
+    #          one, an unreadable sidecar, or an unverifiable verdict
+    #          are all ambiguity -> preserve (sol r12/r13)
     reaper = SPAWN[SPAWN.index("orphan-overlay reaper"):
                    SPAWN.index("reaped orphan overlay")]
     assert 'manifest_app_state "$_side" "$DISK_BASE"; _ms=$?' in reaper
     assert '[ "$_ms" -eq 1 ]' in reaper
-    # an unreadable OR empty sidecar preserves — only a MISSING file
-    # counts as "no owner"
-    assert '[ -f "$overlay.appid" ]' in reaper
+    # the sidecar is REQUIRED, not optional: a missing, unreadable, or
+    # empty one preserves (cat failure OR -z), and it must re-derive
+    # to the disk's own name — a t5-shaped name is only a shape
+    # (sol r17)
+    assert '! _side=$(cat "$overlay.appid"' in reaper
+    assert '[ -z "$_side" ]' in reaper
+    assert '[ "$(tier5_derived_name "$_side")" = "$base" ]' in reaper
     # the ownership gate sits between confirmed-absent and the rm
     assert reaper.index('manifest_app_state') \
         < reaper.index('rm -f "$overlay"')
@@ -501,8 +507,10 @@ def test_reaper_reverifies_after_settle():
         < tail.index('rm -f "$overlay"')
     assert tail.index("manifest_app_state") \
         < tail.index('rm -f "$overlay"')
-    # a sidecar that APPEARED during the settle is re-read, not assumed
-    assert tail.count('[ -f "$overlay.appid" ]') >= 1
+    # a sidecar that APPEARED/changed/vanished during the settle is
+    # re-read and re-derived, not assumed (sol r16/r17)
+    assert tail.count('cat "$overlay.appid"') >= 1
+    assert tail.count('tier5_derived_name "$_side"') >= 1
     # sidecar removal rides along with the overlay rm
     assert 'rm -f "$overlay" "$overlay.appid"' in reaper
 
@@ -659,3 +667,25 @@ def test_cleanup_helper_requires_tier5_binding_to_destroy():
     assert "exit 3" in head
     # the binding check runs INSIDE the hold and BEFORE destroy
     assert head.index("flock -w 5 -x 9") < head.index("qdistro:appId")
+
+
+def test_owner_records_must_rederive_to_the_artifact_name():
+    # ensures: a t5-shaped name is only a SHAPE — the owner record on
+    #          the domain (binding) or disk (sidecar) must re-derive to
+    #          the requested name via tier5_derived_name, the port of
+    #          VMApps._vmNameForApp, or the tool refuses (sol r17)
+    assert "tier5_derived_name()" in SPAWN and "tier5_derived_name()" \
+        in CLEANUP
+    # cleanup: a defined domain whose binding derives a DIFFERENT
+    # guest is refused before destroy
+    head = CLEANUP[:CLEANUP.index('virsh destroy "$VM_NAME"')]
+    assert '[[ "$VM_NAME" =~ ^t5- ]]' in head
+    assert 'tier5_derived_name "$_bound")" != "$VM_NAME"' in head
+    assert "derives a different guest" in head
+    # cleanup: an orphan disk needs a sidecar (or the explicit
+    # ownerless opt-in), and a t5 name demands derivation coherence
+    tail = CLEANUP[CLEANUP.index('if [ -f "$DISK" ]'):]
+    assert "TIER5_CLEANUP_ALLOW_OWNERLESS" in tail
+    assert 'tier5_derived_name "$_side")" != "$VM_NAME"' in tail
+    assert tail.index("TIER5_CLEANUP_ALLOW_OWNERLESS") \
+        < tail.index('rm -f "$DISK"')

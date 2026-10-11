@@ -345,6 +345,26 @@ domain_defined_state() {
 # leaves a non-stale manifest that omits the new base's apps, and
 # that must not read as retirement either (sol r14). Must stay
 # defined before the startup reaper.
+# tier5_derived_name <appId> — port of VMApps._vmNameForApp so a
+# recorded binding/sidecar can be checked against the artifact's own
+# name: a t5-shaped name is only a SHAPE (a hand-made overlay can
+# match it); re-derivation proves the owner record names this very
+# guest (sol r17). appIds are ASCII by the --policy-key charset, so
+# JS charCodeAt == ord() here.
+tier5_derived_name() {
+    python3 - "$1" <<'PY'
+import re, sys
+s = sys.argv[1]
+fnv, djb = 0x811c9dc5, 0x00001505
+for c in (ord(ch) for ch in s):
+    fnv = ((fnv ^ c) * 0x01000193) & 0xFFFFFFFF
+    djb = ((djb * 33) ^ c) & 0xFFFFFFFF
+stub = re.sub(r"[^a-zA-Z0-9_-]", "-", s)
+stub = re.sub(r"-{2,}", "-", stub).strip("-")[:43]
+print("t5-" + (stub or "vmapp") + f"-{fnv:08x}{djb:08x}")
+PY
+}
+
 manifest_app_state() {
     python3 - "$VMAPPS_MANIFEST" "$1" "$2" <<'PY'
 import json, os, sys
@@ -515,22 +535,23 @@ else
             # to do (sol r11). Unverifiable queries skip the same way.
             domain_defined_state "$base"; _ds=$?
             if [ "$_ds" -ne 1 ]; then exec {hfd}>&-; continue; fi
-            # Owner record: a nonempty <overlay>.appid sidecar binds
-            # this disk to an app — an OWNED orphan, not waste (its
-            # app adopts it on next launch). Reap only when there is
-            # no sidecar (no owner ever recorded) or the sidecar names
-            # an appId the CURRENT non-stale manifest no longer
-            # publishes (retired app). An unreadable sidecar, an
-            # empty one, or an unverifiable manifest verdict are all
-            # ambiguity: preserve (sol r12/r13).
-            if [ -f "$overlay.appid" ]; then
-                if ! _side=$(cat "$overlay.appid" 2>/dev/null) \
-                        || [ -z "$_side" ]; then
-                    exec {hfd}>&-; continue
-                fi
-                manifest_app_state "$_side" "$DISK_BASE"; _ms=$?
-                [ "$_ms" -eq 1 ] || { exec {hfd}>&-; continue; }
+            # Owner record is REQUIRED: the t5-shaped name is only a
+            # shape — a hand-made overlay can match it. Only the
+            # sidecar the spawner stamps at create time proves the
+            # disk is ours, and it must re-derive to THIS name (an
+            # owner record for a different name is incoherent, not
+            # proof). The appId must ALSO be manifest-RETIRED — an
+            # owned orphan's app relaunches under its own name. A
+            # missing/unreadable/empty sidecar, a foreign derivation,
+            # or an unverifiable verdict all preserve (sol r12–r17).
+            if ! _side=$(cat "$overlay.appid" 2>/dev/null) \
+                    || [ -z "$_side" ]; then
+                exec {hfd}>&-; continue
             fi
+            [ "$(tier5_derived_name "$_side")" = "$base" ] \
+                || { exec {hfd}>&-; continue; }
+            manifest_app_state "$_side" "$DISK_BASE"; _ms=$?
+            [ "$_ms" -eq 1 ] || { exec {hfd}>&-; continue; }
             # Settle + re-verify: an out-of-band `virsh create` could
             # still be exec'ing a qemu under this name. With no
             # definition AND the per-target hold held, no cooperating
@@ -549,14 +570,18 @@ else
             # the overlay (sol r16).
             domain_defined_state "$base"; _ds=$?
             if [ "$_ds" -ne 1 ]; then exec {hfd}>&-; continue; fi
-            if [ -f "$overlay.appid" ]; then
-                if ! _side=$(cat "$overlay.appid" 2>/dev/null) \
-                        || [ -z "$_side" ]; then
-                    exec {hfd}>&-; continue
-                fi
-                manifest_app_state "$_side" "$DISK_BASE"; _ms=$?
-                [ "$_ms" -eq 1 ] || { exec {hfd}>&-; continue; }
+            # Same owner-record verdict, re-evaluated: the sidecar is
+            # re-read (it may have appeared, changed, or vanished
+            # during the settle) and must still re-derive to $base and
+            # still be manifest-retired (sol r16/r17).
+            if ! _side=$(cat "$overlay.appid" 2>/dev/null) \
+                    || [ -z "$_side" ]; then
+                exec {hfd}>&-; continue
             fi
+            [ "$(tier5_derived_name "$_side")" = "$base" ] \
+                || { exec {hfd}>&-; continue; }
+            manifest_app_state "$_side" "$DISK_BASE"; _ms=$?
+            [ "$_ms" -eq 1 ] || { exec {hfd}>&-; continue; }
             rm -f "$overlay" "$overlay.appid" 2>/dev/null || true
             exec {hfd}>&-
             echo "[tier5] reaped orphan overlay $overlay" >&2
