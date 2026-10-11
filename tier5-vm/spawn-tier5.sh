@@ -380,13 +380,16 @@ except Exception:
 if not isinstance(doc, dict) or doc.get("stale") or doc.get("schema") != 1:
     sys.exit(2)
 ident = (doc.get("baseDev"), doc.get("baseIno"),
-         doc.get("baseMtime"), doc.get("baseSize"))
-if ident != (st.st_dev, st.st_ino, int(st.st_mtime), st.st_size):
+         doc.get("baseMtime"), doc.get("baseMtimeNs"),
+         doc.get("baseSize"))
+if ident != (st.st_dev, st.st_ino, int(st.st_mtime), st.st_mtime_ns,
+             st.st_size):
     sys.exit(2)
-# The identity tuple has int-mtime granularity: a same-inode rewrite
-# inside one second (or an inode reuse) leaves it unchanged. Write
-# ORDER closes that hole — a base modified after the manifest was
-# published must not authorize retirement either (sol r15).
+# Identity is sampled by the scanner BEFORE reading base contents and
+# pinned to nanosecond mtime, so a mid-scan rewrite cannot repeat the
+# tuple. Write ORDER closes the residual hole — a base modified after
+# the manifest was published must not authorize retirement either
+# (sol r15/r16).
 if mst.st_mtime_ns < st.st_mtime_ns:
     sys.exit(2)
 apps = doc.get("apps")
@@ -461,7 +464,8 @@ else
     # ABSENT — a defined-but-stopped domain keeps its overlay: it has
     # an owner record (its bound app restarts it on next launch) that
     # the reaper cannot adjudicate (sol r11). Conservative: only
-    # touches qcow2 files whose backing file is $DISK_BASE (won't
+    # touches qcow2 files in the t5-<stub>-<hash> namespace whose
+    # backing file is $DISK_BASE (won't
     # accidentally rm a user's unrelated qcow2 in the same dir).
     if [ "${TIER5_NO_REAP:-0}" != "1" ] && [ -d "$DISK_DIR" ]; then
         for overlay in "$DISK_DIR"/*.qcow2; do
@@ -469,6 +473,13 @@ else
             base=$(basename "$overlay" .qcow2)
             # Don't touch our own per-spawn name even before it's created.
             [ "$base" = "$VM_NAME" ] && continue
+            # Only names in OUR namespace — t5-<stub>-<64-bit hash> as
+            # VMApps._vmNameForApp derives them. Backing-file match
+            # alone does not prove tier-5 ownership: a separately
+            # created overlay of our base in the same shared dir is
+            # not ours to reap (sol r16).
+            [[ "$base" =~ ^t5-[A-Za-z0-9_-]{1,43}-[0-9a-f]{16}$ ]] \
+                || continue
             # Confirm the overlay is one of ours — EXACT backing-file
             # match from the JSON output, not a substring grep (sol r6).
             _backing=$(run_as_admin qemu-img info --output=json "$overlay" \
@@ -531,6 +542,21 @@ else
                 echo "[tier5] orphan $base came alive during reap — keeping overlay" >&2
             fi
             if [ "$_lv" -ne 1 ]; then exec {hfd}>&-; continue; fi
+            # The settle window can also invalidate the OTHER verdicts —
+            # re-check defined-state and the owner record now: an
+            # out-of-band define, a newly dropped sidecar, or a fresh
+            # catalogue publication in the interval must all preserve
+            # the overlay (sol r16).
+            domain_defined_state "$base"; _ds=$?
+            if [ "$_ds" -ne 1 ]; then exec {hfd}>&-; continue; fi
+            if [ -f "$overlay.appid" ]; then
+                if ! _side=$(cat "$overlay.appid" 2>/dev/null) \
+                        || [ -z "$_side" ]; then
+                    exec {hfd}>&-; continue
+                fi
+                manifest_app_state "$_side" "$DISK_BASE"; _ms=$?
+                [ "$_ms" -eq 1 ] || { exec {hfd}>&-; continue; }
+            fi
             rm -f "$overlay" "$overlay.appid" 2>/dev/null || true
             exec {hfd}>&-
             echo "[tier5] reaped orphan overlay $overlay" >&2

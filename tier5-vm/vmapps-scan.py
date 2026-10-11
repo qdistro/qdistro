@@ -575,6 +575,7 @@ def _base_identity(base_path: str) -> dict[str, int | str]:
         "baseDev": st.st_dev,
         "baseIno": st.st_ino,
         "baseMtime": int(st.st_mtime),
+        "baseMtimeNs": st.st_mtime_ns,
         "baseSize": st.st_size,
     }
 
@@ -600,6 +601,13 @@ def _publish(out_path: str, doc: dict) -> None:
 
 
 def build_manifest(src, base_path: str, denylist: str | None) -> dict:
+    # Identity is sampled BEFORE the scan so it binds the catalogue to
+    # the base as it was when we started reading. A mid-scan rewrite
+    # then necessarily invalidates the recorded identity — a real
+    # write cannot repeat a nanosecond mtime — and the post-scan
+    # re-stat below refuses to publish a torn catalogue outright
+    # rather than relying on consumers to notice (sol r16).
+    ident = _base_identity(base_path)
     apps = select_apps(src, denylist)
     if apps:
         foot = next(
@@ -617,7 +625,12 @@ def build_manifest(src, base_path: str, denylist: str | None) -> dict:
         "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "apps": apps,
     }
-    doc.update(_base_identity(base_path))
+    doc.update(ident)
+    if _base_identity(base_path) != ident:
+        raise ScanError(
+            "base identity changed during the scan — refusing to "
+            "publish a catalogue that may describe torn contents"
+        )
     return doc
 
 
@@ -660,7 +673,8 @@ def manifest_problems(doc) -> list[str]:
         bad = [i for i, r in enumerate(apps) if not _row_ok(r)]
         if bad:
             problems.append(f"malformed app rows at {bad}")
-    for key in ("base", "baseDev", "baseIno", "baseMtime", "baseSize"):
+    for key in ("base", "baseDev", "baseIno", "baseMtime", "baseMtimeNs",
+                "baseSize"):
         if key not in doc:
             problems.append(f"missing identity field {key}")
     return problems
@@ -685,7 +699,8 @@ def cmd_check(manifest_path: str, base_path: str) -> int:
         print(f"check: base {base_path}: {exc}", file=sys.stderr)
         return 1
     stale_keys = [
-        k for k in ("baseDev", "baseIno", "baseMtime", "baseSize")
+        k for k in ("baseDev", "baseIno", "baseMtime", "baseMtimeNs",
+                    "baseSize")
         if doc[k] != ident[k]
     ]
     if doc["base"] != base_path:

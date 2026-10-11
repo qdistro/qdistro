@@ -163,12 +163,20 @@ silently merge:
   schema-current, fully row-valid (the scanner's own `_row_ok`
   strictness — an empty `apps` list or a malformed row is a
   transient catalogue, not a verdict), recorded against the CURRENT
-  base, and no older than the base's last write — the stat tuple
-  has int-second mtime granularity, so a same-inode same-size
-  rewrite inside one second would otherwise repeat the identity
-  (a base swap between scans leaves a manifest that omits the new
-  base's apps); anything less is ambiguity, not proof an app
-  retired. An owned orphan is preserved for its app's next launch.
+  base down to nanosecond mtime, and no older than the base's last
+  write. The scanner samples that identity BEFORE reading base
+  contents and re-stats after the scan, so a mid-scan rewrite
+  either invalidates the recorded identity or refuses to publish —
+  a manifest can never describe torn contents (a base swap between
+  scans leaves a manifest that omits the new base's apps);
+  anything less is ambiguity, not proof an app retired. An owned
+  orphan is preserved for its app's next launch.
+  The reaper also only considers names in the tier-5 namespace —
+  `t5-<stub>-<16-hex>` as `VMApps._vmNameForApp` derives them — so a
+  manually created overlay of our base in the shared image dir is
+  never reaped merely because its backing file matches, and every
+  verdict (defined-state, owner record) is re-checked after the
+  settle window before the unlink.
   "Live" is decided by `qemu_pids_for_domain` alone —
   a LITERAL substring scan of the ps table for libvirt's
   `-name guest=<vm>` argv token narrowed to real qemu via

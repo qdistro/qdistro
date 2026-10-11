@@ -468,6 +468,41 @@ def test_reaper_preserves_owned_orphan_overlays():
     # the ownership gate sits between confirmed-absent and the rm
     assert reaper.index('manifest_app_state') \
         < reaper.index('rm -f "$overlay"')
+
+
+def test_reaper_only_touches_tier5_namespace():
+    # ensures: a backing-file match alone never proves tier-5
+    #          ownership — a manually created overlay of our base in
+    #          the shared image dir keeps its disk. Only names in the
+    #          VMApps._vmNameForApp namespace (t5-<stub>-<16hex>) are
+    #          reapable at all (sol r16)
+    reaper = SPAWN[SPAWN.index("orphan-overlay reaper"):
+                   SPAWN.index("reaped orphan overlay")]
+    assert '[[ "$base" =~ ^t5-' in reaper
+    assert '[0-9a-f]{16}' in reaper
+    # the namespace gate precedes the backing probe and the rm
+    assert reaper.index('$base" =~') < reaper.index('qemu-img info')
+    assert reaper.index('$base" =~') < reaper.index('rm -f "$overlay"')
+
+
+def test_reaper_reverifies_after_settle():
+    # ensures: the settle window cannot invalidate the earlier
+    #          verdicts — defined-state and the owner record are
+    #          re-checked after the sleep and before the unlink, so an
+    #          out-of-band define, a dropped sidecar, or a fresh
+    #          catalogue publication preserves the overlay (sol r16)
+    reaper = SPAWN[SPAWN.index("orphan-overlay reaper"):
+                   SPAWN.index("reaped orphan overlay")]
+    sleep_at = reaper.index("sleep 0.3")
+    tail = reaper[sleep_at:]
+    assert tail.count("domain_defined_state") >= 1
+    assert tail.count("manifest_app_state") >= 1
+    assert tail.index("domain_defined_state") \
+        < tail.index('rm -f "$overlay"')
+    assert tail.index("manifest_app_state") \
+        < tail.index('rm -f "$overlay"')
+    # a sidecar that APPEARED during the settle is re-read, not assumed
+    assert tail.count('[ -f "$overlay.appid" ]') >= 1
     # sidecar removal rides along with the overlay rm
     assert 'rm -f "$overlay" "$overlay.appid"' in reaper
 
@@ -504,8 +539,10 @@ def test_manifest_app_state_is_exact_parse_with_stale_ambiguity():
     assert 'json.loads' in body  # execArgv must parse like the scanner
     assert 'or not apps or' in body  # empty catalogue != "all retired"
     # int-mtime granularity + inode reuse let a DIFFERENT base carry the
-    # same identity tuple — the manifest must also not be older than
-    # the current base's last write (sol r15)
+    # same identity tuple — the manifest must also pin the nanosecond
+    # mtime and not be older than the current base's last write
+    # (sol r15/r16)
+    assert 'baseMtimeNs' in body
     assert 'st_mtime_ns' in body
     assert 'mst.st_mtime_ns < st.st_mtime_ns' in body
 

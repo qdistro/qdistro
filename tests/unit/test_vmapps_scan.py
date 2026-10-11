@@ -549,3 +549,53 @@ def test_appid_outside_policy_key_charset_is_dropped(tmp_path: Path) -> None:
     ids = [r["appId"] for r in _manifest(out)["apps"]]
     assert ids == ["tier5/foot"], ids
     assert "outside the policy-key charset" in res.stderr
+
+
+def test_manifest_pins_nanosecond_mtime(tmp_path: Path) -> None:
+    # ensures: the identity tuple carries st_mtime_ns — a same-inode
+    #          same-size rewrite inside one second must still read as
+    #          a different base (sol r16)
+    root, base, out = _fixture(tmp_path)
+    _exe(root, "usr/bin/foot")
+    res = _scan(root, base, out)
+    assert res.returncode == 0, res.stderr
+    st = base.stat()
+    doc = _manifest(out)
+    assert doc["baseMtimeNs"] == st.st_mtime_ns
+    assert isinstance(doc["baseMtimeNs"], int)
+
+
+def test_base_identity_sampled_before_scan_and_restat_refuses_torn():
+    # ensures: build_manifest samples the base identity BEFORE reading
+    #          contents (binding the catalogue to the pre-scan base) and
+    #          re-stats after the scan, refusing to publish when the
+    #          identity moved — a mid-scan rewrite can never produce a
+    #          manifest whose rows describe replaced contents (sol r16)
+    src = Path(__file__).parents[2] / "tier5-vm/vmapps-scan.py"
+    body = src.read_text()
+    fn = body[body.index("def build_manifest"):
+              body.index("def _row_ok")]
+    assert fn.index("_base_identity") < fn.index("select_apps")
+    assert "_base_identity(base_path) != ident" in fn
+    assert "ScanError" in fn
+    # the reaper's helper and --check both pin the ns field
+    assert '"baseMtimeNs"' in body
+
+
+def test_check_fails_on_missing_ns_identity(tmp_path: Path) -> None:
+    # ensures: an old-schema manifest without baseMtimeNs cannot pass
+    #          --check — pre-ns manifests are cannot-determine, never
+    #          proof of retirement (sol r16)
+    root, base, out = _fixture(tmp_path)
+    _exe(root, "usr/bin/foot")
+    res = _scan(root, base, out)
+    assert res.returncode == 0, res.stderr
+    doc = _manifest(out)
+    del doc["baseMtimeNs"]
+    out.write_text(json.dumps(doc))
+    res = subprocess.run(
+        [sys.executable, str(SCANNER), "--check", str(out),
+         "--base", str(base)],
+        text=True, capture_output=True, check=False,
+    )
+    assert res.returncode == 1
