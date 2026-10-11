@@ -1810,6 +1810,12 @@ _DESCRIBE_SURFACE_HINTS = {
         "Inspect and transcribe the small explanatory paragraph directly "
         "below the Default Applications heading, if one is visible."
     ),
+    "settings_advanced": (
+        "Inspect the warning card's color and icon separately from the "
+        "Advanced tab header. For setting rows, distinguish bright/enabled "
+        "reset controls from dimmed/disabled ones, using visible styling "
+        "rather than the mere presence of a reset icon."
+    ),
     "panel_battery": (
         "State whether battery rows, charge level and time are visible, "
         "or whether the panel has only a header and close button."

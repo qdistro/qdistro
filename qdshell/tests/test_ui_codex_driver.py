@@ -37,6 +37,7 @@ def test_ui_codex_driver_pins_luna_and_keeps_rollout(monkeypatch, with_image):
         ("panel_calendar.png", "date whose cell"),
         ("panel_launcher.png", "visible caret"),
         ("settings_defaultapps-p2.png", "explanatory paragraph"),
+        ("settings_advanced.png", "warning card's color"),
         ("panel_battery.png", "only a header"),
         ("panel_wallpaper.png", "hidden-files eye"),
         ("panel_sessionmenu.png", "corner keybind badge"),

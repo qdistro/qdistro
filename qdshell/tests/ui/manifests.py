@@ -92,6 +92,9 @@ _SETTINGS_EXTRA_CLICKS = {
 # Settings tabs needing a guest-side state fixture (see fixtures.py for what
 # each seeds and why a restart-seed is required).
 _SETTINGS_GUEST_FIXTURES = {
+    # Exercise a real per-app PipeWire stream in the Volumes tab; the
+    # empty-stream state is still truthful when this fixture is absent.
+    "audio": (fixtures.AUDIO_APP_SEED, fixtures.AUDIO_APP_CLEAN),
     # "changed from default" marker dots + enabled reset buttons only render
     # when a live value differs from its default; seed one.
     "advanced": (fixtures.ADVANCED_SEED, fixtures.ADVANCED_CLEAN),
