@@ -1767,6 +1767,10 @@ Cover, as bullet points:
     For a switch, infer on/off from the thumb position (left=off,
     right=on), not the thumb color. Separately state whether the control
     looks disabled/dimmed; a checked value can still be disabled.
+    For a search input, say whether a text caret or focus outline is
+    visible; do not infer focus merely from the input's presence.
+    For a calendar, identify the date whose cell is visibly highlighted
+    or selected, or explicitly say that none is distinguishable.
   - Icon-only buttons (especially in header/toolbar rows): name each one's
     apparent FUNCTION from its icon — e.g. "a close button (X)", "a
     list/grid view-toggle button", "a settings gear button", "a clear/trash
