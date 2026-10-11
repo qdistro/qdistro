@@ -1219,3 +1219,12 @@ def test_launch_record_signal_runs_as_admin():
     #          root's (astra r42)
     assert 'run_as_admin kill "$_inner_pid"' in SPAWN
     assert re.search(r'^\s*kill "\$_inner_pid"', SPAWN, re.M) is None
+
+
+def test_disk_dir_created_as_admin():
+    # ensures: $DISK_DIR (under admin's home by default) is created by
+    #          admin, never by a root `install -d -o` that follows an
+    #          admin-planted symlink and re-owns its target (astra r44)
+    code = [l for l in SPAWN.splitlines() if not l.lstrip().startswith('#')]
+    assert not any('install -d -o' in l for l in code)
+    assert 'run_as_admin mkdir -p -- "$DISK_DIR"' in SPAWN

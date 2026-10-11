@@ -356,7 +356,12 @@ else
         echo "        chmod 0644 $DISK_BASE" >&2
         exit 3
     fi
-    install -d -o "$ADMIN_USER" -g "$ADMIN_USER" "$DISK_DIR"
+    # Created AS admin — a root `install -d -o` under admin's home would
+    # follow an admin-planted symlink and re-own its target.
+    if ! run_as_admin mkdir -p -- "$DISK_DIR"; then
+        echo "[tier5b] FAIL: admin cannot create $DISK_DIR" >&2
+        exit 3
+    fi
     if ! [[ "$VM_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$ ]]; then
         echo "[tier5b] FAIL: invalid vm_name '$VM_NAME'" >&2
         exit 1

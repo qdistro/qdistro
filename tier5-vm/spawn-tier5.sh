@@ -891,7 +891,13 @@ else
         echo "        chmod 0644 $DISK_BASE" >&2
         exit 3
     fi
-    install -d -o "$ADMIN_USER" -g "$ADMIN_USER" "$DISK_DIR"
+    # Created AS admin: $DISK_DIR defaults under admin's home, so a root
+    # `install -d -o` would follow an admin-planted symlink and re-own its
+    # target (astra r44).
+    if ! run_as_admin mkdir -p -- "$DISK_DIR"; then
+        echo "[tier5] FAIL: admin cannot create $DISK_DIR" >&2
+        exit 3
+    fi
     if ! [[ "$VM_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$ ]]; then
         echo "[tier5] FAIL: invalid vm_name '$VM_NAME'" >&2
         exit 1
@@ -2000,14 +2006,10 @@ _create_domain_define() {
 }
 
 # The decision: adopt a running domain under our shared session hold, or
-# take EXCLUSIVE for the create path. The session SH is RELEASED before
-# the exclusive grab — an SH->EX upgrade on one fd deadlocks against a
-# concurrent upgrader (each waits for the other's SH), and an EX on a
-# second fd would deadlock against our own SH. The release window is
-# safe: a teardown that claims the gap destroys a VM with no holders,
-# and a relaunch that adopts in the gap either sees the domain running
-# (keeps it, our EX then waits) or ends up at this same create decision
-# behind us. The re-check under exclusivity always sees a final state.
+# create it under the separate create lock (fd11) while KEEPING that SH —
+# the SH excludes every EX actor (teardown claim, orphan reaper, cleanup),
+# and racing creators serialize on fd11, the loser re-checking and
+# adopting. The re-check under the create lock always sees a final state.
 # Early FOREIGN check, BEFORE we join the lock session: a LIVE domain
 # bound to a different appId means we refuse here — a mismatched spawn
 # that never takes fd9 can never starve the true owner's teardown claim
