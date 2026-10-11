@@ -356,7 +356,10 @@ qd22_s15_ordering() {   # <cursor>
     for _ in $(seq 1 40); do
         if qd22_journal_since "$1"; then
             ok=1
+            # Only an unbind AFTER the drag began is the probe's own: an
+            # earlier bystander unbind ingested late must not end the poll.
             printf '%s\n' "$QD22_JOURNAL" \
+                | sed -n '/qdwin: begin_interactive_move handle=[0-9]* anchor=/,$p' \
                 | grep -qE '^(\[[0-9:.]+\] )?qdwin: shell unbound$' && { unbound=1; break; }
         fi
         sleep 0.25
