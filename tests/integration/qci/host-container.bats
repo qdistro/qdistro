@@ -7,6 +7,9 @@ setup() {
     cp "$SOURCE_ROOT/ci/bin/qci-host-image" "$REPO/ci/bin/"
     cp "$SOURCE_ROOT/ci/containers/"* "$REPO/ci/containers/"
     cp "$SOURCE_ROOT/scripts/vm/container-native-deps.sh" "$REPO/scripts/vm/"
+    # qci-host-image + host-container.sh source the dep cache for base-image
+    # acquisition and the display-info warm — it is a real product dep now.
+    cp "$SOURCE_ROOT/scripts/vm/lib/deps-cache.sh" "$REPO/scripts/vm/lib/"
     cp "$SOURCE_ROOT/qdterm/util/build-sip.sh" "$REPO/qdterm/util/"
     # qci-host-image consumes the podman native stage for the quickshell
     # binaries; stub the stage builder so the recipe gets canned content
@@ -39,9 +42,21 @@ printf '%s\n' "$*" >> "$CALLS"
 case "$1 $2" in
     'info --format') echo true;;
     'image exists')
-        if [[ $3 = registry.* ]]; then [ "${NO_BASE:-0}" = 0 ]; else grep -Fxq "$3" "$IMAGES"; fi;;
+        if [[ $3 = registry.* ]]; then
+            [ "${NO_BASE:-0}" = 0 ] || grep -Fxq "$3" "$IMAGES"
+        else grep -Fxq "$3" "$IMAGES"; fi;;
     'image inspect')
-        if [[ $* = *'.Id'* ]]; then echo "${TEST_BASE_ID:-base-id}"; else echo "${TEST_SNAPSHOT:-20261003}"; fi;;
+        if [[ $* = *'.Id'* ]]; then echo "${TEST_BASE_ID:-base-id}";
+        elif [[ $* = *Digest* ]]; then echo "sha256:00000000000000000000000000000000000000000000000000000000facefeed";
+        else echo "${TEST_SNAPSHOT:-20261003}"; fi;;
+    'pull --quiet') printf '%s\n' "$3" >> "$IMAGES";;
+    'save --format')
+        out=
+        while [ "$#" -gt 0 ]; do
+            case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
+        done
+        printf 'fake-archive\n' > "$out";;
+    'load -i') printf '%s\n' "loaded-archive" >> "$IMAGES";;
     'build --pull=never')
         while [ "$#" -gt 0 ]; do
             if [ "$1" = --tag ]; then echo "$2" >> "$IMAGES"; break; fi
@@ -74,7 +89,7 @@ SH
 
 @test "offline refuses missing base and toolchain without pull or build; allows cache hit" {
     run env QCI_OFFLINE=1 NO_BASE=1 "$REPO/ci/bin/qci-host-image"
-    echo "$output"; [ "$status" = 3 ]; [[ "$output" = *'missing base'* ]]
+    echo "$output"; [ "$status" = 3 ]; [[ "$output" = *'no complete cached OCI archive'* ]]
     run env QCI_OFFLINE=1 "$REPO/ci/bin/qci-host-image"
     echo "$output"; [ "$status" = 3 ]; [[ "$output" = *'missing host image'* ]]
     ! grep -Eq '^(pull|build) ' "$CALLS"
@@ -223,9 +238,20 @@ SH
 @test "a podman failure after the rows finished still records a failing row" {
     # inner marker | podman rc | expected gate rc | container-run row?
     local case_
+    # The gate warms the display-info tarball through deps-cache.sh before
+    # dispatching rows: the fake repo needs the real lib + a pre-verified
+    # entry so the warm resolves without network.
+    local disha
+    mkdir -p "$BATS_TEST_TMPDIR/q/scripts/vm/lib" "$BATS_TEST_TMPDIR/deps"
+    cp "$SOURCE_ROOT/scripts/vm/lib/deps-cache.sh" "$BATS_TEST_TMPDIR/q/scripts/vm/lib/"
+    printf 'fake-ldi' > "$BATS_TEST_TMPDIR/ldi.tgz"
+    disha="$(sha256sum "$BATS_TEST_TMPDIR/ldi.tgz" | awk '{print $1}')"
+    env QDISTRO_DEPS_CACHE_DIR="$BATS_TEST_TMPDIR/deps" bash -c \
+        ". '$SOURCE_ROOT/scripts/vm/lib/deps-cache.sh'; qd_store_file src '$disha' '$BATS_TEST_TMPDIR/ldi.tgz' 'http://x/ldi.tgz'" >/dev/null
     for case_ in "0 0 0 no" "30 30 30 no" "0 125 30 yes" "30 125 30 yes" "- 125 30 yes" "junk 0 30 yes"; do
         set -- $case_
-        run env MARK="$1" PRC="$2" bash -c '
+        run env MARK="$1" PRC="$2" QDISTRO_DEPS_CACHE_DIR="$BATS_TEST_TMPDIR/deps" \
+            QDISTRO_DISPLAY_INFO_SHA256="$disha" QDISTRO_DISPLAY_INFO_URL="http://x/ldi.tgz" bash -c '
             . "$SOURCE_ROOT/ci/lib/host-container.sh"
             EXIT_BUILD=20 EXIT_HOST=30 RDIR="$BATS_TEST_TMPDIR/run" QDISTRO_REPO="$BATS_TEST_TMPDIR/q"
             mkdir -p "$QDISTRO_REPO/ci/bin" "$RDIR/host"

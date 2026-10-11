@@ -34,8 +34,8 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 
 REPO_MD = "{http://linux.duke.edu/metadata/repo}"
