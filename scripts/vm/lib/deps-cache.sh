@@ -84,6 +84,19 @@ qd_repo_present() {
     [ -s "$(qd_repo_dir "$1" 2>/dev/null)/tumbleweed/repo/$2/metadata.json" ]
 }
 
+# A base the wiring helpers generated (vs. a caller's deliberate override) —
+# tracked so a later wire call can re-derive it for its own transport and
+# the CURRENT offline mode instead of trusting a stale export.
+_qd_repo_base_is_generated() {
+    [ -n "${QDISTRO_REPO_BASE:-}" ] && [ "$QDISTRO_REPO_BASE" = "${_QD_REPO_BASE_WIRED:-}" ]
+}
+
+_qd_repo_set_base() {
+    QDISTRO_REPO_BASE="$1" _QD_REPO_BASE_WIRED="$1"
+    export QDISTRO_REPO_BASE _QD_REPO_BASE_WIRED
+    echo "[deps-cache] wired QDISTRO_REPO_BASE=$QDISTRO_REPO_BASE" >&2
+}
+
 _qd_repo_proxy_enabled() {
     case "${QDISTRO_REPO_PROXY:-1}" in 0|false|no|off) return 1 ;; esac
     return 0
@@ -413,29 +426,31 @@ qd_serve_guest_base() {
 # shell (never call it in a subshell — the exports would be lost):
 #   QDISTRO_REPO_BASE       exported base for the container
 #   QD_REPO_CONTAINER_ARGS  podman argv the caller MUST add
+# Offline (either flag): ALWAYS file://<mountpoint> over the cache,
+# read-only, with --network=none — any exported base is ignored, since
+# nothing outside the cache may be reached; works on a partial cache
+# because the metadata is complete, and a package the cache lacks fails the
+# build loudly. Returns 1 offline only when no metadata is cached.
 # Online: the proxy via host.containers.internal (pasta/slirp4netns map it
-# to the host), no extra args — misses are fetched and cached.
-# Offline: file://<mountpoint> over the cache, read-only, with
-# --network=none — works on a partial cache because the metadata is
-# complete; a package the cache lacks fails the build loudly.
-# Returns 1 (unwired, args empty) when the caller set QDISTRO_REPO_BASE,
-# the proxy is disabled/unstartable online, or offline with no metadata.
+# to the host), no extra args. A caller's explicit QDISTRO_REPO_BASE wins
+# online (rc 1); a base an earlier wire call generated (e.g. a guest's
+# 10.0.2.2) is re-derived for the container transport.
 qd_repo_wire_container() {
     local snap="$1" mnt="$2" port
     QD_REPO_CONTAINER_ARGS=()
-    [ -n "${QDISTRO_REPO_BASE:-}" ] && return 1
     if qd_deps_offline; then
         qd_repo_present "$snap" oss || return 1
         qd_repo_present "$snap" non-oss || return 1
         QD_REPO_CONTAINER_ARGS=(--volume "$(qd_deps_root)/repos:$mnt:ro,z" --network=none)
-        QDISTRO_REPO_BASE="file://$mnt"
-    else
-        _qd_repo_proxy_enabled || return 1
-        port="$(qd_serve_start)" || return 1
-        QDISTRO_REPO_BASE="http://host.containers.internal:$port/repos"
+        _qd_repo_set_base "file://$mnt"
+        return 0
     fi
-    export QDISTRO_REPO_BASE
-    echo "[deps-cache] wired QDISTRO_REPO_BASE=$QDISTRO_REPO_BASE" >&2
+    if [ -n "${QDISTRO_REPO_BASE:-}" ] && ! _qd_repo_base_is_generated; then
+        return 1
+    fi
+    _qd_repo_proxy_enabled || return 1
+    port="$(qd_serve_start)" || return 1
+    _qd_repo_set_base "http://host.containers.internal:$port/repos"
 }
 
 # qd_repo_base_safe <url> — repo bases interpolate into .repo files and
@@ -533,17 +548,21 @@ GUESTFISH
 # offline, nothing is cached — consumers then go upstream (online) or fail
 # closed in qdistro_substrate_repo_command (offline).
 qd_repo_wire_guest() {
-    local snap="$1" host="${2:-10.0.2.2}"
-    [ -n "${QDISTRO_REPO_BASE:-}" ] && return 0
+    local snap="$1" host="${2:-10.0.2.2}" base
+    # A caller's override wins; a base we generated earlier is re-derived
+    # (transport + the proxy's offline mode may both have changed).
+    if [ -n "${QDISTRO_REPO_BASE:-}" ] && ! _qd_repo_base_is_generated; then
+        return 0
+    fi
+    _qd_repo_base_is_generated && unset QDISTRO_REPO_BASE _QD_REPO_BASE_WIRED
     _qd_repo_proxy_enabled || return 0
     if qd_deps_offline; then
         qd_repo_present "$snap" oss || return 0
         qd_repo_present "$snap" non-oss || return 0
     fi
     qd_serve_start >/dev/null || return 1
-    QDISTRO_REPO_BASE="$(qd_serve_guest_base "$snap" "$host")" || return 1
-    export QDISTRO_REPO_BASE
-    echo "[deps-cache] wired QDISTRO_REPO_BASE=$QDISTRO_REPO_BASE" >&2
+    base="$(qd_serve_guest_base "$snap" "$host")" || return 1
+    _qd_repo_set_base "$base"
 }
 
 # ---- path resolution ----------------------------------------------------

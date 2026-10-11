@@ -669,8 +669,12 @@ fab_mirror() {
 
 @test "qd_repo_wire_guest offline: cached metadata → cache-only proxy + guest base" {
     fab_mirror 20260101
-    mkdir -p "$WORK/cache/repos/20260101/tumbleweed/repo/oss/repodata"
-    echo '<repomd/>' > "$WORK/cache/repos/20260101/tumbleweed/repo/oss/repodata/repomd.xml"
+    local d="$WORK/cache/repos/20260101/tumbleweed/repo/oss"
+    mkdir -p "$d/repodata"
+    echo '<repomd xmlns="http://linux.duke.edu/metadata/repo"/>' > "$d/repodata/repomd.xml"
+    # a real schema-3 marker pinning that repomd (the proxy re-hashes it)
+    printf '{"schema":3,"repomd_sha256":"%s","sidecars":{}}' \
+        "$(sha256sum "$d/repodata/repomd.xml" | awk '{print $1}')" > "$d/metadata.json"
     SERVE_STARTED=1
     run env QCI_OFFLINE=1 bash -c ". '$LIB'; qd_repo_wire_guest 20260101 169.254.2.2; echo base=\$QDISTRO_REPO_BASE"
     [ "$status" -eq 0 ]
@@ -679,7 +683,7 @@ fab_mirror() {
     # the proxy serves the cached tree
     port="$(bash -c '. "$1"; qd_serve_port' _ "$LIB")"
     wget -q -O - "http://127.0.0.1:$port/repos/20260101/tumbleweed/repo/oss/repodata/repomd.xml" \
-        | grep -q '<repomd/>'
+        | grep -q '<repomd xmlns'
 }
 
 @test "qd_repo_wire_guest: explicit QDISTRO_REPO_BASE wins, no server" {
@@ -838,7 +842,8 @@ fab_mirror() {
     port="$(cat "$WORK/cache/.serve.port")"
     pid="$(cat "$WORK/cache/.serve.pid")"
     kill -0 "$pid" 2>/dev/null
-    wget -q -O - "http://127.0.0.1:$port/" >/dev/null
+    # answers (only /repos/... exists, so the root is a well-formed 404)
+    [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/")" = 404 ]
 }
 
 # Stub podman for the native-builder offline contract: records every call,
@@ -912,4 +917,32 @@ _run_native_builder() {
     grep 'podman build' "$PODMAN_LOG" | grep -q -- '--network=none'
     grep 'podman build' "$PODMAN_LOG" | grep -q -- 'QDISTRO_REPO_BASE=file:///qdistro-mirror'
     ! grep 'podman build' "$PODMAN_LOG" | grep -q 'download.example.org'
+}
+
+@test "a generated guest base is re-derived when the offline mode flips (never a stale online proxy)" {
+    fab_mirror 20260101
+    run bash -c ". '$LIB'
+        qd_repo_wire_guest 20260101 10.0.2.2 2>/dev/null
+        export QCI_OFFLINE=1
+        qd_repo_wire_guest 20260101 10.0.2.2 2>/dev/null
+        cat \"\$(qd_deps_root)/.serve.mode\""
+    [ "$status" -eq 0 ]
+    [ "$output" = offline ]
+}
+
+@test "qd_repo_wire_container offline ignores an exported external base (either offline flag)" {
+    fab_mirror 20260101
+    . "$LIB"
+    export QDISTRO_DEPS_OFFLINE=1 QDISTRO_REPO_BASE=https://download.example.org/history
+    qd_repo_wire_container 20260101 /qdistro-mirror
+    [ "$QDISTRO_REPO_BASE" = "file:///qdistro-mirror" ]
+    [[ " ${QD_REPO_CONTAINER_ARGS[*]} " == *" --network=none "* ]]
+}
+
+@test "qd_repo_wire_container re-derives a generated guest base for the container transport" {
+    . "$LIB"
+    qd_repo_wire_guest 20260101 10.0.2.2 2>/dev/null
+    [[ "$QDISTRO_REPO_BASE" == http://10.0.2.2:* ]]
+    qd_repo_wire_container 20260101 /qdistro-mirror 2>/dev/null
+    [[ "$QDISTRO_REPO_BASE" == http://host.containers.internal:* ]]
 }

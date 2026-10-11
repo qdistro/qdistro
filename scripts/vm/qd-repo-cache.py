@@ -50,6 +50,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
@@ -166,20 +167,32 @@ def fetch_stream(url, dest, want_sha, want_algo, sink, retries=3):
                 # corrupt file. Without a length upstream, truncation is
                 # undetectable, so nothing is streamed (sink stays unstarted
                 # and the caller serves the verified file instead).
+                # Stream only with unambiguous framing: a plain
+                # Content-Length and no Transfer-Encoding. The client is
+                # never sent more than that length, and the body must total
+                # exactly that length before the final chunk goes out.
                 with r, open(tmp, "wb") as out:
                     h = hashlib.new(want_algo)
-                    length = r.headers.get("Content-Length")
-                    stream = bool(length and length.isdigit())
+                    length = r.headers.get("Content-Length", "")
+                    stream = (length.isdigit()
+                              and not r.headers.get("Transfer-Encoding"))
+                    length = int(length) if stream else None
                     if stream:
-                        sink.start(int(length))
-                    pending = None
+                        sink.start(length)
+                    pending, sent, total = None, 0, 0
                     for chunk in iter(lambda: r.read(1 << 20), b""):
                         out.write(chunk)
                         h.update(chunk)
+                        total += len(chunk)
                         if stream:
+                            if total > length:
+                                raise CacheError(f"body exceeds Content-Length for {url}")
                             if pending is not None:
                                 sink.write(pending)
+                                sent += len(pending)
                             pending = chunk
+                if stream and total != length:
+                    raise CacheError(f"body length {total} != Content-Length {length} for {url}")
                 if h.hexdigest() != want_sha:
                     raise CacheError(f"digest mismatch for {url} "
                                      f"(got {h.hexdigest()}, want {want_sha})")
@@ -260,19 +273,78 @@ class Repo:
     def marker(self):
         return os.path.join(self.dir, "metadata.json")
 
+    def load_marker(self):
+        """The metadata.json record, or None (absent, unreadable, or an
+        older schema that did not pin repomd + sidecars)."""
+        try:
+            with open(self.marker) as f:
+                m = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(m, dict) or m.get("schema", 0) < 3 \
+                or not isinstance(m.get("sidecars"), dict):
+            return None
+        return m
+
     def metadata_present(self):
-        return os.path.isfile(self.marker)
+        return self.load_marker() is not None
 
     def repomd(self):
         return os.path.join(self.dir, "repodata", "repomd.xml")
 
+    def verified_repomd(self):
+        """Parsed repomd entries, after repomd.xml re-hashes to the digest
+        pinned in metadata.json. Every other metadata check chains from
+        this one, so nothing is served or parsed off an unpinned repomd."""
+        m = self.load_marker()
+        if m is None:
+            raise CacheError(f"{self.repo}: no metadata.json")
+        if not os.path.isfile(self.repomd()) \
+                or digest_file(self.repomd()) != m.get("repomd_sha256"):
+            raise CacheError(f"{self.repo}: repomd.xml does not match metadata.json")
+        return parse_repomd(self.repomd())
+
+    def metadata_expected(self, rel):
+        """(sha, algo) a repodata/ file must hash to; None when the snapshot
+        has no such file (sidecar recorded absent, or not named)."""
+        m = self.load_marker()
+        if m is None:
+            raise CacheError(f"{self.repo}: no metadata.json")
+        if rel == "repodata/repomd.xml":
+            return m["repomd_sha256"], "sha256"
+        name = rel[len("repodata/"):]
+        if name in SIDECARS:
+            sha = m["sidecars"].get(name)
+            return (sha, "sha256") if sha else None
+        for h, sha, algo, _t in self.verified_repomd():
+            if h == rel:
+                return sha, algo
+        return None
+
+    def metadata_ok(self, rel):
+        exp = self.metadata_expected(rel)
+        local = os.path.join(self.dir, rel)
+        return exp is not None and os.path.isfile(local) \
+            and digest_file(local, exp[1]) == exp[0]
+
     def bad_metadata(self):
-        """Metadata files that are missing or do not match repomd."""
-        if not os.path.isfile(self.repomd()):
-            return ["repodata/repomd.xml"]
-        return [h for h, s, a, _t in parse_repomd(self.repomd())
+        """Metadata files that are missing or break the pinned chain:
+        repomd + sidecars vs metadata.json, every other file vs repomd."""
+        try:
+            entries = self.verified_repomd()
+        except CacheError as e:
+            return [str(e)]
+        bad = []
+        m = self.load_marker()
+        for side in SIDECARS:
+            sha = m["sidecars"].get(side)
+            local = os.path.join(self.dir, "repodata", side)
+            if sha and not (os.path.isfile(local) and digest_file(local) == sha):
+                bad.append(f"repodata/{side}")
+        bad += [h for h, s, a, _t in entries
                 if not (os.path.isfile(os.path.join(self.dir, h))
                         and digest_file(os.path.join(self.dir, h), a) == s)]
+        return bad
 
     def warm_metadata(self, force=False):
         """Fetch + verify repomd and everything it names; publish marker."""
@@ -289,11 +361,17 @@ class Repo:
                     os.unlink(self.marker)
                 if fetch(self.src + "repodata/repomd.xml", self.repomd()) is None:
                     raise CacheError(f"no repomd.xml upstream for {self.src}")
+                sidecars = {}
                 for side in SIDECARS:
                     # only a genuine 404 means "upstream ships no sidecar"
-                    if fetch(self.src + "repodata/" + side,
-                             os.path.join(self.dir, "repodata", side)) is None:
+                    local = os.path.join(self.dir, "repodata", side)
+                    if fetch(self.src + "repodata/" + side, local) is None:
                         log(f"{self.repo}: no repodata/{side} upstream (ok)")
+                        if os.path.lexists(local):
+                            os.unlink(local)
+                        sidecars[side] = None
+                    else:
+                        sidecars[side] = digest_file(local)
                 entries = parse_repomd(self.repomd())
                 for href, sha, algo, _t in entries:
                     local = os.path.join(self.dir, href)
@@ -303,9 +381,10 @@ class Repo:
                         raise CacheError(f"repomd names {href} but upstream 404s it")
                 tmp = self.marker + ".tmp"
                 with open(tmp, "w") as f:
-                    json.dump({"schema": 2, "snapshot": self.snapshot,
+                    json.dump({"schema": 3, "snapshot": self.snapshot,
                                "repo": self.repo, "source": self.src,
                                "repomd_sha256": digest_file(self.repomd()),
+                               "sidecars": sidecars,
                                "files": len(entries),
                                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                             time.gmtime())}, f, indent=2)
@@ -319,12 +398,15 @@ class Repo:
         """{href: (sha, algo, name, arch)} from the cached primary."""
         with self._mu:
             if self._pkgs is None:
-                primary = next((h for h, _s, _a, t in parse_repomd(self.repomd())
-                                if t == "primary"), None)
-                if primary is None:
+                entry = next(((h, s, a) for h, s, a, t in self.verified_repomd()
+                              if t == "primary"), None)
+                if entry is None:
                     raise CacheError(f"{self.repo}: repomd names no primary")
+                primary = os.path.join(self.dir, entry[0])
+                if not os.path.isfile(primary) or digest_file(primary, entry[2]) != entry[1]:
+                    raise CacheError(f"{self.repo}: primary does not match repomd")
                 self._pkgs = {h: (s, a, n, ar) for h, s, a, n, ar in
-                              iter_packages(os.path.join(self.dir, primary))}
+                              iter_packages(primary)}
             return self._pkgs
 
     # -- verified-files index ------------------------------------------------
@@ -474,16 +556,21 @@ def make_handler(root, base):
                 repos[key] = Repo(root, snap, name, base)
             return repos[key]
 
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *a, **kw):
-            super().__init__(*a, directory=root, **kw)
+    real_root = os.path.realpath(root)
 
+    class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             pass  # cache events are logged by Repo; no per-request noise
 
         def _send_file(self, path, head):
+            # Containment: a symlink (or anything else) resolving outside
+            # the cache root is never served.
+            real = os.path.realpath(path)
+            if not real.startswith(real_root + os.sep):
+                self.send_error(404)
+                return
             try:
-                f = open(path, "rb")
+                f = open(real, "rb")
             except OSError:
                 self.send_error(404)
                 return
@@ -496,22 +583,31 @@ def make_handler(root, base):
                     shutil.copyfileobj(f, self.wfile, 1 << 20)
 
         def _repo(self, head):
-            m = REPO_PATH.match(self.path.split("?", 1)[0])
+            # Decode BEFORE routing: an encoded path (/%72epos/...) must hit
+            # exactly the same checks as its plain spelling. Only /repos/...
+            # exists; there is no static fallback.
+            path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+            m = REPO_PATH.match(path) if "\x00" not in path else None
             if not m:
-                return False
+                self.send_error(404)
+                return
             snap, name, rel = m.groups()
+            sink = None
             try:
-                rel = safe_href(urllib.request.url2pathname(rel))
+                rel = safe_href(rel)
                 repo = repo_for(snap, name)
                 if not repo.metadata_present():
                     repo.warm_metadata()
                 if rel.startswith("repodata/"):
-                    path = os.path.join(repo.dir, rel)
-                    if os.path.isfile(path):
-                        self._send_file(path, head)
+                    if not repo.metadata_ok(rel) and not offline() \
+                            and repo.metadata_expected(rel) is not None:
+                        log(f"{snap}/{name}/{rel}: cached metadata fails its pin — re-warming")
+                        repo.warm_metadata(force=True)
+                    if repo.metadata_ok(rel):
+                        self._send_file(os.path.join(repo.dir, rel), head)
                     else:
                         self.send_error(404)
-                    return True
+                    return
                 sink = None if head else _Sink(self)
                 path = repo.ensure_package(rel, sink)
             except (CacheError, ValueError, OSError) as e:
@@ -520,22 +616,19 @@ def make_handler(root, base):
                     self.close_connection = True  # truncated body; client retries
                 else:
                     self.send_error(404 if offline() else 502)
-                return True
+                return
             if path is None:
                 self.send_error(404)
-                return True
+                return
             repo.record_used(rel)
             if sink is None or not sink.started:
                 self._send_file(path, head)
-            return True
 
         def do_GET(self):
-            if not self._repo(False):
-                super().do_GET()
+            self._repo(False)
 
         def do_HEAD(self):
-            if not self._repo(True):
-                super().do_HEAD()
+            self._repo(True)
 
     return Handler
 
@@ -599,8 +692,9 @@ def cmd_prefetch(args):
     for repo in repos_of(args):
         repo.warm_metadata()
         hrefs, gone = listed_hrefs(repo, want[repo.repo])
-        for n in gone:
-            log(f"{repo.repo}: {n} not in snapshot {repo.snapshot} (skipped)")
+        # A listed name the snapshot lacks is a list that no longer matches
+        # the pin (renamed/dropped package) — re-record, never skip silently.
+        failed += [f"{repo.repo}/{n}: not in snapshot {repo.snapshot}" for n in gone]
         got = 0
         for href in hrefs:
             try:
@@ -634,12 +728,14 @@ def cmd_audit(args):
         idx = repo.load_index()
         miss = [h for h in hrefs
                 if not repo.cached_ok(h, *repo.packages()[h][:2], idx=idx, deep=args.deep)]
+        if gone:
+            bad.append(f"{repo.repo}: {len(gone)} listed name(s) not in snapshot "
+                       f"{repo.snapshot}: {', '.join(gone[:5])} — re-record the list")
         if miss:
             bad.append(f"{repo.repo}: {len(miss)}/{len(hrefs)} listed package(s) "
                        f"not cached: {', '.join(miss[:5])}")
-        else:
-            log(f"{repo.repo}: metadata OK, {len(hrefs)} listed packages cached"
-                + (f" ({len(gone)} listed names not in this snapshot)" if gone else ""))
+        if not gone and not miss:
+            log(f"{repo.repo}: metadata OK, {len(hrefs)} listed packages cached")
     if bad:
         for b in bad:
             log(f"audit: {b}")

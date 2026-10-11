@@ -65,7 +65,7 @@ else
     fi
     # Offline the image is built from the cache alone (cached OCI base +
     # cached repo, no network) — or not at all.
-    if offline && [ "${#mirror_args[@]}" -eq 0 ]; then
+    if qd_deps_offline && [ "${#mirror_args[@]}" -eq 0 ]; then
         echo "ERROR: missing host image $image and no cached repo metadata to build it offline (QCI_OFFLINE=1; run qd-cache-warm)" >&2
         exit 3
     fi

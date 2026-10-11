@@ -62,12 +62,12 @@ if [ -s "$archive" ] && [ -s "$receipt" ] \
     printf '%s\n' "$archive"
     exit 0
 fi
-case "${QCI_OFFLINE:-0}" in
-    1|true|yes|on)
-        echo "ERROR: no cached tier-2 archive for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT (QCI_OFFLINE=1)" >&2
-        exit 3
-        ;;
-esac
+# Offline the archive is built from the cache alone (wired above: ro cache
+# mount + --network=none) — or not at all.
+if qd_deps_offline && [ "${#mirror_args[@]}" -eq 0 ]; then
+    echo "ERROR: no cached tier-2 archive for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT and no cached repo metadata to build one offline (run qd-cache-warm)" >&2
+    exit 3
+fi
 
 mkdir -p "$work/context"
 tar -C "$work/context" -xf "$work/source.tar"

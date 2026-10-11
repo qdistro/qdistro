@@ -46,6 +46,7 @@ PY
 
 teardown() {
     stop_proxy
+    [ -n "${COUNT_PID:-}" ] && { kill "$COUNT_PID" 2>/dev/null; wait "$COUNT_PID" 2>/dev/null || true; }
     kill "$UP_PID" 2>/dev/null; wait "$UP_PID" 2>/dev/null || true
     bash -c ". '$DEPS'; qd_serve_stop" 2>/dev/null || true
 }
@@ -162,17 +163,21 @@ C() { echo "$WORK/cache/repos/$SNAP/tumbleweed/repo/$1"; }
     QCI_OFFLINE=1 start_proxy
     run wget -q -O /dev/null "$PROXY/oss/noarch/pkg-a-1.0-1.noarch.rpm"
     [ "$status" -eq 0 ]
-    run wget -q -O /dev/null "$PROXY/oss/noarch/pkg-b-1.0-1.noarch.rpm"
-    [ "$status" -ne 0 ]
+    run curl -s -o /dev/null -w '%{http_code}' "$PROXY/oss/noarch/pkg-b-1.0-1.noarch.rpm"
+    [ "$output" = 404 ]
     [ ! -s "$HITS" ]
     grep -q 'MISS (offline)' "$WORK/proxy.log"
+    ! grep -q Traceback "$WORK/proxy.log"
 }
 
 @test "proxy offline with no cached metadata: 404, never upstream" {
     QCI_OFFLINE=1 start_proxy
-    run wget -q -O /dev/null "$PROXY/oss/repodata/repomd.xml"
-    [ "$status" -ne 0 ]
+    run curl -s -o /dev/null -w '%{http_code}' "$PROXY/oss/repodata/repomd.xml"
+    [ "$output" = 404 ]
+    run curl -s -o /dev/null -w '%{http_code}' "$PROXY/oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    [ "$output" = 404 ]                            # cold offline miss: 404, no crash
     [ ! -s "$HITS" ]
+    ! grep -q Traceback "$WORK/proxy.log"
 }
 
 @test "proxy: an upstream package that fails its digest is never cached or served" {
@@ -323,4 +328,89 @@ PY
     [ "$status" -ne 0 ]
     [ "$(stat -c %s "$WORK/got" 2>/dev/null || echo 0)" -lt 3500000 ]
     [ ! -e "$(C oss)/noarch/pkg-a-1.0-1.noarch.rpm" ]
+}
+
+@test "proxy: percent-encoded paths get the same checks; nothing outside /repos is served" {
+    start_proxy
+    wget -q -O /dev/null "$PROXY/oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    printf 'tampered!!!' > "$(C oss)/noarch/pkg-a-1.0-1.noarch.rpm"
+    local port; port="$(cat "$PROXY_PORT_FILE")"
+    # encoded spelling of the same package: verified (refetched), not raw bytes
+    run curl -fsS "http://127.0.0.1:$port/%72epos/$SNAP/tumbleweed/repo/oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    [ "$output" = "oss-A-bytes" ]
+    # no static fallback: cache bookkeeping and other root paths are 404
+    for p in / /.serve.log "/repos/$SNAP/tumbleweed/repo/oss/metadata.json" \
+             "/repos/$SNAP/tumbleweed/repo/oss/cache-index.json"; do
+        run curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port$p"
+        [ "$output" = 404 ]
+    done
+}
+
+@test "proxy: a symlink inside the cache pointing outside it is never served" {
+    start_proxy
+    wget -q -O /dev/null "$PROXY/oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    stop_proxy
+    # same digest as the real package, so only containment can stop it
+    cp "$(C oss)/noarch/pkg-a-1.0-1.noarch.rpm" "$WORK/outside"
+    rm "$(C oss)/noarch/pkg-a-1.0-1.noarch.rpm"
+    ln -s "$WORK/outside" "$(C oss)/noarch/pkg-a-1.0-1.noarch.rpm"
+    QCI_OFFLINE=1 start_proxy
+    run curl -s -o /dev/null -w '%{http_code}' "$PROXY/oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    [ "$output" = 404 ]
+}
+
+@test "proxy: a lying upstream Content-Length is never streamed as a complete body" {
+    # custom upstream: advertises Content-Length 1 for RPMs, sends the body
+    local port2; port2="$(free_port)"
+    ( exec python3 "$BATS_TEST_DIRNAME/fixtures/lying-length-server.py" \
+        "$WORK/srv" "$port2" >/dev/null 2>&1 </dev/null ) &
+    COUNT_PID=$!
+    wait_http "http://127.0.0.1:$port2/history/$SNAP/tumbleweed/repo/oss/repodata/repomd.xml"
+    BASE="http://127.0.0.1:$port2/history"
+    start_proxy
+    run curl -fsS -o "$WORK/got" "$PROXY/oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    [ "$status" -ne 0 ]
+    [ ! -e "$(C oss)/noarch/pkg-a-1.0-1.noarch.rpm" ]
+    kill "$COUNT_PID"; wait "$COUNT_PID" 2>/dev/null || true; COUNT_PID=
+}
+
+@test "proxy: cached metadata that breaks its pin is re-warmed online, 404 offline" {
+    start_proxy
+    wget -q -O /dev/null "$PROXY/oss/repodata/other.xml"
+    printf 'x' >> "$(C oss)/repodata/other.xml"
+    run curl -fsS "$PROXY/oss/repodata/other.xml"
+    [ "$output" = "other-metadata" ]
+    stop_proxy
+    printf 'x' >> "$(C oss)/repodata/other.xml"
+    QCI_OFFLINE=1 start_proxy
+    run curl -s -o /dev/null -w '%{http_code}' "$PROXY/oss/repodata/other.xml"
+    [ "$output" = 404 ]
+    printf '<repomd/>' > "$(C oss)/repodata/repomd.xml"   # repomd off its pin
+    run curl -s -o /dev/null -w '%{http_code}' "$PROXY/oss/repodata/repomd.xml"
+    [ "$output" = 404 ]
+}
+
+@test "audit: repomd off its pin, or a pinned sidecar gone, fails" {
+    printf 'oss pkg-a.noarch\n' > "$WORK/list"
+    cache_cmd prefetch --snapshot "$SNAP" --repo oss --list "$WORK/list"
+    [ "$status" -eq 0 ]
+    rm "$(C oss)/repodata/repomd.xml.asc"
+    cache_cmd audit --snapshot "$SNAP" --repo oss --list "$WORK/list"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"repomd.xml.asc"* ]]
+    cache_cmd metadata --snapshot "$SNAP" --repo oss --force
+    printf ' ' >> "$(C oss)/repodata/repomd.xml"
+    cache_cmd audit --snapshot "$SNAP" --repo oss --list "$WORK/list"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"repomd.xml does not match"* ]]
+}
+
+@test "a listed name the snapshot lacks fails prefetch and audit" {
+    printf 'oss pkg-a.noarch\noss nonexistent.noarch\n' > "$WORK/list"
+    cache_cmd prefetch --snapshot "$SNAP" --repo oss --list "$WORK/list"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"nonexistent.noarch: not in snapshot"* ]]
+    cache_cmd audit --snapshot "$SNAP" --repo oss --list "$WORK/list" --deep
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"re-record the list"* ]]
 }
