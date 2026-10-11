@@ -109,19 +109,23 @@ def safe_href(href):
     return norm
 
 
-def write_json(dest, obj, **kw):
-    """Atomic JSON write. The temp file is created O_EXCL (mkstemp) beside
-    dest, so a planted <dest>.tmp symlink can never redirect the write;
-    rename then replaces dest itself, never a symlink's target."""
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest), prefix=".json.")
+def write_text(dest, text):
+    """Atomic write. The temp file is created O_EXCL (mkstemp) beside dest,
+    so a planted <dest>.tmp symlink can never redirect the write; rename
+    then replaces dest itself, never a symlink's target."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(dest)), prefix=".w.")
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(obj, f, **kw)
+            f.write(text)
         os.replace(tmp, dest)
     except BaseException:
         if os.path.lexists(tmp):
             os.unlink(tmp)
         raise
+
+
+def write_json(dest, obj, **kw):
+    write_text(dest, json.dumps(obj, **kw))
 
 
 def fetch(url, dest, want_sha=None, want_algo="sha256", retries=3):
@@ -706,10 +710,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 def cmd_serve(args):
     srv = Server(("0.0.0.0", args.port), make_handler(args.root, args.base))
     if args.port_file:
-        tmp = args.port_file + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(str(srv.server_address[1]))
-        os.replace(tmp, args.port_file)
+        write_text(args.port_file, str(srv.server_address[1]))
     log(f"serving {args.root} on :{srv.server_address[1]} "
         f"({'offline: cache only' if offline() else 'pull-through ' + args.base})")
     srv.serve_forever()

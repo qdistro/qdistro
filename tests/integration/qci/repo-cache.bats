@@ -505,3 +505,11 @@ lying_length_case() {
     [ "$status" -eq 0 ]
     [ -f "$WORK/otherdisk/$SNAP/tumbleweed/repo/oss/noarch/pkg-a-1.0-1.noarch.rpm" ]
 }
+
+@test "serve: a planted <port-file>.tmp symlink never redirects the port write" {
+    printf 'keep' > "$WORK/victim"
+    ln -s "$WORK/victim" "$WORK/proxy.port.tmp"
+    start_proxy
+    [ -s "$WORK/proxy.port" ] && [ ! -L "$WORK/proxy.port" ]
+    [ "$(cat "$WORK/victim")" = keep ]
+}
