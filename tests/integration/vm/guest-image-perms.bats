@@ -244,20 +244,32 @@ run_t5b() {
 # Under this file's shims that helper cannot produce a verified entry, so
 # the build has to fail closed before anything is customized.
 @test "builders default to the verified pinned cloud image and fail closed" {
-    local snap url b dest args
+    local snap url sha b dest args
     snap="$(sed -n 's/^snapshot=//p' "$REPO_ROOT/snapshot.conf")"
     url="$(sed -n 's/^cloud_url=//p' "$REPO_ROOT/snapshot.conf")"
-    [ -n "$snap" ] && [ -n "$url" ]
+    sha="$(sed -n 's/^cloud_sha256=//p' "$REPO_ROOT/snapshot.conf")"
+    [ -n "$snap" ] && [ -n "$url" ] && [ -n "$sha" ]
     for b in T4 T5 T5B; do
         : >"$CMDLOG"
         dest="$TMP/default-$b.qcow2"
+        # install is shimmed: pre-create the cache entry dir so the
+        # verified helper gets as far as its (shimmed) fetches.
+        /usr/bin/mkdir -p "$TMP/deps-$b/cloud/$sha"
         args=(--force --dest "$dest")
         [ "$b" = T4 ] && args+=(--qdwin-src "$FAKE_QDWIN" --qdistro-src "$FAKE_QDISTRO")
-        run env -u QCI_OFFLINE -u QDISTRO_REPO_BASE QDISTRO_DEPS_CACHE_DIR="$TMP/deps-$b" \
+        run env -u QCI_OFFLINE -u QDISTRO_DEPS_OFFLINE -u QDISTRO_REPO_BASE \
+            QDISTRO_DEPS_CACHE_DIR="$TMP/deps-$b" \
             bash "${!b}" "${args[@]}"
         [ "$status" -ne 0 ] || { echo "$b: default fetch did not fail closed" >&2; return 1; }
         [[ "$output" == *"FAIL: verified cloud image ($url)"* ]] \
             || { echo "$b: $output" >&2; return 1; }
+        # The helper itself fetched the pinned image and its signed
+        # sidecars into the isolated cache (not a caller-printed message).
+        local f
+        for f in "$url" "$url.sha256" "$url.sha256.asc"; do
+            grep -qE "^wget .* $TMP/deps-$b/cloud/$sha/cloud-download\.[^ ]+ ${f//./\\.}\$" "$CMDLOG" \
+                || { echo "$b: no verified-helper fetch of $f" >&2; cat "$CMDLOG" >&2; return 1; }
+        done
         ! grep -q '^wget .*base\.qcow2' "$CMDLOG" \
             || { echo "$b: unverified floating base download" >&2; return 1; }
         ! grep -q '^virt-customize ' "$CMDLOG" || { echo "$b: customized an unverified base" >&2; return 1; }
