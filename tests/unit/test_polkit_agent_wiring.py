@@ -185,6 +185,42 @@ def _dbus_error(name: str) -> agent_mod.dbus.DBusException:
     return agent_mod.dbus.DBusException("boom", name=name)
 
 
+class _FakePendingCall:
+    """Stand-in for the PendingCall an async proxy call returns."""
+    def cancel(self):
+        pass
+
+
+def _dispatch(kw: dict, fn):
+    """Emulate mainloop-dispatched replies for fake D-Bus methods.
+
+    The agent's worker threads issue broker calls with
+    reply_handler/error_handler (see _call_dbus): a real bus would
+    deliver the reply on the GLib main loop. The fakes answer inline,
+    which is what that dispatch does on a live bus. Calls made
+    WITHOUT handlers (synchronous probing inside the tests) get the
+    old return-or-raise behaviour.
+    """
+    reply_handler = kw.get("reply_handler")
+    error_handler = kw.get("error_handler")
+    try:
+        result = fn()
+    except agent_mod.dbus.DBusException as e:
+        if error_handler is not None:
+            error_handler(e)
+            return _FakePendingCall()
+        raise
+    if reply_handler is not None:
+        if result is None:
+            reply_handler()
+        elif isinstance(result, tuple):
+            reply_handler(*result)
+        else:
+            reply_handler(result)
+        return _FakePendingCall()
+    return result
+
+
 class _RecordingBroker:
     """Records RequestPolkitAuth / WaitForDecision calls and their kwargs."""
 
@@ -203,37 +239,47 @@ class _RecordingBroker:
         self._decision = decision
 
     def RequestPolkitAuth(self, action, details, cookie, identities, **kw):
-        self.filed.append((action, details, cookie, identities, kw))
-        if self._file_raises:
-            exc = self._file_raises.pop(0)
-            if exc is not None:
-                raise exc
-        return len(self.filed)
+        def _go():
+            self.filed.append((action, details, cookie, identities, kw))
+            if self._file_raises:
+                exc = self._file_raises.pop(0)
+                if exc is not None:
+                    raise exc
+            return len(self.filed)
+        return _dispatch(kw, _go)
 
     def WaitForDecision(self, rid, **kw):
-        self.waited.append((rid, kw))
-        if self._wait_raises:
-            exc = self._wait_raises.pop(0)
-            if exc is not None:
-                raise exc
-        return self._decision
+        def _go():
+            self.waited.append((rid, kw))
+            if self._wait_raises:
+                exc = self._wait_raises.pop(0)
+                if exc is not None:
+                    raise exc
+            return self._decision
+        return _dispatch(kw, _go)
 
     def AnnouncePolkitAuth(self, cookie, **kw):
-        self.announced.append((cookie, kw))
-        if self._announce_raises:
-            exc = self._announce_raises.pop(0)
-            if exc is not None:
-                raise exc
+        def _go():
+            self.announced.append((cookie, kw))
+            if self._announce_raises:
+                exc = self._announce_raises.pop(0)
+                if exc is not None:
+                    raise exc
+        return _dispatch(kw, _go)
 
     def RespondPolkitAuth(self, cookie, identities, **kw):
-        self.responded.append((cookie, identities, kw))
-        if self._respond_raises:
-            exc = self._respond_raises.pop(0)
-            if exc is not None:
-                raise exc
+        def _go():
+            self.responded.append((cookie, identities, kw))
+            if self._respond_raises:
+                exc = self._respond_raises.pop(0)
+                if exc is not None:
+                    raise exc
+        return _dispatch(kw, _go)
 
     def CancelPolkitAuth(self, cookie, **kw):
-        self.cancelled.append((cookie, kw))
+        def _go():
+            self.cancelled.append((cookie, kw))
+        return _dispatch(kw, _go)
 
 
 @pytest.fixture
@@ -368,6 +414,25 @@ class TestBrokerDelegation:
         ):
             assert make_agent(_RecordingBroker(**kwargs))._ask_broker(
                 "qsu.exec", {}, "cookie1", []) is False, kwargs
+
+    def test_worker_broker_calls_go_out_async(self, make_agent):
+        """The 900s-freeze defect, take two. A synchronous proxy call from
+        a worker is send_with_reply_and_block on the shared connection —
+        it holds the connection's io path for the call's whole duration,
+        and while any thread holds it the GLib main loop cannot service
+        that connection: incoming traffic parks the loop's watch handler
+        in _dbus_connection_acquire_io_path and reconcile() freezes.
+        The worker thread fixed the callee side; reply_handler/
+        error_handler fix the call side — all transport I/O stays on
+        the main-loop thread."""
+        broker = _RecordingBroker()
+        make_agent(broker)._ask_broker("qsu.exec", {}, "cookie1", [])
+        for record in (broker.filed[0][4], broker.waited[0][1]):
+            assert record.get("reply_handler") is not None, (
+                "worker broker call issued without reply_handler — a "
+                "blocking call would hold the shared bus's io path and "
+                "freeze registration for the call's duration")
+            assert record.get("error_handler") is not None
 
 
 class _SyncThread:
@@ -580,26 +645,36 @@ class _BrokerProxy:
         return inst
 
     def RequestPolkitAuth(self, action, details, cookie, identities, **kw):
-        inst = self._instance()
-        inst.filed.append(action)
-        return len(inst.filed)            # per-instance ids restart at 1
+        def _go():
+            inst = self._instance()
+            inst.filed.append(action)
+            return len(inst.filed)        # per-instance ids restart at 1
+        return _dispatch(kw, _go)
 
     def WaitForDecision(self, rid, **kw):
-        inst = self._instance()
-        inst.waited.append(rid)
-        return True
+        def _go():
+            inst = self._instance()
+            inst.waited.append(rid)
+            return True
+        return _dispatch(kw, _go)
 
     def AnnouncePolkitAuth(self, cookie, **kw):
-        inst = self._instance()
-        inst.announced.append(cookie)
+        def _go():
+            inst = self._instance()
+            inst.announced.append(cookie)
+        return _dispatch(kw, _go)
 
     def RespondPolkitAuth(self, cookie, identities, **kw):
-        inst = self._instance()
-        inst.responded.append(cookie)
+        def _go():
+            inst = self._instance()
+            inst.responded.append(cookie)
+        return _dispatch(kw, _go)
 
     def CancelPolkitAuth(self, cookie, **kw):
-        inst = self._instance()
-        inst.cancelled.append(cookie)
+        def _go():
+            inst = self._instance()
+            inst.cancelled.append(cookie)
+        return _dispatch(kw, _go)
 
 
 class TestBrokerInstanceBinding:
