@@ -22,7 +22,7 @@ setup() {
     GOOD_SHA="$(sha256sum "$WORK/src/blob.bin" | awk '{print $1}')"
     BAD_SHA="0000000000000000000000000000000000000000000000000000000000000000"
     export QDISTRO_DEPS_CACHE_DIR="$WORK/cache"
-    unset QDISTRO_DEPS_OFFLINE QCI_OFFLINE
+    unset QDISTRO_DEPS_OFFLINE QCI_OFFLINE QDISTRO_REPO_BASE
 
     PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
     # exec so $! is python's own pid — without it the subshell may fork a
@@ -43,6 +43,9 @@ teardown() {
     if [ -n "${COUNT_PID:-}" ]; then
         kill "$COUNT_PID" 2>/dev/null
         wait "$COUNT_PID" 2>/dev/null || true
+    fi
+    if [ -n "${SERVE_STARTED:-}" ]; then
+        bash -c '. "$1"; qd_serve_stop' _ "$LIB" 2>/dev/null || true
     fi
 }
 
@@ -637,4 +640,99 @@ oci_img_present() {
     grep -qx "sha256:$REF_SHA" "$WORK/cache/oci/refs/$REF_SHA.digest"
     # No staged tmp leftovers inside the entry dir.
     [ -z "$(find "$WORK/cache/oci/$REF_SHA" -name '.*' -type f -print -quit)" ]
+}
+
+# ---- lane wiring: qd_repo_wire_guest / qd_repo_wire_container ----------------
+# A "complete mirror" for wiring tests — qd_repo_present checks only the
+# marker qd-repo-mirror.py publishes after a fully verified pass.
+fab_mirror() {
+    local snap="$1"
+    mkdir -p "$WORK/cache/repos/$snap/tumbleweed/repo/oss" \
+             "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss"
+    echo '{"repo":"oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/oss/mirror.json"
+    echo '{"repo":"non-oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss/mirror.json"
+}
+
+@test "qd_repo_wire_guest: no mirror → no-op, no server, no base" {
+    run bash -c ". '$LIB'; qd_repo_wire_guest 20260101 10.0.2.2; echo base=\${QDISTRO_REPO_BASE:-unset}"
+    [ "$status" -eq 0 ]
+    [ "$output" = "base=unset" ]
+    [ ! -s "$WORK/cache/.serve.port" ]
+}
+
+@test "qd_repo_wire_guest: complete mirror → serve + export guest base" {
+    fab_mirror 20260101
+    SERVE_STARTED=1
+    run bash -c ". '$LIB'; qd_repo_wire_guest 20260101 10.0.2.2; echo base=\$QDISTRO_REPO_BASE"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ base=http://10\.0\.2\.2:[0-9]+/repos ]]
+    # The exported base actually serves the mirrored tree to a guest.
+    port="$(bash -c '. "$1"; qd_serve_port' _ "$LIB")"
+    wget -q -O - "http://127.0.0.1:$port/repos/20260101/tumbleweed/repo/oss/mirror.json" \
+        | grep -q '"repo":"oss"'
+}
+
+@test "qd_repo_wire_guest: explicit QDISTRO_REPO_BASE wins, no server" {
+    fab_mirror 20260101
+    run bash -c ". '$LIB'; export QDISTRO_REPO_BASE=http://hand.set/base; qd_repo_wire_guest 20260101; echo base=\$QDISTRO_REPO_BASE"
+    [ "$status" -eq 0 ]
+    [ "$output" = "base=http://hand.set/base" ]
+    [ ! -s "$WORK/cache/.serve.port" ]
+}
+
+@test "qd_repo_wire_guest: only-oss mirror does not wire" {
+    mkdir -p "$WORK/cache/repos/20260101/tumbleweed/repo/oss"
+    echo '{}' > "$WORK/cache/repos/20260101/tumbleweed/repo/oss/mirror.json"
+    run bash -c ". '$LIB'; qd_repo_wire_guest 20260101; echo base=\${QDISTRO_REPO_BASE:-unset}"
+    [ "$status" -eq 0 ]
+    [ "$output" = "base=unset" ]
+    [ ! -s "$WORK/cache/.serve.port" ]
+}
+
+@test "qd_repo_wire_container: file:// base + read-only volume spec" {
+    fab_mirror 20260101
+    run bash -c ". '$LIB'; qd_repo_wire_container 20260101 /qdistro-mirror; echo base=\$QDISTRO_REPO_BASE"
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "--volume" ]
+    [ "${lines[1]}" = "$WORK/cache/repos:/qdistro-mirror:ro" ]
+    [ "${lines[-1]}" = "base=file:///qdistro-mirror" ]
+}
+
+@test "qd_repo_wire_container: no mirror → prints nothing, no base" {
+    run bash -c ". '$LIB'; qd_repo_wire_container 20260101 /qdistro-mirror; echo base=\${QDISTRO_REPO_BASE:-unset}"
+    [ "$status" -eq 0 ]
+    [ "$output" = "base=unset" ]
+}
+
+@test "qd_guestfs_host_addr: passt-era libguestfs + passt → 169.254.2.2" {
+    mkdir -p "$WORK/fakebin"
+    printf '#!/bin/sh\necho "guestfish 1.60.2"\n' > "$WORK/fakebin/guestfish"
+    printf '#!/bin/sh\nexit 0\n' > "$WORK/fakebin/passt"
+    chmod +x "$WORK/fakebin/guestfish" "$WORK/fakebin/passt"
+    run bash -c "export PATH='$WORK/fakebin':\"\$PATH\"; . '$LIB'; qd_guestfs_host_addr"
+    [ "$output" = "169.254.2.2" ]
+}
+
+@test "qd_guestfs_host_addr: no passt → 10.0.2.2" {
+    mkdir -p "$WORK/fakebin"
+    printf '#!/bin/sh\necho "guestfish 1.60.2"\n' > "$WORK/fakebin/guestfish"
+    chmod +x "$WORK/fakebin/guestfish"
+    # PATH restricted to the fake: the real passt must not be findable.
+    run bash -c "export PATH='$WORK/fakebin'; . '$LIB'; qd_guestfs_host_addr"
+    [ "$output" = "10.0.2.2" ]
+}
+
+@test "qd_oci_cached: refmap + complete entry → warm; missing sidecar → cold" {
+    mkdir -p "$WORK/oci-bin" "$WORK/cache/oci/refs"
+    REF_SHA="$(printf 'a%.0s' {1..64})"
+    printf 'sha256:%s\n' "$REF_SHA" > "$WORK/cache/oci/refs/$(printf 'oci.local/base:latest' | sha256sum | awk '{print $1}').digest"
+    run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest"
+    [ "$status" -eq 1 ]
+    mkdir -p "$WORK/cache/oci/$REF_SHA"
+    touch "$WORK/cache/oci/$REF_SHA/image.tar"
+    run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest"
+    [ "$status" -eq 1 ]
+    touch "$WORK/cache/oci/$REF_SHA/image.tar.sha256" "$WORK/cache/oci/$REF_SHA/manifest.txt"
+    run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest"
+    [ "$status" -eq 0 ]
 }

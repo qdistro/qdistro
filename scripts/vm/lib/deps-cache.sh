@@ -219,6 +219,19 @@ _qd_oci_save() {
     ) 9>"$lock"
 }
 
+# qd_oci_cached <ref> — is a COMPLETE archive cached for this ref? Pure
+# filesystem audit: ref map resolves, and the digest entry has tar +
+# sidecar + manifest. Does not touch the podman store — the answer for
+# "could qd_oci_ensure serve this offline".
+qd_oci_cached() {
+    local ref="$1" root refmap digest
+    root="$(qd_deps_root)"
+    refmap="$root/oci/refs/$(_qd_oci_ref_key "$ref").digest"
+    [ -s "$refmap" ] || return 1
+    digest="$(cat "$refmap")"
+    _qd_oci_complete "$root/oci/${digest#sha256:}"
+}
+
 qd_oci_ensure() {
     local ref="$1" root refdir refmap digest archive
     [ -n "$ref" ] || { _qdc_die "qd_oci_ensure: empty ref"; return 1; }
@@ -370,6 +383,59 @@ qd_serve_guest_base() {
         return 1
     fi
     printf 'http://%s:%s/repos\n' "$host" "$port"
+}
+
+# qd_repo_wire_container <snapshot> <mountpoint>
+# Container builds cannot see the host cache — mount the mirror read-only
+# at <mountpoint> and export QDISTRO_REPO_BASE=file://<mountpoint> when the
+# caller hasn't set one and a complete mirror exists. Prints a two-line
+# podman --volume spec for the caller to splice into its podman argv
+# (mapfile it); prints nothing when unwired. With the mirror mounted the
+# build needs no network at all — pass --network=none to prove it.
+qd_repo_wire_container() {
+    local snap="$1" mnt="$2"
+    [ -n "${QDISTRO_REPO_BASE:-}" ] && return 0
+    qd_repo_present "$snap" oss || return 0
+    qd_repo_present "$snap" non-oss || return 0
+    QDISTRO_REPO_BASE="file://$mnt"
+    export QDISTRO_REPO_BASE
+    printf -- '--volume\n%s/repos:%s:ro\n' "$(qd_deps_root)" "$mnt"
+    echo "[deps-cache] wired QDISTRO_REPO_BASE=$QDISTRO_REPO_BASE" >&2
+}
+
+# qd_guestfs_host_addr — the host address a libguestfs appliance reaches:
+# 1.60+ prefers passt (169.254.2.2) when runnable; older releases and
+# hosts without passt fall back to QEMU slirp (10.0.2.2). Call sites that
+# probe the backend themselves (build-baked-baseweed.sh) should pass the
+# discovered address to qd_repo_wire_guest instead.
+qd_guestfs_host_addr() {
+    local ver
+    ver="$(guestfish version 2>/dev/null || true)"
+    case "$ver" in
+        guestfish\ 1.6[0-9]*|guestfish\ 1.[7-9]*|guestfish\ [2-9]*)
+            if command -v passt >/dev/null 2>&1; then
+                echo 169.254.2.2; return 0
+            fi ;;
+    esac
+    echo 10.0.2.2
+}
+
+# qd_repo_wire_guest <snapshot> [host-addr]
+# Wire guest lanes to the mirror automatically: when the caller has not set
+# QDISTRO_REPO_BASE and a complete mirror exists for <snapshot>, start
+# qd_serve and export QDISTRO_REPO_BASE for the guest-reachable host
+# address. With no complete mirror this is a no-op — online callers fall
+# back to upstream and offline consumers still fail closed in
+# qd_repo_base/qdistro_substrate_repo_command.
+qd_repo_wire_guest() {
+    local snap="$1" host="${2:-10.0.2.2}"
+    [ -n "${QDISTRO_REPO_BASE:-}" ] && return 0
+    qd_repo_present "$snap" oss || return 0
+    qd_repo_present "$snap" non-oss || return 0
+    qd_serve_start >/dev/null || return 1
+    QDISTRO_REPO_BASE="$(qd_serve_guest_base "$snap" "$host")" || return 1
+    export QDISTRO_REPO_BASE
+    echo "[deps-cache] wired QDISTRO_REPO_BASE=$QDISTRO_REPO_BASE" >&2
 }
 
 # ---- path resolution ----------------------------------------------------

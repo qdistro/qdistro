@@ -22,6 +22,14 @@ command -v podman >/dev/null || { echo 'ERROR: rootless Podman is required' >&2;
 . "$here/lib/deps-cache.sh"
 base_image=registry.opensuse.org/opensuse/tumbleweed:$QDISTRO_SUBSTRATE_SNAPSHOT
 qd_oci_ensure "$base_image" >/dev/null || exit 3
+
+# Mount the verified mirror read-only into the Containerfile RUN steps —
+# file:// inside the build, no qd_serve needed. Wired builds drop the
+# netns entirely: every zypper byte must come from the mirror.
+mirror_args=()
+net_args=()
+mapfile -t mirror_args < <(qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror)
+[ "${#mirror_args[@]}" -gt 0 ] && net_args=(--network=none)
 base_id=$(podman image inspect "$base_image" --format '{{.Id}}')
 
 cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}/tier2-podman/$QDISTRO_SUBSTRATE_SNAPSHOT/$QDISTRO_SUBSTRATE_ARCH
@@ -86,7 +94,7 @@ for workload in "${workloads[@]}"; do
         cp -a "$work/context/qdfileman" "$wcontext/qdfileman"
         cp -a "$work/context/sdk/presentation" "$wcontext/presentation"
     fi
-    podman build --pull=never --layers \
+    podman build --pull=never --layers "${net_args[@]}" "${mirror_args[@]}" \
         --file "$wcontext/Containerfile.$workload" \
         --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
         --build-arg "QDISTRO_REPO_BASE=${QDISTRO_REPO_BASE:-}" \

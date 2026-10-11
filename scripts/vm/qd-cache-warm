@@ -1,0 +1,93 @@
+#!/bin/bash
+# qd-cache-warm — warm the dependency cache for the snapshot pinned in
+# snapshot.conf so lanes can run under QCI_OFFLINE=1/QDISTRO_DEPS_OFFLINE=1.
+# Idempotent and safe to re-run; already-warm classes are skipped.
+#
+# Usage: qd-cache-warm [--check]
+#   (default) warm every class:
+#     repo    verified Tumbleweed history mirror (oss + non-oss)
+#     cloud   substrate qcow2 (snapshot.conf's pinned cloud_sha256)
+#     oci     podman base image registry.opensuse.org/opensuse/tumbleweed:<snapshot>
+#     meson   libdisplay-info tarball for the vendored-libweston wrap-git seed
+#   --check audit only: report which classes are warm; no downloads, no
+#           network. Exit 1 when anything is missing — the offline
+#           pre-flight before a QCI_OFFLINE run.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/test-substrate.sh
+. "$HERE/lib/test-substrate.sh"
+# shellcheck source=lib/deps-cache.sh
+. "$HERE/lib/deps-cache.sh"
+# shellcheck source=lib/opensuse-cloud-image.sh
+. "$HERE/lib/opensuse-cloud-image.sh"
+
+check=0
+case "${1:-}" in
+    '') ;;
+    --check) check=1 ;;
+    *) echo "usage: qd-cache-warm [--check]" >&2; exit 2 ;;
+esac
+
+# floor mode: a stale-but-valid snapshot still warms — the pin decides what
+# runs, freshness policy stays with the lanes.
+qdistro_load_test_substrate floor
+snap="$QDISTRO_SUBSTRATE_SNAPSHOT"
+cloud_base="$(basename "$QDISTRO_SUBSTRATE_CLOUD_URL")"
+oci_ref="registry.opensuse.org/opensuse/tumbleweed:$snap"
+# deps-cache.sh sets the defaults when sourced — never duplicate the pin.
+di_url="$QDISTRO_DISPLAY_INFO_URL"
+di_sha="$QDISTRO_DISPLAY_INFO_SHA256"
+
+ok=1
+mark() { # mark <class> <state>
+    if [ "$2" = ok ]; then
+        echo "  ok      $1"
+    else
+        echo "  MISSING $1"; ok=0
+    fi
+}
+
+if [ "$check" -eq 1 ]; then
+    echo "qd-cache-warm --check (snapshot $snap):"
+    if qd_repo_present "$snap" oss && qd_repo_present "$snap" non-oss; then
+        mark repo ok
+    else
+        mark repo missing
+    fi
+    if qd_has cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$cloud_base"; then
+        mark cloud ok
+    else
+        mark cloud missing
+    fi
+    if qd_oci_cached "$oci_ref"; then
+        mark oci ok
+    else
+        mark oci missing
+    fi
+    if qd_has src "$di_sha" "$(basename "$di_url")"; then
+        mark meson ok
+    else
+        mark meson missing
+    fi
+    [ "$ok" -eq 1 ] && echo "cache warm: all classes present" || echo "cache cold — run qd-cache-warm (needs network)"
+    exit $((1 - ok))
+fi
+
+echo "[qd-cache-warm] warming snapshot $snap into $(qd_deps_root)"
+
+echo "[qd-cache-warm] repo mirror (oss + non-oss) — the big download"
+qd_repo_mirror "$snap"
+
+echo "[qd-cache-warm] cloud image"
+cloud_dest="$(qd_path cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$cloud_base")"
+download_verified_cloud_image "$QDISTRO_SUBSTRATE_CLOUD_URL" "$cloud_dest" \
+    "$QDISTRO_SUBSTRATE_CLOUD_SHA256"
+
+echo "[qd-cache-warm] podman base image $oci_ref"
+qd_oci_ensure "$oci_ref" >/dev/null
+
+echo "[qd-cache-warm] libdisplay-info meson seed"
+qd_display_info_tarball >/dev/null
+
+echo "[qd-cache-warm] done — QCI_OFFLINE=1 lanes can run from cache"

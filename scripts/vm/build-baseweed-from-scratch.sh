@@ -56,6 +56,10 @@ IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 . "$SCRIPT_DIR/lib/rpm-cache.sh"
 . "$SCRIPT_DIR/lib/deps-cache.sh"
 qdistro_load_test_substrate
+# The virt-customize appliance reaches the host at the libguestfs backend's
+# address (passt 169.254.2.2 / slirp 10.0.2.2) — wire before any
+# qdistro_substrate_repo_command call so its slirp default does not win.
+qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" "$(qd_guestfs_host_addr)"
 CACHE_DIR="${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}"
 CLOUD_URL="$QDISTRO_SUBSTRATE_CLOUD_URL"
 # deps-cache layout: cloud/<sha256>/<upstream-name>.qcow2 (content-keyed,

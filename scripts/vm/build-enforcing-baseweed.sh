@@ -60,6 +60,9 @@ IMG="${IMG_DIR_OVERRIDE:-${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}}"
 
 . "$SCRIPT_DIR/lib/test-substrate.sh"
 qdistro_load_test_substrate
+# The bootstrap VM is QEMU slirp — wire the mirror at 10.0.2.2 so the
+# QDISTRO_REPO_BASE below hands fresh-vm-bootstrap.sh a reachable base.
+qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2
 BASE="$(qdistro_substrate_base_path baked "$IMG")"
 ENFORCING="$IMG/baseweed-enforcing-baked.qcow2"
 KEYFILE="$HOME/.ssh/qdistro_enforcing_id_ed25519"
@@ -222,7 +225,7 @@ unset _pkg
     || { echo "ERROR: toolchain install failed in $VM" >&2; exit 7; }
 
 "$VM_TOOLS/vm-exec" "$VM" \
-    "nohup env QDISTRO_HTTP_HOST=http://10.0.2.2:$HTTP_PORT QCI_NATIVE_STAGE_SHA256=$NATIVE_SHA256 bash /root/fresh-vm-bootstrap.sh >/root/bootstrap.log 2>&1 &" \
+    "nohup env QDISTRO_HTTP_HOST=http://10.0.2.2:$HTTP_PORT QCI_NATIVE_STAGE_SHA256=$NATIVE_SHA256 QDISTRO_REPO_BASE=${QDISTRO_REPO_BASE:-} QDISTRO_DEPS_OFFLINE=${QDISTRO_DEPS_OFFLINE:-} QCI_OFFLINE=${QCI_OFFLINE:-} bash /root/fresh-vm-bootstrap.sh >/root/bootstrap.log 2>&1 &" \
     || true
 
 MAX_WAIT=2400

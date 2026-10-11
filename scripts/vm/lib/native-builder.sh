@@ -69,8 +69,14 @@ qdistro_ensure_native_builder_image() {
         work=$(mktemp -d "${TMPDIR:-/tmp}/native-builder.XXXXXXXX")
         mkdir -p "$work/builder-context"
         cp "$here/container-native-deps.sh" "$here/Containerfile.native-builder" "$work/builder-context/"
+        # Mount the verified mirror read-only for the RUN zypper steps —
+        # file:// needs no qd_serve inside a build. With the mirror wired
+        # the build needs no netns at all, so drop it to prove the contract.
+        local -a mirror_args=() net_args=()
+        mapfile -t mirror_args < <(qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror)
+        [ "${#mirror_args[@]}" -gt 0 ] && net_args=(--network=none)
         echo "[native-podman] building toolchain image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT" >&2
-        if ! podman build --pull=never --layers \
+        if ! podman build --pull=never --layers "${net_args[@]}" "${mirror_args[@]}" \
             --volume "$rpm_cache:/var/cache/zypp/packages:rw,Z" \
             --build-arg "BASE_IMAGE=$image" \
             --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \

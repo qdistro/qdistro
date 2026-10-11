@@ -198,7 +198,20 @@ rm -f "$BACKEND_PROBE_LOG"
 
 mapfile -t HOST_DNS_SERVERS < <(select_host_resolvers || true)
 HOST_DNS="${HOST_DNS_SERVERS[*]:-}"
-NET_CHECK='getent ahostsv4 download.opensuse.org >/dev/null && curl -fsS --connect-timeout 10 --max-time 30 https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml >/dev/null'
+# Wire the mirror for the probed backend BEFORE repo_cmd is built below —
+# passt appliances reach the host at 169.254.2.2, slirp at 10.0.2.2.
+if [ "$PASST_CONFIRMED" -eq 1 ]; then
+    qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 169.254.2.2
+else
+    qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2
+fi
+# Probe what zypper will actually fetch: the wired mirror URL when set —
+# honest under a host airgap — else upstream.
+if [ -n "${QDISTRO_REPO_BASE:-}" ]; then
+    NET_CHECK="curl -fsS --connect-timeout 10 --max-time 30 $QDISTRO_REPO_BASE/$QDISTRO_SUBSTRATE_SNAPSHOT/tumbleweed/repo/oss/repodata/repomd.xml >/dev/null"
+else
+    NET_CHECK='getent ahostsv4 download.opensuse.org >/dev/null && curl -fsS --connect-timeout 10 --max-time 30 https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml >/dev/null'
+fi
 if [ "$PASST_CONFIRMED" -eq 1 ]; then
     LIBGUESTFS_NET_ARGS=(
         --run-command "set -eu; if ! ip -4 addr show dev eth0 | grep -q 'inet '; then [ -n '$HOST_DNS' ] || { echo 'ERROR: libguestfs passt DHCP failed and no usable non-loopback IPv4 resolver was found (checked /etc/resolv.conf and resolvectl)' >&2; exit 70; }; ip address replace 169.254.2.15/16 dev eth0; ip route replace default via 169.254.2.2 dev eth0; ip -4 addr show dev eth0 | grep -Fq 'inet 169.254.2.15/16'; ip route show default | grep -Fq 'default via 169.254.2.2 dev eth0'; mount -o remount,rw /etc/resolv.conf; for dns in $HOST_DNS; do printf 'nameserver %s\\n' \"\$dns\"; done >/etc/resolv.conf; for dns in $HOST_DNS; do grep -Fxq \"nameserver \$dns\" /etc/resolv.conf; done; fi; $NET_CHECK"
