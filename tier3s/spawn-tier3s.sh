@@ -634,10 +634,11 @@ if [ "$GUI" = 1 ]; then
     bridge_refuse() {   # a bridge refusal names the cause and the client's log tail
         refuse "$* (client log tail: $(tail -n 5 -- "$BRIDGE_LOG" 2>/dev/null | tr '\n' '|'))"
     }
-    # record the wrapper at once (bounded retry: the task may still be
-    # materializing): a refusal below still gets torn down
-    bwst=""
-    for _ in $(seq 1 100); do
+    # record the wrapper at once (bounded wait by the clock — a fixed
+    # count stretches under load; the task may still be materializing):
+    # a refusal below still gets torn down
+    bwst=""; bw_end=$((SECONDS + BRIDGE_WAIT_S))
+    while [ "$SECONDS" -lt "$bw_end" ]; do
         bwst="$(starttime "$BRIDGE_PID")" && break
         kill -0 "$BRIDGE_PID" 2>/dev/null || break
         sleep 0.05
@@ -651,7 +652,8 @@ if [ "$GUI" = 1 ]; then
     # inside must be ours (a pre-created admin file cannot spoof it); the
     # pid must be live and in this unit's cgroup.
     INNER_PID=""; INNER_TOK=""; SEEN_PID=""
-    for _ in $(seq 1 100); do
+    rec_end=$((SECONDS + BRIDGE_WAIT_S))
+    while [ "$SECONDS" -lt "$rec_end" ]; do
         if [ -s "$T$LAUNCH_RECORD" ]; then
             IFS=' ' read -r INNER_PID INNER_TOK _ < "$T$LAUNCH_RECORD"
             [[ "$INNER_PID" =~ ^[0-9]+$ ]] && SEEN_PID="$INNER_PID"
