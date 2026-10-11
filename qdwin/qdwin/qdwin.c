@@ -4333,6 +4333,9 @@ qdwin_popup_grab_button(struct weston_pointer_grab *grab,
 			weston_pointer_end_grab(pointer);
 			p->grab_active = 0;
 		}
+		/* Drop the cached pointer: teardown runs later and must not
+		 * read a weston_pointer its seat may have freed meanwhile. */
+		p->grab.pointer = NULL;
 		if (p->resource)
 			qdwin_popup_v1_send_dismissed(p->resource);
 		return;
