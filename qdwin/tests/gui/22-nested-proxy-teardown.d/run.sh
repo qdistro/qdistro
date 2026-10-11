@@ -357,7 +357,7 @@ qd22_s15_ordering() {   # <cursor>
         if qd22_journal_since "$1"; then
             ok=1
             printf '%s\n' "$QD22_JOURNAL" \
-                | grep -qE '^qdwin: shell unbound$' && { unbound=1; break; }
+                | grep -qE '^(\[[0-9:.]+\] )?qdwin: shell unbound$' && { unbound=1; break; }
         fi
         sleep 0.25
     done

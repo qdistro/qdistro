@@ -374,7 +374,11 @@ EOF
 }
 
 @test "the ordering check waits for 'shell unbound' before grading the snapshot" {
-    grep -q "grep -qE '\^qdwin: shell unbound\$'" "$RUNSH"
+    # -o cat keeps weston's [hh:mm:ss.ms] prefix: a bare '^qdwin: shell
+    # unbound$' never matches a live line (the first live run graded 1.5
+    # ERROR on exactly that), so both polls must allow the prefix.
+    ! grep -q "'^qdwin: shell unbound" "$RUNSH"
+    [ "$(grep -cF "grep -qE '^(\[[0-9:.]+\] )?qdwin: shell unbound\$'" "$RUNSH")" -eq 2 ]
 }
 
 @test "the receipt grades the stale-grab signature and a missing pick, and checks the injection" {
