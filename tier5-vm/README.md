@@ -153,7 +153,9 @@ silently merge:
   sidecar temp gets the same treatment, so a foreign file at a
   predictable temp path is never overwritten or unlinked by our
   create): the clone is built, stamped, then
-  hard-linked into place, so crash residue is always provable — a
+  hard-linked into place with `ln -T` — a directory or symlink at the
+  destination is never a sink and link(2) never clobbers an existing
+  path — so crash residue is always provable — a
   partial whose inode the sidecar binds is recovered (the create is
   finished), a bare partial is a harmless leak, and a file AT the
   disk path without its record is never our residue. If the
@@ -173,7 +175,8 @@ silently merge:
   launch path (the teardown unlink needs the same inode-bound record,
   a lone sidecar is removed only when it is OUR regular-file record,
   and a foreign, symlinked, or unreadable sidecar is never
-  overwritten) — confirmed qemu
+  overwritten — every record read site requires a regular,
+  non-symlink file) — confirmed qemu
   death proves no live guest is killed, but it does not make a
   foreign definition or disk ours; the owner relaunches under its own
   name and an admin removes a genuinely stale squatter deliberately.

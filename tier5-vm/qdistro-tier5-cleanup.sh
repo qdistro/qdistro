@@ -218,8 +218,14 @@ if [ -f "$DISK" ]; then
         exit 5
     fi
     _sapp="" _sident=""
-    read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
+    [ -f "$DISK.appid" ] && [ ! -L "$DISK.appid" ] \
+        && read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
     if [ -z "$_sapp" ]; then
+        if [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
+            echo "[tier5-cleanup] FAIL: $DISK.appid is not a readable" >&2
+            echo "        regular-file record — keeping both" >&2
+            exit 5
+        fi
         if [ "${TIER5_CLEANUP_ALLOW_OWNERLESS:-0}" != "1" ]; then
             echo "[tier5-cleanup] FAIL: $DISK has no appId sidecar —" >&2
             echo "        owner unproven; keeping it. To remove a" >&2

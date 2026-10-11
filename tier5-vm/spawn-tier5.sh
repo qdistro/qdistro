@@ -569,7 +569,10 @@ else
             # sidecar, an inode mismatch, a foreign derivation, or an
             # unverifiable verdict all preserve (sol r12–r19).
             _sapp="" _sident=""
-            read -r _sapp _sident 2>/dev/null < "$overlay.appid" || true
+            [ -f "$overlay" ] && [ ! -L "$overlay" ] \
+                && [ -f "$overlay.appid" ] && [ ! -L "$overlay.appid" ] \
+                && read -r _sapp _sident 2>/dev/null \
+                    < "$overlay.appid" || true
             [ -n "$_sapp" ] || { exec {hfd}>&-; continue; }
             [ "$_sident" = "$(stat -c '%d %i' "$overlay" 2>/dev/null)" ] \
                 || { exec {hfd}>&-; continue; }
@@ -601,7 +604,10 @@ else
             # re-derive to $base, and still be manifest-retired
             # (sol r16/r17/r19).
             _sapp="" _sident=""
-            read -r _sapp _sident 2>/dev/null < "$overlay.appid" || true
+            [ -f "$overlay" ] && [ ! -L "$overlay" ] \
+                && [ -f "$overlay.appid" ] && [ ! -L "$overlay.appid" ] \
+                && read -r _sapp _sident 2>/dev/null \
+                    < "$overlay.appid" || true
             [ -n "$_sapp" ] || { exec {hfd}>&-; continue; }
             [ "$_sident" = "$(stat -c '%d %i' "$overlay" 2>/dev/null)" ] \
                 || { exec {hfd}>&-; continue; }
@@ -1062,8 +1068,9 @@ cleanup() {
                         # unrecognized record and is preserved
                         # (sol r22).
                         _sapp="" _sident=""
-                        read -r _sapp _sident 2>/dev/null \
-                            < "$DISK.appid" || true
+                        [ -f "$DISK.appid" ] && [ ! -L "$DISK.appid" ] \
+                            && read -r _sapp _sident 2>/dev/null \
+                                < "$DISK.appid" || true
                         if [ -f "$DISK" ]; then
                             if [ "$_sapp" != "$POLICY_KEY" ] \
                                 || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ]; then
@@ -1259,7 +1266,8 @@ _create_overlay_disk() {
     # (same appId) is removed so the new binding can land.
     if [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
         _ca=""
-        read -r _ca _ci 2>/dev/null < "$DISK.appid" || true
+        [ -f "$DISK.appid" ] && [ ! -L "$DISK.appid" ] \
+            && read -r _ca _ci 2>/dev/null < "$DISK.appid" || true
         if [ "$_ca" != "$POLICY_KEY" ]; then
             rm -f "$_tmp" "$_stmp" 2>/dev/null
             echo "[tier5] FAIL: $DISK.appid holds a foreign or" >&2
@@ -1268,14 +1276,19 @@ _create_overlay_disk() {
         fi
         rm -f "$DISK.appid" 2>/dev/null
     fi
-    if ! ln "$_stmp" "$DISK.appid" 2>/dev/null; then
+    # ln -T: the destination is a filename, never a directory sink —
+    # link(2) also refuses any existing path, so nothing can be
+    # clobbered between the check and the install (sol r23).
+    if ! ln -T "$_stmp" "$DISK.appid" 2>/dev/null \
+            || [ ! "$DISK.appid" -ef "$_stmp" ]; then
         rm -f "$_tmp" "$_stmp" 2>/dev/null
         echo "[tier5] FAIL: $DISK.appid appeared during create" >&2
         echo "        — refusing to clobber an unproven record" >&2
         exit 4
     fi
     rm -f "$_stmp" 2>/dev/null
-    if ! ln "$_tmp" "$DISK" 2>/dev/null; then
+    if ! ln -T "$_tmp" "$DISK" 2>/dev/null \
+            || [ ! "$DISK" -ef "$_tmp" ]; then
         rm -f "$_tmp" 2>/dev/null
         echo "[tier5] FAIL: $DISK appeared during create — refusing" >&2
         echo "        to clobber an unproven file" >&2
@@ -1313,9 +1326,10 @@ create_domain() {
     # preserved: our own crash residue never lands at $DISK without
     # its record (the create goes through .partial), so an unproven
     # file here is not ours to delete either (sol r12/r19/r20/r21).
-    if [ -f "$DISK" ]; then
+    if [ -f "$DISK" ] && [ ! -L "$DISK" ]; then
         _sapp="" _sident=""
-        read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
+        [ -f "$DISK.appid" ] && [ ! -L "$DISK.appid" ] \
+            && read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
         _back=$(run_as_admin qemu-img info --output=json "$DISK" \
             2>/dev/null \
             | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
@@ -1348,13 +1362,14 @@ create_domain() {
         fi
         if [ "$_sapp" = "$POLICY_KEY" ] && [ -n "$_sident" ]; then
             for _cand in "$DISK".partial.*; do
-                [ -f "$_cand" ] || continue
+                [ -f "$_cand" ] && [ ! -L "$_cand" ] || continue
                 [ "$(stat -c '%d %i' "$_cand" 2>/dev/null)" = "$_sident" ] \
                     && { _recover="$_cand"; break; }
             done
         fi
         if [ -n "$_recover" ]; then
-            if ln "$_recover" "$DISK" 2>/dev/null; then
+            if ln -T "$_recover" "$DISK" 2>/dev/null \
+                    && [ "$DISK" -ef "$_recover" ]; then
                 rm -f "$_recover" 2>/dev/null
                 echo "[tier5] recovered crashed create at $DISK" >&2
             else

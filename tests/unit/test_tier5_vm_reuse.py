@@ -499,14 +499,21 @@ def test_create_goes_through_a_recoverable_partial():
         in create
     assert 'stat -c \'%d %i\'' in create
     # the record installs BEFORE the disk link, and both install via
-    # no-clobber ln — a file appearing mid-create is never clobbered
-    assert create.index('ln "$_stmp" "$DISK.appid"') \
-        < create.index('ln "$_tmp" "$DISK"')
+    # no-clobber ln -T — a directory/symlink at the destination is
+    # never a sink, and a file appearing mid-create is never
+    # clobbered; the -ef verify proves the intended file landed
+    # (sol r23)
+    assert create.index('ln -T "$_stmp" "$DISK.appid"') \
+        < create.index('ln -T "$_tmp" "$DISK"')
+    assert create.count('"$DISK" -ef') + create.count('$DISK.appid" -ef') \
+        >= 2
     assert 'mv -f' not in create
     # an existing record that is not ours (foreign, unreadable,
-    # raced-in) refuses — the install re-checks inside (sol r22)
+    # raced-in, symlinked) refuses — the install re-checks inside
+    # with the same regular-non-symlink requirement (sol r22/r23)
     assert 'holds a foreign or' in create
     assert '[ "$_ca" != "$POLICY_KEY" ]' in create
+    assert '[ ! -L "$DISK.appid" ]' in create
     # the failure paths only ever remove OUR O_EXCL temps — never
     # $DISK or a pre-existing $DISK.appid (sol r19/r22)
     assert 'rm -f "$DISK"' not in create
@@ -518,7 +525,7 @@ def test_create_goes_through_a_recoverable_partial():
     rec = body[body.index("$DISK absent:"):]
     assert '"$DISK".partial.*' in rec
     assert 'stat -c \'%d %i\' "$_cand"' in rec
-    assert 'ln "$_recover" "$DISK"' in rec
+    assert 'ln -T "$_recover" "$DISK"' in rec
     assert 'refusing to clobber' in rec
     assert 'holds a foreign or' in rec
     assert '[ ! -L "$DISK.appid" ]' in rec
@@ -554,6 +561,10 @@ def test_reaper_preserves_owned_orphan_overlays():
     assert '[ -n "$_sapp" ]' in reaper
     assert '[ "$_sident" = "$(stat -c \'%d %i\' "$overlay"' in reaper
     assert '[ "$(tier5_derived_name "$_sapp")" = "$base" ]' in reaper
+    # a symlinked overlay or record is foreign construction, not
+    # proof — preserve (sol r23)
+    assert '[ ! -L "$overlay" ]' in reaper
+    assert '[ ! -L "$overlay.appid" ]' in reaper
     # the ownership gate sits between confirmed-absent and the rm
     assert reaper.index('manifest_app_state') \
         < reaper.index('rm -f "$overlay"')
@@ -776,5 +787,9 @@ def test_owner_records_must_rederive_to_the_artifact_name():
     assert 'tier5_derived_name "$_sapp")" != "$VM_NAME"' in tail
     assert 'stat -c \'%d %i\' "$DISK"' in tail
     assert "does not bind this" in tail
+    # a present-but-incoherent record (symlink, unreadable) is kept
+    # even with the opt-in — only a genuinely ABSENT sidecar qualifies
+    assert '[ ! -L "$DISK.appid" ]' in tail
+    assert "not a readable" in tail
     assert tail.index("TIER5_CLEANUP_ALLOW_OWNERLESS") \
         < tail.index('rm -f "$DISK"')
