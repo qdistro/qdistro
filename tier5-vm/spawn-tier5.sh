@@ -1181,6 +1181,65 @@ domain_appid() {
         | sed -n 's|.*<qdistro:appId[^>]*>\([^<]*\)</qdistro:appId>.*|\1|p'
 }
 
+# domain_disk_source [name] — print the domain's ONLY disk source path.
+# rc 1 unless the XML declares exactly one <disk> element with a file=
+# or dev= source: our render has exactly one device='disk' file source,
+# so any other shape is foreign construction a verifier must not
+# reason about piecemeal (sol r35).
+domain_disk_source() {
+    run_as_admin virsh dumpxml "${1:-$VM_NAME}" 2>/dev/null | python3 -c '
+import sys, xml.etree.ElementTree as ET
+try:
+    root = ET.parse(sys.stdin).getroot()
+except ET.ParseError:
+    sys.exit(1)
+disks = list(root.iter("disk"))
+if len(disks) != 1:
+    sys.exit(1)
+src = disks[0].find("source")
+p = (src.get("file") or src.get("dev")) if src is not None else ""
+if p:
+    print(p)
+'
+}
+
+# domain_holds_owned_disk <dev-ino> [name] — rc 0 only when the domain
+# provably runs the registry-recorded overlay inode. The root record
+# vouches for the disk pair, NOT for whichever domain currently holds
+# the name: an actor in the admin libvirt session can replace ours
+# with a same-tag domain on a different disk (sol r35).
+#   RUNNING — a backing qemu must hold the recorded inode open on the
+#   fd that names the declared source path. A post-boot path swap can
+#   alias a stat, but cannot fake an open fd; requiring link AND inode
+#   together also keeps a foreign boot disk from smuggling our inode
+#   through a secondary source (serial log, second drive).
+#   STOPPED — no fd exists, so the single declared source must either
+#   BE our pinned boot path (a host reboot drops BOOT_DIR but the def
+#   remains ours to reclaim) or stat to the recorded inode.
+domain_holds_owned_disk() {
+    local ident=$1 name=${2:-$VM_NAME} src qp pid fd tgt
+    # An empty expected identity must never match an empty stat.
+    [ -n "$ident" ] || return 1
+    src=$(domain_disk_source "$name")
+    [ -n "$src" ] || return 1
+    qp=$(qemu_pids_for_domain "$name") || true
+    if [ -n "$qp" ]; then
+        for pid in $qp; do
+            for fd in "/proc/$pid"/fd/*; do
+                [ -e "$fd" ] || continue
+                tgt=$(readlink "$fd" 2>/dev/null) || continue
+                [ "$tgt" = "$src" ] || [ "$tgt" = "$src (deleted)" ] \
+                    || continue
+                [ "$(stat -Lc '%d %i' "$fd" 2>/dev/null)" = "$ident" ] \
+                    && return 0
+            done
+        done
+        return 1
+    fi
+    [ "$src" = "${BOOT_PATH:-}" ] \
+        || [ "$(stat -Lc '%d %i' -- "$src" 2>/dev/null)" = "$ident" ]
+}
+
 # --- teardown ownership -------------------------------------------------
 # REAP is the teardown decision: unset = undecided, 1 = this wrapper is the
 # last lock holder and must destroy+undefine+unlink, 0 = a live session (or
@@ -1320,6 +1379,14 @@ cleanup() {
                 # record independently vouches we created it (sol r34)
                 echo "[tier5] $VM_NAME binding not backed by the" >&2
                 echo "        ownership record — leaving it alone" >&2
+                domain_reaped=0
+            elif [ "$_ds" -eq 0 ] && ! domain_holds_owned_disk "$_oident"; then
+                # The record binds the disk pair, not whichever domain
+                # now holds the name — a same-tag replacement on a
+                # different disk is not ours to destroy (sol r35).
+                echo "[tier5] $VM_NAME does not run the recorded" >&2
+                echo "        overlay — leaving domain and overlay" >&2
+                echo "        alone" >&2
                 domain_reaped=0
             elif [ "$_ds" -eq 2 ]; then
                 echo "[tier5] cannot verify $VM_NAME state —" >&2
@@ -1669,6 +1736,18 @@ create_domain() {
                 echo "[tier5] FAIL: existing domain $VM_NAME is bound to" >&2
                 echo "        another app — refusing to start it" >&2
                 REAP=0; exit 3
+            fi
+            # A forged def can carry our tag — before redefining and
+            # starting it the root record must vouch for the name AND
+            # the declared boot source must be our pinned path or the
+            # recorded inode itself (sol r34/r35).
+            _read_owned "$VM_NAME"
+            if [ "$_oapp" != "$POLICY_KEY" ] \
+                    || ! domain_holds_owned_disk "$_oident"; then
+                echo "[tier5] FAIL: defined domain $VM_NAME is not" >&2
+                echo "        backed by the ownership record/disk —" >&2
+                echo "        refusing to reclaim a forged guest" >&2
+                REAP=0; exit 3
             fi ;;
         1)  ;;  # confirmed absent — define below, disk needs its own record
         *)  echo "[tier5] FAIL: cannot determine state of $VM_NAME — refusing" >&2
@@ -1823,13 +1902,26 @@ create_domain() {
     # Start if not live. The qemu oracle decides — a false "shut off"
     # domstate must not push `virsh start` at an already-live domain,
     # and an unverifiable scan must not guess either (sol r7): rc 0
-    # means a racer started it (proceed — the guest is ours), rc 1
-    # starts it, rc 2 fails closed.
+    # means a racer started it, rc 1 starts it, rc 2 fails closed.
     domain_is_live; _lv=$?
     if [ "$_lv" -eq 1 ]; then
         if ! run_as_admin virsh start "$VM_NAME" >/dev/null; then
             echo "[tier5] FAIL: virsh start failed" >&2
             exit 6
+        fi
+    elif [ "$_lv" -eq 0 ]; then
+        # A racer started a domain under our name between the decision
+        # lock and now. "Running" no longer implies OURS — before
+        # attaching, the qemu must provably hold the recorded overlay
+        # open as its drive; a forged start is refused, never adopted
+        # (sol r35). A just-exec'd qemu that has not opened its drive
+        # yet also refuses here — transient, the next launch adopts.
+        _read_owned "$VM_NAME"
+        if [ "$_oapp" != "$POLICY_KEY" ] \
+                || ! domain_holds_owned_disk "$_oident"; then
+            echo "[tier5] FAIL: racing domain $VM_NAME does not run" >&2
+            echo "        the recorded overlay — refusing to attach" >&2
+            REAP=0; exit 3
         fi
     elif [ "$_lv" -eq 2 ]; then
         echo "[tier5] FAIL: cannot determine liveness of $VM_NAME before start" >&2
@@ -1997,6 +2089,16 @@ if [ "$_lv" -eq 0 ]; then
         echo "        refusing to adopt a forged guest" >&2
         REAP=0; exit 3
     fi
+    # The record binds the DISK pair — it cannot vouch for whichever
+    # domain now holds the name. A same-tag replacement on a different
+    # disk satisfies both checks above yet is not ours; a running
+    # guest is only adopted when its qemu provably holds the recorded
+    # inode open as its drive (sol r35).
+    if ! domain_holds_owned_disk "$_oident"; then
+        echo "[tier5] FAIL: domain $VM_NAME does not run the recorded" >&2
+        echo "        overlay — refusing to adopt a replaced guest" >&2
+        REAP=0; exit 3
+    fi
     ADOPTED=1
 elif [ "$_lv" -eq 2 ]; then
     # Cannot prove the domain is dead OR alive — never guess on an
@@ -2024,6 +2126,14 @@ else
             echo "[tier5] FAIL: domain $VM_NAME carries a tier-5" >&2
             echo "        binding with no root-side ownership" >&2
             echo "        record — refusing to adopt a forged guest" >&2
+            REAP=0; exit 3
+        fi
+        # and the same replacement check — the record binds the disk
+        # pair, not whichever domain holds the name now (sol r35)
+        if ! domain_holds_owned_disk "$_oident"; then
+            echo "[tier5] FAIL: domain $VM_NAME does not run the" >&2
+            echo "        recorded overlay — refusing to adopt a" >&2
+            echo "        replaced guest" >&2
             REAP=0; exit 3
         fi
         ADOPTED=1

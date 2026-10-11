@@ -192,7 +192,14 @@ silently merge:
   anyone in the libvirt session can forge, so adoption of a running
   domain, teardown of a defined one, and the cleanup helper's
   destroy each require the registry to agree independently — a
-  forged guest is refused, never adopted or destroyed (sol r34). Every
+  forged guest is refused, never adopted or destroyed (sol r34). And
+  because the record binds the DISK pair rather than whichever domain
+  currently holds the name, a same-tag domain replacement on a
+  different disk must still be refused: a RUNNING guest is only ours
+  when a backing qemu holds the recorded inode open on the fd that
+  names the declared source — a post-boot path swap cannot fake an
+  open fd — while a STOPPED one must declare our pinned boot path or
+  the recorded inode itself (sol r35). Every
   unproven disk at our name — missing
   sidecar, foreign appId, inode mismatch, wrong provenance — is
   refused AND preserved, never booted and never deleted by the

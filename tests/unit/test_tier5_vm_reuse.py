@@ -1093,3 +1093,46 @@ def test_ownership_registry_authenticates_pairs():
     # the helper refuses to destroy a forged-tag domain
     assert 'refusing to destroy a forged guest' in CLEANUP
     assert '[ "$_oapp" != "$_bound" ]' in CLEANUP
+
+
+def test_registry_domain_binding_requires_recorded_disk():
+    # ensures: the registry binds the DISK pair — not whichever domain
+    #          currently holds the name. A same-tag replacement on a
+    #          different disk satisfies the appId+registry checks but
+    #          must still be refused: a RUNNING guest is only ours when
+    #          a backing qemu holds the recorded inode open on the fd
+    #          naming the declared source (a post-boot path swap cannot
+    #          fake an open fd), a STOPPED one when its single source
+    #          is our pinned path or the recorded inode (sol r35)
+    for src in (SPAWN, CLEANUP):
+        assert 'domain_disk_source()' in src
+        assert 'domain_holds_owned_disk()' in src
+        # exactly-one-disk XML parse — a second source could smuggle a
+        # foreign boot under a matching fd
+        assert 'if len(disks) != 1:' in src
+        # running proof is the qemu process's own fd: link names the
+        # declared source AND stats to the recorded inode
+        assert '"/proc/$pid"/fd/*' in src
+        assert 'tgt=$(readlink "$fd"' in src
+        assert '"$tgt" = "$src (deleted)"' in src
+        # an empty expected identity must never match an empty stat
+        assert '[ -n "$ident" ] || return 1' in src
+        # stopped domains also accept the pinned boot path itself — a
+        # host reboot drops BOOT_DIR but the def remains ours
+        assert '[ "$src" = "$' in src
+    # adoption gates: both the unlocked and post-exclusive paths
+    decision = SPAWN[SPAWN.index("ADOPTED=0"):]
+    assert decision.count('domain_holds_owned_disk "$_oident"') >= 2
+    assert decision.count('refusing to adopt') >= 2
+    # teardown re-verifies the disk before destroying a defined domain
+    gate = _section("cleanup")
+    assert 'domain_holds_owned_disk "$_oident"' in gate
+    assert 'does not run the recorded' in gate
+    # create_domain's defined-ours path and its racing-start check
+    body = _section("create_domain")
+    assert body.count('domain_holds_owned_disk "$_oident"') >= 2
+    assert 'refusing to reclaim a forged guest' in body
+    assert 'refusing to attach' in body
+    # the helper refuses a replaced domain on its destroy path
+    assert 'refusing to destroy a replaced guest' in CLEANUP
+    assert 'domain_holds_owned_disk "$_oident"' in CLEANUP

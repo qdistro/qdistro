@@ -256,6 +256,53 @@ domain_defined_state() {
     return 1
 }
 
+# domain_disk_source / domain_holds_owned_disk — same contract as
+# spawn-tier5.sh: the registry vouches for the disk pair, not for
+# whichever domain currently holds the name, so a destroy also
+# requires the domain to provably run the recorded overlay inode —
+# a running guest through its qemu's open fd (a post-boot path swap
+# cannot fake it), a stopped one through its declared source being
+# our pinned boot path or the recorded inode itself (sol r35).
+domain_disk_source() {
+    run_as_admin virsh dumpxml "$VM_NAME" 2>/dev/null | python3 -c '
+import sys, xml.etree.ElementTree as ET
+try:
+    root = ET.parse(sys.stdin).getroot()
+except ET.ParseError:
+    sys.exit(1)
+disks = list(root.iter("disk"))
+if len(disks) != 1:
+    sys.exit(1)
+src = disks[0].find("source")
+p = (src.get("file") or src.get("dev")) if src is not None else ""
+if p:
+    print(p)
+'
+}
+
+domain_holds_owned_disk() {
+    local ident=$1 src qp pid fd tgt
+    [ -n "$ident" ] || return 1
+    src=$(domain_disk_source)
+    [ -n "$src" ] || return 1
+    qp=$(qemu_pids_for_domain) || true
+    if [ -n "$qp" ]; then
+        for pid in $qp; do
+            for fd in "/proc/$pid"/fd/*; do
+                [ -e "$fd" ] || continue
+                tgt=$(readlink "$fd" 2>/dev/null) || continue
+                [ "$tgt" = "$src" ] || [ "$tgt" = "$src (deleted)" ] \
+                    || continue
+                [ "$(stat -Lc '%d %i' "$fd" 2>/dev/null)" = "$ident" ] \
+                    && return 0
+            done
+        done
+        return 1
+    fi
+    [ "$src" = "$BOOT_PATH" ] \
+        || [ "$(stat -Lc '%d %i' -- "$src" 2>/dev/null)" = "$ident" ]
+}
+
 # Serialize on the domain's own hold file — the same flock protocol the
 # spawn wrappers use. A live wrapper holds a shared fd9 lock for its
 # whole session, so our bounded EXCLUSIVE claim either wins (no wrapper
@@ -308,12 +355,21 @@ if [ "$_ds" -eq 0 ]; then
     # The tag itself is forgeable: anyone in the admin session can
     # stamp a matching appId on a domain we never created. Destroying
     # needs the root-side ownership record to agree — a forged guest
-    # can satisfy the XML check but can never mint it (sol r34).
+    # can satisfy the XML check but can never mint it (sol r34). And
+    # the record binds the disk pair, not the domain: a same-tag
+    # replacement on a different disk must ALSO be refused — the
+    # domain only goes when it provably runs the recorded inode
+    # (sol r35).
     _read_owned "$VM_NAME"
     if [ "$_oapp" != "$_bound" ]; then
         echo "[tier5-cleanup] FAIL: $VM_NAME carries a tier-5 binding" >&2
         echo "        with no matching root-side ownership record —" >&2
         echo "        refusing to destroy a forged guest" >&2
+        exit 3
+    fi
+    if ! domain_holds_owned_disk "$_oident"; then
+        echo "[tier5-cleanup] FAIL: $VM_NAME does not run the recorded" >&2
+        echo "        overlay — refusing to destroy a replaced guest" >&2
         exit 3
     fi
     run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
