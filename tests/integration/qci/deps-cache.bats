@@ -1157,3 +1157,14 @@ SH
         export PATH='$WORK/fb':\"\$PATH\"; . '$LIB'; qd_repo_wire_guest 20260101 passt; echo rc=\$? base=\${QDISTRO_REPO_BASE:-unset}"
     [[ "$output" == *"rc=1 base=unset"* ]]
 }
+
+@test "selftest gate scrubs the offline knobs and repo-cache wiring from its bats" {
+    local repo scrub v
+    repo="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"
+    # The whole sf_scrub=( ... ) array, across its continuation lines.
+    scrub="$(sed -n '/local -a sf_scrub=(/,/)/p' "$repo/ci/lib/gates/selftest.sh")"
+    [ -n "$scrub" ]
+    for v in QCI_OFFLINE QDISTRO_DEPS_OFFLINE QDISTRO_REPO_BASE _QD_REPO_BASE_WIRED; do
+        grep -Eq -- "-u $v( |\)|\$)" <<<"$scrub" || { echo "selftest does not scrub $v" >&2; return 1; }
+    done
+}

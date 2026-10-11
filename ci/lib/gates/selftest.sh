@@ -104,7 +104,12 @@ gate_selftest() {
     # dispatch refuse VM commands; the self-tests drive those commands against
     # fixtures and assert lock contention (98), so an inherited marker would
     # turn them into false refusals (2). The refusal test sets it explicitly.
-    local -a sf_scrub=(-u WORKSPACE -u QCI_GUI_SCENARIO_AGENT)
+    # The offline knobs and the repo-cache wiring (QCI_OFFLINE=1 runs export
+    # them for the guests) would flip hermetic self-tests onto their
+    # offline/proxy paths; the suites that cover offline set them per case.
+    local -a sf_scrub=(-u WORKSPACE -u QCI_GUI_SCENARIO_AGENT
+                       -u QCI_OFFLINE -u QDISTRO_DEPS_OFFLINE
+                       -u QDISTRO_REPO_BASE -u _QD_REPO_BASE_WIRED)
     local _sf_proj _sf_var
     for _sf_proj in "${PROJECTS[@]}"; do
         _sf_var=$(printf '%s' "$_sf_proj" | tr '[:lower:]-' '[:upper:]_')_REPO
