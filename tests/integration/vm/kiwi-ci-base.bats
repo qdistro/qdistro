@@ -250,7 +250,10 @@ setup() {
     grep -q "QCI_OFFLINE=" "$VM/spin-test-vm.sh"
     grep -q 'no zypper repos in the image' "$b"
     grep -q 'qdistro-snapshot-oss.repo' "$b"
-    grep -q 'download.opensuse.org/history/' "$b"
+    # The pinned history base and snapshot suffix form the repo URLs together.
+    grep -Fq 'base="https://download.opensuse.org/history"' "$b"
+    grep -Fq 'baseurl=$base/${snap}/tumbleweed/repo/oss/' "$b"
+    grep -Fq 'baseurl=$base/${snap}/tumbleweed/repo/non-oss/' "$b"
     grep -q 'id -gn admin' "$b"
     local extras_line fetch_line mask_line offline_line repos_line
     extras_line="$(grep -n 'ensuring CI extras' "$b" | head -1 | cut -d: -f1)"
