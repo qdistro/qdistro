@@ -25,14 +25,39 @@ mkdir -p "$QDISTRO_BUILD_TMP"
 # --- locate/fetch the stock ISO -------------------------------------------
 STOCK_ISO=${AGAMA_STOCK_ISO:-}
 if [ -z "$STOCK_ISO" ]; then
-    STOCK_ISO=$QDISTRO_BUILD_TMP/agama-installer-stock.iso
-    # The cache is keyed to its source URL — a changed AGAMA_STOCK_ISO_URL
-    # must not silently reuse an ISO downloaded from somewhere else.
-    if [ ! -f "$STOCK_ISO" ] || \
-       [ "$(cat "$STOCK_ISO.url" 2>/dev/null)" != "$AGAMA_STOCK_ISO_URL" ]; then
-        echo "==> downloading $AGAMA_STOCK_ISO_URL"
-        curl -fL --retry 3 -o "$STOCK_ISO" "$AGAMA_STOCK_ISO_URL"
-        echo "$AGAMA_STOCK_ISO_URL" > "$STOCK_ISO.url"
+    if [ -n "$AGAMA_STOCK_ISO_SHA256" ]; then
+        # Pinned digest → the dep cache: bytes verified before promotion,
+        # content-addressed, provenance in the manifest, offline-aware.
+        # shellcheck source=../../scripts/vm/lib/deps-cache.sh
+        . "$here/../../scripts/vm/lib/deps-cache.sh"
+        STOCK_ISO="$(qd_path agama "$AGAMA_STOCK_ISO_SHA256" "$(basename "$AGAMA_STOCK_ISO_URL")")"
+        # Adopt the legacy url-keyed tmp file when it holds these bytes.
+        qd_adopt agama "$AGAMA_STOCK_ISO_SHA256" \
+            "$QDISTRO_BUILD_TMP/agama-installer-stock.iso" "$AGAMA_STOCK_ISO_URL" || true
+        qd_fetch agama "$AGAMA_STOCK_ISO_URL" "$AGAMA_STOCK_ISO_SHA256" >/dev/null || {
+            echo "stock ISO failed digest verification (or missing under offline): $AGAMA_STOCK_ISO_URL" >&2
+            exit 1
+        }
+        qd_write_manifest agama "$AGAMA_STOCK_ISO_SHA256" "$AGAMA_STOCK_ISO_URL" "$(basename "$AGAMA_STOCK_ISO_URL")"
+    else
+        STOCK_ISO=$QDISTRO_BUILD_TMP/agama-installer-stock.iso
+        # The cache is keyed to its source URL — a changed AGAMA_STOCK_ISO_URL
+        # must not silently reuse an ISO downloaded from somewhere else.
+        # Unpinned (floating) fetches cannot run offline: fail closed.
+        if [ ! -f "$STOCK_ISO" ] || \
+           [ "$(cat "$STOCK_ISO.url" 2>/dev/null)" != "$AGAMA_STOCK_ISO_URL" ]; then
+            _v_off=
+            for _v in "${QDISTRO_DEPS_OFFLINE:-}" "${QCI_OFFLINE:-}"; do
+                case "$_v" in 1|true|yes|on) _v_off=1 ;; esac
+            done
+            [ -n "$_v_off" ] && {
+                echo "offline: stock ISO needs AGAMA_STOCK_ISO_SHA256 set (pin it in env.local.sh) or a warm $STOCK_ISO" >&2
+                exit 1
+            }
+            echo "==> downloading $AGAMA_STOCK_ISO_URL"
+            curl -fL --retry 3 -o "$STOCK_ISO" "$AGAMA_STOCK_ISO_URL"
+            echo "$AGAMA_STOCK_ISO_URL" > "$STOCK_ISO.url"
+        fi
     fi
 fi
 [ -f "$STOCK_ISO" ] || { echo "stock ISO not found: $STOCK_ISO" >&2; exit 1; }

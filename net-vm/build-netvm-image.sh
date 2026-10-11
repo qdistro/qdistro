@@ -75,12 +75,25 @@ IB_NAME="openwrt-imagebuilder-${RELEASE}-${TARGET_PATH}.Linux-x86_64"
 IB_URL="https://downloads.openwrt.org/releases/${RELEASE}/targets/${TARGET}/${IB_NAME}.tar.zst"
 
 install -d -m 0755 "$CACHE_DIR"
-IB_TARBALL="$CACHE_DIR/${IB_NAME}.tar.zst"
-if [ ! -f "$IB_TARBALL" ]; then
-    echo "[netvm-build] fetching ImageBuilder: $IB_URL"
-    wget -q --show-progress -O "$IB_TARBALL.partial" "$IB_URL"
-    mv "$IB_TARBALL.partial" "$IB_TARBALL"
+# Dep-cache: verified, content-addressed, offline-aware. The sha256 pins
+# the DEFAULT release/target (taken from upstream's signed sha256sums);
+# overriding --release/--target requires QDISTRO_NETVM_IB_SHA256.
+IB_SHA256="${QDISTRO_NETVM_IB_SHA256:-}"
+if [ -z "$IB_SHA256" ] && [ "$RELEASE" = 24.10.7 ] && [ "$TARGET" = x86/64 ]; then
+    IB_SHA256=6a14aa08d7414eccbdbcd4e3241847309ee8b2cf0cb71f5b62c0bf8e8869291d
 fi
+if [ -z "$IB_SHA256" ]; then
+    echo "[netvm-build] no digest for $IB_NAME — set QDISTRO_NETVM_IB_SHA256 (from that release's signed sha256sums)" >&2
+    exit 2
+fi
+# shellcheck source=../scripts/vm/lib/deps-cache.sh
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/vm/lib/deps-cache.sh"
+IB_TARBALL="$(qd_path openwrt "$IB_SHA256" "${IB_NAME}.tar.zst")"
+# Adopt the legacy flat tarball if it already holds these bytes.
+qd_adopt openwrt "$IB_SHA256" "$CACHE_DIR/${IB_NAME}.tar.zst" "$IB_URL" || true
+qd_fetch openwrt "$IB_URL" "$IB_SHA256" >/dev/null \
+    || { echo "[netvm-build] ImageBuilder fetch failed (digest or offline-missing): $IB_URL" >&2; exit 4; }
+qd_write_manifest openwrt "$IB_SHA256" "$IB_URL" "${IB_NAME}.tar.zst"
 
 WORK="$(mktemp -d /tmp/netvm-build.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
@@ -97,6 +110,9 @@ chmod 0755 "$STAGE/usr/libexec/rpcd/qdistro.netvm" \
 find "$STAGE/etc/uci-defaults" -type f -exec chmod 0755 {} + 2>/dev/null || true
 
 echo "[netvm-build] building image (release $RELEASE, target $TARGET)..."
+# ImageBuilder's `make image` resolves PACKAGES against downloads.openwrt.org
+# at build time — OpenWrt's opkg feeds are outside the dep cache (a mirror
+# lane is a follow-up); offline runs still need network here.
 make -C "$IB_DIR" image \
     PROFILE=generic \
     PACKAGES="$PACKAGES -dnsmasq" \
