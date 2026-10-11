@@ -3705,6 +3705,8 @@ qdwin_handle_request_raise(struct wl_client *client,
 	weston_compositor_schedule_repaint(qdwin->compositor);
 }
 
+static int qdwin_move_grab_live(struct qdwin *qdwin);
+
 /* v30: shell-owned set-position. The compositor-driven counterpart to
  * begin_interactive_move — the shell names the target outer-rect top-left
  * directly (WM policy), rather than the window following the pointer. Used by
@@ -3746,7 +3748,7 @@ qdwin_handle_request_set_position(struct wl_client *client,
 			   handle);
 		return;
 	}
-	if (qdwin->move_grab_active && qdwin->move_grab_handle == handle) {
+	if (qdwin_move_grab_live(qdwin) && qdwin->move_grab_handle == handle) {
 		weston_log("qdwin: request_set_position handle=%u ignored — "
 			   "interactive move in progress\n", handle);
 		return;
@@ -4008,33 +4010,49 @@ qdwin_move_grab_button(struct weston_pointer_grab *grab,
 	struct weston_pointer *pointer = grab->pointer;
 	struct qdwin *qd = wl_container_of(grab, qd, move_grab);
 
+	/* A button reaching this grab while the compositor believes the
+	 * drag is over means the grab was never ended: it stays installed
+	 * and silently eats every press and release before they can reach
+	 * the default grab's click-focus pick. Log it — it is the only
+	 * signature a stale installed grab produces, since the release
+	 * handling below only logs while move_grab_active is set. Every
+	 * legitimate clear of move_grab_active is paired with an end_grab
+	 * (qdwin_move_grab_end_for, the shell-unbind path, the release
+	 * below) or is weston's cancel callback — which uninstalls the
+	 * grab by ending it itself — so this line cannot appear on a
+	 * correct compositor. */
+	if (!qd->move_grab_active) {
+		weston_log("qdwin: move-grab swallowed button %u while "
+			   "move_grab_active=0 (grab still installed)\n",
+			   button_event->button);
+		return;
+	}
+
 	/* End on any button release. The protocol expects the user to
 	 * release the same button that initiated the drag, but we don't
 	 * gate on which button — clients sometimes lose the original
 	 * press serial across re-grabs and ending defensively is safer. */
 	if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
-		if (qd->move_grab_active) {
-			uint32_t handle = qd->move_grab_handle;
-			struct qdwin_toplevel *tl =
-				qdwin_toplevel_from_handle(qd, handle);
-			weston_log("qdwin: end_interactive_move handle=%u\n",
-				   handle);
-			qd->move_grab_active = 0;
-			weston_pointer_end_grab(pointer);
-			/* Tell the shell where the toplevel ended up so it
-			 * can update its tracked geometry; without this
-			 * tl.x/tl.y stay frozen at the pre-drag position. */
-			if (tl && tl->view && qd->shell_bound &&
-			    qd->shell_resource) {
-				struct weston_coord_global op =
-					weston_view_get_pos_offset_global(tl->view);
-				qdwin_shell_v1_send_toplevel_geometry(
-					qd->shell_resource, handle,
-					(int)(op.c.x - tl->inset_w),
-					(int)(op.c.y - tl->inset_n),
-					(uint32_t)tl->last_width,
-					(uint32_t)tl->last_height);
-			}
+		uint32_t handle = qd->move_grab_handle;
+		struct qdwin_toplevel *tl =
+			qdwin_toplevel_from_handle(qd, handle);
+		weston_log("qdwin: end_interactive_move handle=%u\n",
+			   handle);
+		qd->move_grab_active = 0;
+		weston_pointer_end_grab(pointer);
+		/* Tell the shell where the toplevel ended up so it
+		 * can update its tracked geometry; without this
+		 * tl.x/tl.y stay frozen at the pre-drag position. */
+		if (tl && tl->view && qd->shell_bound &&
+		    qd->shell_resource) {
+			struct weston_coord_global op =
+				weston_view_get_pos_offset_global(tl->view);
+			qdwin_shell_v1_send_toplevel_geometry(
+				qd->shell_resource, handle,
+				(int)(op.c.x - tl->inset_w),
+				(int)(op.c.y - tl->inset_n),
+				(uint32_t)tl->last_width,
+				(uint32_t)tl->last_height);
 		}
 	}
 }
@@ -4064,6 +4082,17 @@ qdwin_move_grab_cancel(struct weston_pointer_grab *grab)
 {
 	struct qdwin *qd = wl_container_of(grab, qd, move_grab);
 	qd->move_grab_active = 0;
+	/* weston_pointer_cancel_grab() only invokes this callback — it
+	 * does NOT reset pointer->grab, so the grab stays the pointer's
+	 * active grab and would eat every later button with
+	 * move_grab_active=0 (the stale-grab signature the button handler
+	 * logs). End it ourselves; end_grab restores the default grab.
+	 * Guard on ours still being the installed grab, mirroring
+	 * qdwin_stream_confine_grab_end's impl-20 idiom, so a cancel
+	 * arriving after the grab was already replaced cannot end
+	 * someone else's. */
+	if (grab->pointer && grab->pointer->grab == grab)
+		weston_pointer_end_grab(grab->pointer);
 }
 
 static const struct weston_pointer_grab_interface qdwin_move_grab_iface = {
@@ -4075,6 +4104,40 @@ static const struct weston_pointer_grab_interface qdwin_move_grab_iface = {
 	qdwin_move_grab_frame,
 	qdwin_move_grab_cancel,
 };
+
+/* weston_pointer_start_grab() replaces pointer->grab without cancelling
+ * the previous grab, so the move grab may no longer be the installed
+ * one by the time we clear it; ending it then would end someone
+ * else's grab. Only end it while it is still ours. */
+static void
+qdwin_move_grab_end_if_installed(struct qdwin *qdwin)
+{
+	struct weston_pointer *pointer = qdwin->move_grab.pointer;
+
+	if (pointer && pointer->grab == &qdwin->move_grab)
+		weston_pointer_end_grab(pointer);
+}
+
+/* Another grab (a popup, a pointer confine) can replace the move grab
+ * via weston_pointer_start_grab() without invoking its cancel callback,
+ * so the move grab gets neither a release nor a cancel and
+ * move_grab_active would stay set forever — refusing every later drag
+ * and suppressing focus-follows-mouse. A move grab that is no longer
+ * installed is dead (end_grab of the replacement restores the default
+ * grab, never ours): clear the flag the first time anyone asks. */
+static int
+qdwin_move_grab_live(struct qdwin *qdwin)
+{
+	if (!qdwin->move_grab_active)
+		return 0;
+	struct weston_pointer *pointer = qdwin->move_grab.pointer;
+	if (pointer && pointer->grab == &qdwin->move_grab)
+		return 1;
+	weston_log("qdwin: move-drag handle=%u lost its grab to another "
+		   "grab — clearing\n", qdwin->move_grab_handle);
+	qdwin->move_grab_active = 0;
+	return 0;
+}
 
 /* End any active move-drag targeting `handle`. Called from
  * qdwin_surface_removed and from shell unbind so a destroyed toplevel
@@ -4089,8 +4152,7 @@ qdwin_move_grab_end_for(struct qdwin *qdwin, uint32_t handle)
 	weston_log("qdwin: cancelling move-drag handle=%u "
 		   "(toplevel/shell gone)\n", handle);
 	qdwin->move_grab_active = 0;
-	if (qdwin->move_grab.pointer)
-		weston_pointer_end_grab(qdwin->move_grab.pointer);
+	qdwin_move_grab_end_if_installed(qdwin);
 }
 
 static void
@@ -4109,7 +4171,7 @@ qdwin_handle_begin_interactive_move(struct wl_client *client,
 	}
 
 	/* One drag at a time. Silently drop a second begin request. */
-	if (qdwin->move_grab_active) {
+	if (qdwin_move_grab_live(qdwin)) {
 		weston_log("qdwin: begin_interactive_move handle=%u "
 			   "ignored — drag already active on handle=%u\n",
 			   handle, qdwin->move_grab_handle);
@@ -8719,7 +8781,7 @@ static int
 qdwin_ffm_timer_cb(void *data)
 {
 	struct qdwin *qdwin = data;
-	if (!qdwin || qdwin->locked || qdwin->move_grab_active)
+	if (!qdwin || qdwin->locked || qdwin_move_grab_live(qdwin))
 		return 0;
 	if (qdwin->wm_policy.focus_policy != QDWIN_FOCUS_FOLLOW_MOUSE)
 		return 0;
@@ -8749,7 +8811,7 @@ qdwin_ffm_cancel(struct qdwin *qdwin)
 static void
 qdwin_ffm_consider(struct qdwin *qdwin, struct weston_pointer *pointer)
 {
-	if (!qdwin || qdwin->locked || qdwin->move_grab_active)
+	if (!qdwin || qdwin->locked || qdwin_move_grab_live(qdwin))
 		return;
 	if (qdwin->wm_policy.focus_policy != QDWIN_FOCUS_FOLLOW_MOUSE)
 		return;
@@ -9848,8 +9910,7 @@ qdwin_shell_resource_destroy(struct wl_resource *resource)
 		qdwin_hotkeys_purge(qdwin);
 		if (qdwin->move_grab_active) {
 			qdwin->move_grab_active = 0;
-			if (qdwin->move_grab.pointer)
-				weston_pointer_end_grab(qdwin->move_grab.pointer);
+			qdwin_move_grab_end_if_installed(qdwin);
 		}
 		/* v25: drop live WM policy back to the compositor default so a
 		 * shell-less compositor keeps the historical feel, and disarm
