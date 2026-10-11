@@ -327,7 +327,9 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
         if not os.path.isdir(dest):
             die(f"audit: no mirror at {dest}")
         lock_path = os.path.join(dest, ".mirror.lock")
-        lock_fd = (os.open(lock_path, os.O_RDWR)
+        # O_RDONLY, not O_RDWR: LOCK_SH works on a read fd, and a read-only
+        # audit must not EACCES on a 0400 lock file.
+        lock_fd = (os.open(lock_path, os.O_RDONLY)
                    if os.path.isfile(lock_path) else None)
         try:
             if lock_fd is not None:
