@@ -573,7 +573,12 @@ def test_create_goes_through_a_recoverable_partial():
     # the recorded inode — never a bare rm on a mutable name (sol r26)
     assert '_unlink_verified "$_recover" "$_sident"' in rec
     assert 'rm -f "$_recover"' not in rec
-    assert '_unlink_verified "$DISK" "$_rino"' in rec
+    # on mismatch the name may name a SUBSTITUTED foreign entry — a
+    # sampled inode proves nothing, so the name is dropped only while
+    # it still binds the sidecar's recorded inode (proven ours);
+    # anything else is preserved (sol r31)
+    assert '_unlink_verified "$DISK" "$_sident"' in rec
+    assert '_unlink_verified "$DISK" "$_rino"' not in rec
     # a recovered disk publishes the record-bound identity for boot
     assert '_bino=$_sident' in rec
     # teardown, reaper and cleanup all unlink via the rename-capture

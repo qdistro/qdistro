@@ -1654,10 +1654,17 @@ create_domain() {
                     _bino=$_sident
                     echo "[tier5] recovered crashed create at $DISK" >&2
                 else
-                    # drop only OUR link name, only while it still
-                    # points at the inode we linked — a re-swap is
-                    # foreign and is restored (sol r25)
-                    _unlink_verified "$DISK" "$_rino" 2>/dev/null || true
+                    # Mismatch: the name's CURRENT inode is not proof
+                    # of anything — a racer may have swapped our link
+                    # for a planted file, and unlinking the sampled
+                    # _rino would delete THEIR entry (sol r31). Drop
+                    # the name only while it still provably binds the
+                    # sidecar's recorded inode (i.e. it IS our disk,
+                    # not a substituted one); anything else stays
+                    # preserved. The bound inode then survives at the
+                    # .partial name for the next launch to recover.
+                    _unlink_verified "$DISK" "$_sident" 2>/dev/null \
+                        || true
                     echo "[tier5] FAIL: recovered partial was swapped" >&2
                     echo "        — refusing to boot an unproven disk" >&2
                     exit 4
