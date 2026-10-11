@@ -826,7 +826,8 @@ def test_cleanup_helper_requires_tier5_binding_to_destroy():
     #          only the appId binding stamped at define time proves
     #          ownership; unbound or unreadable domains are refused
     #          before any virsh destroy (sol r9)
-    head = CLEANUP[:CLEANUP.index('virsh destroy "$VM_NAME"')]
+    head = CLEANUP[:CLEANUP.index(
+        '_destroy_dompid_qemu "$VM_NAME"')]
     assert "qdistro:appId" in head
     assert "virsh dumpxml" in head
     assert "not provably ours" in head
@@ -843,8 +844,10 @@ def test_owner_records_must_rederive_to_the_artifact_name():
     assert "tier5_derived_name()" in SPAWN and "tier5_derived_name()" \
         in CLEANUP
     # cleanup: a defined domain whose binding derives a DIFFERENT
-    # guest is refused before destroy
-    head = CLEANUP[:CLEANUP.index('virsh destroy "$VM_NAME"')]
+    # guest is refused before destroy (the destroy lives inside
+    # _destroy_dompid_qemu — its call is the destroy boundary)
+    head = CLEANUP[:CLEANUP.index(
+        '_destroy_dompid_qemu "$VM_NAME"')]
     assert '[[ "$VM_NAME" =~ ^t5- ]]' in head
     assert 'tier5_derived_name "$_bound")" != "$VM_NAME"' in head
     assert "derives a different guest" in head
@@ -1152,39 +1155,38 @@ def test_registry_domain_binding_requires_recorded_disk():
 
 
 def test_qemu_signal_fallback_is_domain_bound():
-    # ensures: the post-destroy kill fallback never signals a process
-    #          that is not THIS domain's qemu — argv tags, open disk
-    #          fds, and cgroup names are all attacker-reproducible, so
-    #          the ONLY killable pid is the one libvirt itself bound
-    #          to the domain (pre-destroy dompid), re-verified against
-    #          a fresh scan each time so a pid-reuse cannot redirect
-    #          the signal (sol r37/r38)
+    # ensures: the post-destroy signal path can only ever reach THIS
+    #          domain's qemu — argv tags, open disk fds, and cgroup
+    #          names are all attacker-reproducible, and a pid NUMBER
+    #          can be recycled, so signals go through a pidfd opened
+    #          while the dompid-verified process is still live. A
+    #          dead pinned process fails ESRCH; no exit+reuse window
+    #          can alias a decoy (sol r37/r38/r39)
     for src in (SPAWN, CLEANUP):
         assert '_pid_in()' in src
+        assert '_destroy_dompid_qemu()' in src
         # the dompid anchor is captured BEFORE destroy, while the
-        # libvirt record still exists
+        # libvirt record still exists, and cross-checked against the
+        # argv-verified name-scan before pinning
         assert 'virsh dompid "$VM_NAME"' in src
-        # no signal may ride the raw name-scan or a derived set —
-        # only "$_dpid" itself is ever signalled
-        assert 'run_as_admin kill $qpids' not in src
-        assert 'run_as_admin kill -9 $qpids' not in src
-        assert 'run_as_admin kill $_qp' not in src
-        assert 'run_as_admin kill -9 $_qp' not in src
-        assert 'run_as_admin kill $_kp' not in src
-        assert 'run_as_admin kill -9 $_kp' not in src
-        assert 'run_as_admin kill "$_dpid"' in src
-        assert 'run_as_admin kill -9 "$_dpid"' in src
-        # an open disk fd is NOT process-ownership authority — the
-        # fd-based killability helpers must not come back
+        assert '_pid_in' in src
+        # the process is pinned by a pidfd opened while live, and
+        # signalled through pidfd_send_signal — never kill(2) on a
+        # bare number
+        assert 'pidfd_open' in src
+        assert '424, fd, n' in src          # pidfd_send_signal
+        assert '_sig(15)' in src and '_sig(9)' in src
+        assert 'run_as_admin kill' not in src
+        # no number-based signal authority may come back
         assert '_pid_holds_path' not in src
         assert '_killable_qemu_pids' not in src
-    # spawn captures the anchor before destroy and gates every signal
-    # on membership of a FRESH scan (pid-reuse safe)
+    # spawn verifies the dompid is a live guest=<name> qemu before
+    # pinning, then destroys+signals through the helper
     body = _section("reap_domain")
     assert body.index('_dpid=$(run_as_admin virsh dompid') \
-        < body.index('virsh destroy')
-    assert body.count('_pid_in "$qpids" "$_dpid"') >= 3
+        < body.index('_destroy_dompid_qemu "$VM_NAME" "$_dpid" "$_pok"')
+    assert '_pid_in "$qpids" "$_dpid" && _pok=1' in body
     # the helper does the same on its destroy path
     assert CLEANUP.index('_dpid=$(run_as_admin virsh dompid') \
-        < CLEANUP.index('virsh destroy')
-    assert CLEANUP.count('_pid_in "$_qp" "$_dpid"') >= 3
+        < CLEANUP.index('_destroy_dompid_qemu "$VM_NAME" "$_dpid" "$_pok"')
+    assert '_pid_in "$_qp" "$_dpid" && _pok=1' in CLEANUP

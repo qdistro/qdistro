@@ -292,14 +292,18 @@ silently merge:
   regex scan would let a manual name like `t5.a` match `t5xa`, and
   a raw substring would match inside a foreign argument; both
   would hand the cleanup helper foreign pids to signal. Even so, the
-  post-destroy signal fallback signals only the pid libvirt itself
-  bound to the domain (pre-destroy `dompid`, re-verified against a
-  fresh scan each iteration so a pid-reuse cannot redirect it):
-  argv tags, open disk fds, and cgroup names are all attacker-
-  reproducible, and an open disk fd is not process-ownership
-  authority — a same-name decoy is never signalled, and when
-  libvirt cannot name the pid the fallback signals nothing and the
-  confirmed-dead gate preserves the overlay (sol r37/r38).
+  post-destroy signal path signals only the process libvirt itself
+  bound to the domain: the pre-destroy `dompid` is cross-checked
+  against the argv-verified scan, then pinned with a `pidfd` opened
+  while the process is live and signalled through `pidfd_send_signal`.
+  A pid NUMBER can be recycled — a pidfd cannot — so no exit+reuse
+  window can redirect the signal onto a same-name decoy, and a dead
+  pinned process fails ESRCH instead of aliasing a reuser: argv tags,
+  open disk fds, and cgroup names are all attacker-reproducible, and
+  an open disk fd is not process-ownership authority — a same-name
+  decoy is never signalled, and when libvirt cannot name the pid the
+  fallback signals nothing and the confirmed-dead gate preserves the
+  overlay (sol r37/r38/r39).
   `domstate` is not consulted for liveness at all: nested-virt libvirt
   can lie in both directions — "shut off" for a live qemu and stale
   "running" for a dead one — and no backing qemu process means death,
