@@ -62,7 +62,10 @@ RUN ln -sf python3.14 /usr/bin/python3
 
 COPY qdfileman /usr/src/qdfileman
 COPY presentation /usr/src/presentation
-RUN python3 -m pip install --no-deps --no-cache-dir --prefix=/usr \
+# --no-index --no-build-isolation: setuptools comes from the pinned snapshot
+# RPM above, never PyPI (offline builds have no index to reach).
+RUN python3 -m pip install --no-deps --no-cache-dir --no-index \
+        --no-build-isolation --prefix=/usr \
         /usr/src/presentation \
         /usr/src/qdfileman \
  && rm -rf /usr/src/qdfileman /usr/src/presentation \

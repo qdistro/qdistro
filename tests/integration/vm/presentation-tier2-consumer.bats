@@ -23,7 +23,8 @@ text = cf_path.read_text(encoding="utf-8")
 make = make_path.read_text(encoding="utf-8")
 
 PIP_BLOCK = (
-    "RUN python3 -m pip install --no-deps --no-cache-dir --prefix=/usr \\\n"
+    "RUN python3 -m pip install --no-deps --no-cache-dir --no-index \\\n"
+    "        --no-build-isolation --prefix=/usr \\\n"
     "        /usr/src/presentation \\\n"
     "        /usr/src/qdfileman \\\n"
 )
