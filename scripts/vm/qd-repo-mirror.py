@@ -378,9 +378,10 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
     repomd_local = fetch(src + "repodata/repomd.xml",
                          os.path.join(dest, "repodata", "repomd.xml"))
     for side in ("repomd.xml.asc", "repomd.xml.key"):
-        try:
-            fetch(src + f"repodata/{side}", os.path.join(dest, "repodata", side), retries=1)
-        except SystemExit:
+        # Only a genuine 404 means "upstream ships no sidecar"; any other
+        # failure is fatal like every metadata fetch.
+        if fetch(src + f"repodata/{side}", os.path.join(dest, "repodata", side),
+                 allow_404=True) is None:
             print(f"[repo-mirror] {repo}: no repodata/{side} upstream (ok)", file=sys.stderr)
 
     # 2. every metadata file named by repomd.xml, checksum-verified.
@@ -413,9 +414,11 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
             break
         href = safe_href(href)
         seen.add(href)
-        if href in absent:
-            continue  # recorded upstream-absent; verify re-probes these
         local = os.path.join(dest, href)
+        if href in absent and not os.path.lexists(local):
+            continue  # recorded upstream-absent; verify re-probes these
+        # A file at an absent-recorded path is never trusted: it goes
+        # through the adopt-or-fetch path below like any other.
         rec = index.get(href)
         if rec and rec.get("sum") == sha and rec.get("algo", "sha256") == algo \
                 and os.path.isfile(local) \
@@ -446,6 +449,9 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
         except FetchError as e:
             return href, sha, algo, None, f"failed: {e}"
         if got is None:
+            # Upstream 404: whatever sits locally is not what primary names.
+            if os.path.lexists(local):
+                os.unlink(local)
             return href, sha, algo, None, "absent"
         return href, sha, algo, os.path.getsize(local), "downloaded"
 
@@ -466,6 +472,7 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
                     print(f"[repo-mirror] {repo}: {how} (continuing)",
                           file=sys.stderr)
                     continue
+                absent.discard(href)  # healed upstream, or adopted locally
                 new_index[href] = {"sum": sha, "algo": algo, "size": size}
                 stats[how] = stats.get(how, 0) + 1
                 done = stats["downloaded"] + stats.get("adopted", 0)

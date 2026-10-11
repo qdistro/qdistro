@@ -481,3 +481,72 @@ EOF
     [ "$status" -ne 0 ]
     [ ! -f "$d/mirror.json" ]
 }
+
+@test "a corrupt file at an absent-recorded path is re-probed, never marked complete" {
+    local oss="$SNAP_DIR/oss" d="$WORK/cache/repos/$SNAP/tumbleweed/repo/oss"
+    run_mirror
+    [ "$status" -eq 0 ]
+    # Forge an absent record for pkg-a and corrupt its local bytes.
+    python3 - "$d/mirror-index.json" <<'PY'
+import json, sys
+p = sys.argv[1]; idx = json.load(open(p))
+idx["files"].pop("noarch/pkg-a-1.0-1.noarch.rpm")
+idx["absent"] = ["noarch/pkg-a-1.0-1.noarch.rpm"]
+json.dump(idx, open(p, "w"))
+PY
+    rm -f "$d/mirror.json"
+    printf 'corrupt' > "$d/noarch/pkg-a-1.0-1.noarch.rpm"
+    # Upstream still ships it: the re-probe heals the record.
+    run_mirror
+    [ "$status" -eq 0 ]
+    cmp "$d/noarch/pkg-a-1.0-1.noarch.rpm" "$oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    ! grep -q 'pkg-a' <(python3 -c "import json;print(json.load(open('$d/mirror-index.json'))['absent'])")
+
+    # Upstream 404s it: the corrupt local file is removed, not kept.
+    python3 - "$d/mirror-index.json" <<'PY'
+import json, sys
+p = sys.argv[1]; idx = json.load(open(p))
+idx["files"].pop("noarch/pkg-a-1.0-1.noarch.rpm")
+idx["absent"] = ["noarch/pkg-a-1.0-1.noarch.rpm"]
+json.dump(idx, open(p, "w"))
+PY
+    rm -f "$d/mirror.json" "$oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    printf 'corrupt' > "$d/noarch/pkg-a-1.0-1.noarch.rpm"
+    run_mirror --force
+    [ "$status" -eq 0 ]
+    [ ! -e "$d/noarch/pkg-a-1.0-1.noarch.rpm" ]
+    run_mirror --audit
+    [ "$status" -eq 0 ]
+}
+
+@test "a sidecar server error is fatal; only a 404 means no sidecar" {
+    local port2
+    port2="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    ( cd "$WORK/srv" && exec python3 - "$port2" >/dev/null 2>&1 </dev/null <<'PY'
+import http.server, sys
+class H(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.endswith("repomd.xml.asc"):
+            self.send_error(500); return
+        super().do_GET()
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+    ) &
+    COUNT_PID=$!
+    for _ in $(seq 1 50); do
+        wget -q -O /dev/null "http://127.0.0.1:$port2/" && break
+        sleep 0.1
+    done
+    run python3 "$MIRROR" --root "$WORK/cache" --snapshot "$SNAP" \
+        --repo oss --base "http://127.0.0.1:$port2/history"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"repomd.xml.asc"* ]]
+    [[ "$output" != *"no repodata/repomd.xml.asc upstream (ok)"* ]]
+    [ ! -f "$WORK/cache/repos/$SNAP/tumbleweed/repo/oss/mirror.json" ]
+
+    # A real 404 is fine.
+    rm -f "$SNAP_DIR/oss/repodata/repomd.xml.asc"
+    run_mirror
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no repodata/repomd.xml.asc upstream (ok)"* ]]
+}
