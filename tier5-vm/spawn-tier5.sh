@@ -1208,26 +1208,37 @@ fi
 # a relaunch of the same app names the same domain); a missing or stopped
 # one is (re)created under a short EXCLUSIVE upgrade that serializes
 # against a racing creator or an exiting wrapper's teardown claim.
-# _create_overlay_disk — create the linked clone, then stamp its bound
-# owner record "<appId> <dev> <ino>" atomically — bound to THIS inode:
-# a leftover or planted sidecar can never authorize a different file
-# at the same path (sol r19). A crashed create leaves an unproven disk
-# the next spawn replaces; a failure here removes only OUR temp file —
-# never rm the path itself: a foreign file could have appeared between
-# the caller's absence check and now (sol r19).
+# _create_overlay_disk — create the linked clone under a PARTIAL name,
+# stamp its bound owner record "<appId> <dev> <ino>", then link it
+# into place. Crash residue is then always provable: a partial plus a
+# sidecar binding its inode is recoverable (finish the create), and a
+# bare partial is a harmless leak — while a file AT $DISK without a
+# matching record is NEVER our residue, so the caller refuses it
+# instead of deleting an unproven file (sol r19/r20). ln, not mv:
+# it atomically refuses to clobber a $DISK that appeared after the
+# caller's absence check.
 _create_overlay_disk() {
-    if ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$DISK" >/dev/null 2>&1; then
+    _tmp="$DISK.partial.$$"
+    if ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$_tmp" >/dev/null 2>&1; then
+        rm -f "$_tmp" 2>/dev/null
         echo "[tier5] FAIL: qemu-img create -b $DISK_BASE failed at $DISK" >&2
         exit 4
     fi
-    _di=$(run_as_admin stat -c '%d %i' "$DISK" 2>/dev/null)
+    _di=$(run_as_admin stat -c '%d %i' "$_tmp" 2>/dev/null)
     if [ -z "$_di" ] || ! { printf '%s %s\n' "$POLICY_KEY" "$_di" > "$DISK.appid.$$" \
             && mv -f "$DISK.appid.$$" "$DISK.appid" \
             && chmod 0600 "$DISK.appid"; }; then
-        rm -f "$DISK.appid.$$" 2>/dev/null
+        rm -f "$_tmp" "$DISK.appid.$$" 2>/dev/null
         echo "[tier5] FAIL: could not stamp binding sidecar $DISK.appid" >&2
         exit 4
     fi
+    if ! ln "$_tmp" "$DISK" 2>/dev/null; then
+        rm -f "$_tmp" 2>/dev/null
+        echo "[tier5] FAIL: $DISK appeared during create — refusing" >&2
+        echo "        to clobber an unproven file" >&2
+        exit 4
+    fi
+    rm -f "$_tmp" 2>/dev/null
 }
 
 create_domain() {
@@ -1252,15 +1263,12 @@ create_domain() {
     # with a provable owner bound to THIS inode: while the domain is
     # defined-and-ours its binding is the record; with the domain
     # absent the disk needs its own — the <disk>.appid sidecar stamped
-    # post-create as "<appId> <dev> <ino>" so a leftover or planted
-    # sidecar can never authorize a different file at the same path
-    # (sol r12/r19). A sidecar naming another app is a foreign claim —
-    # refuse. Every other unproven state at OUR name — no record, our
-    # appId with a mismatched/missing inode record, wrong provenance —
-    # is REPLACED, never booted: a crashed create, a lone sidecar's
-    # late-appearing disk, or a plant all resolve to a fresh known
-    # overlay, and unproven content can never run under our binding
-    # (sol r18/r19).
+    # as "<appId> <dev> <ino>". Every check must pass; anything less —
+    # missing sidecar, foreign appId, inode mismatch, wrong provenance
+    # — is refused AND preserved: our own crash residue never lands at
+    # $DISK without its record (the create goes through .partial), so
+    # an unproven file here is not ours to delete either (sol
+    # r12/r19/r20).
     if [ -f "$DISK" ]; then
         if [ "$_ds" -eq 1 ]; then
             _sapp="" _sident=""
@@ -1268,18 +1276,13 @@ create_domain() {
             _back=$(run_as_admin qemu-img info --output=json "$DISK" \
                 2>/dev/null \
                 | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
-            if [ "$_sapp" = "$POLICY_KEY" ] \
-                    && [ "$_sident" = "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ] \
-                    && [ "$_back" = "$DISK_BASE" ]; then
-                :   # proven ours — reuse
-            elif [ -n "$_sapp" ] && [ "$_sapp" != "$POLICY_KEY" ]; then
-                echo "[tier5] FAIL: overlay $DISK bound to '$_sapp'" >&2
-                echo "        — a foreign-claimed disk is never ours" >&2
+            if [ "$_sapp" != "$POLICY_KEY" ] \
+                    || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ] \
+                    || [ "$_back" != "$DISK_BASE" ]; then
+                echo "[tier5] FAIL: overlay $DISK bound to" >&2
+                echo "        '${_sapp:-<unbound>}' / backing '${_back:-<unknown>}'" >&2
+                echo "        — refusing to boot an unproven disk" >&2
                 REAP=0; exit 3
-            else
-                echo "[tier5] overlay $DISK unproven — replacing it" >&2
-                rm -f "$DISK" "$DISK.appid"
-                _create_overlay_disk
             fi
         elif [ ! -f "$DISK.appid" ]; then
             # Defined-ours pre-sidecar guest: backfill the disk's owner
@@ -1292,7 +1295,32 @@ create_domain() {
                 || true
         fi
     else
-        _create_overlay_disk
+        # $DISK absent: a crash between the sidecar stamp and the ln
+        # leaves a provable pair — the sidecar binds a $DISK.partial.*
+        # file's inode, and dev+ino cannot be forged by a planted file.
+        # Finish that create rather than leaking the partial.
+        _sapp="" _sident="" _recover=""
+        read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
+        if [ "$_sapp" = "$POLICY_KEY" ] && [ -n "$_sident" ]; then
+            for _cand in "$DISK".partial.*; do
+                [ -f "$_cand" ] || continue
+                [ "$(stat -c '%d %i' "$_cand" 2>/dev/null)" = "$_sident" ] \
+                    && { _recover="$_cand"; break; }
+            done
+        fi
+        if [ -n "$_recover" ]; then
+            if ln "$_recover" "$DISK" 2>/dev/null; then
+                rm -f "$_recover" 2>/dev/null
+                echo "[tier5] recovered crashed create at $DISK" >&2
+            else
+                rm -f "$_recover" 2>/dev/null
+                echo "[tier5] FAIL: $DISK appeared during create" >&2
+                echo "        recovery — refusing to clobber it" >&2
+                exit 4
+            fi
+        else
+            _create_overlay_disk
+        fi
     fi
 
     # Define only on CONFIRMED absence (the same verdict that gated the

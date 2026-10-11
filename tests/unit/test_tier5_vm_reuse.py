@@ -447,42 +447,26 @@ def test_overlay_reuse_requires_an_inode_bound_owner_record():
     #          its <disk>.appid sidecar records OUR appId AND the
     #          dev/ino of THE file it was stamped for — a lone sidecar
     #          left by a crashed create, or one copied beside a planted
-    #          disk, can never authorize that disk (sol r12/r19). A
-    #          sidecar naming another app is a foreign claim and
-    #          refuses; every other unproven state at our own name is
-    #          REPLACED (rm + fresh create), never booted — a crashed
-    #          create's disk or a plant both resolve to a known-fresh
-    #          overlay (sol r18/r19)
+    #          disk, can never authorize that disk (sol r12/r19). Every
+    #          unproven state REFUSES AND PRESERVES: the create goes
+    #          through a .partial name, so a file at $DISK without its
+    #          record is never our residue — not ours to boot OR to
+    #          delete (sol r20)
     body = _section("create_domain")
     assert 'read -r _sapp _sident' in body
-    assert '[ "$_sapp" = "$POLICY_KEY" ]' in body
-    assert '[ "$_sident" = "$(stat -c \'%d %i\' "$DISK"' in body
+    assert '[ "$_sident" != "$(stat -c \'%d %i\' "$DISK"' in body
     assert '"backing-filename"' in body
-    assert 'foreign-claimed disk is never ours' in body
-    assert 'unproven — replacing it' in body
+    assert 'refusing to boot an unproven disk' in body
+    assert '[ "$_sapp" != "$POLICY_KEY" ]' in body
+    # no unproven file is ever deleted by the launch path
+    assert 'unproven — replacing it' not in body
+    assert 'rm -f "$DISK" "$DISK.appid"' not in body
     # the ownership gate only fires when the domain is CONFIRMED
     # ABSENT — a defined-ours domain's own binding is the stronger
     # record (and missing-sidecar backfill records dev/ino too)
     gate = body[body.index('if [ -f "$DISK" ]'):]
     assert '[ "$_ds" -eq 1 ]' in gate
     assert "printf '%s %s\\n' \"$POLICY_KEY\" \"$_di\"" in gate
-    # the record is stamped AFTER create inside _create_overlay_disk —
-    # it must name the inode it binds, so the create precedes the
-    # stamp; a crash between them leaves an unproven disk the next
-    # spawn replaces (never boots) — automatic recovery, not a brick
-    # (sol r18/r19)
-    create = _section("_create_overlay_disk")
-    assert create.index("qemu-img create") \
-        < create.index('"$DISK.appid.$$"')
-    assert 'stat -c \'%d %i\'' in create
-    # the create-failure path never rm's $DISK itself — a foreign file
-    # could have appeared after the caller's absence check (sol r19)
-    fail = create[create.index("qemu-img create"):
-                  create.index("exit 4")]
-    assert 'rm -f "$DISK"' not in fail
-    assert 'rm -f "$DISK" "$DISK.appid"' in SPAWN
-    assert 'rm -f "$overlay" "$overlay.appid"' in SPAWN
-    assert 'rm -f "$DISK" "$DISK.appid"' in CLEANUP
     # teardown's confirmed-absent-at-claim path gates the unlink on the
     # sidecar too — a domain that was already gone never vouched for
     # the disk, so the inode-bound sidecar is the only owner record
@@ -491,6 +475,40 @@ def test_overlay_reuse_requires_an_inode_bound_owner_record():
     assert "_claim_ds=$_ds" in body
     assert "overlay owner unproven" in body
     assert '_claim_ds" -eq 1' in body
+
+
+def test_create_goes_through_a_recoverable_partial():
+    # ensures: a crashed create leaves only provable residue — the
+    #          overlay is built under a .partial name, the sidecar
+    #          binds that inode, and the link into place is a
+    #          no-clobber ln. A sidecar+matching-partial pair is
+    #          provably ours and is recovered; a bare $DISK without
+    #          its record can then NEVER be our crash residue, so
+    #          refusing it is correct (sol r19/r20)
+    create = _section("_create_overlay_disk")
+    assert '_tmp="$DISK.partial.$$"' in create
+    assert 'qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$_tmp"' \
+        in create
+    assert create.index("qemu-img create") \
+        < create.index('"$DISK.appid.$$"')
+    assert 'stat -c \'%d %i\'' in create
+    # the link-into-place must not clobber a $DISK that appeared after
+    # the caller's absence check (ln fails on existing target)
+    assert 'ln "$_tmp" "$DISK"' in create
+    assert 'mv "$_tmp" "$DISK"' not in create
+    # the create-failure path never rm's $DISK itself (sol r19)
+    assert 'rm -f "$DISK"' not in create
+    # recovery: only a partial whose dev/ino the sidecar binds is
+    # finished — dev+ino cannot be forged by a planted file
+    body = _section("create_domain")
+    rec = body[body.index("$DISK absent:"):]
+    assert '"$DISK".partial.*' in rec
+    assert 'stat -c \'%d %i\' "$_cand"' in rec
+    assert 'ln "$_recover" "$DISK"' in rec
+    assert 'refusing to clobber' in rec
+    assert 'rm -f "$DISK" "$DISK.appid"' in SPAWN
+    assert 'rm -f "$overlay" "$overlay.appid"' in SPAWN
+    assert 'rm -f "$DISK" "$DISK.appid"' in CLEANUP
 
 
 def test_reaper_preserves_owned_orphan_overlays():

@@ -146,22 +146,25 @@ silently merge:
   path — the appId is the only identity.
 - The domain records its bound appId in `<metadata>` at define time,
   and the overlay gets an owner record in a `<disk>.appid` sidecar
-  stamped right after create as `<appId> <dev> <ino>` — bound to the
-  inode it names, so a leftover or planted sidecar can never
-  authorize a different file at the same path. If the definition is
-  ever lost the disk still proves its owner, and a crash between
-  create and stamp leaves an unproven disk the next spawn replaces —
-  never boots — so a crashed create recovers automatically.
+  stamped as `<appId> <dev> <ino>` — bound to the inode it names, so
+  a leftover or planted sidecar can never authorize a different file
+  at the same path. The create itself goes through a
+  `<disk>.partial.<pid>` name: the clone is built, stamped, then
+  hard-linked into place, so crash residue is always provable — a
+  partial whose inode the sidecar binds is recovered (the create is
+  finished), a bare partial is a harmless leak, and a file AT the
+  disk path without its record is never our residue. If the
+  definition is ever lost the disk still proves its owner.
   Adoption verifies bound == `--policy-key`: a
   LIVE domain bound to another (or no) app is refused (the wrapper
   exits with REAP=0 — it never tears down a guest it does not own), a
   defined foreign domain is refused outright rather than reclaimed,
   and an overlay whose domain is gone is reused only when its sidecar
   names our appId, records the disk's own dev/ino, AND its backing
-  file is our base. A sidecar naming another app is a foreign claim —
-  refused; every other unproven disk at our own name is replaced
-  rather than booted, so its contents can never run under our
-  binding — confirmed qemu
+  file is our base. Every unproven disk at our name — missing
+  sidecar, foreign appId, inode mismatch, wrong provenance — is
+  refused AND preserved, never booted and never deleted by the
+  launch path — confirmed qemu
   death proves no live guest is killed, but it does not make a
   foreign definition or disk ours; the owner relaunches under its own
   name and an admin removes a genuinely stale squatter deliberately.
