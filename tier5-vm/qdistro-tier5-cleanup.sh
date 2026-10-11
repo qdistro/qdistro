@@ -116,14 +116,32 @@ PY
 # the final unlink at a planted path (sol r26).
 _read_owner_record() {
     _sapp="" _sident="" _sfid=""
-    local _p=$1 _rfd
-    [ -f "$_p" ] && [ ! -L "$_p" ] || return 0
-    # NB: 2>/dev/null on bare exec would apply to the shell
-    # permanently — the brace group carries the suppression instead.
-    { exec {_rfd}< "$_p"; } 2>/dev/null || return 0
-    read -r _sapp _sident <&$_rfd 2>/dev/null || true
-    _sfid=$(stat -Lc '%d %i' "/proc/$$/fd/$_rfd" 2>/dev/null)
-    exec {_rfd}<&-
+    local _out
+    # One root open with O_NOFOLLOW, and the opened inode must be a
+    # regular file OWNED BY ADMIN: contents and identity come from that
+    # fd alone, and a swapped-in symlink or a hard link to a root-only
+    # file is refused rather than read — root never discloses a file
+    # admin could not already read (astra r45).
+    _out=$(T5_UID="$ADMIN_UID" python3 - "$1" 2>/dev/null <<'PY'
+import os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError:
+    sys.exit(0)
+st = os.fstat(fd)
+if not stat.S_ISREG(st.st_mode) or st.st_uid != int(os.environ["T5_UID"]):
+    sys.exit(0)
+line = os.read(fd, 4096).split(b"\n", 1)[0].decode("utf-8", "replace")
+parts = line.split(None, 1)
+if not parts:
+    sys.exit(0)
+print(parts[0])
+print(parts[1].strip() if len(parts) > 1 else "")
+print("%d %d" % (st.st_dev, st.st_ino))
+PY
+)
+    [ -n "$_out" ] || return 0
+    { read -r _sapp; read -r _sident; read -r _sfid; } <<<"$_out"
 }
 
 # Root-side ownership record — see spawn-tier5.sh (sol r33).

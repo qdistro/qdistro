@@ -11,7 +11,11 @@ wrapper's exit from reaping a VM a relaunch adopted, and keeps create
 races from double-defining the domain.
 """
 
+import os
+import subprocess
 from pathlib import Path
+
+import pytest
 import re
 
 
@@ -625,9 +629,10 @@ def test_reaper_preserves_owned_orphan_overlays():
     assert '[ "$(tier5_derived_name "$_sapp")" = "$base" ]' in reaper
     # a symlinked overlay or record is foreign construction, not
     # proof — preserve (sol r23); the record read itself requires a
-    # regular non-symlink file inside _read_owner_record
+    # admin-owned regular file opened O_NOFOLLOW inside
+    # _read_owner_record (behaviour-tested below)
     assert '[ ! -L "$overlay" ]' in reaper
-    assert '[ ! -L "$_p" ]' in SPAWN
+    assert 'os.O_NOFOLLOW' in SPAWN
     # the ownership gate sits between confirmed-absent and the
     # verified unlink
     assert reaper.index('manifest_app_state') \
@@ -890,11 +895,10 @@ def test_record_reads_and_unlinks_are_race_bound():
     #          (sol r25/r26/r28/r29)
     for src in (SPAWN, CLEANUP):
         assert '_read_owner_record()' in src
-        assert 'exec {_rfd}< "$_p"' in src
-        assert 'read -r _sapp _sident <&$_rfd' in src
-        # the record's own dev/ino is taken from the OPEN fd, not the
-        # mutable path — contents and identity provably share one inode
-        assert 'stat -Lc \'%d %i\' "/proc/$$/fd/$_rfd"' in src
+        # contents and dev/ino both come from ONE no-follow fd
+        # (fstat), so they provably share one inode — behaviour is
+        # pinned by test_owner_record_reader_behaviour
+        assert 'os.O_NOFOLLOW' in src and 'os.fstat(fd)' in src
         assert '_unlink_verified()' in src
         # capture lands in a private dir created AND opened through
         # the parent's dir fd (mkdirat/openat + O_NOFOLLOW), and the
@@ -1228,3 +1232,47 @@ def test_disk_dir_created_as_admin():
     code = [l for l in SPAWN.splitlines() if not l.lstrip().startswith('#')]
     assert not any('install -d -o' in l for l in code)
     assert 'run_as_admin mkdir -p -- "$DISK_DIR"' in SPAWN
+
+
+def _run_owner_record_reader(src, path, admin_uid):
+    # Execute the REAL _read_owner_record from the script under test.
+    body = re.search(r"^_read_owner_record\(\) \{\n.*?^\}\n", src,
+                     re.S | re.M).group(0)
+    script = (body + 'ADMIN_UID="$2"; _read_owner_record "$1"\n'
+              'printf "%s\\n%s\\n%s\\n" "$_sapp" "$_sident" "$_sfid"\n')
+    out = subprocess.run(["bash", "-uo", "pipefail", "-c", script, "_",
+                          str(path), str(admin_uid)],
+                         capture_output=True, text=True, check=True)
+    return out.stdout.split("\n")[:3]
+
+
+@pytest.mark.parametrize("src", [SPAWN, CLEANUP], ids=["spawn", "cleanup"])
+def test_owner_record_reader_behaviour(src, tmp_path):
+    # ensures: the sidecar reader returns contents + identity of ONE
+    #          no-follow open, and refuses symlinks and files not owned
+    #          by admin — root never discloses a file admin could not
+    #          already read (astra r45). Runs the real function.
+    me = os.getuid()
+    rec = tmp_path / "rec"
+    rec.write_text("tier5/org.example.App 64769 12345\nignored\n")
+    st = rec.stat()
+    assert _run_owner_record_reader(src, rec, me) == [
+        "tier5/org.example.App", "64769 12345",
+        f"{st.st_dev} {st.st_ino}"]
+    link = tmp_path / "link"
+    link.symlink_to(rec)
+    assert _run_owner_record_reader(src, link, me) == ["", "", ""]
+    assert _run_owner_record_reader(src, rec, me + 1) == ["", "", ""]
+    assert _run_owner_record_reader(src, tmp_path / "missing", me) \
+        == ["", "", ""]
+    (tmp_path / "empty").write_text("")
+    assert _run_owner_record_reader(src, tmp_path / "empty", me) \
+        == ["", "", ""]
+
+
+def test_server_log_dump_runs_as_admin():
+    # ensures: the guest-exec failure dump reads the admin-writable log
+    #          with admin's authority, never root's (astra r45)
+    assert 'run_as_admin cat -- "$SERVER_LOG"' in SPAWN
+    code = [l for l in SPAWN.splitlines() if not l.lstrip().startswith('#')]
+    assert not any(l.strip().startswith('cat "$SERVER_LOG"') for l in code)
