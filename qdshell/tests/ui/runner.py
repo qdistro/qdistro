@@ -1758,7 +1758,9 @@ Describe ONLY what is actually visible. Do NOT speculate about what a similar
 UI might typically contain.
 
 Cover, as bullet points:
-  - The header/title text shown at the top of the visible panel or tab.
+  - The header/title text shown at the top of the visible panel or tab, and
+    the icon immediately beside that title (if one is visible). Inspect the
+    header separately so a small icon is not lost among the top-bar icons.
   - Visible labelled controls: button labels, toggle states (on/off),
     slider values if numeric values are shown, dropdown current values.
   - Icon-only buttons (especially in header/toolbar rows): name each one's
@@ -1818,7 +1820,8 @@ def _run_codex(prompt: str, image_path: Optional[Path] = None) -> str:
             "--dangerously-bypass-approvals-and-sandbox",
             "--sandbox", "danger-full-access",
             "--cd", str(QDSHELL_ROOT),
-            "--ephemeral",
+            "--model", "gpt-5.6-luna",
+            "-c", "model_reasoning_effort=medium",
             "--output-last-message", str(output_path),
         ]
         if image_path is not None:
@@ -1884,6 +1887,13 @@ Decide: do all the load-bearing reference elements appear in the actual? Cosmeti
 phrasing differences are fine. A reference bullet is satisfied if its meaning is
 present in the actual, even with different wording. A reference bullet is
 violated if its element is clearly absent or contradicted.
+
+Apply conditional requirements only when their condition is established in the
+actual. If the reference describes an absent-resource branch, judge that branch
+against what is visible; do not also require controls from the resource-present
+branch. Do not infer that a feature is enabled merely because its conditional
+section is mentioned. Unconditional header, close, and nonblank requirements
+still apply in every branch.
 
 Reply in this exact format:
   MISSING: <bullet, or 'none'>
