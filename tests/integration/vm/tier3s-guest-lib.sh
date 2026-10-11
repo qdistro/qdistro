@@ -747,9 +747,11 @@ broker_log()  { journalctl -u qdistro-admin-broker.service --no-pager -o cat ${1
 # qs_ipc <target> <method> [args...] — Quickshell IPC as admin. `qs ipc`
 # filters by display connection by default and the runuser session has no
 # wayland of its own: --any-display bypasses the filter (s48's convention);
-# -p selects the qdshell instance.
+# -p selects the qdshell instance. LANG: as_admin's env -i leaves the C
+# locale, and Quickshell >= 0.3.2 then prints a "Detected locale "C""
+# warning on stderr, which `2>&1 | head -1` would return as the answer.
 qs_ipc() {
-    as_admin qs -p /usr/share/quickshell/qdshell ipc --any-display call "$@" 2>&1 | head -1
+    as_admin LANG=C.UTF-8 qs -p /usr/share/quickshell/qdshell ipc --any-display call "$@" 2>&1 | head -1
 }
 
 # The toplevel handle qdshell recorded for a tier3s silo, from its own
