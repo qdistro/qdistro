@@ -23,7 +23,9 @@ Same parser/style as test_text_input.py. The invariants:
 4. The keyboard grab SUPPRESSES app delivery: the grab key handler forwards to
    the grab resource (zwp_input_method_keyboard_grab_v2_send_key) and must NOT
    call weston_keyboard_send_key (spec: do not further process a forwarded
-   event). Releasing only ends the weston grab if it is still ours.
+   event). Releasing only ends the weston grab if it is still ours, and
+   weston's cancel (which does not reset keyboard->grab itself) ends the
+   grab while it is still installed, so it can never outlive the grab struct.
 5. The IME->app commit is serial-guarded and activation-scoped (only forwards
    when active for a still-enabled text_input echoing our done serial).
 6. Teardown: input methods are drained before text_inputs in qdwin_destroy,
@@ -257,6 +259,31 @@ def check_grab_release_only_ends_own_grab(source):
     return 0
 
 
+def check_grab_cancel_ends_own_grab(source):
+    """weston_keyboard_cancel_grab() only calls the cancel callback; it does
+    not reset keyboard->grab. The cancel must therefore end the grab itself
+    while it is still installed — otherwise it nulls g->keyboard, the
+    resource-destroy path skips end_grab, and keyboard->grab dangles into the
+    freed grab struct — and must detach g->keyboard only after that."""
+    body, err = _function_body(
+        source, r"static void\s+qdwin_im_grab_cancel\s*\(",
+        "qdwin_im_grab_cancel")
+    if err:
+        return fail(err)
+    code = _strip_comments(body)
+    m = re.search(r"if\s*\(\s*grab->keyboard\s*&&\s*grab->keyboard->grab"
+                  r"\s*==\s*grab\s*\)\s*weston_keyboard_end_grab\s*\("
+                  r"\s*grab->keyboard\s*\)", code)
+    if not m:
+        return fail("grab cancel does not end the still-installed grab "
+                    "(weston's cancel leaves keyboard->grab pointing at it)")
+    null = re.search(r"g->keyboard\s*=\s*NULL", code)
+    if not null or null.start() < m.start():
+        return fail("grab cancel detaches g->keyboard before ending the "
+                    "installed grab")
+    return 0
+
+
 def check_commit_is_serial_and_activation_guarded(source):
     """The IME commit must only forward to the text_input when the IME is
     active for a still-enabled text_input and the serial matches our done
@@ -393,6 +420,7 @@ def main():
         check_one_ime_per_seat_unavailable,
         check_grab_suppresses_app_delivery,
         check_grab_release_only_ends_own_grab,
+        check_grab_cancel_ends_own_grab,
         check_commit_is_serial_and_activation_guarded,
         check_manager_resource_is_neutralizable,
         check_seat_destroy_sends_unavailable,
@@ -408,7 +436,7 @@ def main():
     print("PASS: input-method-v2 (manager gated at v1, bind rejects "
           "sandboxed/uid-mismatched clients fail-closed, global filter hides "
           "it from silos, one-IME-per-seat via unavailable, keyboard grab "
-          "suppresses app delivery and releases safely, commit is "
+          "suppresses app delivery and releases/cancels safely, commit is "
           "serial/activation-guarded, seat-destroy + teardown detach cleanly)")
     return 0
 
