@@ -149,9 +149,10 @@ silently merge:
   stamped as `<appId> <dev> <ino>` — bound to the inode it names, so
   a leftover or planted sidecar can never authorize a different file
   at the same path. The create itself goes through a
-  `<disk>.partial.XXXXXX` name claimed by mktemp's O_EXCL (so a
-  foreign file at a predictable partial path is never overwritten or
-  unlinked by our create): the clone is built, stamped, then
+  `<disk>.partial.XXXXXX` name claimed by mktemp's O_EXCL (the
+  sidecar temp gets the same treatment, so a foreign file at a
+  predictable temp path is never overwritten or unlinked by our
+  create): the clone is built, stamped, then
   hard-linked into place, so crash residue is always provable — a
   partial whose inode the sidecar binds is recovered (the create is
   finished), a bare partial is a harmless leak, and a file AT the
@@ -170,7 +171,9 @@ silently merge:
   sidecar, foreign appId, inode mismatch, wrong provenance — is
   refused AND preserved, never booted and never deleted by the
   launch path (the teardown unlink needs the same inode-bound record,
-  and a foreign appId in a sidecar is never overwritten) — confirmed qemu
+  a lone sidecar is removed only when it is OUR regular-file record,
+  and a foreign, symlinked, or unreadable sidecar is never
+  overwritten) — confirmed qemu
   death proves no live guest is killed, but it does not make a
   foreign definition or disk ours; the owner relaunches under its own
   name and an admin removes a genuinely stale squatter deliberately.

@@ -1055,19 +1055,33 @@ cleanup() {
                         # EVERY case: the domain's binding vouched for
                         # the path, not the inode — a file swapped in
                         # while the domain was stopped is not ours to
-                        # delete (sol r21). The sidecar must name our
-                        # appId AND the disk's own dev/ino.
+                        # delete (sol r21). And with the disk absent, a
+                        # sidecar still gets the same check — only OUR
+                        # regular-file record goes; a foreign,
+                        # symlinked, or unreadable one is an
+                        # unrecognized record and is preserved
+                        # (sol r22).
                         _sapp="" _sident=""
-                        [ -f "$DISK" ] \
-                            && read -r _sapp _sident 2>/dev/null \
-                                < "$DISK.appid" || true
-                        if [ -f "$DISK" ] \
-                            && { [ "$_sapp" != "$POLICY_KEY" ] \
-                              || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ]; }; then
-                            domain_reaped=0
-                            echo "[tier5] WARN: keeping $DISK — overlay owner unproven" >&2
-                        else
-                            rm -f "$DISK" "$DISK.appid" 2>/dev/null || true
+                        read -r _sapp _sident 2>/dev/null \
+                            < "$DISK.appid" || true
+                        if [ -f "$DISK" ]; then
+                            if [ "$_sapp" != "$POLICY_KEY" ] \
+                                || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ]; then
+                                domain_reaped=0
+                                echo "[tier5] WARN: keeping $DISK — overlay owner unproven" >&2
+                            else
+                                rm -f "$DISK" "$DISK.appid" 2>/dev/null || true
+                            fi
+                        elif [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
+                            if [ "$_sapp" = "$POLICY_KEY" ] \
+                                && [ -f "$DISK.appid" ] \
+                                && [ ! -L "$DISK.appid" ]; then
+                                rm -f "$DISK.appid" 2>/dev/null || true
+                            else
+                                domain_reaped=0
+                                echo "[tier5] WARN: keeping $DISK.appid —" >&2
+                                echo "        foreign or unreadable record" >&2
+                            fi
                         fi
                     else
                         domain_reaped=0
@@ -1229,13 +1243,38 @@ _create_overlay_disk() {
         exit 4
     fi
     _di=$(run_as_admin stat -c '%d %i' "$_tmp" 2>/dev/null)
-    if [ -z "$_di" ] || ! { printf '%s %s\n' "$POLICY_KEY" "$_di" > "$DISK.appid.$$" \
-            && mv -f "$DISK.appid.$$" "$DISK.appid" \
-            && chmod 0600 "$DISK.appid"; }; then
-        rm -f "$_tmp" "$DISK.appid.$$" 2>/dev/null
+    # The sidecar temp gets the same O_EXCL claim — a predictable
+    # $DISK.appid.$$ path could otherwise overwrite (or on failure
+    # unlink) a foreign file/symlink squatting there (sol r22).
+    _stmp=$(run_as_admin mktemp "$DISK.appid.tmp.XXXXXX" 2>/dev/null)
+    if [ -z "$_di" ] || [ -z "$_stmp" ] \
+            || ! printf '%s %s\n' "$POLICY_KEY" "$_di" > "$_stmp"; then
+        rm -f "$_tmp" ${_stmp:+"$_stmp"} 2>/dev/null
         echo "[tier5] FAIL: could not stamp binding sidecar $DISK.appid" >&2
         exit 4
     fi
+    # Install the record first — but never clobber one that is not
+    # ours: the caller gates readable foreign records, yet a record
+    # could still appear in the gap (sol r22). Our OWN stale record
+    # (same appId) is removed so the new binding can land.
+    if [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
+        _ca=""
+        read -r _ca _ci 2>/dev/null < "$DISK.appid" || true
+        if [ "$_ca" != "$POLICY_KEY" ]; then
+            rm -f "$_tmp" "$_stmp" 2>/dev/null
+            echo "[tier5] FAIL: $DISK.appid holds a foreign or" >&2
+            echo "        unreadable record — preserving it" >&2
+            exit 4
+        fi
+        rm -f "$DISK.appid" 2>/dev/null
+    fi
+    if ! ln "$_stmp" "$DISK.appid" 2>/dev/null; then
+        rm -f "$_tmp" "$_stmp" 2>/dev/null
+        echo "[tier5] FAIL: $DISK.appid appeared during create" >&2
+        echo "        — refusing to clobber an unproven record" >&2
+        exit 4
+    fi
+    rm -f "$_stmp" 2>/dev/null
     if ! ln "$_tmp" "$DISK" 2>/dev/null; then
         rm -f "$_tmp" 2>/dev/null
         echo "[tier5] FAIL: $DISK appeared during create — refusing" >&2
@@ -1292,15 +1331,20 @@ create_domain() {
         # $DISK absent: a crash between the sidecar stamp and the ln
         # leaves a provable pair — the sidecar binds a $DISK.partial.*
         # file's inode, and dev+ino cannot be forged by a planted file.
-        # Finish that create rather than leaking the partial. A sidecar
-        # naming a DIFFERENT app is a foreign owner record — preserve
-        # it and refuse, never overwrite it (sol r21).
+        # Finish that create rather than leaking the partial. Only a
+        # REGULAR sidecar naming OUR appId may reach the create path:
+        # a foreign record, a symlink, or an unreadable/empty file is
+        # an unrecognized owner record — preserve it and refuse, never
+        # overwrite it (sol r21/r22).
         _sapp="" _sident="" _recover=""
-        read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
-        if [ -n "$_sapp" ] && [ "$_sapp" != "$POLICY_KEY" ]; then
-            echo "[tier5] FAIL: $DISK.appid names foreign app '$_sapp'" >&2
-            echo "        — preserving the record; refusing to overwrite" >&2
-            REAP=0; exit 3
+        if [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
+            [ -f "$DISK.appid" ] && [ ! -L "$DISK.appid" ] \
+                && read -r _sapp _sident 2>/dev/null < "$DISK.appid" || true
+            if [ "$_sapp" != "$POLICY_KEY" ]; then
+                echo "[tier5] FAIL: $DISK.appid holds a foreign or" >&2
+                echo "        unreadable record — preserving it" >&2
+                REAP=0; exit 3
+            fi
         fi
         if [ "$_sapp" = "$POLICY_KEY" ] && [ -n "$_sident" ]; then
             for _cand in "$DISK".partial.*; do

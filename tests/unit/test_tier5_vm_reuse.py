@@ -467,11 +467,18 @@ def test_overlay_reuse_requires_an_inode_bound_owner_record():
     gate = body[body.index('if [ -f "$DISK" ]'):body.index('$DISK absent')]
     assert '_ds' not in gate
     # teardown's unlink requires the inode-bound record in EVERY case —
-    # the claim never vouched for the current file either (sol r21)
+    # the claim never vouched for the current file either (sol r21) —
+    # and a LONE sidecar gets the same check: only our regular-file
+    # record is removed; a foreign, symlinked, or unreadable record is
+    # preserved, never unlinked (sol r22)
     body = _section("cleanup")
     assert "overlay owner unproven" in body
     assert '[ "$_sapp" != "$POLICY_KEY" ]' in body
     assert '_claim_ds' not in body
+    assert 'keeping $DISK.appid' in body
+    assert 'foreign or unreadable record' in body
+    assert '[ ! -L "$DISK.appid" ]' in body
+    assert 'rm -f "$DISK.appid"' in body
 
 
 def test_create_goes_through_a_recoverable_partial():
@@ -483,35 +490,40 @@ def test_create_goes_through_a_recoverable_partial():
     #          its record can then NEVER be our crash residue, so
     #          refusing it is correct (sol r19/r20)
     create = _section("_create_overlay_disk")
-    # mktemp claims the name with O_EXCL — a foreign file at a
-    # predictable partial path can never be overwritten or unlinked
-    # by our create (sol r21)
+    # mktemp claims BOTH temp names with O_EXCL — a foreign file at a
+    # predictable partial or sidecar-temp path can never be
+    # overwritten or unlinked by our create (sol r21/r22)
     assert 'mktemp "$DISK.partial.XXXXXX"' in create
+    assert 'mktemp "$DISK.appid.tmp.XXXXXX"' in create
     assert 'qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$_tmp"' \
         in create
-    assert create.index("qemu-img create") \
-        < create.index('"$DISK.appid.$$"')
     assert 'stat -c \'%d %i\'' in create
-    # the link-into-place must not clobber a $DISK that appeared after
-    # the caller's absence check (ln fails on existing target)
-    assert 'ln "$_tmp" "$DISK"' in create
-    assert 'mv "$_tmp" "$DISK"' not in create
-    # the create-failure path never rm's $DISK itself (sol r19)
+    # the record installs BEFORE the disk link, and both install via
+    # no-clobber ln — a file appearing mid-create is never clobbered
+    assert create.index('ln "$_stmp" "$DISK.appid"') \
+        < create.index('ln "$_tmp" "$DISK"')
+    assert 'mv -f' not in create
+    # an existing record that is not ours (foreign, unreadable,
+    # raced-in) refuses — the install re-checks inside (sol r22)
+    assert 'holds a foreign or' in create
+    assert '[ "$_ca" != "$POLICY_KEY" ]' in create
+    # the failure paths only ever remove OUR O_EXCL temps — never
+    # $DISK or a pre-existing $DISK.appid (sol r19/r22)
     assert 'rm -f "$DISK"' not in create
     # recovery: only a partial whose dev/ino the sidecar binds is
     # finished — dev+ino cannot be forged by a planted file — and a
-    # sidecar naming a foreign app is preserved, never overwritten
-    # (sol r21)
+    # non-regular/foreign/unreadable record is preserved, never
+    # overwritten (sol r21/r22)
     body = _section("create_domain")
     rec = body[body.index("$DISK absent:"):]
     assert '"$DISK".partial.*' in rec
     assert 'stat -c \'%d %i\' "$_cand"' in rec
     assert 'ln "$_recover" "$DISK"' in rec
     assert 'refusing to clobber' in rec
-    assert 'names foreign app' in rec
-    assert 'refusing to overwrite' in rec
-    # the foreign-sidecar refuse precedes any write to $DISK.appid
-    assert rec.index('names foreign app') \
+    assert 'holds a foreign or' in rec
+    assert '[ ! -L "$DISK.appid" ]' in rec
+    # the record refuse precedes any write to $DISK.appid
+    assert rec.index('holds a foreign or') \
         < rec.index('_create_overlay_disk')
     assert 'rm -f "$DISK" "$DISK.appid"' in SPAWN
     assert 'rm -f "$overlay" "$overlay.appid"' in SPAWN
