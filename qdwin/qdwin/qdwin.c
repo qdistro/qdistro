@@ -4116,6 +4116,27 @@ qdwin_move_grab_end_if_installed(struct qdwin *qdwin)
 		weston_pointer_end_grab(pointer);
 }
 
+/* Another grab (a popup, a pointer confine) can replace the move grab
+ * via weston_pointer_start_grab() without invoking its cancel callback,
+ * so the move grab gets neither a release nor a cancel and
+ * move_grab_active would stay set forever — refusing every later drag
+ * and suppressing focus-follows-mouse. A move grab that is no longer
+ * installed is dead (end_grab of the replacement restores the default
+ * grab, never ours): clear the flag the first time anyone asks. */
+static int
+qdwin_move_grab_live(struct qdwin *qdwin)
+{
+	if (!qdwin->move_grab_active)
+		return 0;
+	struct weston_pointer *pointer = qdwin->move_grab.pointer;
+	if (pointer && pointer->grab == &qdwin->move_grab)
+		return 1;
+	weston_log("qdwin: move-drag handle=%u lost its grab to another "
+		   "grab — clearing\n", qdwin->move_grab_handle);
+	qdwin->move_grab_active = 0;
+	return 0;
+}
+
 /* End any active move-drag targeting `handle`. Called from
  * qdwin_surface_removed and from shell unbind so a destroyed toplevel
  * (or a vanished shell) doesn't leave a dangling grab. */
@@ -4148,7 +4169,7 @@ qdwin_handle_begin_interactive_move(struct wl_client *client,
 	}
 
 	/* One drag at a time. Silently drop a second begin request. */
-	if (qdwin->move_grab_active) {
+	if (qdwin_move_grab_live(qdwin)) {
 		weston_log("qdwin: begin_interactive_move handle=%u "
 			   "ignored — drag already active on handle=%u\n",
 			   handle, qdwin->move_grab_handle);
@@ -8758,7 +8779,7 @@ static int
 qdwin_ffm_timer_cb(void *data)
 {
 	struct qdwin *qdwin = data;
-	if (!qdwin || qdwin->locked || qdwin->move_grab_active)
+	if (!qdwin || qdwin->locked || qdwin_move_grab_live(qdwin))
 		return 0;
 	if (qdwin->wm_policy.focus_policy != QDWIN_FOCUS_FOLLOW_MOUSE)
 		return 0;
@@ -8788,7 +8809,7 @@ qdwin_ffm_cancel(struct qdwin *qdwin)
 static void
 qdwin_ffm_consider(struct qdwin *qdwin, struct weston_pointer *pointer)
 {
-	if (!qdwin || qdwin->locked || qdwin->move_grab_active)
+	if (!qdwin || qdwin->locked || qdwin_move_grab_live(qdwin))
 		return;
 	if (qdwin->wm_policy.focus_policy != QDWIN_FOCUS_FOLLOW_MOUSE)
 		return;
