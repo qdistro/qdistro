@@ -292,6 +292,20 @@ Singleton {
     // reports an item index; the policy lives here so the C++ side
     // stays menu-content-agnostic.
     property var _menuActions: ({})
+    // Handles the compositor replayed since the last bind (null outside
+    // the post-bind window). See onBoundChanged.
+    property var _replayedHandles: null
+
+    function _resyncChromeAfterReplay() {
+        const live = root._replayedHandles;
+        root._replayedHandles = null;
+        if (!live)
+            return;
+        for (let i = 0; i < root.windows.count; i++) {
+            if (live[root.windows.get(i).handle])
+                root._syncChromeForRow(i);
+        }
+    }
 
     function _syncChromeForRow(i) {
         if (!qdwinBinding || !qdwinBinding.bound)
@@ -678,10 +692,15 @@ Singleton {
                 // idleNotifierAvailable change below.
                 root._refreshIdleDpmsCapability();
                 // Chrome surfaces + popups died with the previous
-                // connection; rows persist across binds, so re-attach
-                // every strip whose geometry is already known.
-                for (let ci = 0; ci < root.windows.count; ci++)
-                    root._syncChromeForRow(ci);
+                // connection. Rows persist across binds, but a row may
+                // belong to a toplevel that closed while we were unbound;
+                // attaching chrome to its handle is a protocol error that
+                // drops this bind too (a rebind storm). The compositor
+                // replays every live toplevel right after hello, inside
+                // the same dispatch, so collect the replayed handles and
+                // re-attach once that dispatch has finished.
+                root._replayedHandles = ({});
+                Qt.callLater(root._resyncChromeAfterReplay);
             } else {
                 // Unbound: the compositor can no longer apply WM policy or
                 // hold our hotkeys, so drop the capability (the tab reverts
@@ -824,6 +843,8 @@ Singleton {
         }
 
         onToplevelAdded: (handle, ownerUid, appId, title, isXwayland) => {
+            if (root._replayedHandles)
+                root._replayedHandles[handle] = true;
             root.windows.append({
                 handle: handle,
                 ownerUid: ownerUid,

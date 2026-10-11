@@ -3261,6 +3261,16 @@ qdwin_handle_attach_decoration(struct wl_client *client,
 		return;
 	tl = qdwin_toplevel_from_handle(qdwin, handle);
 	if (!tl) {
+		/* A handle we issued whose toplevel has since gone: the shell
+		 * cannot avoid this race (toplevel_removed may still be in
+		 * flight when it decorates a short-lived window), so ignore
+		 * it like request_close does. Never-issued handles stay a
+		 * protocol error. */
+		if (handle != 0 && handle <= qdwin->next_handle) {
+			weston_log("qdwin: attach_decoration stale handle=%u "
+				   "(toplevel gone); ignored\n", handle);
+			return;
+		}
 		wl_resource_post_error(resource,
 				       QDWIN_SHELL_V1_ERROR_INVALID_HANDLE,
 				       "attach_decoration: unknown handle %u",

@@ -263,6 +263,10 @@
         This is the point at which a toplevel transitions out of
         pending-chrome holding state. The first attach_decoration or
         set_border_color is what makes the client visible.
+
+        A handle that qdwin issued but whose toplevel has since been
+        removed is ignored (the toplevel_removed event may still be in
+        flight); a handle qdwin never issued is an invalid_handle error.
       </description>
       <arg name="handle" type="uint"/>
       <arg name="north" type="object" interface="wl_surface" allow-null="true"/>

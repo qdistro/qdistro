@@ -188,11 +188,38 @@ function body(name) {
         "geometry changes must re-sync the chrome strip");
     assert.ok(/state & 2[\s\S]*?detachChrome/.test(qml),
         "fullscreen windows must not keep the chrome strip");
-    // Rebind replay: rows persist across a compositor reconnect, so the
-    // bound transition must re-attach every known strip.
-    assert.ok(/for \(let ci = 0; ci < root\.windows\.count; ci\+\+\)[\s\S]*?_syncChromeForRow\(ci\)/
+    // Rebind replay: rows persist across a compositor reconnect, but a
+    // row whose toplevel closed while unbound must NOT be re-decorated
+    // (attach_decoration on its handle killed every rebind — tiered-
+    // isolation s49, 2026-10-11). The bound transition defers the
+    // re-attach and only toplevels the compositor replayed qualify.
+    assert.ok(/root\._replayedHandles = \(\{\}\);[\s\S]*?Qt\.callLater\(root\._resyncChromeAfterReplay\)/
               .test(qml),
-        "rebind must re-attach chrome for every live window row");
+        "rebind must defer chrome re-attach until the replay is in");
+    assert.ok(/onToplevelAdded[\s\S]*?_replayedHandles\[handle\] = true/
+              .test(qml),
+        "toplevel replay must mark its handle live");
+    {
+        const vm = require("vm");
+        const synced = [];
+        const rows = [{handle: 24}, {handle: 25}, {handle: 27}];
+        const ctx = vm.createContext({
+            windows: {count: rows.length, get: i => rows[i]},
+            _syncChromeForRow: i => synced.push(rows[i].handle),
+            _replayedHandles: {25: true, 27: true},
+        });
+        ctx.root = ctx;
+        vm.runInContext(qml.match(
+            /^ {4}function _resyncChromeAfterReplay\([^]*?^ {4}}/m)[0], ctx);
+        ctx._resyncChromeAfterReplay();
+        assert.deepStrictEqual(synced, [25, 27],
+            "only replayed (live) handles get chrome after a rebind");
+        assert.strictEqual(ctx._replayedHandles, null,
+            "the replay window closes after the resync");
+        ctx._resyncChromeAfterReplay();
+        assert.deepStrictEqual(synced, [25, 27],
+            "a second resync outside the replay window is a no-op");
+    }
 
     // Silo identity: setBorderColor also repaints the strip.
     const sbc = qml.match(/function setBorderColor[\s\S]*?\n    \}/)[0];
