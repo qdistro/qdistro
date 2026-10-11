@@ -4103,6 +4103,19 @@ static const struct weston_pointer_grab_interface qdwin_move_grab_iface = {
 	qdwin_move_grab_cancel,
 };
 
+/* weston_pointer_start_grab() replaces pointer->grab without cancelling
+ * the previous grab, so the move grab may no longer be the installed
+ * one by the time we clear it; ending it then would end someone
+ * else's grab. Only end it while it is still ours. */
+static void
+qdwin_move_grab_end_if_installed(struct qdwin *qdwin)
+{
+	struct weston_pointer *pointer = qdwin->move_grab.pointer;
+
+	if (pointer && pointer->grab == &qdwin->move_grab)
+		weston_pointer_end_grab(pointer);
+}
+
 /* End any active move-drag targeting `handle`. Called from
  * qdwin_surface_removed and from shell unbind so a destroyed toplevel
  * (or a vanished shell) doesn't leave a dangling grab. */
@@ -4116,8 +4129,7 @@ qdwin_move_grab_end_for(struct qdwin *qdwin, uint32_t handle)
 	weston_log("qdwin: cancelling move-drag handle=%u "
 		   "(toplevel/shell gone)\n", handle);
 	qdwin->move_grab_active = 0;
-	if (qdwin->move_grab.pointer)
-		weston_pointer_end_grab(qdwin->move_grab.pointer);
+	qdwin_move_grab_end_if_installed(qdwin);
 }
 
 static void
@@ -9875,8 +9887,7 @@ qdwin_shell_resource_destroy(struct wl_resource *resource)
 		qdwin_hotkeys_purge(qdwin);
 		if (qdwin->move_grab_active) {
 			qdwin->move_grab_active = 0;
-			if (qdwin->move_grab.pointer)
-				weston_pointer_end_grab(qdwin->move_grab.pointer);
+			qdwin_move_grab_end_if_installed(qdwin);
 		}
 		/* v25: drop live WM policy back to the compositor default so a
 		 * shell-less compositor keeps the historical feel, and disarm
