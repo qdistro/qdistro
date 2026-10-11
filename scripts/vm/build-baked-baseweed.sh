@@ -182,9 +182,9 @@ if [ "$GUESTFS_BACKEND" = passt ]; then PASST_CONFIRMED=1; fi
 mapfile -t HOST_DNS_SERVERS < <(select_host_resolvers || true)
 HOST_DNS="${HOST_DNS_SERVERS[*]:-}"
 # Wire the mirror for the probed backend BEFORE repo_cmd is built below —
-# passt appliances reach the host at 169.254.2.2, slirp at 10.0.2.2.
+# passt appliances reach the host at its default gateway (qd_passt_host_addr), slirp at 10.0.2.2.
 if [ "$PASST_CONFIRMED" -eq 1 ]; then
-    qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 169.254.2.2
+    qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" "$(qd_passt_host_addr)"
 else
     qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2
 fi

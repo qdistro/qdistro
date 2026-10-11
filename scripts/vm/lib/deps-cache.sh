@@ -318,7 +318,7 @@ qd_oci_ensure() {
 # ---- guest transport (qd-serve) -----------------------------------------
 
 # Guests cannot see the host filesystem: slirp reaches the host at
-# 10.0.2.2, libguestfs/passt at 169.254.2.2. qd_serve_start exports the
+# 10.0.2.2, libguestfs/passt at qd_passt_host_addr. qd_serve_start exports the
 # whole deps root over HTTP on 0.0.0.0 so a guest can use
 # QDISTRO_REPO_BASE=http://<host-addr>:<port>/repos — the same layout as
 # the file:// host base. State lives in the root: .serve.pid/.serve.port
@@ -394,7 +394,7 @@ qd_serve_stop() {
 # qd_serve_guest_base <snapshot> [host-addr] — the QDISTRO_REPO_BASE value
 # for a guest lane: requires the proxy running; offline also requires the
 # snapshot's metadata cached (an online proxy fetches it on first touch).
-# host-addr defaults to slirp's 10.0.2.2; passt lanes pass 169.254.2.2.
+# host-addr defaults to slirp's 10.0.2.2; passt lanes pass qd_passt_host_addr.
 qd_serve_guest_base() {
     local snap="$1" host="${2:-10.0.2.2}" port
     port="$(qd_serve_port)" || {
@@ -450,8 +450,25 @@ qd_repo_base_safe() {
     [[ "$1" =~ $re ]]
 }
 
+# qd_passt_host_addr — the address a passt-networked guest uses to reach
+# the HOST. passt hands the guest the host's own default gateway and, by
+# default (--map-host-loopback), translates traffic to that gateway address
+# to the host's loopback — so the gateway, not passt's 169.254.2.2 recovery
+# address, is what reaches a host service (verified: libguestfs 1.60.1 +
+# passt 20260612, appliance route "default via <host gw>"; 169.254.2.2
+# times out). QDISTRO_PASST_HOST_ADDR overrides.
+qd_passt_host_addr() {
+    local gw
+    if [ -n "${QDISTRO_PASST_HOST_ADDR:-}" ]; then
+        printf '%s\n' "$QDISTRO_PASST_HOST_ADDR"; return 0
+    fi
+    gw="$(ip -4 route show default 2>/dev/null | awk '$1 == "default" && $2 == "via" {print $3; exit}')"
+    [ -n "$gw" ] || { _qdc_die "qd_passt_host_addr: host has no IPv4 default gateway (set QDISTRO_PASST_HOST_ADDR)"; return 1; }
+    printf '%s\n' "$gw"
+}
+
 # qd_guestfs_host_addr — the host address a libguestfs appliance reaches:
-# 1.60+ prefers passt (169.254.2.2) when runnable; older releases and
+# 1.60+ prefers passt (qd_passt_host_addr) when runnable; older releases and
 # hosts without passt fall back to QEMU slirp (10.0.2.2). Call sites that
 # probe the backend themselves (build-baked-baseweed.sh) should pass the
 # discovered address to qd_repo_wire_guest instead.
@@ -470,7 +487,7 @@ qd_guestfs_host_addr() {
     if { [ "${major:-0}" -gt 1 ] 2>/dev/null \
         || { [ "${major:-0}" -eq 1 ] && [ "${minor:-0}" -ge 60 ]; } 2>/dev/null; } \
         && command -v passt >/dev/null 2>&1; then
-        echo 169.254.2.2
+        qd_passt_host_addr
     else
         echo 10.0.2.2
     fi

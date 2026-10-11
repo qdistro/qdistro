@@ -752,15 +752,28 @@ fab_mirror() {
     run qd_repo_base_safe 'not-a-url'; [ "$status" -eq 1 ]
 }
 
-@test "qd_guestfs_host_addr: passt-era libguestfs + passt → 169.254.2.2" {
+@test "qd_guestfs_host_addr: passt-era libguestfs + passt → the host's default gateway" {
     mkdir -p "$WORK/fakebin"
     # Real `guestfish version` output is multi-line key: value — NOT
     # "guestfish 1.60.2".
     printf '#!/bin/sh\nprintf "major: 1\\nminor: 60\\nrelease: 1\\nextra: \\n"\n' > "$WORK/fakebin/guestfish"
     printf '#!/bin/sh\nexit 0\n' > "$WORK/fakebin/passt"
-    chmod +x "$WORK/fakebin/guestfish" "$WORK/fakebin/passt"
+    # passt maps the guest's view of the host's default gateway to the host.
+    printf '#!/bin/sh\necho "default via 192.0.2.77 dev eth0 proto dhcp"\n' > "$WORK/fakebin/ip"
+    chmod +x "$WORK/fakebin/guestfish" "$WORK/fakebin/passt" "$WORK/fakebin/ip"
     run bash -c "export PATH='$WORK/fakebin':\"\$PATH\"; . '$LIB'; qd_guestfs_host_addr"
-    [ "$output" = "169.254.2.2" ]
+    [ "$output" = "192.0.2.77" ]
+    run bash -c "export PATH='$WORK/fakebin':\"\$PATH\" QDISTRO_PASST_HOST_ADDR=198.51.100.9; . '$LIB'; qd_guestfs_host_addr"
+    [ "$output" = "198.51.100.9" ]
+}
+
+@test "qd_passt_host_addr: no default route fails closed" {
+    mkdir -p "$WORK/fakebin"
+    printf '#!/bin/sh\nexit 0\n' > "$WORK/fakebin/ip"
+    chmod +x "$WORK/fakebin/ip"
+    run bash -c "export PATH='$WORK/fakebin':\"\$PATH\"; . '$LIB'; qd_passt_host_addr"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no IPv4 default gateway"* ]]
 }
 
 @test "qd_guestfs_host_addr: no passt → 10.0.2.2" {

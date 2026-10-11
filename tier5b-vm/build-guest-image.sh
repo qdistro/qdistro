@@ -169,7 +169,7 @@ else
     # with no mirror fails closed here, not inside the guest.
     GUESTFS_BACKEND="$(qd_guestfs_probe_backend)"         || { echo "[build] ERROR: libguestfs backend probe failed" >&2; exit 3; }
     if [ "$GUESTFS_BACKEND" = passt ]; then
-        qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 169.254.2.2 || true
+        qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" "$(qd_passt_host_addr)" || true
     else
         qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2 || true
     fi
