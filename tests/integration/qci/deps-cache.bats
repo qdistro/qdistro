@@ -1059,6 +1059,31 @@ _run_native_builder() {
     [[ "$output" != *serve-start.* ]]
 }
 
+@test "qd_serve_start: a server paused after publishing stays alive once accepted" {
+    mkdir -p "$WORK/pause"
+    # freeze the server right after it publishes; resume after acceptance
+    cat > "$WORK/pause/setsid" <<'SH'
+#!/bin/bash
+pf=; prev=
+for a in "$@"; do [ "$prev" = --port-file ] && pf="$a"; prev="$a"; done
+"$@" & c=$!
+for _ in $(seq 1 100); do [ -s "$pf" ] && break; sleep 0.02; done
+kill -STOP "$c"
+( sleep 1.5; kill -CONT "$c" ) >/dev/null 2>&1 &
+exit 0
+SH
+    chmod +x "$WORK/pause/setsid"
+    run env PATH="$WORK/pause:$PATH" bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ]
+    local port="$output" pid; pid="$(cat "$WORK/cache/.serve.pid")"
+    sleep 2.5   # resumed and past its post-publish check
+    kill -0 "$pid"
+    [ "$(cat "$WORK/cache/.serve.port")" = "$port" ]
+    run ls "$WORK/cache/.locks"
+    [[ "$output" != *serve-start.* ]]
+    bash -c ". '$LIB'; qd_serve_stop"
+}
+
 @test "qd_serve_start: a squatted port fails naming the holder" {
     PORT2="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
     python3 -c 'import socket,sys,time; s=socket.socket(); s.bind(("0.0.0.0",int(sys.argv[1]))); s.listen(); time.sleep(60)' "$PORT2" 9>&- 3>&- &

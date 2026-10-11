@@ -720,14 +720,19 @@ def cmd_serve(args):
         write_text(args.pid_file, str(os.getpid()))
     if args.port_file:
         write_text(args.port_file, str(srv.server_address[1]))
-    if args.start_token and not os.path.exists(args.start_token):
-        for f in (args.pid_file, args.port_file):
-            if f:
-                try:
-                    os.unlink(f)
-                except OSError:
-                    pass
-        sys.exit(1)
+    if args.start_token:
+        try:
+            # present = still wanted (or already accepted): claim it
+            os.unlink(args.start_token)
+        except FileNotFoundError:
+            # withdrawn: the starter gave up before we published
+            for f in (args.pid_file, args.port_file):
+                if f:
+                    try:
+                        os.unlink(f)
+                    except OSError:
+                        pass
+            sys.exit(1)
     log(f"serving {args.root} on :{srv.server_address[1]} "
         f"({'offline: cache only' if offline() else 'pull-through ' + args.base})")
     srv.serve_forever()

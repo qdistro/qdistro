@@ -416,8 +416,12 @@ qd_serve_start() {
             rm -f "$pid_file" "$port_file"
         fi
         rm -f "$port_file.next" "$pid_file.next"
-        # a per-start token: a server late past an earlier deadline never
-        # mistakes this start's claim for its own
+        # Start token: its ABSENCE means "the starter gave up". A server
+        # past the deadline finds it gone and exits; an accepted server
+        # removes it itself after its post-publish check. Per-start names, so
+        # a late server never mistakes a later start's claim for its own;
+        # leftovers (a server that died mid-check) are swept under the lock.
+        rm -f "$root/.locks"/serve-start.*
         token="$(mktemp "$root/.locks/serve-start.XXXXXX")" || exit 1
         # The server binds port 0 and writes the kernel-assigned port
         # itself — no pick-then-bind race. 9>&- is load-bearing: without
@@ -461,7 +465,6 @@ qd_serve_start() {
         fi
         mv "$port_file.next" "$port_file"
         mv "$pid_file.next" "$pid_file"
-        rm -f "$token"
         if qd_deps_offline; then echo offline; else echo online; fi >"$root/.serve.mode"
         cat "$port_file"
     ) 9>"$root/.locks/serve.lock"
