@@ -153,7 +153,7 @@ prepare_pinned_git_subproject "display-info"
 # wrap. A real git checkout keeps the alignment path above; offline with
 # nothing warm, qd_fetch fails closed naming the dep.
 seed_display_info() {
-    local dir="$SRC/subprojects/display-info" tarball deps actual
+    local dir="$SRC/subprojects/display-info" tarball deps actual snap=
     [ -d "$dir/.git" ] && return 0
     deps="$(cd "$HERE/../.." && pwd)/scripts/vm/lib/deps-cache.sh"
     if [ -f "$deps" ]; then
@@ -166,35 +166,42 @@ seed_display_info() {
         tarball="$(qd_display_info_tarball)"
     else
         # env-staged path: the override is a transport for guest/container
-        # lanes, not a verification bypass — hash the staged bytes against
-        # the pinned digest before trusting them.
+        # lanes, not a verification bypass. Copy to a private file first so
+        # the bytes hashed are the bytes extracted (no swap in between).
+        snap="$(mktemp)" || return 1
+        cp -- "$tarball" "$snap" || {
+            echo "error: cannot read staged display-info tarball $tarball" >&2
+            rm -f "$snap"; return 1
+        }
+        tarball="$snap"
         actual="$(sha256sum "$tarball" | awk '{print $1}')" || {
-            echo "error: cannot hash staged display-info tarball $tarball" >&2
-            return 1
+            echo "error: cannot hash staged display-info tarball copy" >&2
+            rm -f "$snap"; return 1
         }
         [ "$actual" = "${QDISTRO_DISPLAY_INFO_SHA256:?env-staged tarball needs a digest pin}" ] || {
             echo "error: staged display-info tarball sha256 mismatch: $actual" >&2
-            return 1
+            rm -f "$snap"; return 1
         }
     fi
     [ -f "$tarball" ] || {
         echo "error: display-info tarball not found: $tarball" >&2
-        return 1
+        rm -f "${snap:-}"; return 1
     }
     rm -rf "$dir"
     mkdir -p "$dir"
     tar -xzf "$tarball" -C "$dir" --strip-components=1 || {
         echo "error: display-info seed extract failed from $tarball" >&2
         rm -rf "$dir"
-        return 1
+        rm -f "${snap:-}"; return 1
     }
     [ -f "$dir/meson.build" ] || {
         echo "error: seeded display-info from $tarball lacks meson.build" >&2
         rm -rf "$dir"
-        return 1
+        rm -f "${snap:-}"; return 1
     }
     : > "$dir/.qd-tarball-seed"
-    echo "note: seeded subprojects/display-info from $tarball (wrap-git bypassed)" >&2
+    echo "note: seeded subprojects/display-info (wrap-git bypassed)" >&2
+    rm -f "${snap:-}"
 }
 seed_display_info
 
