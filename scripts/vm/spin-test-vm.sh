@@ -301,7 +301,15 @@ case "${QCI_OFFLINE:-0}" in 1|true|yes|on) _OFFLINE=1 ;; *) _OFFLINE=0 ;; esac
 # meson setup — used by the A1-min straddle test build (-Denable_test_place=true).
 # QCI_OFFLINE is forwarded so a tester-as-base golden fails closed before
 # zypper instead of waiting 60s for DNS that will not come.
-"$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_HTTP_HOST='$STAGE_URL' QDISTRO_BUILD_TIER2_IMAGES='$_T2_IMAGES' QDWIN_APP_DEPS='$_APP_DEPS' QCI_OFFLINE='$_OFFLINE' QDWIN_EXTRA_MESON_OPTS='${QDWIN_EXTRA_MESON_OPTS:-}' QCI_NATIVE_STAGE_SHA256='$NATIVE_SHA256' QCI_TIER2_STAGE_SHA256='$TIER2_SHA256' bash /root/fresh-vm-bootstrap.sh" >&2
+# Route the in-guest zypper through the host repo cache: the bootstrap
+# writes the guest's .repo files from QDISTRO_REPO_BASE (and fails closed
+# offline without one). Wiring starts the qd_serve proxy for this run.
+. "$REPO/scripts/vm/lib/test-substrate.sh"
+qdistro_load_test_substrate floor >/dev/null 2>&1 || true
+[ -n "${QDISTRO_SUBSTRATE_SNAPSHOT:-}" ] && qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2
+qd_repo_base_safe "${QDISTRO_REPO_BASE:-http://unset}" || { log "ERROR: QDISTRO_REPO_BASE is not a plain URL"; exit 2; }
+case "${QDISTRO_DEPS_OFFLINE:-0}" in 1|true|yes|on) _OFFLINE=1 ;; esac
+"$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_REPO_BASE='${QDISTRO_REPO_BASE:-}' QDISTRO_HTTP_HOST='$STAGE_URL' QDISTRO_BUILD_TIER2_IMAGES='$_T2_IMAGES' QDWIN_APP_DEPS='$_APP_DEPS' QCI_OFFLINE='$_OFFLINE' QDWIN_EXTRA_MESON_OPTS='${QDWIN_EXTRA_MESON_OPTS:-}' QCI_NATIVE_STAGE_SHA256='$NATIVE_SHA256' QCI_TIER2_STAGE_SHA256='$TIER2_SHA256' bash /root/fresh-vm-bootstrap.sh" >&2
 
 fi  # end stages 4-5 (skipped in run-golden mode)
 

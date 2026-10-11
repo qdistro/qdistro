@@ -22,7 +22,10 @@ setup() {
     GOOD_SHA="$(sha256sum "$WORK/src/blob.bin" | awk '{print $1}')"
     BAD_SHA="0000000000000000000000000000000000000000000000000000000000000000"
     export QDISTRO_DEPS_CACHE_DIR="$WORK/cache"
-    unset QDISTRO_DEPS_OFFLINE QCI_OFFLINE QDISTRO_REPO_BASE
+    unset QDISTRO_DEPS_OFFLINE QCI_OFFLINE QDISTRO_REPO_BASE _QD_REPO_BASE_WIRED
+    # Kernel-assigned proxy port + a fixed guest host address: never collide
+    # with a live proxy on this user's stable port, never depend on routes.
+    export QDISTRO_SERVE_PORT=0 QDISTRO_GUEST_HOST_ADDR=192.0.2.10
 
     PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
     # exec so $! is python's own pid — without it the subshell may fork a
@@ -656,7 +659,7 @@ fab_mirror() {
     SERVE_STARTED=1
     run bash -c ". '$LIB'; qd_repo_wire_guest 20260101 10.0.2.2; echo base=\$QDISTRO_REPO_BASE"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ base=http://10\.0\.2\.2:[0-9]+/repos ]]
+    [[ "$output" =~ base=http://192\.0\.2\.10:[0-9]+/repos ]]
     [ "$(cat "$WORK/cache/.serve.mode")" = online ]
 }
 
@@ -678,7 +681,7 @@ fab_mirror() {
     SERVE_STARTED=1
     run env QCI_OFFLINE=1 bash -c ". '$LIB'; qd_repo_wire_guest 20260101 169.254.2.2; echo base=\$QDISTRO_REPO_BASE"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ base=http://169\.254\.2\.2:[0-9]+/repos ]]
+    [[ "$output" =~ base=http://192\.0\.2\.10:[0-9]+/repos ]]
     [ "$(cat "$WORK/cache/.serve.mode")" = offline ]
     # the proxy serves the cached tree
     port="$(bash -c '. "$1"; qd_serve_port' _ "$LIB")"
@@ -942,7 +945,20 @@ _run_native_builder() {
 @test "qd_repo_wire_container re-derives a generated guest base for the container transport" {
     . "$LIB"
     qd_repo_wire_guest 20260101 10.0.2.2 2>/dev/null
-    [[ "$QDISTRO_REPO_BASE" == http://10.0.2.2:* ]]
+    [[ "$QDISTRO_REPO_BASE" == http://192.0.2.10:* ]]
     qd_repo_wire_container 20260101 /qdistro-mirror 2>/dev/null
     [[ "$QDISTRO_REPO_BASE" == http://host.containers.internal:* ]]
+}
+
+@test "qd_repo_wire_guest: the host's primary IPv4 wins; the transport address is only the routeless fallback" {
+    run bash -c "export QDISTRO_GUEST_HOST_ADDR=; mkdir -p '$WORK/fb'; printf '#!/bin/sh\nexit 1\n' > '$WORK/fb/ip'; chmod +x '$WORK/fb/ip'
+        export PATH='$WORK/fb':\"\$PATH\"; . '$LIB'; qd_repo_wire_guest 20260101 10.0.2.2 2>/dev/null; echo base=\$QDISTRO_REPO_BASE"
+    [[ "$output" =~ base=http://10\.0\.2\.2:[0-9]+/repos ]]
+}
+
+@test "qd_serve_port_default: stable per-user port, override wins" {
+    run bash -c "unset QDISTRO_SERVE_PORT; . '$LIB'; qd_serve_port_default"
+    [ "$output" = "$((20000 + $(id -u) % 10000))" ]
+    run bash -c "QDISTRO_SERVE_PORT=31337; . '$LIB'; qd_serve_port_default"
+    [ "$output" = 31337 ]
 }

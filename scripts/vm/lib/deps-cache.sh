@@ -337,6 +337,28 @@ qd_oci_ensure() {
 # the file:// host base. State lives in the root: .serve.pid/.serve.port
 # are stale-tolerant (a dead pid is re-checked, not trusted).
 
+# qd_serve_port_default — the proxy's STABLE per-user port. Guest images
+# persist the repo URL they were built with (baked substrates, goldens), so
+# the proxy must come back on the same port in every later run.
+# QDISTRO_SERVE_PORT overrides; 0 = kernel-assigned (tests).
+qd_serve_port_default() {
+    printf '%s\n' "${QDISTRO_SERVE_PORT:-$((20000 + $(id -u) % 10000))}"
+}
+
+# qd_guest_host_addr — the host address EVERY guest transport reaches: the
+# host's primary IPv4 (slirp NATs it to the host, passt forwards it, the
+# libguestfs appliance and the builder VM both reach it — verified). Using
+# one address means a repo URL persisted into an image by one transport
+# (a passt appliance bake) stays valid for another (a slirp clone).
+# QDISTRO_GUEST_HOST_ADDR overrides; empty when the host has no route.
+qd_guest_host_addr() {
+    if [ -n "${QDISTRO_GUEST_HOST_ADDR:-}" ]; then
+        printf '%s\n' "$QDISTRO_GUEST_HOST_ADDR"; return 0
+    fi
+    ip -4 route get 1.1.1.1 2>/dev/null \
+        | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}'
+}
+
 # qd_serve_start — start (or reuse) the server; print the bound port.
 # Serialized on .locks/serve.lock: racing starters would otherwise each
 # spawn a server and tear the pid/port files.
@@ -365,7 +387,7 @@ qd_serve_start() {
         # it the server inherits the lock fd and holds flock forever,
         # hanging every later starter.
         python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/qd-repo-cache.py" \
-            --root "$root" serve --port-file "$port_file.next" \
+            --root "$root" serve --port "$(qd_serve_port_default)" --port-file "$port_file.next" \
             >>"$root/.serve.log" 2>&1 9>&- </dev/null &
         pid=$!
         for _ in $(seq 1 50); do
@@ -561,6 +583,9 @@ qd_repo_wire_guest() {
         qd_repo_present "$snap" non-oss || return 0
     fi
     qd_serve_start >/dev/null || return 1
+    # The host's primary IPv4 reaches the proxy from every transport, so
+    # prefer it; the caller's transport address is the routeless fallback.
+    host="$(qd_guest_host_addr)" && [ -n "$host" ] || host="${2:-10.0.2.2}"
     base="$(qd_serve_guest_base "$snap" "$host")" || return 1
     _qd_repo_set_base "$base"
 }
