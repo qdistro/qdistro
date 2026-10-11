@@ -1153,39 +1153,38 @@ def test_registry_domain_binding_requires_recorded_disk():
 
 def test_qemu_signal_fallback_is_domain_bound():
     # ensures: the post-destroy kill fallback never signals a process
-    #          that is not THIS domain's qemu — the argv name-scan
-    #          alone cannot distinguish the domain's qemu from a
-    #          hand-run same-name decoy, so a pid is killable only
-    #          when libvirt bound it (pre-destroy dompid) or it holds
-    #          the domain's declared disk source open (sol r37)
+    #          that is not THIS domain's qemu — argv tags, open disk
+    #          fds, and cgroup names are all attacker-reproducible, so
+    #          the ONLY killable pid is the one libvirt itself bound
+    #          to the domain (pre-destroy dompid), re-verified against
+    #          a fresh scan each time so a pid-reuse cannot redirect
+    #          the signal (sol r37/r38)
     for src in (SPAWN, CLEANUP):
-        assert '_pid_holds_path()' in src
-        assert '_killable_qemu_pids()' in src
+        assert '_pid_in()' in src
         # the dompid anchor is captured BEFORE destroy, while the
         # libvirt record still exists
         assert 'virsh dompid "$VM_NAME"' in src
-        # no signal may ride the raw name-scan — every kill goes
-        # through the domain-bound filter
+        # no signal may ride the raw name-scan or a derived set —
+        # only "$_dpid" itself is ever signalled
         assert 'run_as_admin kill $qpids' not in src
         assert 'run_as_admin kill -9 $qpids' not in src
         assert 'run_as_admin kill $_qp' not in src
         assert 'run_as_admin kill -9 $_qp' not in src
-    # spawn captures both anchors (dompid + declared source) before
-    # destroy and filters every scan result through them
+        assert 'run_as_admin kill $_kp' not in src
+        assert 'run_as_admin kill -9 $_kp' not in src
+        assert 'run_as_admin kill "$_dpid"' in src
+        assert 'run_as_admin kill -9 "$_dpid"' in src
+        # an open disk fd is NOT process-ownership authority — the
+        # fd-based killability helpers must not come back
+        assert '_pid_holds_path' not in src
+        assert '_killable_qemu_pids' not in src
+    # spawn captures the anchor before destroy and gates every signal
+    # on membership of a FRESH scan (pid-reuse safe)
     body = _section("reap_domain")
     assert body.index('_dpid=$(run_as_admin virsh dompid') \
         < body.index('virsh destroy')
-    assert body.index('_dsrc=$(domain_disk_source)') \
-        < body.index('virsh destroy')
-    assert body.count('_killable_qemu_pids "$qpids" "$_dpid" "$_dsrc"') \
-        >= 3
-    assert 'run_as_admin kill $_kp' in body
-    assert 'run_as_admin kill -9 $_kp' in body
+    assert body.count('_pid_in "$qpids" "$_dpid"') >= 3
     # the helper does the same on its destroy path
     assert CLEANUP.index('_dpid=$(run_as_admin virsh dompid') \
         < CLEANUP.index('virsh destroy')
-    assert CLEANUP.index('_dsrc=$(domain_disk_source)') \
-        < CLEANUP.index('virsh destroy')
-    assert CLEANUP.count(
-        '_killable_qemu_pids "$_qp" "$_dpid" "$_dsrc"') >= 2
-    assert 'run_as_admin kill -9 $_kp' in CLEANUP
+    assert CLEANUP.count('_pid_in "$_qp" "$_dpid"') >= 3

@@ -1099,35 +1099,12 @@ undefine_domain() {
     return 1
 }
 
-# _pid_holds_path <pid> <path> — rc 0 when the process holds an open fd
-# whose link names <path>. A hand-run same-name decoy that never opened
-# the domain's disk fails this; one that DID open it is pinning a
-# recorded tier-5 resource and is indistinguishable in effect from the
-# domain's own qemu (sol r37).
-_pid_holds_path() {
-    local _p=$1 _s=$2 _fd
-    [ -n "$_s" ] || return 1
-    for _fd in "/proc/$_p"/fd/*; do
-        [ -e "$_fd" ] || continue
-        [ "$(readlink "$_fd" 2>/dev/null)" = "$_s" ] && return 0
-    done
+# _pid_in <scan> <pid> — is <pid> a member of an argv-verified
+# name-scan result? Used to gate signals: membership proves the pid
+# is currently a guest=<name> qemu (not a reused pid), nothing more.
+_pid_in() {
+    case " $1 " in *" $2 "*) return 0 ;; esac
     return 1
-}
-
-# _killable_qemu_pids <scan> <dompid> <src> — filter an argv-verified
-# name-scan to the pids PROVABLY backing this domain: libvirt's own
-# dompid (captured pre-destroy) or a pid holding the domain's declared
-# disk source open. The argv tag alone never authorizes a signal —
-# a co-admin's same-name decoy would die otherwise (sol r37).
-_killable_qemu_pids() {
-    local _p out=""
-    for _p in $1; do
-        if [ -n "$2" ] && [ "$_p" = "$2" ]; then
-            out="$out $_p"; continue
-        fi
-        _pid_holds_path "$_p" "$3" && out="$out $_p"
-    done
-    printf '%s' "$out"
 }
 
 # reap_domain [force] — stop the domain, undefine it, unlink the overlay.
@@ -1168,37 +1145,36 @@ reap_domain() {
                 ;;
         esac
     fi
-    # Capture the domain's identity anchors BEFORE destroy while its
-    # libvirt record still exists: the signal fallback below must never
-    # reach a process that is not THIS domain's qemu — the argv name
-    # alone cannot distinguish it from a hand-run same-name decoy, so
-    # only libvirt's dompid or a pid holding the declared disk source
-    # open may be signalled (sol r37).
-    local _dpid _dsrc qpids _kp
+    # Capture the domain's own qemu pid BEFORE destroy while libvirt's
+    # record still exists: the signal fallback below must never reach
+    # a process that is not THIS domain's qemu, and libvirt's dompid is
+    # the ONLY binding a decoy cannot fake — argv tags, open disk fds,
+    # and cgroup names are all attacker-reproducible (sol r37/r38).
+    # When libvirt cannot name the pid the fallback signals nothing at
+    # all: the orphan keeps the disk busy, the confirmed-dead check
+    # below then preserves the overlay — fail-closed, never a guess.
+    local _dpid qpids
     _dpid=$(run_as_admin virsh dompid "$VM_NAME" 2>/dev/null) || _dpid=""
-    _dsrc=$(domain_disk_source) || _dsrc=""
     # Force-destroy if still running (or method=force). Harmless if already off.
     run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
     # Nested-KVM safety net: domstate can falsely report "shut off" while qemu is
     # still ALIVE, so `virsh destroy` no-ops and the undefine below then drops only
     # the persistent config — leaving a live TRANSIENT domain that dominfo keeps
     # reporting, so it never undefines (perm-gui/21 S4). If qemu survived destroy,
-    # signal it directly. A pure FALLBACK: when destroy already worked there is no
-    # qemu pid and we fall straight through to undefine.
+    # signal it directly — but only THE DOMAIN's pid, re-verified against
+    # a fresh scan each time so a pid-reuse can't redirect the signal.
     qpids=$(qemu_pids_for_domain)
-    _kp=$(_killable_qemu_pids "$qpids" "$_dpid" "$_dsrc")
-    if [ -n "$_kp" ]; then
-        echo "[tier5] destroy left qemu alive for $VM_NAME (pids:$_kp); killing" >&2
-        run_as_admin kill $_kp 2>/dev/null || true
+    if [ -n "$_dpid" ] && _pid_in "$qpids" "$_dpid"; then
+        echo "[tier5] destroy left qemu alive for $VM_NAME (pid $_dpid); killing" >&2
+        run_as_admin kill "$_dpid" 2>/dev/null || true
         for _ in 1 2 3 4 5 6; do
             qpids=$(qemu_pids_for_domain)
-            _kp=$(_killable_qemu_pids "$qpids" "$_dpid" "$_dsrc")
-            [ -n "$_kp" ] || break
+            _pid_in "$qpids" "$_dpid" || break
             sleep 0.5
         done
         qpids=$(qemu_pids_for_domain)
-        _kp=$(_killable_qemu_pids "$qpids" "$_dpid" "$_dsrc")
-        [ -n "$_kp" ] && run_as_admin kill -9 $_kp 2>/dev/null || true
+        _pid_in "$qpids" "$_dpid" \
+            && run_as_admin kill -9 "$_dpid" 2>/dev/null || true
     fi
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         undefine_domain || true

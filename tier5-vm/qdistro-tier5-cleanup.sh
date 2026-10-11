@@ -317,31 +317,16 @@ domain_holds_owned_disk() {
         || [ "$(stat -Lc '%d %i' -- "$src" 2>/dev/null)" = "$ident" ]
 }
 
-# _pid_holds_path / _killable_qemu_pids — same contract as
-# spawn-tier5.sh: the post-destroy signal fallback must never reach a
-# process that is not THIS domain's qemu. A name-scan pid is killable
-# only when libvirt bound it to the domain (pre-destroy dompid) or it
-# holds the domain's declared disk source open — a hand-run same-name
-# decoy that never opened our disk is never signalled (sol r37).
-_pid_holds_path() {
-    local _p=$1 _s=$2 _fd
-    [ -n "$_s" ] || return 1
-    for _fd in "/proc/$_p"/fd/*; do
-        [ -e "$_fd" ] || continue
-        [ "$(readlink "$_fd" 2>/dev/null)" = "$_s" ] && return 0
-    done
+# _pid_in <scan> <pid> — same contract as spawn-tier5.sh: membership
+# proves the pid is currently a guest=<name> qemu (not a reused pid).
+# The post-destroy signal fallback uses it to signal ONLY the pid
+# libvirt bound to the domain (pre-destroy dompid) — an open disk fd
+# is not process-ownership authority and cannot justify a signal
+# (sol r38). When libvirt cannot name the pid the fallback signals
+# nothing: the confirmed-dead gate then preserves the overlay.
+_pid_in() {
+    case " $1 " in *" $2 "*) return 0 ;; esac
     return 1
-}
-
-_killable_qemu_pids() {
-    local _p out=""
-    for _p in $1; do
-        if [ -n "$2" ] && [ "$_p" = "$2" ]; then
-            out="$out $_p"; continue
-        fi
-        _pid_holds_path "$_p" "$3" && out="$out $_p"
-    done
-    printf '%s' "$out"
 }
 
 # Serialize on the domain's own hold file — the same flock protocol the
@@ -413,28 +398,28 @@ if [ "$_ds" -eq 0 ]; then
         echo "        overlay — refusing to destroy a replaced guest" >&2
         exit 3
     fi
-    # Capture the domain's identity anchors BEFORE destroy while its
+    # Capture the domain's own qemu pid BEFORE destroy while its
     # libvirt record still exists — the leftover-qemu fallback below
-    # may only signal processes provably backing THIS domain, never a
-    # same-name decoy (sol r37).
+    # may only signal THE DOMAIN's pid (an open disk fd or an argv tag
+    # is not process-ownership authority; sol r37/r38).
     _dpid=$(run_as_admin virsh dompid "$VM_NAME" 2>/dev/null) || _dpid=""
-    _dsrc=$(domain_disk_source) || _dsrc=""
     run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
     # destroy can no-op under a lying domstate — signal leftover qemu
     # directly (mirrors reap_domain's fallback), then demand a
-    # confirmed-dead scan before touching the overlay.
+    # confirmed-dead scan before touching the overlay. Only the
+    # dompid-bound pid, re-verified against a fresh scan each time.
     _qp=$(qemu_pids_for_domain) || true
-    _kp=$(_killable_qemu_pids "$_qp" "$_dpid" "$_dsrc")
-    if [ -n "$_kp" ]; then
-        echo "[tier5-cleanup] destroy left qemu alive for $VM_NAME (pids:$_kp); killing" >&2
-        run_as_admin kill $_kp 2>/dev/null || true
+    if [ -n "$_dpid" ] && _pid_in "$_qp" "$_dpid"; then
+        echo "[tier5-cleanup] destroy left qemu alive for $VM_NAME (pid $_dpid); killing" >&2
+        run_as_admin kill "$_dpid" 2>/dev/null || true
         for _ in 1 2 3 4 5 6; do
             sleep 0.5
             _qp=$(qemu_pids_for_domain) || true
-            _kp=$(_killable_qemu_pids "$_qp" "$_dpid" "$_dsrc")
-            [ -n "$_kp" ] || break
+            _pid_in "$_qp" "$_dpid" || break
         done
-        [ -n "$_kp" ] && run_as_admin kill -9 $_kp 2>/dev/null || true
+        _qp=$(qemu_pids_for_domain) || true
+        _pid_in "$_qp" "$_dpid" \
+            && run_as_admin kill -9 "$_dpid" 2>/dev/null || true
     fi
     if ! run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1; then
         echo "[tier5-cleanup] WARN: undefine $VM_NAME failed" >&2
