@@ -67,7 +67,11 @@ in `spec/29` . Reasons:
   Requires a guest `foot` binary whenever the catalogue is non-empty —
   foot is the launcher fallback and operator escape hatch.
   `build-guest-image.sh` runs it after customizing the base and leaves
-  `qdistro-tier5-base.json` beside the qcow2.
+  `qdistro-tier5-base.json` beside the qcow2. Guest paths probed via
+  `stat` are interpolated into double-quoted guestfish commands, so
+  the scanner refuses any path carrying `"`, `\`, or a control
+  character — inside the quote they could break out and a `!cmd`
+  line would execute on the host as the scanning user (sol r28).
 - `vmapps-reconcile.sh` — the `qdistro-tier5-vmapps-scan.service`
   ExecStart: identity-samples the base, removes the manifest when the
   base is absent, stale-publishes when admin cannot read it, takes a

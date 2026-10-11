@@ -71,6 +71,12 @@ APPS_DIRS = ("/usr/local/share/applications", "/usr/share/applications")
 # Bare TryExec/program names resolve against these guest dirs, in order.
 BIN_DIRS = ("/usr/local/bin", "/usr/bin", "/bin")
 
+# Guest paths are interpolated into double-quoted guestfish commands —
+# a `"`, `\`, or control character would break out of the quote and a
+# following `!cmd` would execute ON THE HOST as the scanning user
+# (sol r28). Paths carrying any of these are skipped, never quoted.
+_UNSAFE_GUEST_PATH = re.compile(r'["\\\x00-\x1f\x7f]')
+
 # foot is the operator escape hatch and the loader's deterministic
 # fallback. A catalogue-bearing base with no guest foot binary makes the
 # scan fail rather than publish a menu that cannot offer it.
@@ -330,12 +336,26 @@ class GuestfsSource:
     def _stats(self, paths: list[str]) -> dict[str, tuple[bool, int]]:
         if not paths:
             return {}
+        # Paths land inside a double-quoted guestfish arg — a `"`,
+        # `\`, or control char (incl. newline) breaks out of the quote
+        # and a following `!cmd` would execute ON THE HOST (sol r28).
+        # Those paths simply don't get statted: they report missing,
+        # which is also the correct verdict for a path a real guest
+        # cannot cleanly address.
+        safe = [p for p in paths if not _UNSAFE_GUEST_PATH.search(p)]
+        dropped = set(paths) - set(safe)
+        for p in dropped:
+            log(f"unsafe guest path {p!r} — reported missing")
+        if not safe:
+            return {p: (False, 0) for p in dropped}
         script = "".join(
-            f'echo "::stat::{p}"\nstat "{p}"\n' for p in paths
+            f'echo "::stat::{p}"\nstat "{p}"\n' for p in safe
         )
         proc = self._run(script)
         text = proc.stdout.decode(errors="replace")
-        result: dict[str, tuple[bool, int]] = {}
+        result: dict[str, tuple[bool, int]] = {
+            p: (False, 0) for p in dropped
+        }
         current: str | None = None
         for line in text.splitlines():
             line = line.strip()

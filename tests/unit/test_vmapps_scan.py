@@ -599,3 +599,44 @@ def test_check_fails_on_missing_ns_identity(tmp_path: Path) -> None:
         text=True, capture_output=True, check=False,
     )
     assert res.returncode == 1
+
+
+def test_guestfish_script_never_quotes_unsafe_paths() -> None:
+    # ensures: a TryExec/guest path containing `"`, `\`, or a control
+    #          char never reaches a guestfish command — inside the
+    #          double-quoted arg it would break out of the quote and a
+    #          following `!cmd` would execute ON THE HOST as root
+    #          (sol r28). Unsafe paths report (False, 0), never quoted.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("vmapps_scan", SCANNER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    captured: list[str] = []
+
+    class _P:
+        stdout = b""
+        returncode = 0
+
+    src = mod.GuestfsSource.__new__(mod.GuestfsSource)
+    src._run = lambda script: (captured.append(script), _P())[1]
+
+    evil = '/bin/foo"\n!echo pwned > /tmp/pwned\n #'
+    res = src.stats(["/usr/bin/foot", evil, "/bin/ba\\d",
+                     "/bin/ta\tb", "/bin/qu'ote ok"])
+    assert res[evil] == (False, 0)
+    assert res["/bin/ba\\d"] == (False, 0)
+    assert res["/bin/ta\tb"] == (False, 0)
+    assert res.get("/usr/bin/foot", (False, 0)) == (False, 0)
+    # only the safe paths reach the script, and no unsafe byte does
+    assert len(captured) == 1
+    script = captured[0]
+    assert 'stat "/usr/bin/foot"' in script
+    assert 'stat "/bin/qu\'ote ok"' in script
+    assert "pwned" not in script
+    assert "!echo" not in script
+    # all-unsafe input never even launches guestfish
+    captured.clear()
+    res = src.stats([evil])
+    assert res == {evil: (False, 0)}
+    assert captured == []
