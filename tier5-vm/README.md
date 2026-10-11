@@ -160,13 +160,21 @@ silently merge:
   already absent at claim time, and the orphan reaper reaps only
   unproven overlays (no sidecar) or retired-app disks — retirement
   needs an exact appId parse of a manifest that is non-stale,
-  schema-current, and recorded against the CURRENT base (a base swap
-  between scans leaves a non-stale manifest that omits the new
+  schema-current, fully row-valid (the scanner's own `_row_ok`
+  strictness — an empty `apps` list or a malformed row is a
+  transient catalogue, not a verdict), recorded against the CURRENT
+  base, and no older than the base's last write — the stat tuple
+  has int-second mtime granularity, so a same-inode same-size
+  rewrite inside one second would otherwise repeat the identity
+  (a base swap between scans leaves a manifest that omits the new
   base's apps); anything less is ambiguity, not proof an app
   retired. An owned orphan is preserved for its app's next launch.
   "Live" is decided by `qemu_pids_for_domain` alone —
-  a pgrep on libvirt's `-name guest=<vm>` argv token narrowed to real
-  qemu via `/proc/<pid>/comm`, with a distinct cannot-determine rc.
+  a LITERAL substring scan of the ps table for libvirt's
+  `-name guest=<vm>` argv token narrowed to real qemu via
+  `/proc/<pid>/comm`, with a distinct cannot-determine rc — a regex
+  scan would let a manual name like `t5.a` match `t5xa` and hand the
+  cleanup helper foreign pids to signal.
   `domstate` is not consulted for liveness at all: nested-virt libvirt
   can lie in both directions — "shut off" for a live qemu and stale
   "running" for a dead one — and no backing qemu process means death,
@@ -178,7 +186,7 @@ silently merge:
   that created it.
 
   Every destructive step fails closed on that oracle's third state:
-  cannot-determine NEVER counts as dead. A pgrep candidate whose
+  cannot-determine NEVER counts as dead. A scan candidate whose
   `/proc/<pid>/comm` is unreadable, a failed `virsh undefine`, and a
   failed defined-state query are all ambiguity, and ambiguity
   preserves the guest, the definition, and the overlay. Defined-state

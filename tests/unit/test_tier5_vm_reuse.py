@@ -66,6 +66,11 @@ def test_liveness_decisions_use_the_qemu_oracle():
     assert "run_as_admin true" in body  # runuser broken != "no qemu"
     # the match requires the discrete `-name guest=` argv token
     assert '"-name guest=$name,"' in body
+    # the name is matched LITERALLY — pgrep -f treats it as ERE, so
+    # `t5.a` would match `t5xa` and hand the caller foreign pids to
+    # signal (sol r15); an awk index() substring check never widens
+    assert "pgrep -f --" not in body
+    assert 'ENVIRON["T5N"]' in body
     live = _section("domain_is_live")
     # the oracle alone is the liveness authority — no domstate hint can
     # override it in either direction (sol r8)
@@ -489,8 +494,20 @@ def test_manifest_app_state_is_exact_parse_with_stale_ambiguity():
         in body
     # grep-based substring matching would be imprecise
     assert "grep" not in body
-    # every row must carry a string appId for the list to be trusted
-    assert 'isinstance(r.get("appId"), str)' in body
+    # every row must pass the scanner's own _row_ok strictness — an
+    # appId-only row or an empty apps list is a transient/invalid
+    # catalogue, not proof of retirement (sol r15)
+    assert '_row_ok' in body
+    for k in ('"appId"', '"desktopId"', '"name"', '"iconName"',
+              '"comment"', '"execArgv"'):
+        assert k in body
+    assert 'json.loads' in body  # execArgv must parse like the scanner
+    assert 'or not apps or' in body  # empty catalogue != "all retired"
+    # int-mtime granularity + inode reuse let a DIFFERENT base carry the
+    # same identity tuple — the manifest must also not be older than
+    # the current base's last write (sol r15)
+    assert 'st_mtime_ns' in body
+    assert 'mst.st_mtime_ns < st.st_mtime_ns' in body
 
 
 def test_cleanup_unlink_requires_confirmed_dead():

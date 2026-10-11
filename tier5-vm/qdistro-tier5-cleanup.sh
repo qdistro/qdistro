@@ -40,8 +40,15 @@ run_as_admin() {
 qemu_pids_for_domain() {
     local name="${1:-$VM_NAME}" p c out="" raw unread=""
     run_as_admin true >/dev/null 2>&1 || return 2
-    raw=$(run_as_admin pgrep -f -- "-name guest=$name," 2>/dev/null)
-    case $? in 0) ;; 1) return 1 ;; *) return 2 ;; esac
+    # Literal substring match: pgrep -f treats the name as ERE, so a
+    # manual name like `t5.a` would also match `t5xa` — over-matching
+    # hands the caller FOREIGN qemu pids it may signal (sol r15). awk
+    # index() via ENVIRON needs no escaping at all.
+    raw=$(run_as_admin ps -eo pid=,args= 2>/dev/null) || return 2
+    raw=$(printf '%s\n' "$raw" \
+        | T5N="-name guest=$name," \
+            awk 'index($0, ENVIRON["T5N"]) {print $1}')
+    [ -n "$raw" ] || return 1
     for p in $raw; do
         # An unreadable /proc/<pid>/comm is ambiguous, never "dead".
         c=$(cat "/proc/$p/comm" 2>/dev/null) || { unread=1; continue; }

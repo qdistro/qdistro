@@ -261,31 +261,39 @@ run_as_admin() {
 # was written for). RETURN CODES are the contract (sol r6):
 #   0 — pids printed: a backing qemu EXISTS
 #   1 — clean empty scan: confirmed NO backing qemu
-#   2 — scan unreliable: runuser/pgrep/proc lookup failed. NOT "dead" —
+#   2 — scan unreliable: runuser/ps/proc lookup failed. NOT "dead" —
 #       callers must fail closed, never treat it as proof of absence.
 # libvirt launches the session qemu with `-name guest=<domain>,…`, so the
 # pattern requires the discrete `-name guest=` token — no false match on
-# another qemu carrying the string in an unrelated argument. pgrep runs
-# through run_as_admin to see admin-owned session processes; candidates
-# are narrowed to REAL qemu by /proc/<pid>/comm (truncated to 15 chars,
-# e.g. "qemu-system-x86"), which also discards the run_as_admin wrapper
-# chain (runuser/env/pgrep) carrying the pattern in its own argv. A
-# candidate whose comm cannot be READ (vanished or permission) is
-# unverifiable — never silently discounted as "not qemu" (sol r7).
+# another qemu carrying the string in an unrelated argument. The ps
+# table runs through run_as_admin to see admin-owned session processes;
+# candidates are narrowed to REAL qemu by /proc/<pid>/comm (truncated
+# to 15 chars, e.g. "qemu-system-x86"), which also discards the
+# run_as_admin wrapper chain (runuser/env/ps) carrying the pattern in
+# its own argv. A candidate whose comm cannot be READ (vanished or
+# permission) is unverifiable — never silently discounted as "not qemu"
+# (sol r7).
 qemu_pids_for_domain() {
     local name="${1:-$VM_NAME}" p c out="" raw unread=""
     # The scan's own plumbing must work before "empty" can mean "dead":
     # runuser auth/exec failure (rc 1/126/127) is otherwise
-    # indistinguishable from pgrep's no-match rc 1.
+    # indistinguishable from a clean no-match scan.
     run_as_admin true >/dev/null 2>&1 || return 2
-    raw=$(run_as_admin pgrep -f -- "-name guest=$name," 2>/dev/null)
-    case $? in 0) ;; 1) return 1 ;; *) return 2 ;; esac
+    # Literal substring match: pgrep -f treats the name as ERE, so a
+    # manual name like `t5.a` would also match `t5xa` — over-matching
+    # hands the caller FOREIGN qemu pids it may signal (sol r15). awk
+    # index() via ENVIRON needs no escaping at all.
+    raw=$(run_as_admin ps -eo pid=,args= 2>/dev/null) || return 2
+    raw=$(printf '%s\n' "$raw" \
+        | T5N="-name guest=$name," \
+            awk 'index($0, ENVIRON["T5N"]) {print $1}')
+    [ -n "$raw" ] || return 1
     for p in $raw; do
         # An unreadable /proc/<pid>/comm CANNOT be discounted — the pid
         # might be our qemu; only a confirmed-qemu or a fully readable
         # candidate list may produce a verdict (sol r7). A candidate
-        # that vanished between pgrep and read also lands here, which
-        # fails closed — the next scan settles it.
+        # that vanished between the ps scan and the read also lands
+        # here, which fails closed — the next scan settles it.
         c=$(cat "/proc/$p/comm" 2>/dev/null) || { unread=1; continue; }
         case "$c" in qemu-system-*|qemu-kvm) out="$out $p" ;; esac
     done
@@ -341,10 +349,32 @@ manifest_app_state() {
     python3 - "$VMAPPS_MANIFEST" "$1" "$2" <<'PY'
 import json, os, sys
 mpath, side, base = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def _row_ok(r):
+    # Same strictness as the scanner's _row_ok — a catalogue that
+    # fails validation proves nothing about retirement (sol r15).
+    if not isinstance(r, dict):
+        return False
+    for k in ("appId", "desktopId", "name", "iconName", "comment"):
+        if not isinstance(r.get(k), str):
+            return False
+    a = r.get("execArgv")
+    if not isinstance(a, str):
+        return False
+    try:
+        argv = json.loads(a)
+    except Exception:
+        return False
+    return (isinstance(argv, list) and len(argv) > 0
+            and all(isinstance(x, str) for x in argv) and bool(argv[0]))
+
+
 try:
     with open(mpath) as f:
         doc = json.load(f)
     st = os.stat(base)
+    mst = os.stat(mpath)
 except Exception:
     sys.exit(2)
 if not isinstance(doc, dict) or doc.get("stale") or doc.get("schema") != 1:
@@ -353,10 +383,17 @@ ident = (doc.get("baseDev"), doc.get("baseIno"),
          doc.get("baseMtime"), doc.get("baseSize"))
 if ident != (st.st_dev, st.st_ino, int(st.st_mtime), st.st_size):
     sys.exit(2)
+# The identity tuple has int-mtime granularity: a same-inode rewrite
+# inside one second (or an inode reuse) leaves it unchanged. Write
+# ORDER closes that hole — a base modified after the manifest was
+# published must not authorize retirement either (sol r15).
+if mst.st_mtime_ns < st.st_mtime_ns:
+    sys.exit(2)
 apps = doc.get("apps")
-if not isinstance(apps, list) or not all(
-        isinstance(r, dict) and isinstance(r.get("appId"), str)
-        for r in apps):
+# The scanner treats an empty catalogue as a transient state, not a
+# verdict — mirror that: empty apps is cannot-determine, not "every
+# app retired" (sol r15).
+if not isinstance(apps, list) or not apps or not all(map(_row_ok, apps)):
     sys.exit(2)
 sys.exit(0 if any(r["appId"] == side for r in apps) else 1)
 PY
