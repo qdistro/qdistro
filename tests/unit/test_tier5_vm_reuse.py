@@ -1123,12 +1123,11 @@ def test_registry_domain_binding_requires_recorded_disk():
         # stopped domains also accept the pinned boot path itself — a
         # host reboot drops BOOT_DIR but the def remains ours
         assert '[ "$src" = "$' in src
-        # the fd proof must pin THE DOMAIN's qemu: virsh dompid is
-        # libvirt's own pid binding, cross-checked against the
-        # argv-verified name-scan — a hand-run same-name decoy or a
-        # stale/reused dompid can never satisfy it (sol r36)
-        assert 'virsh dompid' in src
-        assert 'case " $qp " in *" $pid "*) ;; *) return 1 ;; esac' in src
+        # the fd proof walks the argv-verified name-scan pids — virsh
+        # has no `dompid` (astra r42: the old cross-check made every
+        # running guest fail ownership, breaking adoption)
+        assert 'for pid in $qp; do' in src
+        assert 'virsh dompid' not in src
         # an unreliable qemu scan is ambiguity — NEVER converted into
         # the stopped-domain proof (the scan rc is kept, not
         # discarded with `|| true`) (sol r36)
@@ -1163,10 +1162,13 @@ def test_no_pid_signalling_fallback_after_destroy():
     #          doc/threat-model.md places inside the TCB
     for src in (SPAWN, CLEANUP):
         for gone in ('_destroy_dompid_qemu', 'pidfd_open', '424, fd, n',
-                     '_sig(', '("virtqemud", "libvirtd")', 'run_as_admin kill', '_pok',
+                     '_sig(', '("virtqemud", "libvirtd")', '_pok',
                      '_pid_holds_path', '_killable_qemu_pids', '_dpid'):
             assert gone not in src, gone
         assert 'run_as_admin virsh destroy "$VM_NAME"' in src
+        # the only admin-run kill is the inner-waypipe reap
+        assert set(re.findall(r'run_as_admin kill (\S+)', src)) \
+            <= {'"$_inner_pid"'}
     # spawn: destroy precedes the first undefine in reap_domain
     body = _section("reap_domain")
     assert body.index('run_as_admin virsh destroy "$VM_NAME"') \
@@ -1174,3 +1176,41 @@ def test_no_pid_signalling_fallback_after_destroy():
     # cleanup: destroy precedes its undefine
     assert CLEANUP.index('run_as_admin virsh destroy "$VM_NAME"') \
         < CLEANUP.index('run_as_admin virsh undefine "$VM_NAME"')
+
+
+# Every subcommand of virsh the tier-5 scripts actually invoke — each is
+# a real virsh(1) command. A string-contract test once pinned a
+# nonexistent `virsh dompid` for six review rounds; new subcommands must
+# be checked against `virsh help <cmd>` before joining this list.
+_REAL_VIRSH = {"define", "destroy", "dominfo", "domstate", "dumpxml",
+               "list", "qemu-agent-command", "shutdown", "start",
+               "undefine"}
+
+
+def test_virsh_subcommands_exist():
+    for src in (SPAWN, CLEANUP):
+        code = "\n".join(l for l in src.splitlines()
+                         if not l.lstrip().startswith("#"))
+        used = set(re.findall(
+            r"(?:run_as_admin |\$\(|'|^\s*)virsh\s+([a-z][a-z-]+)",
+            code, re.M))
+        assert used, "no virsh invocations found"
+        assert used <= _REAL_VIRSH, used - _REAL_VIRSH
+
+
+def test_hold_files_are_never_replaced():
+    # ensures: hold files are created with `>>` under umask 077 —
+    #          `[ -f ] || install` let a racing first user's install
+    #          unlink an inode another wrapper already locked, splitting
+    #          the flock namespace (astra r42)
+    for src in (SPAWN, CLEANUP):
+        assert 'install -m 0600 /dev/null' not in src
+        assert '( umask 077; : >>"$' in src
+
+
+def test_launch_record_signal_runs_as_admin():
+    # ensures: the inner-waypipe pid comes from an admin-writable launch
+    #          record, so its signal carries admin's authority, never
+    #          root's (astra r42)
+    assert 'run_as_admin kill "$_inner_pid"' in SPAWN
+    assert re.search(r'^\s*kill "\$_inner_pid"', SPAWN, re.M) is None

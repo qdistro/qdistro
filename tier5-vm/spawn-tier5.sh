@@ -771,11 +771,11 @@ else
             # either loses (a live or in-flight decision owns it →
             # skip) or wins and serializes every later wrapper behind
             # our reap (sol r7). Creating the file when absent matches
-            # the spawn's own `install` — hold files are never unlinked.
+            # the spawn's own `>>` create — hold files are never unlinked.
             _holddir="${TIER5_HOLD_DIR:-/run/qdistro-tier5}"
             install -d -m 0700 "$_holddir" 2>/dev/null || true
             _holdf="$_holddir/hold-$base"
-            [ -f "$_holdf" ] || install -m 0600 /dev/null "$_holdf" 2>/dev/null
+            ( umask 077; : >>"$_holdf" ) 2>/dev/null || true
             { exec {hfd}>>"$_holdf"; } 2>/dev/null || continue
             flock -n -x "$hfd" 2>/dev/null || { exec {hfd}>&-; continue; }
             # Domain still alive? Only a CONFIRMED-dead oracle verdict
@@ -1193,12 +1193,7 @@ if p:
 # vouches for the disk pair, NOT for whichever domain currently holds
 # the name: an actor in the admin libvirt session can replace ours
 # with a same-tag domain on a different disk (sol r35).
-#   RUNNING — the proof must pin THE LIBVIRT DOMAIN's qemu, not just
-#   any process shaped like it: `virsh dompid` binds a pid to this
-#   domain's libvirt record, and that pid must also appear in the
-#   argv-verified name-scan (a stale or reused dompid then fails). A
-#   hand-run same-name decoy holding our disk open can satisfy the fd
-#   match but is never the domain's pid (sol r36). The pid's own fd
+#   RUNNING — an argv-verified guest=<name> qemu (qemu_pids_for_domain)
 #   must hold the recorded inode open on the link naming the declared
 #   source — a post-boot path swap can alias a stat, not an open fd,
 #   and link+inode together stops a foreign boot disk smuggling our
@@ -1217,17 +1212,19 @@ domain_holds_owned_disk() {
     qp=$(qemu_pids_for_domain "$name"); qrc=$?
     [ "$qrc" -eq 2 ] && return 1
     if [ "$qrc" -eq 0 ]; then
-        pid=$(run_as_admin virsh dompid "$name" 2>/dev/null) || return 1
-        [ -n "$pid" ] || return 1
-        case " $qp " in *" $pid "*) ;; *) return 1 ;; esac
-        [ -d "/proc/$pid/fd" ] || return 1
-        for fd in "/proc/$pid"/fd/*; do
-            [ -e "$fd" ] || continue
-            tgt=$(readlink "$fd" 2>/dev/null) || continue
-            [ "$tgt" = "$src" ] || [ "$tgt" = "$src (deleted)" ] \
-                || continue
-            [ "$(stat -Lc '%d %i' "$fd" 2>/dev/null)" = "$ident" ] \
-                && return 0
+        # Any argv-verified guest=<name> qemu holding the recorded
+        # inode open on the declared source proves it. (virsh has no
+        # `dompid`; a same-uid decoy is out of scope — README.)
+        for pid in $qp; do
+            [ -d "/proc/$pid/fd" ] || continue
+            for fd in "/proc/$pid"/fd/*; do
+                [ -e "$fd" ] || continue
+                tgt=$(readlink "$fd" 2>/dev/null) || continue
+                [ "$tgt" = "$src" ] || [ "$tgt" = "$src (deleted)" ] \
+                    || continue
+                [ "$(stat -Lc '%d %i' "$fd" 2>/dev/null)" = "$ident" ] \
+                    && return 0
+            done
         done
         return 1
     fi
@@ -1340,8 +1337,10 @@ cleanup() {
             # Guard against pid reuse: only kill if it is still a waypipe. The
             # inner client may already be gone (C-side SIGTERM-forward above), in
             # which case the pid could be recycled by an unrelated process.
+            # The record lives in admin's runtime dir, so the signal
+            # carries admin's authority, never root's (astra r42).
             if grep -qx waypipe "/proc/$_inner_pid/comm" 2>/dev/null; then
-                kill "$_inner_pid" 2>/dev/null || true
+                run_as_admin kill "$_inner_pid" 2>/dev/null || true
             fi
         fi
     fi
@@ -2046,7 +2045,9 @@ fi
 HOLD_DIR="${TIER5_HOLD_DIR:-/run/qdistro-tier5}"
 install -d -m 0700 "$HOLD_DIR"
 HOLD_FILE="$HOLD_DIR/hold-$VM_NAME"
-[ -f "$HOLD_FILE" ] || install -m 0600 /dev/null "$HOLD_FILE"
+# `>>` creates without ever replacing an existing inode (install
+# unlinks first, splitting the flock namespace under a racing first user).
+( umask 077; : >>"$HOLD_FILE" )
 exec 9>>"$HOLD_FILE"
 exec 10>>"$HOLD_FILE"
 if ! flock -w 120 -s 9; then

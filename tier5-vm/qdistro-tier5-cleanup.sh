@@ -260,9 +260,8 @@ domain_defined_state() {
 # spawn-tier5.sh: the registry vouches for the disk pair, not for
 # whichever domain currently holds the name, so a destroy also
 # requires the domain to provably run the recorded overlay inode —
-# a running guest through the open fd of THE DOMAIN's qemu (dompid,
-# cross-checked against the argv-verified name-scan — a hand-run
-# same-name decoy or a stale dompid never satisfies it), a stopped
+# a running guest through the open fd of an argv-verified
+# guest=<name> qemu, a stopped
 # one through its declared source being our pinned boot path or the
 # recorded inode itself. An unreliable qemu scan is ambiguity, never
 # a stopped-domain proof (sol r35/r36).
@@ -293,23 +292,19 @@ domain_holds_owned_disk() {
     # stopped-domain proof (sol r36).
     [ "$qrc" -eq 2 ] && return 1
     if [ "$qrc" -eq 0 ]; then
-        # The fd proof must pin THE LIBVIRT DOMAIN's qemu — dompid is
-        # libvirt's own binding; a hand-run same-name decoy holding
-        # our disk open is never its pid. The dompid pid must also be
-        # an argv-verified guest=<name> qemu from the name-scan (a
-        # stale or reused record then fails) (sol r36).
-        pid=$(run_as_admin virsh dompid "$VM_NAME" 2>/dev/null) \
-            || return 1
-        [ -n "$pid" ] || return 1
-        case " $qp " in *" $pid "*) ;; *) return 1 ;; esac
-        [ -d "/proc/$pid/fd" ] || return 1
-        for fd in "/proc/$pid"/fd/*; do
-            [ -e "$fd" ] || continue
-            tgt=$(readlink "$fd" 2>/dev/null) || continue
-            [ "$tgt" = "$src" ] || [ "$tgt" = "$src (deleted)" ] \
-                || continue
-            [ "$(stat -Lc '%d %i' "$fd" 2>/dev/null)" = "$ident" ] \
-                && return 0
+        # Any argv-verified guest=<name> qemu holding the recorded
+        # inode open on the declared source proves it. (virsh has no
+        # `dompid`; a same-uid decoy is out of scope — README.)
+        for pid in $qp; do
+            [ -d "/proc/$pid/fd" ] || continue
+            for fd in "/proc/$pid"/fd/*; do
+                [ -e "$fd" ] || continue
+                tgt=$(readlink "$fd" 2>/dev/null) || continue
+                [ "$tgt" = "$src" ] || [ "$tgt" = "$src (deleted)" ] \
+                    || continue
+                [ "$(stat -Lc '%d %i' "$fd" 2>/dev/null)" = "$ident" ] \
+                    && return 0
+            done
         done
         return 1
     fi
@@ -327,7 +322,9 @@ domain_holds_owned_disk() {
 HOLD_DIR="${TIER5_HOLD_DIR:-/run/qdistro-tier5}"
 HOLD_FILE="$HOLD_DIR/hold-$VM_NAME"
 install -d -m 0700 "$HOLD_DIR" 2>/dev/null || true
-[ -f "$HOLD_FILE" ] || install -m 0600 /dev/null "$HOLD_FILE" 2>/dev/null
+# `>>` never replaces an existing inode (install unlinks first, which
+# would split the flock namespace under a racing first user).
+( umask 077; : >>"$HOLD_FILE" ) 2>/dev/null || true
 if ! exec 9>>"$HOLD_FILE"; then
     echo "[tier5-cleanup] FAIL: cannot open $HOLD_FILE" >&2
     exit 2
