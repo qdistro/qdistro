@@ -805,3 +805,57 @@ fab_mirror() {
     kill -0 "$pid" 2>/dev/null
     wget -q -O - "http://127.0.0.1:$port/" >/dev/null
 }
+
+# Stub podman for the native-builder offline contract: records every call,
+# reports the builder image absent, and "builds" successfully.
+_native_builder_stub() {
+    mkdir -p "$WORK/bin"
+    cat > "$WORK/bin/podman" <<'SH'
+#!/bin/bash
+echo "podman $*" >> "$PODMAN_LOG"
+case "$1 $2" in
+    "info --format") echo true ;;
+    "image exists") exit 1 ;;
+    "image inspect")
+        case "$*" in *Labels*) echo 20260101 ;; *) echo sha256:base ;; esac ;;
+    build*) exit 0 ;;
+esac
+SH
+    chmod +x "$WORK/bin/podman"
+    export PATH="$WORK/bin:$PATH" PODMAN_LOG="$WORK/podman.log"
+    : > "$PODMAN_LOG"
+}
+
+_run_native_builder() {
+    run bash -c "
+        . '$REPO_ROOT/scripts/vm/lib/native-builder.sh'
+        . '$LIB'
+        qdistro_native_builder_base_image() { echo registry.example/tw:20260101; }
+        QDISTRO_SUBSTRATE_SNAPSHOT=20260101 QDISTRO_SUBSTRATE_ARCH=x86_64
+        QDWIN_CACHE_DIR='$WORK/qdwin'
+        qdistro_ensure_native_builder_image"
+}
+
+@test "native builder: offline with no warm mirror fails closed, never builds" {
+    _native_builder_stub
+    export QCI_OFFLINE=1
+    _run_native_builder
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"no warm repo mirror"* ]]
+    ! grep -q 'podman build' "$PODMAN_LOG"
+}
+
+@test "native builder: offline with a warm mirror builds from cache under --network=none" {
+    _native_builder_stub
+    local snap=20260101
+    mkdir -p "$WORK/cache/repos/$snap/tumbleweed/repo/oss" "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss"
+    echo '{"repo":"oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/oss/mirror.json"
+    echo '{"repo":"non-oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss/mirror.json"
+    export QCI_OFFLINE=1
+    _run_native_builder
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"localhost/qdistro/native-builder:"* ]]
+    grep 'podman build' "$PODMAN_LOG" | grep -q -- '--network=none'
+    grep 'podman build' "$PODMAN_LOG" | grep -q -- "$WORK/cache/repos:/qdistro-mirror:ro,z"
+    grep 'podman build' "$PODMAN_LOG" | grep -q -- 'QDISTRO_REPO_BASE=file:///qdistro-mirror'
+}

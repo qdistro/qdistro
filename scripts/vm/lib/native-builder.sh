@@ -57,12 +57,6 @@ qdistro_ensure_native_builder_image() {
     builder_image="localhost/qdistro/native-builder:$builder_key"
 
     if ! podman image exists "$builder_image"; then
-        case "${QCI_OFFLINE:-0}" in
-            1|true|yes|on)
-                echo "ERROR: no cached native builder image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT (QCI_OFFLINE=1)" >&2
-                return 3
-                ;;
-        esac
         image=$(qdistro_native_builder_base_image) || return $?
         rpm_cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}/podman-rpm/$QDISTRO_SUBSTRATE_SNAPSHOT/$QDISTRO_SUBSTRATE_ARCH/packages
         mkdir -p "$rpm_cache"
@@ -77,6 +71,17 @@ qdistro_ensure_native_builder_image() {
         if qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror; then
             mirror_args=(--volume "$(qd_deps_root)/repos:/qdistro-mirror:ro,z")
             net_args=(--network=none)
+        fi
+        # Offline, the image is built from the cache alone: the verified OCI
+        # base (above) plus the warm mirror under --network=none. Without a
+        # warm mirror or an explicit QDISTRO_REPO_BASE there is nothing to
+        # install from — fail closed rather than reach upstream.
+        if [ "${#mirror_args[@]}" -eq 0 ] && [ -z "${QDISTRO_REPO_BASE:-}" ]; then
+            if qd_deps_offline; then
+                rm -rf "$work"
+                echo "ERROR: no cached native builder image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT and no warm repo mirror to build one offline (run qd-cache-warm)" >&2
+                return 3
+            fi
         fi
         echo "[native-podman] building toolchain image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT" >&2
         if ! podman build --pull=never --layers "${net_args[@]}" "${mirror_args[@]}" \
