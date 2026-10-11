@@ -36,7 +36,18 @@ _qdc_die() { echo "ERROR: $*" >&2; return 1; }
 # Cache root: explicit override wins, then the established qdistro cache
 # root (shared with the rpm/npm/baseweed caches), then the XDG default.
 qd_deps_root() {
-    printf '%s\n' "${QDISTRO_DEPS_CACHE_DIR:-${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}}"
+    if [ -n "${QDISTRO_DEPS_CACHE_DIR:-}" ]; then
+        printf '%s\n' "$QDISTRO_DEPS_CACHE_DIR"
+    elif [ -n "${QDWIN_CACHE_DIR:-}" ]; then
+        printf '%s\n' "$QDWIN_CACHE_DIR"
+    else
+        # Kiwi runs config.sh in a root chroot with HOME unset. Resolve the
+        # account's home from passwd so a cold image build can seed the cache.
+        local home_dir
+        home_dir="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
+        [ -n "$home_dir" ] || { _qdc_die "cannot determine home directory for cache"; return 1; }
+        printf '%s/.cache/qdistro\n' "$home_dir"
+    fi
 }
 
 qd_deps_offline() {
