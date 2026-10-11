@@ -393,6 +393,34 @@ qd_guest_host_addr() {
 # qd_serve_start — start (or reuse) the server; print the bound port.
 # Serialized on .locks/serve.lock: racing starters would otherwise each
 # spawn a server and tear the pid/port files.
+# _qd_serve_is_ours <pid> <root> — <pid> is this root's proxy (by its
+# command line), not a reused pid or one recorded from another pid
+# namespace (a container sharing the cache). Gates every reuse AND kill.
+_qd_serve_is_ours() {
+    local pid="$1" root="$2" args
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    args="$(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null)" || return 1
+    grep -q 'qd-repo-cache\.py$' <<<"$args" \
+        && grep -Fxq -- "$root" <<<"$args" && grep -Fxq serve <<<"$args"
+}
+
+# _qd_serve_pid_offline <pid> — that server was started offline.
+_qd_serve_pid_offline() {
+    local v
+    for v in $(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null \
+            | sed -n 's/^\(QDISTRO_DEPS_OFFLINE\|QCI_OFFLINE\)=//p'); do
+        case "$v" in 1|true|yes|on) return 0 ;; esac
+    done
+    return 1
+}
+
+# _qd_serve_reap <pid> — stop a proxy and wait (3 s) until it is gone, so
+# its stable port is free before a replacement binds it.
+_qd_serve_reap() {
+    kill "$1" 2>/dev/null || return 0
+    for _ in $(seq 1 30); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.1; done
+}
+
 qd_serve_start() {
     local root pid_file port_file pid mode port launcher launcher_done token
     qd_deps_init || return 1
@@ -408,12 +436,28 @@ qd_serve_start() {
             # never replaces one (that would break a live online build's
             # misses). Only an online caller replaces a server started
             # offline — its offline clients keep their /offline/ URLs.
-            if kill -0 "$pid" 2>/dev/null && { qd_deps_offline \
+            if _qd_serve_is_ours "$pid" "$root" && { qd_deps_offline \
                     || [ "$(cat "$root/.serve.mode" 2>/dev/null)" = online ]; }; then
                 cat "$port_file"; exit 0
             fi
-            kill "$pid" 2>/dev/null || true
+            _qd_serve_is_ours "$pid" "$root" && _qd_serve_reap "$pid"
             rm -f "$pid_file" "$port_file"
+        fi
+        # This root's proxy may already hold the stable port unrecorded (its
+        # state overwritten or removed): adopt it, or replace it under the
+        # same online/offline rule, rather than failing to bind.
+        if [ "$port" != 0 ] && command -v ss >/dev/null 2>&1; then
+            pid="$(ss -ltnpH "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\),.*/\1/p' | head -1)"
+            if _qd_serve_is_ours "$pid" "$root"; then
+                mode=online; _qd_serve_pid_offline "$pid" && mode=offline
+                if qd_deps_offline || [ "$mode" = online ]; then
+                    printf '%s\n' "$pid" >"$pid_file"
+                    printf '%s' "$port" >"$port_file"
+                    echo "$mode" >"$root/.serve.mode"
+                    cat "$port_file"; exit 0
+                fi
+                _qd_serve_reap "$pid"
+            fi
         fi
         rm -f "$port_file.next" "$pid_file.next"
         # Start token: its ABSENCE means "the starter gave up". A server
@@ -486,7 +530,7 @@ qd_serve_stop() {
     pid_file="$root/.serve.pid" port_file="$root/.serve.port"
     [ -s "$pid_file" ] || { rm -f "$port_file"; return 0; }
     pid="$(cat "$pid_file")"
-    kill "$pid" 2>/dev/null || true
+    _qd_serve_is_ours "$pid" "$root" && _qd_serve_reap "$pid"
     rm -f "$pid_file" "$port_file" "$root/.serve.mode"
 }
 

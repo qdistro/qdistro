@@ -1084,6 +1084,45 @@ SH
     bash -c ". '$LIB'; qd_serve_stop"
 }
 
+@test "qd_serve_start: a pid file naming a foreign process is neither reused nor killed" {
+    sleep 60 9>&- 3>&- &
+    local foreign=$!
+    mkdir -p "$WORK/cache"
+    printf '%s\n' "$foreign" > "$WORK/cache/.serve.pid"
+    printf '1' > "$WORK/cache/.serve.port"; echo online > "$WORK/cache/.serve.mode"
+    run bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ]
+    [ "$output" != 1 ]
+    kill -0 "$foreign"            # an unrelated process survives
+    [ "$(cat "$WORK/cache/.serve.pid")" != "$foreign" ]
+    bash -c ". '$LIB'; qd_serve_stop"
+    kill -0 "$foreign"
+    kill "$foreign"
+}
+
+@test "qd_serve_start: this root's unrecorded server on the stable port is adopted" {
+    local p; p="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    run env QDISTRO_SERVE_PORT="$p" bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ] && [ "$output" = "$p" ]
+    local pid; pid="$(cat "$WORK/cache/.serve.pid")"
+    rm -f "$WORK/cache/.serve.pid" "$WORK/cache/.serve.port"   # state lost
+    run env QDISTRO_SERVE_PORT="$p" bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ] && [ "$output" = "$p" ]
+    [ "$(cat "$WORK/cache/.serve.pid")" = "$pid" ]
+    # an online caller replaces an adopted offline-started server, port reused
+    bash -c ". '$LIB'; qd_serve_stop"
+    run env QCI_OFFLINE=1 QDISTRO_SERVE_PORT="$p" bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ]
+    pid="$(cat "$WORK/cache/.serve.pid")"
+    rm -f "$WORK/cache/.serve.pid" "$WORK/cache/.serve.port" "$WORK/cache/.serve.mode"
+    run env QDISTRO_SERVE_PORT="$p" bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ] && [ "$output" = "$p" ]
+    [ "$(cat "$WORK/cache/.serve.pid")" != "$pid" ]
+    [ "$(cat "$WORK/cache/.serve.mode")" = online ]
+    ! kill -0 "$pid" 2>/dev/null
+    bash -c ". '$LIB'; qd_serve_stop"
+}
+
 @test "qd_serve_start: a squatted port fails naming the holder" {
     PORT2="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
     python3 -c 'import socket,sys,time; s=socket.socket(); s.bind(("0.0.0.0",int(sys.argv[1]))); s.listen(); time.sleep(60)' "$PORT2" 9>&- 3>&- &
