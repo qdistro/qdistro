@@ -3705,6 +3705,8 @@ qdwin_handle_request_raise(struct wl_client *client,
 	weston_compositor_schedule_repaint(qdwin->compositor);
 }
 
+static int qdwin_move_grab_live(struct qdwin *qdwin);
+
 /* v30: shell-owned set-position. The compositor-driven counterpart to
  * begin_interactive_move — the shell names the target outer-rect top-left
  * directly (WM policy), rather than the window following the pointer. Used by
@@ -3746,7 +3748,7 @@ qdwin_handle_request_set_position(struct wl_client *client,
 			   handle);
 		return;
 	}
-	if (qdwin->move_grab_active && qdwin->move_grab_handle == handle) {
+	if (qdwin_move_grab_live(qdwin) && qdwin->move_grab_handle == handle) {
 		weston_log("qdwin: request_set_position handle=%u ignored — "
 			   "interactive move in progress\n", handle);
 		return;
