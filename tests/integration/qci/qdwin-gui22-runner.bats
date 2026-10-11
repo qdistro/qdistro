@@ -167,7 +167,19 @@ SHIM
     export FAKE_PROBE_S=20
     qd22_s3_stage
     qd22_s3_launch
-    qd22_s3_ack
+    # Preserve the launcher's actual failure when this asynchronous ack fails
+    # under the full self-test load; Bats otherwise reports only the function
+    # name and discards its stdout along with the per-test temp directory.
+    if ! qd22_s3_ack >"$T/ack.log" 2>&1; then
+        cat "$T/ack.log" >&3
+        printf 'launcher state: ' >&3
+        if [ -e "$QD22_LAUNCH_LOG" ]; then
+            cat "$QD22_LAUNCH_LOG" >&3
+        else
+            printf 'no launcher log\n' >&3
+        fi
+        return 1
+    fi
     qd22_s3_target
     run qd22_s3_waiting
     [ "$status" -eq 0 ]
