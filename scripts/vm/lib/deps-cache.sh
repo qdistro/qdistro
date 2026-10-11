@@ -394,7 +394,7 @@ qd_guest_host_addr() {
 # Serialized on .locks/serve.lock: racing starters would otherwise each
 # spawn a server and tear the pid/port files.
 qd_serve_start() {
-    local root pid_file port_file pid mode port launcher launcher_done
+    local root pid_file port_file pid mode port launcher launcher_done token
     qd_deps_init || return 1
     root="$(qd_deps_root)" || return 1
     port="$(qd_serve_port_default)" || return 1
@@ -416,6 +416,9 @@ qd_serve_start() {
             rm -f "$pid_file" "$port_file"
         fi
         rm -f "$port_file.next" "$pid_file.next"
+        # a per-start token: a server late past an earlier deadline never
+        # mistakes this start's claim for its own
+        token="$(mktemp "$root/.locks/serve-start.XXXXXX")" || exit 1
         # The server binds port 0 and writes the kernel-assigned port
         # itself — no pick-then-bind race. 9>&- is load-bearing: without
         # it the server inherits the lock fd and holds flock forever,
@@ -424,6 +427,7 @@ qd_serve_start() {
         # signals its group must not take the shared proxy down with it).
         setsid python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/qd-repo-cache.py" \
             --root "$root" serve --port "$port" --port-file "$port_file.next" --pid-file "$pid_file.next" \
+            --start-token "$token" \
             >>"$root/.serve.log" 2>&1 9>&- </dev/null &
         # $! is setsid when it forks (its parent exits 0 at once), so wait on
         # the server's own files for the whole deadline; bail early only
@@ -440,8 +444,12 @@ qd_serve_start() {
         pid="$(cat "$pid_file.next" 2>/dev/null)"
         case "$pid" in ''|*[!0-9]*) pid= ;; esac
         if [ ! -s "$port_file.next" ] || [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-            # never leave a half-started server behind without a pid file
-            [ -n "$pid" ] && kill "$pid" 2>/dev/null
+            # Never leave a half-started server behind without a pid file:
+            # withdraw the start token (a later server sees it gone and
+            # exits), then reap whatever published in the meantime.
+            rm -f "$token"
+            [ -n "$pid" ] || pid="$(cat "$pid_file.next" 2>/dev/null)"
+            case "$pid" in ''|*[!0-9]*) ;; *) kill "$pid" 2>/dev/null ;; esac
             rm -f "$port_file.next" "$pid_file.next"
             if [ "$port" != 0 ] && command -v ss >/dev/null 2>&1 \
                     && ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
@@ -453,6 +461,7 @@ qd_serve_start() {
         fi
         mv "$port_file.next" "$port_file"
         mv "$pid_file.next" "$pid_file"
+        rm -f "$token"
         if qd_deps_offline; then echo offline; else echo online; fi >"$root/.serve.mode"
         cat "$port_file"
     ) 9>"$root/.locks/serve.lock"

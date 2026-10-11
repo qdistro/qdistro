@@ -711,11 +711,23 @@ def cmd_serve(args):
     # run waits on its output fd, a CI step on its pipes) — stdio is already
     # the log and /dev/null.
     os.closerange(3, os.sysconf("SC_OPEN_MAX"))
+    # --start-token: the starter's claim. Gone = the starter gave up on us
+    # (deadline), so never bind/publish as an unrecorded orphan.
+    if args.start_token and not os.path.exists(args.start_token):
+        sys.exit(1)
     srv = Server(("0.0.0.0", args.port), make_handler(args.root, args.base))
     if args.pid_file:  # before the port file: the port file means "ready"
         write_text(args.pid_file, str(os.getpid()))
     if args.port_file:
         write_text(args.port_file, str(srv.server_address[1]))
+    if args.start_token and not os.path.exists(args.start_token):
+        for f in (args.pid_file, args.port_file):
+            if f:
+                try:
+                    os.unlink(f)
+                except OSError:
+                    pass
+        sys.exit(1)
     log(f"serving {args.root} on :{srv.server_address[1]} "
         f"({'offline: cache only' if offline() else 'pull-through ' + args.base})")
     srv.serve_forever()
@@ -834,6 +846,7 @@ def main():
     s.add_argument("--port", type=int, default=0)
     s.add_argument("--port-file")
     s.add_argument("--pid-file")
+    s.add_argument("--start-token")
     for name in ("metadata", "prefetch", "audit", "export-list", "prune"):
         s = sub.add_parser(name)
         s.add_argument("--snapshot", required=True)

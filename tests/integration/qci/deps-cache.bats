@@ -1044,6 +1044,21 @@ _run_native_builder() {
     ! kill -0 "$pid" 2>/dev/null || { sleep 0.5; ! kill -0 "$pid" 2>/dev/null; }
 }
 
+@test "qd_serve_start: a server starting after the deadline exits instead of orphaning" {
+    mkdir -p "$WORK/late"
+    printf '#!/bin/bash\n( sleep 6.5; exec "$@" ) &\nexit 0\n' > "$WORK/late/setsid"
+    chmod +x "$WORK/late/setsid"
+    run env PATH="$WORK/late:$PATH" bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -ne 0 ]
+    sleep 3   # the late child has now run
+    run pgrep -f -- "--root $WORK/cache serve"
+    [ "$status" -ne 0 ]
+    [ ! -e "$WORK/cache/.serve.pid.next" ] && [ ! -e "$WORK/cache/.serve.port.next" ]
+    [ ! -e "$WORK/cache/.serve.pid" ]
+    run ls "$WORK/cache/.locks"
+    [[ "$output" != *serve-start.* ]]
+}
+
 @test "qd_serve_start: a squatted port fails naming the holder" {
     PORT2="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
     python3 -c 'import socket,sys,time; s=socket.socket(); s.bind(("0.0.0.0",int(sys.argv[1]))); s.listen(); time.sleep(60)' "$PORT2" 9>&- 3>&- &
