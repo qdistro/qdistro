@@ -261,3 +261,63 @@ def test_capability_discovery_is_bounded_and_closed_results_ignored(sender, monk
     from PyQt6.QtWidgets import QApplication
     QApplication.processEvents()
     assert len(enriched) == 2
+
+
+def test_capability_discovery_reopen_while_busy_keeps_inflight_results(sender, qtbot):
+    """Reopening the send-to menu mid-probe must not strand the in-flight
+    discovery: start() early-outs on _busy and must not bump _generation,
+    or the worker's results arrive stale and the reopened rows stay
+    'acceptance unknown' forever."""
+    from qfileman.transfer_jobs import CapabilityDiscovery
+
+    window, _path = sender
+    entered = threading.Event()
+    release = threading.Event()
+    enriched = []
+
+    def caps(*args):
+        entered.set()
+        release.wait(5)
+        return capabilities()
+
+    discovery = CapabilityDiscovery(window, SimpleNamespace(
+        get_transfer_capabilities=caps))
+    discovery.enriched.connect(lambda *args: enriched.append(args))
+    discovery.start([(1000, "org.qdistro.Notebook.uid1000")])
+    assert entered.wait(2), "discovery worker never entered the probe"
+    # the menu reopen: busy -> early-out — previously this still bumped
+    # _generation and made the in-flight worker's result stale.
+    discovery.start([(1000, "org.qdistro.Notebook.uid1000")])
+    release.set()
+    qtbot.waitUntil(lambda: not discovery._busy)
+    assert enriched == [(1000, "org.qdistro.Notebook.uid1000", capabilities())]
+
+
+def test_reopened_menu_still_unknown_row_gets_inflight_result(sender, monkeypatch, qtbot):
+    """Reopen while the probe is in flight and the row is still unknown:
+    the in-flight result must land on the reopened menu's new action
+    rather than being stranded by a generation bump."""
+    window, _path = sender
+    entered, release = threading.Event(), threading.Event()
+    rows = [{"name": "Notebook", "uid": 1000,
+             "service": "org.qdistro.Notebook.uid1000",
+             "capabilities": {"version": 0}}]
+    monkeypatch.setattr(qi, "send_to_targets", lambda **kwargs: rows)
+
+    def caps(*args):
+        entered.set()
+        assert release.wait(2)
+        return capabilities()
+
+    monkeypatch.setattr(qi, "get_transfer_capabilities", caps)
+    window._populate_send_to_menu()
+    assert entered.wait(1)
+    first_action = window._send_to_menu.actions()[0]
+    window._populate_send_to_menu()
+    action = window._send_to_menu.actions()[0]
+    assert action is not first_action
+    release.set()
+    qtbot.waitUntil(lambda: "confirmation required" in action.text())
+    assert action.isEnabled()
+    assert (window._receiver_actions[(1000, "org.qdistro.Notebook.uid1000")][1]
+            ["instance_id"] == "receiver-a")

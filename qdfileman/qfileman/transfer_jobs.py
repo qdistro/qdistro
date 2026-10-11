@@ -126,10 +126,10 @@ class CapabilityDiscovery(QObject):
         self.result.connect(self._present, Qt.ConnectionType.QueuedConnection)
 
     def start(self, targets):
-        self._generation += 1
         if self._closed or self._busy or not targets or not _DISCOVERY_WORKERS.acquire(blocking=False):
             return
         self._busy = True
+        self._generation += 1
         self._cancel = threading.Event()
         threading.Thread(target=self._run,
                          args=(self._generation, list(targets[:self.MAX_TARGETS]), self._cancel),

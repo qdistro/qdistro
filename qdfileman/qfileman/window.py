@@ -965,6 +965,8 @@ class FileManagerWindow(QMainWindow):
         if entry is None or caps.get("version") != 1:
             return
         action, current_caps, row = entry
+        if current_caps.get("version") == 1:
+            return
         current_caps.clear()
         current_caps.update(caps)
         consent = (
