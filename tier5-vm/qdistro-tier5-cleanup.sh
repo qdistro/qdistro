@@ -135,6 +135,20 @@ _want = (int(_wd), int(_wi))
 _parent = os.path.dirname(_p) or "."
 _name = os.path.basename(_p)
 
+
+def _rename_noreplace(srcfd, src, dstfd, dst):
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        nr = {"x86_64": 316, "aarch64": 276}.get(os.uname().machine)
+        if nr is None:
+            return False
+        return libc.syscall(nr, srcfd, os.fsencode(src),
+                            dstfd, os.fsencode(dst), 1) == 0
+    except (OSError, AttributeError):
+        return False
+
+
 pfd = os.open(_parent, os.O_RDONLY | os.O_DIRECTORY)
 rc = 1
 try:
@@ -162,15 +176,7 @@ try:
                     os.unlink("v", dir_fd=tfd)
                     restored = True
                 except OSError:
-                    try:
-                        os.lstat(_name, dir_fd=pfd)
-                    except OSError:
-                        try:
-                            os.rename("v", _name, src_dir_fd=tfd,
-                                      dst_dir_fd=pfd)
-                            restored = True
-                        except OSError:
-                            pass
+                    restored = _rename_noreplace(tfd, "v", pfd, _name)
                 if not restored:
                     sys.stderr.write(
                         "[tier5-cleanup] WARN: preserved foreign"
@@ -305,15 +311,10 @@ if [ -e "$DISK" ] || [ -L "$DISK" ]; then
     # PRESENT one must bind THIS inode — a record copied beside a
     # different disk is not proof (sol r19) — and for a t5-namespace
     # name it must re-derive to it. An unreadable backing or an
-    # incoherent record is ambiguity -> keep the disk.
-    _back=$(run_as_admin qemu-img info --output=json "$DISK" \
-        2>/dev/null \
-        | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
-    if [ "$_back" != "$DISK_BASE" ]; then
-        echo "[tier5-cleanup] FAIL: $DISK is not a tier-5 overlay" >&2
-        echo "        (backing '${_back:-<unknown>}') — keeping it" >&2
-        exit 5
-    fi
+    # incoherent record is ambiguity -> keep the disk. The backing
+    # read itself happens below on the PINNED inode — a path-based
+    # qemu-img here could be raced into checking a different file
+    # than the one we unlink (sol r27).
     _read_owner_record "$DISK.appid"
     _dino=$(stat -c '%d %i' "$DISK" 2>/dev/null)
     if [ -z "$_sapp" ]; then
@@ -347,18 +348,46 @@ if [ -e "$DISK" ] || [ -L "$DISK" ]; then
     fi
     qemu_pids_for_domain; _lv=$?
     if [ "$_lv" -eq 1 ]; then
-        # confirmed dead — the boot mount goes with the domain (it
-        # pins the disk inode at BOOT_PATH; lives in root-owned dir)
+        # confirmed dead — pin the verified inode at the root-owned
+        # boot path: the mounted inode is the only read surface a
+        # name-swap cannot redirect, and the backing check must run
+        # on it, not on the mutable $DISK path (sol r27)
+        install -d -m 0755 "$BOOT_DIR" 2>/dev/null
+        [ -e "$BOOT_PATH" ] \
+            || install -m 0644 /dev/null "$BOOT_PATH" 2>/dev/null
         umount -l "$BOOT_PATH" 2>/dev/null || true
-        rm -f "$BOOT_PATH" 2>/dev/null || true
+        if ! mount --bind "$DISK" "$BOOT_PATH" 2>/dev/null \
+                || [ "$(stat -c '%d %i' "$BOOT_PATH" 2>/dev/null)" \
+                    != "$_dino" ]; then
+            echo "[tier5-cleanup] FAIL: cannot pin $DISK for" >&2
+            echo "        verification — keeping it" >&2
+            umount -l "$BOOT_PATH" 2>/dev/null || true
+            rm -f "$BOOT_PATH" 2>/dev/null || true
+            exit 5
+        fi
+        _back=$(run_as_admin qemu-img info --output=json "$BOOT_PATH" \
+            2>/dev/null \
+            | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
+        if [ "$_back" != "$DISK_BASE" ]; then
+            umount -l "$BOOT_PATH" 2>/dev/null || true
+            rm -f "$BOOT_PATH" 2>/dev/null || true
+            echo "[tier5-cleanup] FAIL: $DISK is not a tier-5" >&2
+            echo "        overlay (backing '${_back:-<unknown>}')" >&2
+            echo "        — keeping it" >&2
+            exit 5
+        fi
         # Check→rm is a swap window (sol r25): verified-unlink removes
         # only the inode these checks passed; for the ownerless opt-in
         # path _dino still binds the disk itself, and a sidecar that
         # never existed simply has nothing to unlink.
         if _unlink_verified "$DISK" "$_dino"; then
             _unlink_verified "$DISK.appid" "${_sfid:-}" 2>/dev/null || true
+            umount -l "$BOOT_PATH" 2>/dev/null || true
+            rm -f "$BOOT_PATH" 2>/dev/null || true
             echo "[tier5-cleanup] removed $DISK (bound to '$_sapp')"
         else
+            umount -l "$BOOT_PATH" 2>/dev/null || true
+            rm -f "$BOOT_PATH" 2>/dev/null || true
             echo "[tier5-cleanup] FAIL: $DISK changed under" >&2
             echo "        verification — keeping it" >&2
             exit 5

@@ -495,6 +495,24 @@ _want = (int(_wd), int(_wi))
 _parent = os.path.dirname(_p) or "."
 _name = os.path.basename(_p)
 
+
+def _rename_noreplace(srcfd, src, dstfd, dst):
+    # renameat2(RENAME_NOREPLACE): atomic no-clobber restore for entry
+    # types link(2) cannot carry (directories). False on any failure —
+    # the caller then preserves the capture rather than risking a
+    # clobber.
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        nr = {"x86_64": 316, "aarch64": 276}.get(os.uname().machine)
+        if nr is None:
+            return False
+        return libc.syscall(nr, srcfd, os.fsencode(src),
+                            dstfd, os.fsencode(dst), 1) == 0
+    except (OSError, AttributeError):
+        return False
+
+
 pfd = os.open(_parent, os.O_RDONLY | os.O_DIRECTORY)
 rc = 1
 try:
@@ -515,6 +533,13 @@ try:
                 os.unlink("v", dir_fd=tfd)
                 rc = 0
             else:
+                # Restore the foreign capture's name without ever
+                # clobbering a re-appeared entry: link(2) is atomic
+                # for files/symlinks; a directory capture cannot link,
+                # so it restores via renameat2(RENAME_NOREPLACE) —
+                # a check-then-rename fallback would let a racing
+                # empty dir be replaced (sol r27). Anything unrestored
+                # stays preserved inside our private dir.
                 restored = False
                 try:
                     os.link("v", _name, src_dir_fd=tfd, dst_dir_fd=pfd,
@@ -522,15 +547,7 @@ try:
                     os.unlink("v", dir_fd=tfd)
                     restored = True
                 except OSError:
-                    try:
-                        os.lstat(_name, dir_fd=pfd)
-                    except OSError:
-                        try:
-                            os.rename("v", _name, src_dir_fd=tfd,
-                                      dst_dir_fd=pfd)
-                            restored = True
-                        except OSError:
-                            pass
+                    restored = _rename_noreplace(tfd, "v", pfd, _name)
                 if not restored:
                     sys.stderr.write(
                         "[tier5] WARN: preserved foreign entry at %s/v\n"
@@ -736,13 +753,24 @@ else
             # re-read (it may have appeared, changed, or vanished
             # during the settle) and must still bind this inode,
             # re-derive to $base, and still be manifest-retired
-            # (sol r16/r17/r19).
+            # (sol r16/r17/r19). The inode AND its backing are read
+            # through ONE open fd — a name-swap between a path-based
+            # qemu-img and a later stat could otherwise check the
+            # backing of a different file than the one we unlink
+            # (sol r27).
             _read_owner_record "$overlay.appid"
             [ -f "$overlay" ] && [ ! -L "$overlay" ] \
                 || { exec {hfd}>&-; continue; }
-            _oino=$(stat -c '%d %i' "$overlay" 2>/dev/null)
+            { exec {ofd}< "$overlay"; } 2>/dev/null \
+                || { exec {hfd}>&-; continue; }
+            _oino=$(stat -Lc '%d %i' "/proc/$$/fd/$ofd" 2>/dev/null)
+            _backing=$(qemu-img info --output=json "/proc/$$/fd/$ofd" \
+                2>/dev/null \
+                | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
+            exec {ofd}<&-
             [ -n "$_sapp" ] && [ -n "$_oino" ] \
                 && [ "$_sident" = "$_oino" ] \
+                && [ "$_backing" = "$DISK_BASE" ] \
                 || { exec {hfd}>&-; continue; }
             [ "$(tier5_derived_name "$_sapp")" = "$base" ] \
                 || { exec {hfd}>&-; continue; }
@@ -1512,23 +1540,23 @@ create_domain() {
     # defined-ours domain's binding vouches for the path, not the
     # inode, and a file swapped in while the domain was stopped would
     # otherwise boot under our binding (sol r21). The <disk>.appid
-    # sidecar must name our appId, record the disk's own dev/ino, and
-    # the backing must be our base; anything less — missing sidecar,
-    # foreign appId, inode mismatch, wrong provenance — is refused AND
-    # preserved: our own crash residue never lands at $DISK without
-    # its record (the create goes through .partial), so an unproven
-    # file here is not ours to delete either (sol r12/r19/r20/r21).
+    # sidecar must name our appId and record the disk's own dev/ino;
+    # anything less — missing sidecar, foreign appId, inode mismatch —
+    # is refused AND preserved: our own crash residue never lands at
+    # $DISK without its record (the create goes through .partial), so
+    # an unproven file here is not ours to delete either
+    # (sol r12/r19/r20/r21). Backing provenance is checked once, later,
+    # on the MOUNTED inode — a path-based qemu-img read here could be
+    # raced into inspecting a different file than the one we boot
+    # (sol r27).
     if [ -f "$DISK" ] && [ ! -L "$DISK" ]; then
         _read_owner_record "$DISK.appid"
-        _back=$(run_as_admin qemu-img info --output=json "$DISK" \
-            2>/dev/null \
-            | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
         if [ "$_sapp" != "$POLICY_KEY" ] \
-                || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ] \
-                || [ "$_back" != "$DISK_BASE" ]; then
+                || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ]; then
             echo "[tier5] FAIL: overlay $DISK bound to" >&2
-            echo "        '${_sapp:-<unbound>}' / backing '${_back:-<unknown>}'" >&2
-            echo "        — refusing to boot an unproven disk" >&2
+            echo "        '${_sapp:-<unbound>}' or an inode its record" >&2
+            echo "        does not name — refusing to boot an unproven" >&2
+            echo "        disk" >&2
             REAP=0; exit 3
         fi
         _bino=$_sident
@@ -1563,15 +1591,12 @@ create_domain() {
             # verify (it compares to whatever the path held at link
             # time). The only trustworthy check is against the sidecar's
             # recorded dev/ino — the installed disk must BE the bound
-            # inode, plus a provenance recheck before we ever start it
-            # (sol r25). On mismatch drop only OUR link name; the
-            # planted file keeps its own path.
+            # inode — and the provenance recheck happens once, later, on
+            # the MOUNTED inode (sol r25/r27). On mismatch drop only OUR
+            # link name; the planted file keeps its own path.
             if ln -T "$_recover" "$DISK" 2>/dev/null; then
                 _rino=$(stat -c '%d %i' "$DISK" 2>/dev/null)
-                _rback=$(run_as_admin qemu-img info --output=json "$DISK" \
-                    2>/dev/null \
-                    | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
-                if [ "$_rino" = "$_sident" ] && [ "$_rback" = "$DISK_BASE" ]; then
+                if [ "$_rino" = "$_sident" ]; then
                     # drop the redundant partial name — only if it still
                     # binds the recorded inode (a swapped name is
                     # restored, never unlinked) (sol r26)
@@ -1611,9 +1636,27 @@ create_domain() {
         REAP=0; exit 3
     fi
 
-    # Define only on CONFIRMED absence (the same verdict that gated the
-    # overlay provenance above).
-    [ "$_ds" -eq 1 ] && _create_domain_define
+    # Backing provenance is read on the PINNED path: the mounted inode
+    # is the only read surface a name-swap cannot redirect, and
+    # qemu-img on the mutable $DISK path could be raced into checking
+    # a different file than the inode we mount (sol r27).
+    _bback=$(run_as_admin qemu-img info --output=json "$BOOT_PATH" \
+        2>/dev/null \
+        | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
+    if [ "$_bback" != "$DISK_BASE" ]; then
+        echo "[tier5] FAIL: mounted overlay backs onto" >&2
+        echo "        '${_bback:-<unknown>}' — refusing to boot an" >&2
+        echo "        unproven disk" >&2
+        _unmount_boot_disk
+        REAP=0; exit 3
+    fi
+
+    # Define (or redefine) unconditionally so the STARTED domain always
+    # runs OUR render: a leftover or forged definition under our
+    # name+appId could point its disk source at an unverified path and
+    # bypass BOOT_PATH entirely (sol r27). Confirmed absence or a
+    # bound stopped domain both get the fresh XML.
+    _create_domain_define
 
     # Start if not live. The qemu oracle decides — a false "shut off"
     # domstate must not push `virsh start` at an already-live domain,

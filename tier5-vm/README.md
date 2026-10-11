@@ -203,7 +203,16 @@ silently merge:
   The mount's own inode is re-verified against the provenance-bound
   dev/ino after mount(8), so a swap that lands between the gate and
   the mount refuses the launch; teardown, the orphan reaper, and the
-  cleanup helper each drop the mount with the overlay.
+  cleanup helper each drop the mount with the overlay. The mounted
+  path is also the only read surface a name-swap cannot redirect:
+  backing provenance (`qemu-img info`) is read there, never on the
+  mutable `$DISK` path — a racer cannot show the right backing for a
+  different inode — and the startup reaper reads an overlay's inode
+  and backing through one open fd (`/proc/$$/fd`) for the same
+  reason. The started domain always runs a freshly rendered
+  definition — a defined-ours domain is re-defined, so a leftover or
+  forged XML under our name+appId can never point its disk source
+  around the mount.
   The teardown unlink applies the same rule when the domain was
   already absent at claim time, and the orphan reaper reaps only
   retired-app disks — retirement

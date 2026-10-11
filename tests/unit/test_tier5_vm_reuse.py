@@ -434,8 +434,11 @@ def test_create_domain_reverifies_binding_before_start():
     #          stopped foreign guest (sol r8)
     body = _section("create_domain")
     assert "domain_defined_state; _ds=$?" in body
-    # define happens ONLY on confirmed absence (rc 1)
-    assert '[ "$_ds" -eq 1 ] && _create_domain_define' in body
+    # define is UNCONDITIONAL — a leftover or forged definition under
+    # our name+appId could point its disk source at an unverified
+    # path; the STARTED XML is always our render (sol r27)
+    assert '[ "$_ds" -eq 1 ] && _create_domain_define' not in body
+    assert '\n    _create_domain_define\n' in body
     # a defined domain must carry our binding before start
     assert '[ "$(domain_appid)" != "$POLICY_KEY" ]' in body
     assert "refusing to start it" in body
@@ -654,7 +657,11 @@ def test_reaper_reverifies_after_settle():
     # (sol r16/r17/r19)
     assert tail.count('_read_owner_record') >= 1
     assert tail.count('tier5_derived_name "$_sapp"') >= 1
-    assert tail.count('stat -c \'%d %i\' "$overlay"') >= 1
+    # inode AND backing are re-read through one open fd post-settle —
+    # a name-swap cannot split the pair (sol r27)
+    assert tail.count('stat -Lc \'%d %i\' "/proc/$$/fd/$ofd"') >= 1
+    assert tail.count('qemu-img info --output=json "/proc/$$/fd/$ofd"') \
+        >= 1
     # sidecar removal rides along with the overlay's verified unlink —
     # bound to the record's OWN fd-read inode (_sfid), so a swapped
     # record is restored not deleted (sol r25)
@@ -773,10 +780,11 @@ def test_cleanup_helper_requires_absent_definition_for_unlink():
     assert tail.index("qemu_pids_for_domain") \
         < tail.index('_unlink_verified "$DISK"')
     # an orphan disk has no definition to carry the binding — the rm
-    # additionally requires tier-5 provenance (backing == our base)
-    # and surfaces the sidecar's bound appId (sol r13)
+    # additionally requires tier-5 provenance (backing == our base,
+    # read on the PINNED mount) and surfaces the sidecar's bound
+    # appId (sol r13/r27)
     assert '"backing-filename"' in tail
-    assert "not a tier-5 overlay" in tail
+    assert "is not a tier-5" in tail
     assert '"$DISK.appid"' in tail
     assert tail.index('"backing-filename"') \
         < tail.index('_unlink_verified "$DISK"')
@@ -883,8 +891,13 @@ def test_record_reads_and_unlinks_are_race_bound():
         assert 'os.stat("v", dir_fd=tfd, follow_symlinks=False)' in src
         assert 'os.unlink("v", dir_fd=tfd)' in src
         # a foreign capture is restored via link(2) — atomic
-        # no-clobber, never overwriting a re-appeared path
+        # no-clobber, never overwriting a re-appeared path — and entry
+        # types link(2) cannot carry (directories) restore through
+        # renameat2(RENAME_NOREPLACE), never a racy check-then-rename
+        # (sol r27)
         assert 'os.link("v", _name, src_dir_fd=tfd, dst_dir_fd=pfd' in src
+        assert '_rename_noreplace' in src
+        assert 'ctypes' in src
         # no shell-level path re-resolution remains in the primitive
         assert 'mv -T -- "$_p"' not in src
         # an empty expected-ident can never authorize a removal
@@ -951,6 +964,21 @@ def test_boot_uses_a_pinned_bind_mount_not_the_admin_path():
     # the mount happens between the gate and define/start
     assert body.index('_bind_mount_disk "$_bino"') \
         < body.index('virsh start')
+    # backing provenance is read on the PINNED inode — the mounted
+    # path is the only read surface a name-swap cannot redirect; a
+    # path-based qemu-img could be raced into checking a different
+    # file than the one we boot or unlink (sol r27)
+    assert 'qemu-img info --output=json "$BOOT_PATH"' in body
+    assert 'qemu-img info --output=json "$DISK"' not in body
+    assert '[ "$_bback" != "$DISK_BASE" ]' in body
+    assert body.index('_bind_mount_disk "$_bino"') \
+        < body.index('qemu-img info --output=json "$BOOT_PATH"') \
+        < body.index('virsh start')
+    # the cleanup helper applies the same pinned-inode backing check
+    assert 'qemu-img info --output=json "$BOOT_PATH"' in CLEANUP
+    # the reaper binds inode AND backing to one open fd post-settle
+    assert 'qemu-img info --output=json "/proc/$$/fd/$ofd"' in SPAWN
+    assert 'stat -Lc \'%d %i\' "/proc/$$/fd/$ofd"' in SPAWN
     # the domain XML names the mount path, never the admin path
     assert 's|__DISK_PATH__|$BOOT_PATH|g' in SPAWN
     assert 's|__DISK_PATH__|$DISK|g' not in SPAWN
