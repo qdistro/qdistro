@@ -267,8 +267,26 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
                 force, verify, audit):
     src = f"{base}/{snapshot}/tumbleweed/repo/{repo}/"
     dest = os.path.join(dest_root, snapshot, "tumbleweed", "repo", repo)
-    os.makedirs(dest, exist_ok=True)
 
+    if audit:
+        # Read-only: never create the tree, the lock file, or any state.
+        # Take a shared lock only if a lock file already exists so an
+        # in-progress mirror can't race the audit into a false verdict.
+        if not os.path.isdir(dest):
+            die(f"audit: no mirror at {dest}")
+        lock_path = os.path.join(dest, ".mirror.lock")
+        lock_fd = (os.open(lock_path, os.O_RDWR)
+                   if os.path.isfile(lock_path) else None)
+        try:
+            if lock_fd is not None:
+                fcntl.flock(lock_fd, fcntl.LOCK_SH)
+            audit_repo(src.rstrip("/"), dest, mutate=False)
+        finally:
+            if lock_fd is not None:
+                os.close(lock_fd)
+        return
+
+    os.makedirs(dest, exist_ok=True)
     lock_path = os.path.join(dest, ".mirror.lock")
     lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
     try:
@@ -277,8 +295,8 @@ def mirror_repo(base, snapshot, repo, dest_root, limit, metadata_only,
         die(f"could not lock {lock_path}: {e}")
     print(f"[repo-mirror] {repo}: {src} -> {dest}", file=sys.stderr)
 
-    if verify or audit:
-        audit_repo(src.rstrip("/"), dest, mutate=not audit)
+    if verify:
+        audit_repo(src.rstrip("/"), dest, mutate=True)
         return
     # Completed-mirror fast path: mirror.json is written only after a full
     # successful pass, so its presence means every repodata+package file was
