@@ -56,10 +56,6 @@ IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 . "$SCRIPT_DIR/lib/rpm-cache.sh"
 . "$SCRIPT_DIR/lib/deps-cache.sh"
 qdistro_load_test_substrate
-# The virt-customize appliance reaches the host at the libguestfs backend's
-# address (passt 169.254.2.2 / slirp 10.0.2.2) — wire before any
-# qdistro_substrate_repo_command call so its slirp default does not win.
-qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" "$(qd_guestfs_host_addr)"
 CACHE_DIR="${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}"
 CLOUD_URL="$QDISTRO_SUBSTRATE_CLOUD_URL"
 # deps-cache layout: cloud/<sha256>/<upstream-name>.qcow2 (content-keyed,
@@ -126,6 +122,19 @@ virt-resize --quiet --expand /dev/sda3 "$CLOUD_CACHE" "$PARTIAL" >/dev/null || {
 
 echo "[scratch] customizing: admin user + qga + SELinux + cloud-init mask..."
 qdistro_rpm_cache_import "$PARTIAL"
+# The virt-customize appliance reaches the host at the libguestfs backend's
+# address. Version/binary checks cannot prove which backend a launch picks
+# — probe a diskless appliance (as build-baked-baseweed.sh does) and wire
+# the mirror for the observed address before repo_cmd is built.
+GUESTFS_BACKEND="$(qd_guestfs_probe_backend)" || {
+    echo "[scratch] ERROR: libguestfs backend probe failed" >&2; exit 3;
+}
+echo "[scratch] libguestfs network backend: $GUESTFS_BACKEND"
+if [ "$GUESTFS_BACKEND" = passt ]; then
+    qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 169.254.2.2
+else
+    qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2
+fi
 repo_cmd="$(qdistro_substrate_repo_command)" || {
     echo "ERROR: substrate repo command failed (offline without QDISTRO_REPO_BASE?)" >&2
     exit 3

@@ -34,7 +34,9 @@ if [ -z "$STOCK_ISO" ]; then
         # Adopt the legacy url-keyed tmp file when it holds these bytes.
         qd_adopt agama "$AGAMA_STOCK_ISO_SHA256" \
             "$QDISTRO_BUILD_TMP/agama-installer-stock.iso" "$AGAMA_STOCK_ISO_URL" || true
-        qd_fetch agama "$AGAMA_STOCK_ISO_URL" "$AGAMA_STOCK_ISO_SHA256" >/dev/null || {
+        # qd_fetch prints the real stored path — a content-keyed hit may
+        # live under a different basename than the URL's.
+        STOCK_ISO="$(qd_fetch agama "$AGAMA_STOCK_ISO_URL" "$AGAMA_STOCK_ISO_SHA256")" || {
             echo "stock ISO failed digest verification (or missing under offline): $AGAMA_STOCK_ISO_URL" >&2
             exit 1
         }

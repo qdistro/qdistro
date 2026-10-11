@@ -52,9 +52,10 @@ Usage:
 
 Options:
   --force        Rebuild even if dest already exists.
-  --mirror URL   Override Tumbleweed-Minimal-VM download URL.
-                 Default: https://download.opensuse.org/tumbleweed/appliances/
-                          openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2
+  --mirror URL   Override Tumbleweed-Minimal-VM download URL (floating,
+                 unverified — operator override). Default: the snapshot.conf-
+                 pinned Minimal-VM image, fetched verified (openSUSE-signed
+                 sha256 + pinned digest) via the dep cache.
   --dest PATH    Output path (default /var/lib/libvirt/images/qdistro-tier5-base.qcow2).
 
 Reqs:
@@ -68,9 +69,18 @@ Env:
 EOF
 }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Dep-cache libs: verified cloud fetch (opensuse-cloud-image.sh) +
+# snapshot pin + mirror wiring (test-substrate.sh → deps-cache.sh).
+# This script runs as root, so the cache root is ~root/.cache/qdistro —
+# warm it with `sudo scripts/vm/qd-cache-warm`, or point
+# QDISTRO_DEPS_CACHE_DIR at the shared warm cache.
+. "$SCRIPT_DIR/../scripts/vm/lib/test-substrate.sh"
+. "$SCRIPT_DIR/../scripts/vm/lib/opensuse-cloud-image.sh"
+
 FORCE=0
 DEST=/var/lib/libvirt/images/qdistro-tier5-base.qcow2
-MIRROR=https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2
+MIRROR=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -100,11 +110,41 @@ trap 'rm -rf "$WORK"' EXIT
 
 BASE_QCOW="$WORK/base.qcow2"
 RESIZED_QCOW="$WORK/base-resized.qcow2"
-echo "[tier5-build] downloading base image..."
-wget -q --show-progress -O "$BASE_QCOW" "$MIRROR" || {
-    echo "[tier5-build] FAIL: download from $MIRROR" >&2
-    exit 3
-}
+if [ -n "$MIRROR" ]; then
+    # Explicit operator override: keep the historical floating fetch. It is
+    # unverified by design — the pinned default below is the verified path.
+    echo "[tier5-build] downloading base image (--mirror override; unverified)..."
+    wget -q --show-progress -O "$BASE_QCOW" "$MIRROR" || {
+        echo "[tier5-build] FAIL: download from $MIRROR" >&2
+        exit 3
+    }
+    REPO_CMD=""
+else
+    # Default: the snapshot-pinned Minimal-VM image — same verified artifact
+    # the test substrate consumes (openSUSE-signed sidecars + pinned digest),
+    # content-addressed in the deps cache. Copy out so virt-customize never
+    # writes into the cache entry.
+    qdistro_load_test_substrate floor || { echo "[tier5-build] snapshot.conf load failed" >&2; exit 2; }
+    CLOUD_CACHE="$(qd_path cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$(basename "$QDISTRO_SUBSTRATE_CLOUD_URL")")"
+    download_verified_cloud_image "$QDISTRO_SUBSTRATE_CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" \
+        || { echo "[tier5-build] FAIL: verified cloud image ($QDISTRO_SUBSTRATE_CLOUD_URL)" >&2; exit 3; }
+    echo "[tier5-build] using verified pinned image: $CLOUD_CACHE"
+    cp --reflink=auto -f "$CLOUD_CACHE" "$BASE_QCOW"
+    # Pin the guest repos to the same snapshot as the base image: a complete
+    # local mirror gets served and wired (libguestfs appliance → passt/slirp
+    # addr); otherwise the repo files point at the snapshot's history URL —
+    # still the right content for a snapshot-pinned base. Under offline mode
+    # with no mirror this fails closed here instead of inside the guest.
+    GUESTFS_BACKEND="$(qd_guestfs_probe_backend)"         || { echo "[build] ERROR: libguestfs backend probe failed" >&2; exit 3; }
+    if [ "$GUESTFS_BACKEND" = passt ]; then
+        qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 169.254.2.2 || true
+    else
+        qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2 || true
+    fi
+    REPO_CMD="$(qdistro_substrate_repo_command)" \
+        || { echo "[tier5-build] substrate repo command failed" >&2; exit 3; }
+    echo "[tier5-build] guest installs pinned against ${QDISTRO_REPO_BASE:-snapshot history} ($QDISTRO_SUBSTRATE_SNAPSHOT)"
+fi
 
 echo "[tier5-build] expanding base image..."
 qemu-img create -f qcow2 "$RESIZED_QCOW" "${TIER5_BASE_SIZE:-5G}" >/dev/null
@@ -207,7 +247,12 @@ echo "[tier5-build] customizing..."
 # mirrors the OUTER baseweed images, which mask jeos-firstboot for the
 # same reason (scripts/vm/build-baseweed-from-scratch.sh,
 # scripts/vm/fresh-vm-bootstrap.sh).
+# Repo pinning runs first: virt-customize applies argv-ordered ops, so the
+# .repo files are in place before --install resolves packages.
+REPO_ARGS=()
+[ -n "${REPO_CMD:-}" ] && REPO_ARGS=(--run-command "$REPO_CMD")
 virt-customize -a "$BASE_QCOW" \
+    "${REPO_ARGS[@]}" \
     --install waypipe,wayland-utils,qemu-guest-agent,kbd,alsa-utils,weston,MozillaFirefox,baobab,gnome-text-editor,nautilus,gnome-calculator,libqt5-qtwayland,qt6-wayland,kcalc,dolphin,konsole,kate,fontconfig,dejavu-fonts,liberation-fonts,cantarell-fonts,google-noto-sans-fonts,google-noto-serif-fonts,google-noto-sans-mono-fonts,google-noto-coloremoji-fonts,google-noto-sans-cjk-fonts \
     --run-command 'systemctl enable qemu-guest-agent.service' \
     `# The host drives the tier-5 publisher via qga guest-exec. Current` \

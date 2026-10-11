@@ -88,10 +88,11 @@ if [ -z "$IB_SHA256" ]; then
 fi
 # shellcheck source=../scripts/vm/lib/deps-cache.sh
 . "$(cd "$(dirname "$0")/.." && pwd)/scripts/vm/lib/deps-cache.sh"
-IB_TARBALL="$(qd_path openwrt "$IB_SHA256" "${IB_NAME}.tar.zst")"
 # Adopt the legacy flat tarball if it already holds these bytes.
 qd_adopt openwrt "$IB_SHA256" "$CACHE_DIR/${IB_NAME}.tar.zst" "$IB_URL" || true
-qd_fetch openwrt "$IB_URL" "$IB_SHA256" >/dev/null \
+# qd_fetch prints the real stored path — a content-keyed hit may live
+# under a different basename than the URL's.
+IB_TARBALL="$(qd_fetch openwrt "$IB_URL" "$IB_SHA256" "${IB_NAME}.tar.zst")" \
     || { echo "[netvm-build] ImageBuilder fetch failed (digest or offline-missing): $IB_URL" >&2; exit 4; }
 qd_write_manifest openwrt "$IB_SHA256" "$IB_URL" "${IB_NAME}.tar.zst"
 

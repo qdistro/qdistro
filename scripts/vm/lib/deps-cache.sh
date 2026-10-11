@@ -422,8 +422,10 @@ qd_repo_wire_container() {
 # (whitespace, quotes, metacharacters) is injection, not a URL.
 qd_repo_base_safe() {
     # regex in a variable: bare &/() in an unquoted =~ pattern trips the
-    # [[ ]] parser before the match ever runs.
-    local re='^(https?|file)://[A-Za-z0-9._~:/?&=%+@-]+$'
+    # [[ ]] parser before the match ever runs. '&' is deliberately NOT in
+    # the charset — a repo base is a plain path prefix (no query), and an
+    # unquoted '&' inside a --run-command string would split commands.
+    local re='^(https?|file)://[A-Za-z0-9._~:/?=%+@-]+$'
     [[ "$1" =~ $re ]]
 }
 
@@ -451,6 +453,37 @@ qd_guestfs_host_addr() {
     else
         echo 10.0.2.2
     fi
+}
+
+# qd_guestfs_probe_backend — launch a diskless libguestfs appliance with
+# debug output and print the backend it ACTUALLY selected: "passt" or
+# "slirp". The libguestfs version/binary heuristics of
+# qd_guestfs_host_addr cannot prove the pick — passt needs to be runnable,
+# which only a real launch shows. rc non-zero when the appliance fails to
+# launch (diagnostics on stderr); callers should treat that as fatal, not
+# fall back to guessing.
+qd_guestfs_probe_backend() {
+    local log
+    log="$(mktemp)" || return 1
+    if ! LIBGUESTFS_DEBUG=1 guestfish >"$log" 2>&1 <<'GUESTFISH'
+set-network true
+run
+GUESTFISH
+    then
+        echo "ERROR: libguestfs backend probe failed to launch" >&2
+        tail -40 "$log" >&2
+        rm -f "$log"
+        return 1
+    fi
+    local backend=slirp
+    if { grep -Fq '<backend type="passt"/>' "$log" \
+         && grep -Fq 'address="169.254.2.15" prefix="16"' "$log"; } \
+        || { grep -Fq 'command: run: passt' "$log" \
+             && grep -Fq -- '--address 169.254.2.15' "$log"; }; then
+        backend=passt
+    fi
+    rm -f "$log"
+    printf '%s\n' "$backend"
 }
 
 # qd_repo_wire_guest <snapshot> [host-addr]

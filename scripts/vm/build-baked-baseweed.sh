@@ -172,29 +172,12 @@ select_host_resolvers() {
 
 # libguestfs 1.60 prefers passt when it is runnable, but that is an internal
 # backend decision: the presence of /usr/bin/passt alone does not prove the
-# appliance actually uses it.  Launch a diskless network appliance and inspect
-# the generated libvirt XML/direct-QEMU command before permitting passt's fixed
-# 169.254.2.0/16 recovery addresses.
+# appliance actually uses it.  Probe a diskless network appliance and inspect
+# the generated libvirt XML/direct-QEMU command before permitting passt's
+# fixed 169.254.2.0/16 recovery addresses.
+GUESTFS_BACKEND="$(qd_guestfs_probe_backend)" || exit 3
 PASST_CONFIRMED=0
-BACKEND_PROBE_LOG="$(mktemp)"
-if LIBGUESTFS_DEBUG=1 guestfish >"$BACKEND_PROBE_LOG" 2>&1 <<'GUESTFISH'
-set-network true
-run
-GUESTFISH
-then
-    if { grep -Fq '<backend type="passt"/>' "$BACKEND_PROBE_LOG" \
-         && grep -Fq 'address="169.254.2.15" prefix="16"' "$BACKEND_PROBE_LOG"; } \
-        || { grep -Fq 'command: run: passt' "$BACKEND_PROBE_LOG" \
-             && grep -Fq -- '--address 169.254.2.15' "$BACKEND_PROBE_LOG"; }; then
-        PASST_CONFIRMED=1
-    fi
-else
-    echo "ERROR: could not launch the libguestfs backend probe" >&2
-    tail -40 "$BACKEND_PROBE_LOG" >&2
-    rm -f "$BACKEND_PROBE_LOG"
-    exit 3
-fi
-rm -f "$BACKEND_PROBE_LOG"
+if [ "$GUESTFS_BACKEND" = passt ]; then PASST_CONFIRMED=1; fi
 
 mapfile -t HOST_DNS_SERVERS < <(select_host_resolvers || true)
 HOST_DNS="${HOST_DNS_SERVERS[*]:-}"
@@ -211,7 +194,7 @@ fi
 if [ -n "${QDISTRO_REPO_BASE:-}" ]; then
     qd_repo_base_safe "$QDISTRO_REPO_BASE" \
         || { echo "ERROR: QDISTRO_REPO_BASE is not a plain URL: ${QDISTRO_REPO_BASE:0:80}" >&2; exit 3; }
-    NET_CHECK="curl -fsS --connect-timeout 10 --max-time 30 $QDISTRO_REPO_BASE/$QDISTRO_SUBSTRATE_SNAPSHOT/tumbleweed/repo/oss/repodata/repomd.xml >/dev/null"
+    NET_CHECK="curl -fsS --connect-timeout 10 --max-time 30 '$QDISTRO_REPO_BASE/$QDISTRO_SUBSTRATE_SNAPSHOT/tumbleweed/repo/oss/repodata/repomd.xml' >/dev/null"
 else
     NET_CHECK='getent ahostsv4 download.opensuse.org >/dev/null && curl -fsS --connect-timeout 10 --max-time 30 https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml >/dev/null'
 fi

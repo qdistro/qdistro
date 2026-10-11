@@ -726,6 +726,7 @@ fab_mirror() {
     run qd_repo_base_safe "http://x/
 [evil]"; [ "$status" -eq 1 ]
     run qd_repo_base_safe 'http://x/$(id)'; [ "$status" -eq 1 ]
+    run qd_repo_base_safe 'http://x/a&rm -rf /'; [ "$status" -eq 1 ]
     run qd_repo_base_safe 'not-a-url'; [ "$status" -eq 1 ]
 }
 

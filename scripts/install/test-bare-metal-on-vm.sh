@@ -130,10 +130,11 @@ prep_image() {
         # dep cache's remit.
         local ubuntu_sha="${QDISTRO_UBUNTU_CLOUD_SHA256:-8800651811af9a85465ad1d552add729947bb16488dddb4a9b5305a3d97332b2}"
         . "$SCRIPT_DIR/../vm/lib/deps-cache.sh"
-        cache="$(qd_path cloud "$ubuntu_sha" "$(basename "$url")")"
         # Adopt the legacy flat cache if it already holds these bytes.
         qd_adopt cloud "$ubuntu_sha" "$CACHE_DIR/ubuntu-26.04-cloud-base.qcow2" "$url" || true
-        qd_fetch cloud "$url" "$ubuntu_sha" >/dev/null \
+        # qd_fetch prints the real stored path — a content-keyed hit may
+        # live under a different basename than the URL's.
+        cache="$(qd_fetch cloud "$url" "$ubuntu_sha" "$(basename "$url")")" \
             || { log "[$distro] ERROR: ubuntu image failed digest verification (or is missing under offline mode)"; return 1; }
         qd_write_manifest cloud "$ubuntu_sha" "$url" "$(basename "$url")"
         log "[$distro] verified image: $cache"

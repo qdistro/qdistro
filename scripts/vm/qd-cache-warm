@@ -11,7 +11,11 @@
 #     meson   libdisplay-info tarball for the vendored-libweston wrap-git seed
 #   --check audit only: report which classes are warm; no downloads, no
 #           network. Exit 1 when anything is missing — the offline
-#           pre-flight before a QCI_OFFLINE run.
+#           pre-flight before a QCI_OFFLINE run. The audit is deep: mirror
+#           files are re-verified against repomd/primary digests and cached
+#           artifacts re-hash against their content key, so a deleted or
+#           corrupt file fails the check rather than riding a stale marker.
+#           `--check --quick` audits structure/markers only.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,12 +26,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/opensuse-cloud-image.sh
 . "$HERE/lib/opensuse-cloud-image.sh"
 
-check=0
-case "${1:-}" in
-    '') ;;
-    --check) check=1 ;;
-    *) echo "usage: qd-cache-warm [--check]" >&2; exit 2 ;;
-esac
+check=0 quick=0
+for arg in "$@"; do
+    case "$arg" in
+        --check) check=1 ;;
+        --quick) quick=1 ;;
+        *) echo "usage: qd-cache-warm [--check [--quick]]" >&2; exit 2 ;;
+    esac
+done
 
 # floor mode: a stale-but-valid snapshot still warms — the pin decides what
 # runs, freshness policy stays with the lanes.
@@ -49,22 +55,39 @@ mark() { # mark <class> <state>
 }
 
 if [ "$check" -eq 1 ]; then
-    echo "qd-cache-warm --check (snapshot $snap):"
+    echo "qd-cache-warm --check (snapshot $snap)$([ "$quick" -eq 1 ] && echo ' [quick]'):"
+    repo_state=missing
     if qd_repo_present "$snap" oss && qd_repo_present "$snap" non-oss; then
-        mark repo ok
-    else
-        mark repo missing
+        repo_state=ok
+        if [ "$quick" -eq 0 ]; then
+            # Deep audit: re-verify every file repomd/primary names.
+            # Offline env makes --verify audit-only (dies, never refetches).
+            if ! QDISTRO_DEPS_OFFLINE=1 QCI_OFFLINE=1 \
+                    "$HERE/qd-repo-mirror.py" --root "$(qd_deps_root)" \
+                    --snapshot "$snap" --verify; then
+                repo_state=missing
+            fi
+        fi
     fi
+    mark repo "$repo_state"
+
     # Offline cloud verification re-verifies the signed sidecars — the
-    # image alone is NOT a warm entry.
+    # image alone is NOT a warm entry. Deep mode also re-runs the full
+    # signature + digest verification.
     cloud_dir="$(qd_path cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256")"
+    cloud_state=missing
     if qd_has cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$cloud_base" \
         && [ -s "$cloud_dir/$cloud_base.sha256" ] \
         && [ -s "$cloud_dir/$cloud_base.sha256.asc" ]; then
-        mark cloud ok
-    else
-        mark cloud missing
+        cloud_state=ok
+        if [ "$quick" -eq 0 ] && ! verify_cached_cloud_image \
+                "$cloud_dir/$cloud_base" "$cloud_dir/$cloud_base.sha256" \
+                "$cloud_dir/$cloud_base.sha256.asc" "$cloud_base" >/dev/null 2>&1; then
+            cloud_state=missing
+        fi
     fi
+    mark cloud "$cloud_state"
+
     # Structure AND archive bytes — qd_oci_ensure verifies the sha256
     # sidecar before podman-load, so the audit does too.
     if qd_oci_cached "$oci_ref" --verify; then
@@ -72,11 +95,49 @@ if [ "$check" -eq 1 ]; then
     else
         mark oci missing
     fi
-    if qd_has src "$di_sha" "$(basename "$di_url")"; then
+    if [ "$quick" -eq 0 ]; then
+        if qd_verify src "$di_sha" >/dev/null 2>&1; then mark meson ok; else mark meson missing; fi
+    elif qd_has src "$di_sha" "$(basename "$di_url")"; then
         mark meson ok
     else
         mark meson missing
     fi
+
+    # Extra pinned lanes (ubuntu base image, Agama stock ISO, OpenWrt
+    # ImageBuilder, …) land in the same sha-keyed layout — audit every
+    # entry present: each artifact must hash to its directory key.
+    if [ "$quick" -eq 0 ]; then
+        extras=0 bad=0
+        for class in agama openwrt ubuntu; do
+            cdir="$(qd_deps_root)/$class"
+            [ -d "$cdir" ] || continue
+            for kdir in "$cdir"/*/; do
+                [ -d "$kdir" ] || continue
+                key="$(basename "$kdir")"
+                # Lock-file-only residue from an aborted fetch is not an
+                # entry — only audit keys that hold an artifact.
+                qd_has "$class" "$key" || continue
+                extras=$((extras + 1))
+                if ! qd_verify "$class" "$key" >/dev/null 2>&1; then
+                    echo "  CORRUPT $class/$key"
+                    bad=$((bad + 1))
+                fi
+            done
+        done
+        # ubuntu's image lives in the cloud class (qd_fetch cloud …) —
+        # audit every non-substrate cloud entry the same way.
+        for kdir in "$(qd_deps_root)/cloud"/*/; do
+            [ -d "$kdir" ] || continue
+            key="$(basename "$kdir")"
+            [ "$key" = "$QDISTRO_SUBSTRATE_CLOUD_SHA256" ] && continue
+            qd_has cloud "$key" || continue
+            extras=$((extras + 1))
+            qd_verify cloud "$key" >/dev/null 2>&1 || { echo "  CORRUPT cloud/$key"; bad=$((bad + 1)); }
+        done
+        if [ "$bad" -ne 0 ]; then ok=0; fi
+        if [ "$extras" -gt 0 ]; then echo "  (audited $extras extra pinned entries)"; fi
+    fi
+
     [ "$ok" -eq 1 ] && echo "cache warm: all classes present" || echo "cache cold — run qd-cache-warm (needs network)"
     exit $((1 - ok))
 fi

@@ -62,9 +62,10 @@ Usage:
 
 Options:
   --force        Rebuild even if dest already exists.
-  --mirror URL   Override Tumbleweed-Minimal-VM download URL.
-                 Default: https://download.opensuse.org/tumbleweed/appliances/
-                          openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2
+  --mirror URL   Override Tumbleweed-Minimal-VM download URL (floating,
+                 unverified — operator override). Default: the snapshot.conf-
+                 pinned Minimal-VM image, fetched verified (openSUSE-signed
+                 sha256 + pinned digest) via the dep cache.
   --dest PATH    Output path. Default
                  /var/lib/libvirt/images/qdistro-tier5b-<app>-base.qcow2
   --app  APP     Target app name (used to derive default dest, the
@@ -85,9 +86,17 @@ Env:
 EOF
 }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Dep-cache libs: verified cloud fetch + snapshot pin + mirror wiring.
+# Runs as root → cache root is ~root/.cache/qdistro; warm it with
+# `sudo scripts/vm/qd-cache-warm` or point QDISTRO_DEPS_CACHE_DIR at a
+# shared warm cache.
+. "$SCRIPT_DIR/../scripts/vm/lib/test-substrate.sh"
+. "$SCRIPT_DIR/../scripts/vm/lib/opensuse-cloud-image.sh"
+
 FORCE=0
 DEST=""
-MIRROR=https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2
+MIRROR=""
 APP=firefox
 PKG=""
 
@@ -135,11 +144,39 @@ WORK="$(mktemp -d /tmp/tier5b-build.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
 BASE_QCOW="$WORK/base.qcow2"
-echo "[tier5b-build] downloading base image..."
-wget -q --show-progress -O "$BASE_QCOW" "$MIRROR" || {
-    echo "[tier5b-build] FAIL: download from $MIRROR" >&2
-    exit 3
-}
+if [ -n "$MIRROR" ]; then
+    # Explicit operator override: historical floating fetch (unverified by
+    # design — the pinned default below is the verified path).
+    echo "[tier5b-build] downloading base image (--mirror override; unverified)..."
+    wget -q --show-progress -O "$BASE_QCOW" "$MIRROR" || {
+        echo "[tier5b-build] FAIL: download from $MIRROR" >&2
+        exit 3
+    }
+    REPO_CMD=""
+else
+    # Default: the snapshot-pinned Minimal-VM image — the same verified
+    # artifact the test substrate consumes — content-addressed in the deps
+    # cache. Copy out so virt-customize never writes into the cache entry.
+    qdistro_load_test_substrate floor || { echo "[tier5b-build] snapshot.conf load failed" >&2; exit 2; }
+    CLOUD_CACHE="$(qd_path cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$(basename "$QDISTRO_SUBSTRATE_CLOUD_URL")")"
+    download_verified_cloud_image "$QDISTRO_SUBSTRATE_CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" \
+        || { echo "[tier5b-build] FAIL: verified cloud image ($QDISTRO_SUBSTRATE_CLOUD_URL)" >&2; exit 3; }
+    echo "[tier5b-build] using verified pinned image: $CLOUD_CACHE"
+    cp --reflink=auto -f "$CLOUD_CACHE" "$BASE_QCOW"
+    # Pin the guest repos to the same snapshot as the base image: serve a
+    # complete local mirror when one exists (libguestfs appliance →
+    # passt/slirp addr), else point at the snapshot's history URL. Offline
+    # with no mirror fails closed here, not inside the guest.
+    GUESTFS_BACKEND="$(qd_guestfs_probe_backend)"         || { echo "[build] ERROR: libguestfs backend probe failed" >&2; exit 3; }
+    if [ "$GUESTFS_BACKEND" = passt ]; then
+        qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 169.254.2.2 || true
+    else
+        qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2 || true
+    fi
+    REPO_CMD="$(qdistro_substrate_repo_command)" \
+        || { echo "[tier5b-build] substrate repo command failed" >&2; exit 3; }
+    echo "[tier5b-build] guest installs pinned against ${QDISTRO_REPO_BASE:-snapshot history} ($QDISTRO_SUBSTRATE_SNAPSHOT)"
+fi
 
 # Stage the per-app publisher. Unlike tier-5's publisher (which accepts
 # arbitrary argv), tier-5b's publisher hard-codes the allowed app
@@ -180,8 +217,13 @@ else
 fi
 
 echo "[tier5b-build] customizing for app=$APP pkg=$PKG..."
+# Repo pinning runs first: virt-customize applies argv-ordered ops, so the
+# .repo files are in place before --install resolves packages.
+REPO_ARGS=()
+[ -n "${REPO_CMD:-}" ] && REPO_ARGS=(--run-command "$REPO_CMD")
 # shellcheck disable=SC2086
 virt-customize -a "$BASE_QCOW" \
+    "${REPO_ARGS[@]}" \
     --install "waypipe,wayland-utils,qemu-guest-agent,kbd,alsa-utils,$PKG" \
     --run-command 'systemctl enable qemu-guest-agent.service' \
     --run-command 'systemctl enable serial-getty@ttyS0.service' \
