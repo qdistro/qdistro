@@ -177,7 +177,17 @@ silently merge:
   names our appId, records the disk's own dev/ino, AND its backing
   file is our base — in every domain state, since the domain's
   binding vouches for the path, not the inode, and a file swapped in
-  while the domain was stopped must refuse the same way. Every
+  while the domain was stopped must refuse the same way. The sidecar
+  alone is not enough to prove origin, though: it lives in the
+  admin-writable image dir, so anyone who can stat their own
+  base-backed qcow2 can write the same plain-text record beside it.
+  The create therefore ALSO stamps a matching
+  `<appId> <dev> <ino>` record into a root-owned 0700 registry at
+  `/var/lib/qdistro/tier5-owned/<vm>` (persistent, so ownership
+  survives reboot), and every accept/recover/reap/delete decision
+  requires BOTH records to bind the same inode — a planted
+  disk+sidecar can satisfy the sidecar but can never mint the
+  registry entry (sol r33). Every
   unproven disk at our name — missing
   sidecar, foreign appId, inode mismatch, wrong provenance — is
   refused AND preserved, never booted and never deleted by the

@@ -1020,3 +1020,62 @@ def test_tier4_rdp_password_never_enters_argv():
     # no argv-bearing variant survives anywhere in tier4
     assert '"$RDP_PASSWORD" >"$1"' not in T4SPAWN
     assert '_ "$RDP_PASSWORD_FILE" "$RDP_PASSWORD"' not in T4SPAWN
+
+
+def test_ownership_registry_authenticates_pairs():
+    # ensures: a co-admin who can write DISK_DIR cannot get a planted
+    #          disk+sidecar accepted, recovered, booted or reaped as
+    #          ours — the admin-writable record is forgeable, so a
+    #          second "<appId> <dev> <ino>" record lives in a
+    #          root-owned 0700 dir under /var/lib the actor can
+    #          neither write nor read, and every accept/recover/
+    #          reap/delete decision requires both records to agree
+    #          (sol r33)
+    for src in (SPAWN, CLEANUP):
+        assert 'TIER5_OWNED_DIR:-/var/lib/qdistro/tier5-owned' in src
+        assert '_read_owned()' in src
+        assert '_drop_owned()' in src
+        assert 'read -r _oapp _oident' in src
+        # the registry dir must be persistent + root-owned, and the
+        # record a regular non-symlink file
+        assert '[ ! -L "$_f" ]' in src
+    assert '_write_owned_record()' in SPAWN
+    assert 'install -d -m 0700 "$OWNED_DIR"' in SPAWN
+    create = _section("_create_overlay_disk")
+    # written after the sidecar publishes, before the disk links — a
+    # crash leaves the recoverable trio, and a failed create never
+    # leaves a lone record that would refuse every later launch
+    assert create.index('ln -T "$_stmp" "$DISK.appid"') \
+        < create.index('_write_owned_record "$_di"') \
+        < create.index('ln -T "$_tmp" "$DISK"')
+    body = _section("create_domain")
+    # reuse requires sidecar AND registry to bind the same inode
+    assert body.index('_read_owned "$VM_NAME"') \
+        < body.index('_bino=$_sident')
+    assert '[ "$_oapp" != "$POLICY_KEY" ]' in body
+    assert '[ "$_oident" != "$_sident" ]' in body
+    # recovery requires the trio: registry must agree with the
+    # sidecar's recorded inode before the partial may be promoted
+    assert '[ "$_oapp" = "$POLICY_KEY" ]' in body
+    assert '[ "$_oident" = "$_sident" ]' in body
+    # teardown deletes only when both records bind the disk inode,
+    # then drops the registry entry with its disk
+    tail = _section("cleanup")
+    assert '_read_owned "$VM_NAME"' in tail
+    assert '[ "$_oident" != "$_dino" ]' in tail
+    assert '_drop_owned "$VM_NAME"' in tail
+    # the orphan reaper requires the registry at BOTH verification
+    # points and drops it on reap — a planted pair can never be
+    # deleted (or kept) as ours
+    reaper = SPAWN[SPAWN.index("orphan-overlay reaper"):
+                   SPAWN.index("swapped during reap")]
+    assert reaper.count('_read_owned "$base"') >= 2
+    assert reaper.count('[ "$_oapp" = "$_sapp" ]') >= 2
+    assert reaper.count('[ "$_oident" = "$_oino" ]') >= 2
+    assert '_drop_owned "$base"' in reaper
+    # the standalone helper refuses a planted pair on its bound path
+    # and drops the record on a successful cleanup
+    assert 'no matching root-side' in CLEANUP
+    assert '[ "$_oapp" != "$_sapp" ]' in CLEANUP
+    assert '[ "$_oident" != "$_dino" ]' in CLEANUP
+    assert '_drop_owned "$VM_NAME"' in CLEANUP

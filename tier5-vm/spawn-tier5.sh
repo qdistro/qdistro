@@ -471,6 +471,33 @@ _read_owner_record() {
     exec {_rfd}<&-
 }
 
+# Root-side ownership registry: the .appid sidecar alone cannot prove
+# THIS script created the disk pair — it lives in the admin-writable
+# DISK_DIR, and a co-admin who can stat their own base-backed qcow2
+# can write the same plain-text record beside it (sol r33). The
+# registry duplicates "<appId> <dev> <ino>" in a root-owned 0700 dir
+# the co-admin can neither write nor read, so a planted pair can
+# never mint the record that acceptance requires. Persistent
+# (/var/lib, not /run) so ownership survives reboot.
+# _write_owned_record <dev-ino> — record that WE created the pair.
+# _read_owned <vm> — read it back; empty _oapp means unproven.
+# _drop_owned <vm> — remove it with its disk (root dir: plain rm).
+_write_owned_record() {
+    install -d -m 0700 "$OWNED_DIR" 2>/dev/null || return 1
+    printf '%s %s\n' "$POLICY_KEY" "$1" \
+        >"$OWNED_DIR/$VM_NAME" 2>/dev/null
+}
+_oapp=""; _oident=""
+_read_owned() {
+    _oapp=""; _oident=""
+    local _f="$OWNED_DIR/$1"
+    [ -f "$_f" ] && [ ! -L "$_f" ] || return 0
+    read -r _oapp _oident <"$_f" 2>/dev/null || true
+}
+_drop_owned() {
+    rm -f "$OWNED_DIR/$1" 2>/dev/null || true
+}
+
 # _unlink_verified <path> <dev-ino> — remove <path> only if it still
 # names the verified inode. A check→rm window lets a co-admin swap the
 # entry so `rm` deletes the replacement (sol r25): instead we
@@ -682,6 +709,9 @@ else
     # the admin between our provenance gate and qemu's open (sol r26)
     BOOT_DIR="${TIER5_BOOT_DIR:-/run/qdistro-tier5-boot}"
     BOOT_PATH="$BOOT_DIR/$VM_NAME.qcow2"
+    # Root-side ownership registry — the origin proof a planted
+    # disk+sidecar can never mint (sol r33). Persistent, root-owned.
+    OWNED_DIR="${TIER5_OWNED_DIR:-/var/lib/qdistro/tier5-owned}"
     # The published app catalogue — the reaper uses it to tell an OWNED
     # orphan (sidecar appId still published) from a retired app's disk.
     VMAPPS_MANIFEST="${VMAPPS_MANIFEST:-/usr/share/qdistro/vmapps/base.json}"
@@ -770,11 +800,18 @@ else
             # sidecar, an inode mismatch, a foreign derivation, or an
             # unverifiable verdict all preserve (sol r12–r19).
             _read_owner_record "$overlay.appid"
+            _read_owned "$base"
             [ -f "$overlay" ] && [ ! -L "$overlay" ] \
                 || { exec {hfd}>&-; continue; }
             _oino=$(stat -c '%d %i' "$overlay" 2>/dev/null)
+            # Sidecar AND registry must bind this inode — a planted
+            # pair satisfies the admin-writable sidecar but can never
+            # mint the root-side record, and reaping deletes, so the
+            # stronger proof is required (sol r33).
             [ -n "$_sapp" ] && [ -n "$_oino" ] \
                 && [ "$_sident" = "$_oino" ] \
+                && [ "$_oapp" = "$_sapp" ] \
+                && [ "$_oident" = "$_oino" ] \
                 || { exec {hfd}>&-; continue; }
             [ "$(tier5_derived_name "$_sapp")" = "$base" ] \
                 || { exec {hfd}>&-; continue; }
@@ -808,6 +845,7 @@ else
             # backing of a different file than the one we unlink
             # (sol r27).
             _read_owner_record "$overlay.appid"
+            _read_owned "$base"
             [ -f "$overlay" ] && [ ! -L "$overlay" ] \
                 || { exec {hfd}>&-; continue; }
             { exec {ofd}< "$overlay"; } 2>/dev/null \
@@ -819,6 +857,8 @@ else
             exec {ofd}<&-
             [ -n "$_sapp" ] && [ -n "$_oino" ] \
                 && [ "$_sident" = "$_oino" ] \
+                && [ "$_oapp" = "$_sapp" ] \
+                && [ "$_oident" = "$_oino" ] \
                 && [ "$_backing" = "$DISK_BASE" ] \
                 || { exec {hfd}>&-; continue; }
             [ "$(tier5_derived_name "$_sapp")" = "$base" ] \
@@ -832,6 +872,7 @@ else
             if _unlink_verified "$overlay" "$_oino"; then
                 _unlink_verified "$overlay.appid" "$_sfid" \
                     2>/dev/null || true
+                _drop_owned "$base"
                 # its stale boot mount (a crashed wrapper's leftover)
                 # pins the same inode — drop it with the overlay
                 umount -l "$BOOT_DIR/$base.qcow2" 2>/dev/null || true
@@ -1304,11 +1345,18 @@ cleanup() {
                         # unrecognized record and is preserved
                         # (sol r22).
                         _read_owner_record "$DISK.appid"
+                        _read_owned "$VM_NAME"
                         if [ -f "$DISK" ] && [ ! -L "$DISK" ]; then
                             _dino=$(stat -c '%d %i' "$DISK" 2>/dev/null)
+                            # Sidecar AND registry must both bind this
+                            # inode — a planted pair can satisfy the
+                            # admin-writable sidecar but never the
+                            # root-side record (sol r33).
                             if [ "$_sapp" != "$POLICY_KEY" ] \
                                 || [ -z "$_dino" ] \
-                                || [ "$_sident" != "$_dino" ]; then
+                                || [ "$_sident" != "$_dino" ] \
+                                || [ "$_oapp" != "$POLICY_KEY" ] \
+                                || [ "$_oident" != "$_dino" ]; then
                                 domain_reaped=0
                                 echo "[tier5] WARN: keeping $DISK — overlay owner unproven" >&2
                             elif _unlink_verified "$DISK" "$_dino"; then
@@ -1317,6 +1365,7 @@ cleanup() {
                                 # foreign replacement (sol r25)
                                 _unlink_verified "$DISK.appid" "$_sfid" \
                                     2>/dev/null || true
+                                _drop_owned "$VM_NAME"
                             else
                                 domain_reaped=0
                                 echo "[tier5] WARN: keeping $DISK — it" >&2
@@ -1335,6 +1384,8 @@ cleanup() {
                                 && [ -n "$_sfid" ]; then
                                 _unlink_verified "$DISK.appid" "$_sfid" \
                                     || domain_reaped=0
+                                [ "$domain_reaped" = "1" ] \
+                                    && _drop_owned "$VM_NAME"
                             else
                                 domain_reaped=0
                                 echo "[tier5] WARN: keeping $DISK.appid —" >&2
@@ -1563,9 +1614,27 @@ _create_overlay_disk() {
         exit 4
     fi
     _unlink_verified "$_stmp" "$_sino" 2>/dev/null || true
+    # Root-side ownership record BEFORE the disk link: the sidecar
+    # alone is forgeable by anyone who can write DISK_DIR, so every
+    # later accept/recover/reap decision requires this registry entry
+    # to agree — a crash after it lands leaves the provable trio
+    # (record + registry + partial) the caller's recovery finishes
+    # (sol r33).
+    if ! _write_owned_record "$_di"; then
+        _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
+        _unlink_verified "$DISK.appid" "$_sino" 2>/dev/null || true
+        echo "[tier5] FAIL: cannot write ownership record for" >&2
+        echo "        $VM_NAME — refusing to publish unproven disk" >&2
+        exit 4
+    fi
     if ! ln -T "$_tmp" "$DISK" 2>/dev/null \
             || [ ! "$DISK" -ef "$_tmp" ]; then
         _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
+        # withdraw the just-published pair too — a lone record left
+        # behind would refuse every later launch as unproven (both
+        # only while they still bind the inode we created)
+        _unlink_verified "$DISK.appid" "$_sino" 2>/dev/null || true
+        _drop_owned "$VM_NAME"
         echo "[tier5] FAIL: $DISK appeared during create — refusing" >&2
         echo "        to clobber an unproven file" >&2
         exit 4
@@ -1608,11 +1677,19 @@ create_domain() {
     # (sol r27).
     if [ -f "$DISK" ] && [ ! -L "$DISK" ]; then
         _read_owner_record "$DISK.appid"
+        _read_owned "$VM_NAME"
+        # Sidecar AND registry must agree: the sidecar is
+        # admin-writable, so it only binds the inode; the root-side
+        # record is what proves THIS suite created the pair — a
+        # planted disk+sidecar can satisfy the sidecar check but can
+        # never mint the registry entry (sol r33).
         if [ "$_sapp" != "$POLICY_KEY" ] \
-                || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ]; then
+                || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ] \
+                || [ "$_oapp" != "$POLICY_KEY" ] \
+                || [ "$_oident" != "$_sident" ]; then
             echo "[tier5] FAIL: overlay $DISK bound to" >&2
-            echo "        '${_sapp:-<unbound>}' or an inode its record" >&2
-            echo "        does not name — refusing to boot an unproven" >&2
+            echo "        '${_sapp:-<unbound>}' or an inode its records" >&2
+            echo "        do not name — refusing to boot an unproven" >&2
             echo "        disk" >&2
             REAP=0; exit 3
         fi
@@ -1635,7 +1712,14 @@ create_domain() {
                 REAP=0; exit 3
             fi
         fi
-        if [ "$_sapp" = "$POLICY_KEY" ] && [ -n "$_sident" ]; then
+        _read_owned "$VM_NAME"
+        # Recovery needs the full provable trio: a planted
+        # sidecar+partial pair satisfies the two-file check, so the
+        # root-side registry must also name the same inode before the
+        # partial may be promoted to $DISK (sol r33).
+        if [ "$_sapp" = "$POLICY_KEY" ] && [ -n "$_sident" ] \
+                && [ "$_oapp" = "$POLICY_KEY" ] \
+                && [ "$_oident" = "$_sident" ]; then
             for _cand in "$DISK".partial.*; do
                 [ -f "$_cand" ] && [ ! -L "$_cand" ] || continue
                 [ "$(stat -c '%d %i' "$_cand" 2>/dev/null)" = "$_sident" ] \

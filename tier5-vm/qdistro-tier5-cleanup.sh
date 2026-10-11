@@ -18,6 +18,9 @@ DISK_BASE="${TIER5_BASE_DISK:-/var/lib/libvirt/images/qdistro-tier5-base.qcow2}"
 # and no stale mount serves it later (sol r26).
 BOOT_DIR="${TIER5_BOOT_DIR:-/run/qdistro-tier5-boot}"
 BOOT_PATH="$BOOT_DIR/$VM_NAME.qcow2"
+# Root-side ownership registry — a planted disk+sidecar pair can
+# satisfy the admin-writable record but never this one (sol r33).
+OWNED_DIR="${TIER5_OWNED_DIR:-/var/lib/qdistro/tier5-owned}"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "[tier5-cleanup] FAIL: must run as root" >&2
@@ -121,6 +124,18 @@ _read_owner_record() {
     read -r _sapp _sident <&$_rfd 2>/dev/null || true
     _sfid=$(stat -Lc '%d %i' "/proc/$$/fd/$_rfd" 2>/dev/null)
     exec {_rfd}<&-
+}
+
+# Root-side ownership record — see spawn-tier5.sh (sol r33).
+_oapp=""; _oident=""
+_read_owned() {
+    _oapp=""; _oident=""
+    local _f="$OWNED_DIR/$1"
+    [ -f "$_f" ] && [ ! -L "$_f" ] || return 0
+    read -r _oapp _oident <"$_f" 2>/dev/null || true
+}
+_drop_owned() {
+    rm -f "$OWNED_DIR/$1" 2>/dev/null || true
 }
 
 # _unlink_verified <path> <dev-ino> — remove <path> only if it still
@@ -350,6 +365,7 @@ if [ -e "$DISK" ] || [ -L "$DISK" ]; then
     # qemu-img here could be raced into checking a different file
     # than the one we unlink (sol r27).
     _read_owner_record "$DISK.appid"
+    _read_owned "$VM_NAME"
     _dino=$(stat -c '%d %i' "$DISK" 2>/dev/null)
     if [ -z "$_sapp" ]; then
         if [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
@@ -371,6 +387,15 @@ if [ -e "$DISK" ] || [ -L "$DISK" ]; then
         if [ -z "$_dino" ] || [ "$_sident" != "$_dino" ]; then
             echo "[tier5-cleanup] FAIL: $DISK.appid does not bind this" >&2
             echo "        disk (copied or stale record) — keeping it" >&2
+            exit 5
+        fi
+        # The admin-writable sidecar alone is forgeable — the
+        # root-side registry must agree before root deletes
+        # (sol r33).
+        if [ "$_oapp" != "$_sapp" ] || [ "$_oident" != "$_dino" ]; then
+            echo "[tier5-cleanup] FAIL: no matching root-side" >&2
+            echo "        ownership record for $VM_NAME — a planted" >&2
+            echo "        pair is not ours; keeping it" >&2
             exit 5
         fi
         if [[ "$VM_NAME" =~ ^t5- ]] \
@@ -416,6 +441,7 @@ if [ -e "$DISK" ] || [ -L "$DISK" ]; then
         # never existed simply has nothing to unlink.
         if _unlink_verified "$DISK" "$_dino"; then
             _unlink_verified "$DISK.appid" "${_sfid:-}" 2>/dev/null || true
+            _drop_owned "$VM_NAME"
             umount -l "$BOOT_PATH" 2>/dev/null || true
             rm -f "$BOOT_PATH" 2>/dev/null || true
             echo "[tier5-cleanup] removed $DISK (bound to '$_sapp')"
