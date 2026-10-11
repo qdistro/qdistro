@@ -394,7 +394,7 @@ qd_guest_host_addr() {
 # Serialized on .locks/serve.lock: racing starters would otherwise each
 # spawn a server and tear the pid/port files.
 qd_serve_start() {
-    local root pid_file port_file pid mode port launcher
+    local root pid_file port_file pid mode port launcher launcher_done
     qd_deps_init || return 1
     root="$(qd_deps_root)" || return 1
     port="$(qd_serve_port_default)" || return 1
@@ -425,18 +425,24 @@ qd_serve_start() {
         setsid python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/qd-repo-cache.py" \
             --root "$root" serve --port "$port" --port-file "$port_file.next" --pid-file "$pid_file.next" \
             >>"$root/.serve.log" 2>&1 9>&- </dev/null &
-        # $! is setsid when it forks: wait on the server's own files, bail
-        # early only once the launched process is gone without them.
-        launcher=$!
+        # $! is setsid when it forks (its parent exits 0 at once), so wait on
+        # the server's own files for the whole deadline; bail early only
+        # when the launcher itself failed (python died without forking).
+        launcher=$! launcher_done=
         for _ in $(seq 1 50); do
             [ -s "$port_file.next" ] && break
-            kill -0 "$launcher" 2>/dev/null || [ -s "$pid_file.next" ] || {
-                sleep 0.2; [ -s "$port_file.next" ] || break; }
+            if [ -z "$launcher_done" ] && ! kill -0 "$launcher" 2>/dev/null; then
+                launcher_done=1
+                wait "$launcher" 2>/dev/null || break
+            fi
             sleep 0.1
         done
         pid="$(cat "$pid_file.next" 2>/dev/null)"
         case "$pid" in ''|*[!0-9]*) pid= ;; esac
         if [ ! -s "$port_file.next" ] || [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+            # never leave a half-started server behind without a pid file
+            [ -n "$pid" ] && kill "$pid" 2>/dev/null
+            rm -f "$port_file.next" "$pid_file.next"
             if [ "$port" != 0 ] && command -v ss >/dev/null 2>&1 \
                     && ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
                 _qdc_die "qd_serve_start: port $port is held by another process: $(ss -ltnpH "sport = :$port" 2>/dev/null | sed -n 's/.*users:((\(.*\)))/\1/p' | head -1) (set QDISTRO_SERVE_PORT, or stop it)"
