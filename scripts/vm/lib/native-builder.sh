@@ -68,27 +68,35 @@ qdistro_ensure_native_builder_image() {
         # the build needs no netns at all, so drop it to prove the contract.
         # Must run in THIS shell — a subshell drops the export.
         local -a mirror_args=() net_args=()
-        if qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror; then
-            mirror_args=(--volume "$(qd_deps_root)/repos:/qdistro-mirror:ro,z")
-            net_args=(--network=none)
-        fi
-        # Offline, the image is built from the cache alone: the verified OCI
-        # base (above) plus the warm mirror under --network=none. Without a
-        # warm mirror or an explicit QDISTRO_REPO_BASE there is nothing to
-        # install from — fail closed rather than reach upstream.
-        if [ "${#mirror_args[@]}" -eq 0 ] && [ -z "${QDISTRO_REPO_BASE:-}" ]; then
-            if qd_deps_offline; then
+        local build_base
+        if qd_deps_offline; then
+            # Offline, the image is built from the cache alone: the verified
+            # OCI base (above) plus the warm mirror under --network=none. Any
+            # exported QDISTRO_REPO_BASE (an upstream URL, or a slirp
+            # 10.0.2.2 base another wiring step exported into this shell)
+            # is not reachable without egress, so it is ignored here.
+            if ! qd_repo_present "$QDISTRO_SUBSTRATE_SNAPSHOT" oss \
+                    || ! qd_repo_present "$QDISTRO_SUBSTRATE_SNAPSHOT" non-oss; then
                 rm -rf "$work"
                 echo "ERROR: no cached native builder image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT and no warm repo mirror to build one offline (run qd-cache-warm)" >&2
                 return 3
             fi
+            mirror_args=(--volume "$(qd_deps_root)/repos:/qdistro-mirror:ro,z")
+            net_args=(--network=none)
+            build_base=file:///qdistro-mirror
+        elif qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror; then
+            mirror_args=(--volume "$(qd_deps_root)/repos:/qdistro-mirror:ro,z")
+            net_args=(--network=none)
+            build_base=$QDISTRO_REPO_BASE
+        else
+            build_base=${QDISTRO_REPO_BASE:-}
         fi
         echo "[native-podman] building toolchain image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT" >&2
         if ! podman build --pull=never --layers "${net_args[@]}" "${mirror_args[@]}" \
             --volume "$rpm_cache:/var/cache/zypp/packages:rw,Z" \
             --build-arg "BASE_IMAGE=$image" \
             --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
-            --build-arg "QDISTRO_REPO_BASE=${QDISTRO_REPO_BASE:-}" \
+            --build-arg "QDISTRO_REPO_BASE=$build_base" \
             --build-arg "QDISTRO_DEPS_OFFLINE=${QDISTRO_DEPS_OFFLINE:-}" \
             --build-arg "QCI_OFFLINE=${QCI_OFFLINE:-}" \
             --file "$work/builder-context/Containerfile.native-builder" \

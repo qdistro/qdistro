@@ -859,3 +859,22 @@ _run_native_builder() {
     grep 'podman build' "$PODMAN_LOG" | grep -q -- "$WORK/cache/repos:/qdistro-mirror:ro,z"
     grep 'podman build' "$PODMAN_LOG" | grep -q -- 'QDISTRO_REPO_BASE=file:///qdistro-mirror'
 }
+
+@test "native builder: offline ignores an exported external repo base — mirror + no network, or fail closed" {
+    _native_builder_stub
+    export QCI_OFFLINE=1 QDISTRO_REPO_BASE=https://download.example.org/history
+    _run_native_builder
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"no warm repo mirror"* ]]
+    ! grep -q 'podman build' "$PODMAN_LOG"
+
+    local snap=20260101
+    mkdir -p "$WORK/cache/repos/$snap/tumbleweed/repo/oss" "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss"
+    echo '{"repo":"oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/oss/mirror.json"
+    echo '{"repo":"non-oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss/mirror.json"
+    _run_native_builder
+    [ "$status" -eq 0 ]
+    grep 'podman build' "$PODMAN_LOG" | grep -q -- '--network=none'
+    grep 'podman build' "$PODMAN_LOG" | grep -q -- 'QDISTRO_REPO_BASE=file:///qdistro-mirror'
+    ! grep 'podman build' "$PODMAN_LOG" | grep -q 'download.example.org'
+}
