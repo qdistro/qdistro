@@ -35,8 +35,16 @@ _qdc_die() { echo "ERROR: $*" >&2; return 1; }
 
 # Cache root: explicit override wins, then the established qdistro cache
 # root (shared with the rpm/npm/baseweed caches), then the XDG default.
+# HOME may be unset (kiwi chroot scripts, systemd units) — callers run
+# under set -u, so resolve it from passwd rather than abort.
 qd_deps_root() {
-    printf '%s\n' "${QDISTRO_DEPS_CACHE_DIR:-${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}}"
+    local home="${HOME:-}"
+    [ -n "$home" ] || home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+    if [ -z "${QDISTRO_DEPS_CACHE_DIR:-}${QDWIN_CACHE_DIR:-}" ] && [ -z "$home" ]; then
+        _qdc_die "no deps cache root: HOME unset — set QDISTRO_DEPS_CACHE_DIR"
+        return 1
+    fi
+    printf '%s\n' "${QDISTRO_DEPS_CACHE_DIR:-${QDWIN_CACHE_DIR:-$home/.cache/qdistro}}"
 }
 
 qd_deps_offline() {

@@ -292,7 +292,18 @@ done
 # (todo/issues/qdistro/image.md). Builds the production profile on demand;
 # fatal on failure under set -e like every step here.
 echo "[qdistro-image] building + staging vendored libweston (production)..."
+# build-in-vm.sh stages the verified display-info tarball here; a build
+# without it fetches through a throwaway deps root, never into the image's
+# /root/.cache. Both are gone before the image is sealed.
+QDISTRO_DEPS_CACHE_DIR=/root/qdistro-deps/cache
+export QDISTRO_DEPS_CACHE_DIR
+if [ -f /root/qdistro-deps/display-info.tar.gz ]; then
+    QDISTRO_DISPLAY_INFO_TARBALL=/root/qdistro-deps/display-info.tar.gz
+    export QDISTRO_DISPLAY_INFO_TARBALL
+fi
 bash "$QD/scripts/install/install-vendored-libweston.sh" "$SRC/qdwin"
+unset QDISTRO_DEPS_CACHE_DIR QDISTRO_DISPLAY_INFO_TARBALL
+rm -rf /root/qdistro-deps
 
 # The overlay's default-cursor-theme dir must be traversable by non-root
 # (libXcursor reads it as the session user); git does not track directory

@@ -91,6 +91,16 @@ runq() {
         bash -c ". '$LIB'; $1" --
 }
 
+@test "qd_deps_root survives an unset HOME under set -u (kiwi chroot)" {
+    run env -u HOME -u QDISTRO_DEPS_CACHE_DIR -u QDWIN_CACHE_DIR bash -c \
+        'set -euo pipefail; . "$1"; qd_deps_root' _ "$LIB"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(getent passwd "$(id -u)" | cut -d: -f6)/.cache/qdistro" ]
+    run env -u HOME bash -c 'set -euo pipefail; . "$1"; qd_deps_root' _ "$LIB"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$WORK/cache" ]
+}
+
 @test "qd_fetch cold-stores an artifact under class/sha256/basename" {
     runq "qd_fetch blob '$URL/blob.bin' '$GOOD_SHA'"
     [ "$status" -eq 0 ]
