@@ -783,3 +783,24 @@ fab_mirror() {
     run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest --verify"
     [ "$status" -eq 1 ]
 }
+
+@test "parallel qd_serve_start: one server, one port, all callers agree" {
+    fab_mirror 20260101
+    SERVE_STARTED=1
+    local pids=()
+    for i in 1 2 3; do
+        bash -c ". '$LIB'; qd_serve_start" >"$WORK/serve-out.$i" 2>"$WORK/serve-err.$i" &
+        pids+=("$!")
+    done
+    local rc=0
+    for i in "${pids[@]}"; do wait "$i" || rc=$((rc + 1)); done
+    [ "$rc" -eq 0 ]
+    # All three starters report the SAME bound port.
+    [ "$(sort -u "$WORK/serve-out".[123] | wc -l)" -eq 1 ]
+    # State files record a live server on that port, and it answers.
+    local port pid
+    port="$(cat "$WORK/cache/.serve.port")"
+    pid="$(cat "$WORK/cache/.serve.pid")"
+    kill -0 "$pid" 2>/dev/null
+    wget -q -O - "http://127.0.0.1:$port/" >/dev/null
+}

@@ -315,22 +315,28 @@ qd_oci_ensure() {
 # are stale-tolerant (a dead pid is re-checked, not trusted).
 
 # qd_serve_start — start (or reuse) the server; print the bound port.
+# Serialized on .locks/serve.lock: racing starters would otherwise each
+# spawn a server and tear the pid/port files.
 qd_serve_start() {
     local root pid_file port_file pid
     qd_deps_init || return 1
     root="$(qd_deps_root)"
     pid_file="$root/.serve.pid" port_file="$root/.serve.port"
-    if [ -s "$pid_file" ] && [ -s "$port_file" ]; then
-        pid="$(cat "$pid_file")"
-        if kill -0 "$pid" 2>/dev/null; then
-            cat "$port_file"; return 0
+    (
+        flock -x 9
+        if [ -s "$pid_file" ] && [ -s "$port_file" ]; then
+            pid="$(cat "$pid_file")"
+            if kill -0 "$pid" 2>/dev/null; then
+                cat "$port_file"; exit 0
+            fi
+            rm -f "$pid_file" "$port_file"
         fi
-        rm -f "$pid_file" "$port_file"
-    fi
-    rm -f "$port_file.next"
-    # The server binds port 0 and writes the kernel-assigned port itself —
-    # no pick-then-bind race.
-    python3 - "$root" "$port_file.next" >"$root/.serve.log" 2>&1 <<'PY' &
+        rm -f "$port_file.next"
+        # The server binds port 0 and writes the kernel-assigned port
+        # itself — no pick-then-bind race. 9>&- is load-bearing: without
+        # it the server inherits the lock fd and holds flock forever,
+        # hanging every later starter.
+        python3 - "$root" "$port_file.next" >"$root/.serve.log" 2>&1 9>&- <<'PY' &
 import functools, http.server, socketserver, sys
 root, portfile = sys.argv[1], sys.argv[2]
 h = functools.partial(http.server.SimpleHTTPRequestHandler, directory=root)
@@ -339,19 +345,20 @@ with socketserver.TCPServer(("0.0.0.0", 0), h) as s:
         f.write(str(s.server_address[1]))
     s.serve_forever()
 PY
-    pid=$!
-    for _ in $(seq 1 50); do
-        kill -0 "$pid" 2>/dev/null || break
-        [ -s "$port_file.next" ] && break
-        sleep 0.1
-    done
-    if [ ! -s "$port_file.next" ] || ! kill -0 "$pid" 2>/dev/null; then
-        _qdc_die "qd_serve_start: http server failed to start (see $root/.serve.log)"
-        return 1
-    fi
-    mv "$port_file.next" "$port_file"
-    echo "$pid" >"$pid_file"
-    cat "$port_file"
+        pid=$!
+        for _ in $(seq 1 50); do
+            kill -0 "$pid" 2>/dev/null || break
+            [ -s "$port_file.next" ] && break
+            sleep 0.1
+        done
+        if [ ! -s "$port_file.next" ] || ! kill -0 "$pid" 2>/dev/null; then
+            _qdc_die "qd_serve_start: http server failed to start (see $root/.serve.log)"
+            exit 1
+        fi
+        mv "$port_file.next" "$port_file"
+        echo "$pid" >"$pid_file"
+        cat "$port_file"
+    ) 9>"$root/.locks/serve.lock"
 }
 
 qd_serve_port() {
