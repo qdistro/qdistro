@@ -4008,33 +4008,49 @@ qdwin_move_grab_button(struct weston_pointer_grab *grab,
 	struct weston_pointer *pointer = grab->pointer;
 	struct qdwin *qd = wl_container_of(grab, qd, move_grab);
 
+	/* A button reaching this grab while the compositor believes the
+	 * drag is over means the grab was never ended: it stays installed
+	 * and silently eats every press and release before they can reach
+	 * the default grab's click-focus pick. Log it — it is the only
+	 * signature a stale installed grab produces, since the release
+	 * handling below only logs while move_grab_active is set. Every
+	 * legitimate clear of move_grab_active is paired with an end_grab
+	 * (qdwin_move_grab_end_for, the shell-unbind path, the release
+	 * below) or is weston's cancel callback — which uninstalls the
+	 * grab by ending it itself — so this line cannot appear on a
+	 * correct compositor. */
+	if (!qd->move_grab_active) {
+		weston_log("qdwin: move-grab swallowed button %u while "
+			   "move_grab_active=0 (grab still installed)\n",
+			   button_event->button);
+		return;
+	}
+
 	/* End on any button release. The protocol expects the user to
 	 * release the same button that initiated the drag, but we don't
 	 * gate on which button — clients sometimes lose the original
 	 * press serial across re-grabs and ending defensively is safer. */
 	if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
-		if (qd->move_grab_active) {
-			uint32_t handle = qd->move_grab_handle;
-			struct qdwin_toplevel *tl =
-				qdwin_toplevel_from_handle(qd, handle);
-			weston_log("qdwin: end_interactive_move handle=%u\n",
-				   handle);
-			qd->move_grab_active = 0;
-			weston_pointer_end_grab(pointer);
-			/* Tell the shell where the toplevel ended up so it
-			 * can update its tracked geometry; without this
-			 * tl.x/tl.y stay frozen at the pre-drag position. */
-			if (tl && tl->view && qd->shell_bound &&
-			    qd->shell_resource) {
-				struct weston_coord_global op =
-					weston_view_get_pos_offset_global(tl->view);
-				qdwin_shell_v1_send_toplevel_geometry(
-					qd->shell_resource, handle,
-					(int)(op.c.x - tl->inset_w),
-					(int)(op.c.y - tl->inset_n),
-					(uint32_t)tl->last_width,
-					(uint32_t)tl->last_height);
-			}
+		uint32_t handle = qd->move_grab_handle;
+		struct qdwin_toplevel *tl =
+			qdwin_toplevel_from_handle(qd, handle);
+		weston_log("qdwin: end_interactive_move handle=%u\n",
+			   handle);
+		qd->move_grab_active = 0;
+		weston_pointer_end_grab(pointer);
+		/* Tell the shell where the toplevel ended up so it
+		 * can update its tracked geometry; without this
+		 * tl.x/tl.y stay frozen at the pre-drag position. */
+		if (tl && tl->view && qd->shell_bound &&
+		    qd->shell_resource) {
+			struct weston_coord_global op =
+				weston_view_get_pos_offset_global(tl->view);
+			qdwin_shell_v1_send_toplevel_geometry(
+				qd->shell_resource, handle,
+				(int)(op.c.x - tl->inset_w),
+				(int)(op.c.y - tl->inset_n),
+				(uint32_t)tl->last_width,
+				(uint32_t)tl->last_height);
 		}
 	}
 }
@@ -4064,6 +4080,17 @@ qdwin_move_grab_cancel(struct weston_pointer_grab *grab)
 {
 	struct qdwin *qd = wl_container_of(grab, qd, move_grab);
 	qd->move_grab_active = 0;
+	/* weston_pointer_cancel_grab() only invokes this callback — it
+	 * does NOT reset pointer->grab, so the grab stays the pointer's
+	 * active grab and would eat every later button with
+	 * move_grab_active=0 (the stale-grab signature the button handler
+	 * logs). End it ourselves; end_grab restores the default grab.
+	 * Guard on ours still being the installed grab, mirroring
+	 * qdwin_stream_confine_grab_end's impl-20 idiom, so a cancel
+	 * arriving after the grab was already replaced cannot end
+	 * someone else's. */
+	if (grab->pointer && grab->pointer->grab == grab)
+		weston_pointer_end_grab(grab->pointer);
 }
 
 static const struct weston_pointer_grab_interface qdwin_move_grab_iface = {
