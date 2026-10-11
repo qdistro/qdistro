@@ -90,12 +90,19 @@ def sender(qapp, monkeypatch, tmp_path):
     qapp.processEvents()
 
 
-def test_menu_reads_selection_and_contents_at_dispatch(sender, monkeypatch):
+def _wait_send_to_rows(window, qtbot, seq=0):
+    """Row discovery is async now; wait for the worker's reply."""
+    qtbot.waitUntil(lambda: window._send_to_rows_seq > seq
+                    and window._send_to_rows is not None)
+
+
+def test_menu_reads_selection_and_contents_at_dispatch(sender, monkeypatch, qtbot):
     sent = []
     monkeypatch.setattr(qi, "send_to_targets", lambda **_: [
         {"uid": 1000, "service": "org.qdistro.Notebook.uid1000", "name": "Notebook"}])
     monkeypatch.setattr(qi, "send_payload", lambda *args, **kwargs: sent.append((args, kwargs)) or True)
     sender.window._populate_send_to_menu()
+    _wait_send_to_rows(sender.window, qtbot)
     assert sent == []
     changed = sender.path.with_name("changed")
     changed.write_bytes(b"current\r\ntext")
@@ -107,12 +114,13 @@ def test_menu_reads_selection_and_contents_at_dispatch(sender, monkeypatch):
     assert sender.window.statusBar().currentMessage() == "Text arrived at receiver; acceptance is unknown."
 
 
-def test_menu_does_not_capture_stale_contents(sender, monkeypatch):
+def test_menu_does_not_capture_stale_contents(sender, monkeypatch, qtbot):
     sent = []
     monkeypatch.setattr(qi, "send_to_targets", lambda **_: [
         {"uid": 1000, "service": "org.qdistro.Notebook.uid1000", "name": "Notebook"}])
     monkeypatch.setattr(qi, "send_payload", lambda *args, **kwargs: sent.append(args[2]) or True)
     sender.window._populate_send_to_menu()
+    _wait_send_to_rows(sender.window, qtbot)
     sender.path.write_text("edited after opening menu", encoding="utf-8")
     sender.window._send_to_menu.actions()[0].trigger()
     assert sent == ["edited after opening menu"]

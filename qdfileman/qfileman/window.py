@@ -269,6 +269,8 @@ class FileManagerWindow(QMainWindow):
         # live broker view of registered peer apps.
         self._send_to_menu = edit_menu.addMenu("Send Text &To")
         self._send_to_menu.aboutToShow.connect(self._populate_send_to_menu)
+        self._send_to_rows = None
+        self._send_to_rows_seq = 0
 
         edit_menu.addSeparator()
 
@@ -901,16 +903,45 @@ class FileManagerWindow(QMainWindow):
                 break
 
     def _populate_send_to_menu(self) -> None:
-        """Discover receivers; read the current selection only at dispatch."""
-        self._send_to_menu.clear()
-        self._receiver_actions = {}
+        """Kick the async receiver fetch; render what the cache has.
+
+        ``send_to_targets`` blocks on a synchronous ``ListReceivers``
+        D-Bus call, so it never runs on this thread — the menu shows the
+        last-known rows (or a placeholder on the cold path) and is
+        rebuilt when the worker's reply lands."""
         try:
             from qfileman import qdistro_integration as _qi
         except ImportError:
+            self._send_to_menu.clear()
+            self._receiver_actions = {}
             act = self._send_to_menu.addAction("(qdistro SDK not available)")
             act.setEnabled(False)
             return
-        targets = _qi.send_to_targets(kind="text/plain")
+        discovery = getattr(self, "_receiver_list", None)
+        if discovery is None:
+            from qfileman.transfer_jobs import ReceiverListDiscovery
+            discovery = ReceiverListDiscovery(self, _qi)
+            discovery.found.connect(self._send_to_rows_found)
+            self._receiver_list = discovery
+        discovery.start()
+        self._render_send_to_rows()
+
+    def _send_to_rows_found(self, rows) -> None:
+        self._send_to_rows_seq += 1
+        if rows == self._send_to_rows:
+            return
+        self._send_to_rows = rows
+        self._render_send_to_rows()
+
+    def _render_send_to_rows(self) -> None:
+        """Discover receivers; read the current selection only at dispatch."""
+        self._send_to_menu.clear()
+        self._receiver_actions = {}
+        targets = getattr(self, "_send_to_rows", None)
+        if targets is None:
+            act = self._send_to_menu.addAction("(discovering receivers…)")
+            act.setEnabled(False)
+            return
         if not targets:
             act = self._send_to_menu.addAction("(no receivers running)")
             act.setEnabled(False)
@@ -951,6 +982,7 @@ class FileManagerWindow(QMainWindow):
             )
             if not known:
                 to_probe.append((uid, svc))
+        from qfileman import qdistro_integration as _qi
         from qfileman.transfer_jobs import CapabilityDiscovery
 
         discovery = getattr(self, "_capability_discovery", None)
@@ -965,6 +997,8 @@ class FileManagerWindow(QMainWindow):
         if entry is None or caps.get("version") != 1:
             return
         action, current_caps, row = entry
+        if current_caps.get("version") == 1:
+            return
         current_caps.clear()
         current_caps.update(caps)
         consent = (
@@ -1085,6 +1119,9 @@ class FileManagerWindow(QMainWindow):
         discovery = getattr(self, "_capability_discovery", None)
         if discovery is not None:
             discovery.close()
+        receiver_list = getattr(self, "_receiver_list", None)
+        if receiver_list is not None:
+            receiver_list.close()
         sender = getattr(self, "_transfer_sender", None)
         if sender is not None:
             sender.close()
