@@ -1602,20 +1602,21 @@ def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
             description = _describe_scrolled_vm(session, surface, png_path,
                                               description)
 
-        # Additional views (e.g. the audio panel's Devices tab): each click
-        # lands on a different page of the SAME surface; every page is
-        # described and concatenated so the judge sees the union.
+        # Additional views (e.g. the audio panel's Devices tab or an opened
+        # settings chooser): every clicked state is described and concatenated
+        # so the judge sees the union.
         if surface.post_open_clicks and surface.kind == "settings":
-            # Scroll-stitch leaves the view at the bottom, and the settings
-            # subtab strip scrolls WITH the content — the fractional click
-            # coords only hit the subtab when the view is at the top.
+            # Scroll-stitch leaves the view at the bottom; settings controls
+            # scroll WITH the content. Fractional click coordinates for the
+            # subtabs and choosers only hit their targets from the top.
             mouse_wheel(session, int(VM_SCREEN_W * 0.55),
                         int(VM_SCREEN_H * 0.55), 30, "up")
             time.sleep(0.5)
         for idx, (fx, fy) in enumerate(surface.post_open_clicks):
             mouse_click(session, int(VM_SCREEN_W * fx), int(VM_SCREEN_H * fy))
-            # Subtab switches animate the pill + re-incubate the page; under
-            # suite load (post scroll-stitch) transitions can exceed 2s —
+            # Subtab switches animate the pill + re-incubate the page, while
+            # opened choosers also need a settled popup frame. Under suite
+            # load (post scroll-stitch) transitions can exceed 2s —
             # 0.8s and 1.5s both caught mid-animation frames (empty pill,
             # previous subtab's content still rendered).
             time.sleep(2.5)
@@ -1763,6 +1764,9 @@ Cover, as bullet points:
     header separately so a small icon is not lost among the top-bar icons.
   - Visible labelled controls: button labels, toggle states (on/off),
     slider values if numeric values are shown, dropdown current values.
+    For a switch, infer on/off from the thumb position (left=off,
+    right=on), not the thumb color. Separately state whether the control
+    looks disabled/dimmed; a checked value can still be disabled.
   - Icon-only buttons (especially in header/toolbar rows): name each one's
     apparent FUNCTION from its icon — e.g. "a close button (X)", "a
     list/grid view-toggle button", "a settings gear button", "a clear/trash
@@ -1894,6 +1898,11 @@ against what is visible; do not also require controls from the resource-present
 branch. Do not infer that a feature is enabled merely because its conditional
 section is mentioned. Unconditional header, close, and nonblank requirements
 still apply in every branch.
+
+Read headings and notes as scope. A "Notes" paragraph that says a banner or
+control is absent under the observed capability is context, not a requirement
+to find that absent item. Do not turn an explicitly absent element into a
+MISSING item. Keep every applicable positive requirement from the reference.
 
 Reply in this exact format:
   MISSING: <bullet, or 'none'>

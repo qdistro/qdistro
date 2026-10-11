@@ -9,11 +9,27 @@ ColumnLayout {
   spacing: Style.marginL
   Layout.fillWidth: true
 
+  // Settings.data is a plain observable JS object. Nested assignments emit
+  // settingChanged but do not invalidate QML bindings on their own.
+  property int settingsRevision: 0
+  readonly property bool desktopIconsEnabled: {
+    settingsRevision;
+    return Settings.data.desktopIcons.enabled;
+  }
+
+  Connections {
+    target: Settings
+    function onSettingChanged(owner, key) {
+      if (owner === Settings.data.desktopIcons && key === "enabled")
+        root.settingsRevision++;
+    }
+  }
+
   NToggle {
     Layout.fillWidth: true
     label: I18n.tr("desktop-icons.enabled-label")
     description: I18n.tr("desktop-icons.enabled-description")
-    checked: Settings.data.desktopIcons.enabled
+    checked: root.desktopIconsEnabled
     defaultValue: Settings.getDefaultValue("desktopIcons.enabled")
     onToggled: checked => Settings.data.desktopIcons.enabled = checked
   }
@@ -21,7 +37,7 @@ ColumnLayout {
   ColumnLayout {
     Layout.fillWidth: true
     spacing: Style.marginL
-    enabled: Settings.data.desktopIcons.enabled
+    enabled: root.desktopIconsEnabled
 
     NToggle {
       Layout.fillWidth: true

@@ -19,6 +19,12 @@ title area background) in the frame you just opened. Page content of
 qdbrowser (`about:blank`, the web view) is CONTENT, not chrome: it does not
 have to follow and must not be graded as chrome.
 
+Keep every screenshot the harness captured. For a retry or a resumed step,
+choose a new attempt subdirectory under `QCI_GUI_ARTIFACT_DIR` and capture to
+new paths there. `qdwin_screenshot` removes an existing destination before
+recapturing it, so reusing any earlier path discards attested visual evidence
+even if the later attempt succeeds. Do not delete a partial attempt's frames.
+
 qterminator paints the narrow title strip of its FOCUSED terminal with the
 snapshot accent (`mPrimary`): pale yellow under the dark palette, indigo
 under light. That ~20 px strip is an accent marker, not the mode oracle —
@@ -125,7 +131,13 @@ qdwin_screenshot /tmp/pres01-step4-after-shell-kill.png
 **Assert (4.2):** `SNAP_4` equals `SNAP_LIGHT` (a shell crash does not
 rewrite or delete the snapshot).
 **Assert (4.3):** OPEN the Step 4 frame: qfileman is in front with LIGHT
-chrome.
+chrome. Compare its qfileman window interior directly with
+`pres01-step3-qfileman.png`, especially the menu/toolbar and left side panel.
+The large desktop background outside the window is not qfileman chrome. If
+the app's interior pixels and light palette remain the same across these two
+captures, 4.3 passes; a shell kill cannot have restyled an unchanged window.
+The later `pres01-step6-qfileman-dark.png` is the dark-palette comparison
+frame: its window interior should visibly differ from both light frames.
 
 ### Step 5 — a new app started while qdshell is DOWN reads the persisted snapshot
 
