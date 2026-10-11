@@ -478,3 +478,30 @@ lying_length_case() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"names no packages"* ]]
 }
+
+@test "proxy: planted .tmp symlinks beside the marker/index never redirect a write" {
+    mkdir -p "$(C oss)"
+    printf 'keep' > "$WORK/victim1"; printf 'keep' > "$WORK/victim2"
+    ln -s "$WORK/victim1" "$(C oss)/metadata.json.tmp"
+    ln -s "$WORK/victim2" "$(C oss)/cache-index.json.tmp"
+    start_proxy
+    run wget -q -O "$WORK/got" "$PROXY/oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$WORK/victim1")" = keep ]
+    [ "$(cat "$WORK/victim2")" = keep ]
+    [ -f "$(C oss)/metadata.json" ] && [ ! -L "$(C oss)/metadata.json" ]
+}
+
+@test "proxy: a symlinked <root>/repos (cache on another disk) serves cold and cached" {
+    mkdir -p "$WORK/otherdisk"
+    ln -s "$WORK/otherdisk" "$WORK/cache/repos"
+    start_proxy
+    run wget -q -O "$WORK/got" "$PROXY/oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    [ "$status" -eq 0 ]
+    run wget -q -O "$WORK/got" "$PROXY/oss/noarch/pkg-a-1.0-1.noarch.rpm"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$WORK/got")" = "oss-A-bytes" ]
+    run wget -q -O /dev/null "$PROXY/oss/repodata/repomd.xml"
+    [ "$status" -eq 0 ]
+    [ -f "$WORK/otherdisk/$SNAP/tumbleweed/repo/oss/noarch/pkg-a-1.0-1.noarch.rpm" ]
+}

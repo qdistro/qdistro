@@ -109,6 +109,21 @@ def safe_href(href):
     return norm
 
 
+def write_json(dest, obj, **kw):
+    """Atomic JSON write. The temp file is created O_EXCL (mkstemp) beside
+    dest, so a planted <dest>.tmp symlink can never redirect the write;
+    rename then replaces dest itself, never a symlink's target."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest), prefix=".json.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f, **kw)
+        os.replace(tmp, dest)
+    except BaseException:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        raise
+
+
 def fetch(url, dest, want_sha=None, want_algo="sha256", retries=3):
     """Download url → temp file in dest's dir → verify → atomic promote.
     Returns dest; None on a persistent 404; raises CacheError otherwise."""
@@ -405,16 +420,13 @@ class Repo:
                         continue
                     if fetch(self.src + href, local, want_sha=sha, want_algo=algo) is None:
                         raise CacheError(f"repomd names {href} but upstream 404s it")
-                tmp = self.marker + ".tmp"
-                with open(tmp, "w") as f:
-                    json.dump({"schema": 3, "snapshot": self.snapshot,
+                write_json(self.marker, {"schema": 3, "snapshot": self.snapshot,
                                "repo": self.repo, "source": self.src,
                                "repomd_sha256": digest_file(self.repomd()),
                                "sidecars": sidecars,
                                "files": len(entries),
                                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                            time.gmtime())}, f, indent=2)
-                os.replace(tmp, self.marker)
+                                                            time.gmtime())}, indent=2)
                 log(f"{self.repo}: metadata verified ({len(entries)} files)")
             finally:
                 os.close(fd)
@@ -460,10 +472,7 @@ class Repo:
             idx.update(add or {})
             for h in drop:
                 idx.pop(h, None)
-            tmp = self._index_path() + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(idx, f)
-            os.replace(tmp, self._index_path())
+            write_json(self._index_path(), idx)
         finally:
             os.close(fd)
 
@@ -582,7 +591,9 @@ def make_handler(root, base):
                 repos[key] = Repo(root, snap, name, base)
             return repos[key]
 
-    real_root = os.path.realpath(root)
+    # Same trusted anchor as Repo.contained: <root>/repos may be a symlink
+    # (another disk); nothing may resolve outside wherever it points.
+    real_root = os.path.realpath(os.path.join(root, "repos"))
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
