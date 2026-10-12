@@ -309,12 +309,20 @@ def test_parse_connect(line, want):
     ("0x7f.1", "127.0.0.1"),
     ("017.1", "15.0.0.1"),
     ("256.1.1.1", ""),
+    ("0x7f.0x.0x.1", "127.0.0.1"),
+    ("2130706433", "127.0.0.1"),
+    ("1.2.3.4.5", ""),
+    ("1..2", ""),
+    ("09.1", ""),
+    ("pinned.test。", "pinned.test"),
+    ("pinned．test", "pinned.test"),
     ("1.2.3.4x", "1.2.3.4x"),
     ("", ""),
     (None, ""),
 ])
 def test_canonical_host(raw, want):
     assert canonical_host(raw) == want
+    assert canonical_host(want) == want, "must be idempotent"
 
 
 def test_store_matches_idn_and_ip_spellings():
@@ -605,3 +613,51 @@ def test_startup_setup_failure_without_pins_continues(monkeypatch, tmp_path):
     monkeypatch.setenv("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox")
     qmain._start_pin_proxy()
     assert os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] == "--no-sandbox"
+
+
+def test_tunnel_write_stall_ends_both_directions():
+    """One side stops reading while the other keeps talking: the stalled
+    write must end the WHOLE tunnel, not just one pump."""
+    import threading
+    import time
+
+    from qdbrowser.pin_proxy import _splice
+    a1, a2 = socket.socketpair()   # a1 = client end that never reads
+    b1, b2 = socket.socketpair()   # b2 = upstream end
+    for x in (a1, a2, b1, b2):
+        x.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        x.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+    t = threading.Thread(target=_splice, args=(a2, b1),
+                         kwargs={"stall": 0.5, "idle": 30}, daemon=True)
+    t.start()
+    stop = threading.Event()
+
+    def upstream_floods():  # fills a1's buffers: a2.sendall stalls
+        b2.settimeout(0.05)
+        while not stop.is_set():
+            try:
+                b2.send(b"y" * 4096)
+            except (TimeoutError, OSError):
+                pass
+            try:  # ...while draining the client's bytes, so the reverse
+                b2.recv(65536)  # direction stays healthy and active
+            except (TimeoutError, OSError):
+                pass
+
+    def client_keeps_talking():  # reverse direction stays active
+        a1.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                a1.send(b"x")
+            except (TimeoutError, OSError):
+                pass
+            time.sleep(0.02)
+    workers = [threading.Thread(target=f, daemon=True)
+               for f in (upstream_floods, client_keeps_talking)]
+    for w in workers:
+        w.start()
+    t.join(timeout=10)
+    stop.set()
+    assert not t.is_alive(), "stalled tunnel kept its slot"
+    for x in (a1, a2, b1, b2):
+        x.close()

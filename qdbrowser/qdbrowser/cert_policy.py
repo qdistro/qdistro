@@ -80,17 +80,12 @@ import ipaddress
 import json
 import logging
 import os
-import re
-import socket
 from collections.abc import Iterable
 
 log = logging.getLogger("qdbrowser.cert")
 
 
 PIN_PREFIX = "sha256/"
-
-_IPV4_LAST_LABEL = re.compile(r"^(0x[0-9a-f]*|[0-9]+)$")
-_IPV4_CHARS = re.compile(r"^[0-9a-fx.]+$")
 
 
 class PinDecision:
@@ -120,9 +115,9 @@ def canonical_host(host) -> str:
 
     The goal is Chromium's spelling, since that is what reaches the pin
     proxy's ``CONNECT`` line: lowercase, no surrounding ``[]`` or trailing
-    dot, IPv6 compressed, IPv4 in dotted-quad form after URL-style
-    parsing (``127.1``, ``0x7f.1`` and octal ``017.1`` are addresses, as
-    in a browser URL), IDNs as UTS #46 *nontransitional* punycode
+    dot, IPv6 compressed, IPv4 in dotted-quad form after the URL
+    standard's IPv4 parser (``127.1``, ``0x7f.1``, octal ``017.1``,
+    ``0x7f.0x.0x.1`` are addresses, as in a browser URL), IDNs as UTS #46 *nontransitional* punycode
     (``faß.de`` -> ``xn--fa-hia.de``, not Python's IDNA 2003 ``fass.de``;
     ``QUrl.toAce`` implements the same processing as Chromium).
     ``QUrl.host()`` returns Unicode, so the error-path hook needs this
@@ -149,20 +144,60 @@ def canonical_host(host) -> str:
             log.error("qdbrowser.cert cannot canonicalize host %r: %s",
                       host, exc)
             return ""
+        # toAce maps U+3002 and friends to "."; strip the trailing one
+        # that only exists after mapping ("pinned.test。").
+        h = h.rstrip(".")
         if not h:
             return ""
-    if _IPV4_LAST_LABEL.match(h.rsplit(".", 1)[-1]):
+    if _ends_in_number(h):
         # WHATWG/Chromium: a numeric last label makes the host an IPv4
-        # address (or invalid). inet_aton has the same 1-4 part,
-        # hex/octal grammar; the charset check keeps glibc's tolerance of
-        # trailing junk out.
-        if not _IPV4_CHARS.match(h):
-            return ""
-        try:
-            return socket.inet_ntoa(socket.inet_aton(h))
-        except OSError:
-            return ""
+        # address, or invalid.
+        v4 = _whatwg_ipv4(h)
+        return "" if v4 is None else v4
     return h
+
+
+def _ipv4_number(part: str) -> int | None:
+    """WHATWG "IPv4 number parser": 0x hex, leading-0 octal, decimal; an
+    empty remainder after the prefix is 0."""
+    radix = 10
+    if part[:2] in ("0x", "0X"):
+        part, radix = part[2:], 16
+    elif len(part) >= 2 and part[0] == "0":
+        part, radix = part[1:], 8
+    if part == "":
+        return 0
+    digits = {10: "0123456789", 8: "01234567", 16: "0123456789abcdef"}[radix]
+    if any(c not in digits for c in part.lower()):
+        return None
+    return int(part, radix)
+
+
+def _ends_in_number(host: str) -> bool:
+    """WHATWG "ends in a number" (trailing dot already stripped)."""
+    last = host.split(".")[-1]
+    if last and all(c in "0123456789" for c in last):
+        return True
+    return last[:2] in ("0x", "0X") and all(
+        c in "0123456789abcdefABCDEF" for c in last[2:])
+
+
+def _whatwg_ipv4(host: str) -> str | None:
+    """WHATWG "IPv4 parser": dotted-quad string, or None on failure."""
+    parts = host.split(".")
+    if len(parts) > 4 or any(p == "" for p in parts):
+        return None
+    nums = [_ipv4_number(p) for p in parts]
+    if any(n is None for n in nums):
+        return None
+    if any(n > 255 for n in nums[:-1]):
+        return None
+    if nums[-1] >= 256 ** (5 - len(nums)):
+        return None
+    value = nums[-1]
+    for i, n in enumerate(nums[:-1]):
+        value += n * 256 ** (3 - i)
+    return str(ipaddress.IPv4Address(value))
 
 
 class PinStore:

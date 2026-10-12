@@ -433,10 +433,10 @@ class _Activity:
 
 def _pump(src: socket.socket, dst: socket.socket, act: _Activity,
           idle: float = _IDLE_S) -> None:
-    """Copy ``src`` -> ``dst`` until EOF/error/idle, then half-close
-    ``dst``. Sockets carry a ``_STALL_S``-style timeout: a recv timeout
-    only ends the tunnel once BOTH directions have been idle ``idle`` s;
-    a send that stalls that long ends it outright."""
+    """Copy ``src`` -> ``dst``. On EOF, half-close ``dst`` so the other
+    direction can finish. On a stalled write (socket timeout), an error
+    or ``idle`` s with no byte in EITHER direction, shut BOTH sockets down
+    so the other pump ends too and the tunnel's slot is released."""
     try:
         while True:
             try:
@@ -446,15 +446,19 @@ def _pump(src: socket.socket, dst: socket.socket, act: _Activity,
                     break
                 continue
             if not data:
-                break
+                try:
+                    dst.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+                return
             act.last = time.monotonic()
             dst.sendall(data)
             act.last = time.monotonic()
     except OSError:
         pass
-    finally:
+    for sock in (src, dst):
         try:
-            dst.shutdown(socket.SHUT_WR)
+            sock.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
 
