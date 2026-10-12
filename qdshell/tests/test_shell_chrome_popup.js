@@ -236,6 +236,8 @@ function body(name) {
         assert.strictEqual(ctx._frameResizeEdges(row, 0, 200, 10), 0,
             "the rest of the title bar is not a resize grip");
         assert.strictEqual(ctx._frameResizeEdges(row, 0, 3, 1), 1 | 4, "top-left");
+        assert.strictEqual(ctx._frameResizeEdges(row, 0, 400, 1), 0,
+            "the top grip yields to the buttons (close sits top-right)");
         assert.strictEqual(ctx._frameResizeEdges(row, 2, 200, 1), 2, "bottom");
         assert.strictEqual(ctx._frameResizeEdges(row, 2, 400, 1), 2 | 8,
             "bottom-right corner");

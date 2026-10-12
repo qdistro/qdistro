@@ -366,8 +366,12 @@ Singleton {
         const left = x < root.cornerGrip ? 4 : 0;
         const right = x >= outerW - root.cornerGrip ? 8 : 0;
         switch (side) {
-        case 0:  // N: only its top grip resizes
-            return y < root.resizeGrip ? (1 | left | right) : 0;
+        case 0: {  // N: only its top grip resizes, never over a button
+            const firstButtonX = outerW - root._titleButtons(row).length
+                                        * root.chromeHeight;
+            return y < root.resizeGrip && x < firstButtonX
+                ? (1 | left) : 0;
+        }
         case 2:  // S
             return 2 | left | right;
         case 1:  // E
