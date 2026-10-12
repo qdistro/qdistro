@@ -160,9 +160,9 @@ qdwin_screenshot "$ART/s2-before-drag.png"
 $VMGUI "$VM" click-preview X Y title-bar
 $VMGUI "$VM" drag X Y $((X + 120)) $((Y + 60))
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
-    bash /tmp/61-driver.sh await_qdwin_line "request_raise handle=$H"
-    bash /tmp/61-driver.sh await_qdwin_line "begin_interactive_move handle=$H"
-    bash /tmp/61-driver.sh await_qdwin_line "end_interactive_move handle=$H"' \
+    bash /tmp/61-driver.sh await_qdwin_line "request_raise handle=$H (re-stacked|unminimised)"
+    bash /tmp/61-driver.sh await_qdwin_line "begin_interactive_move handle=$H anchor="
+    bash /tmp/61-driver.sh await_qdwin_line "end_interactive_move handle=$H\$"' \
     || { echo "FAIL(S2): drag produced no raise/move/end_move journal lines"; exit 1; }
 qdwin_screenshot "$ART/s2-after-drag.png"
 ```
@@ -185,7 +185,7 @@ qdshell and `showPopup(serial)` passed the live-grab check.
 $VMGUI "$VM" click-preview X2 Y2 title-bar
 $VMGUI "$VM" rightclick X2 Y2
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
-    bash /tmp/61-driver.sh await_qdwin_line "show_popup parent=$H"' \
+    bash /tmp/61-driver.sh await_qdwin_line "show_popup parent=$H at "' \
     || { echo "FAIL(S3): right-click on the title bar produced no show_popup"; exit 1; }
 qdwin_screenshot "$ART/s3-menu-open.png"
 ```
@@ -227,14 +227,14 @@ double-click the (now full-width) title bar left of the buttons →
 $VMGUI "$VM" click-preview BX BY maximize-button
 $VMGUI "$VM" click BX BY
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
-    bash /tmp/61-driver.sh await_qdwin_line "set_maximized handle=$H max=1"' \
+    bash /tmp/61-driver.sh await_qdwin_line "set_maximized handle=$H max=1 outer="' \
     || { echo "FAIL(S5): maximize button did not maximise"; exit 1; }
 qdwin_screenshot "$ART/s5-maximized.png"
 # Runner: title-bar point (DX,DY) on s5-maximized.png, left of the buttons
 $VMGUI "$VM" click-preview DX DY title-bar
 $VMGUI "$VM" doubleclick DX DY
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
-    bash /tmp/61-driver.sh await_qdwin_line "set_maximized handle=$H max=0"' \
+    bash /tmp/61-driver.sh await_qdwin_line "set_maximized handle=$H max=0 restored="' \
     || { echo "FAIL(S5): double-click on the title bar did not restore"; exit 1; }
 qdwin_screenshot "$ART/s5-restored.png"
 ```
@@ -259,7 +259,7 @@ $VMGUI "$VM" click-preview RX RY bottom-right-corner
 $VMGUI "$VM" drag RX RY $((RX + 100)) $((RY + 80))
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
     bash /tmp/61-driver.sh await_qdwin_line "begin_interactive_resize handle=$H edges=0xa" &&
-    bash /tmp/61-driver.sh await_qdwin_line "end_interactive_resize handle=$H"' \
+    bash /tmp/61-driver.sh await_qdwin_line "end_interactive_resize handle=$H \("' \
     || { echo "FAIL(S6): corner drag produced no resize-drag journal lines"; exit 1; }
 qdwin_screenshot "$ART/s6-after-resize.png"
 ```
@@ -285,7 +285,7 @@ qdshell's hit-test maps it to row 0 → `requestMinimize`.
 $VMGUI "$VM" click-preview X5 Y5 title-bar
 $VMGUI "$VM" rightclick X5 Y5
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
-    bash /tmp/61-driver.sh await_qdwin_line "show_popup parent=$H"' \
+    bash /tmp/61-driver.sh await_qdwin_line "show_popup parent=$H at "' \
     || { echo "FAIL(S7): menu did not reopen"; exit 1; }
 qdwin_screenshot "$ART/s7-menu.png"
 # Runner: compute the Minimize row centre (MX,MY) from s7-menu.png;
@@ -293,7 +293,7 @@ qdwin_screenshot "$ART/s7-menu.png"
 $VMGUI "$VM" click-preview MX MY minimize-row
 $VMGUI "$VM" click MX MY
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
-    bash /tmp/61-driver.sh await_qdwin_line "set_minimized handle=$H"' \
+    bash /tmp/61-driver.sh await_qdwin_line "set_minimized handle=$H \(state="' \
     || { echo "FAIL(S7): Minimize row did not minimise the window"; exit 1; }
 qdwin_screenshot "$ART/s7-minimized.png"
 ```
@@ -346,7 +346,7 @@ $VMGUI "$VM" click-preview TX TY csd-title-bar
 $VMGUI "$VM" drag TX TY $((TX + 100)) $((TY + 40))
 $VMEXEC "$VM" 'H2=$(cat /tmp/61-csd.handle)
     bash /tmp/61-driver.sh await_qdwin_line "xdg_toplevel.move handle=$H2 anchor=" &&
-    bash /tmp/61-driver.sh await_qdwin_line "end_interactive_move handle=$H2"' \
+    bash /tmp/61-driver.sh await_qdwin_line "end_interactive_move handle=$H2\$"' \
     || { echo "FAIL(S8): the client's own title bar did not move it"; exit 1; }
 qdwin_screenshot "$ART/s8-csd-moved.png"
 ```
@@ -387,7 +387,7 @@ $VMGUI "$VM" click-preview CX CY close-button
 $VMGUI "$VM" click CX CY
 $VMEXEC "$VM" 'H3=$(cat /tmp/61-qterm.handle)
     bash /tmp/61-driver.sh await_qdwin_line "request_close handle=$H3 dispatched" &&
-    bash /tmp/61-driver.sh await_qdwin_line "toplevel_removed handle=$H3"' \
+    bash /tmp/61-driver.sh await_qdwin_line "toplevel_removed handle=$H3\$"' \
     || { echo "FAIL(S9): close button did not close the window"; exit 1; }
 qdwin_screenshot "$ART/s9-closed.png"
 ```
