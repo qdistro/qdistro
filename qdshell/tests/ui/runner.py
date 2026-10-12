@@ -1888,6 +1888,16 @@ _DESCRIBE_SURFACE_HINTS = {
         "Inspect and transcribe the small explanatory paragraph directly "
         "below the Default Applications heading, if one is visible."
     ),
+    "settings_bar_widgets": (
+        "Within the Left section, inspect the Launcher widget itself for "
+        "a settings gear button. Report its presence or absence separately "
+        "from the gear buttons on widgets in the Right section."
+    ),
+    "settings_keyboard": (
+        "Under the Cursor heading, report any explanatory note about "
+        "cursor preference persistence before the Cursor blink control. "
+        "Distinguish it from the capability note near the top."
+    ),
     "settings_advanced": (
         "Inspect the warning card's color and icon separately from the "
         "Advanced tab header. For setting rows, distinguish bright/enabled "
