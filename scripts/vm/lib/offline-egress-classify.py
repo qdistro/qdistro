@@ -23,10 +23,9 @@ stdout:
 import ipaddress
 import json
 import os
-import re
 import socket
-from concurrent.futures import ThreadPoolExecutor
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 POOL = ThreadPoolExecutor(max_workers=4)
 RECORD_SETS = ("any4", "any6", "out4", "out6", "fwd4", "fwd6")

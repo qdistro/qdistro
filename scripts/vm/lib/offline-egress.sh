@@ -71,7 +71,8 @@ QD_OFFLINE_EGRESS_LIBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # session user (uid 1000): a root build fetching e.g. a meson wrap from
 # github still fails. Keep hosts whose addresses are shared with a package or
 # registry host out: NetworkManager's conncheck.opensuse.org shares
-# mirrors.opensuse.org's address, so its check is switched off instead.
+# mirrors.opensuse.org's address, so its check is switched off instead (here
+# and in the tier-5 per-app guest image).
 QCI_OFFLINE_EGRESS_EXPECTED="${QCI_OFFLINE_EGRESS_EXPECTED-api.open-meteo.com@1000 geocoding-api.open-meteo.com@1000 github.com@1000 udp/123}"
 
 # qd_offline_egress_enabled — QCI_OFFLINE or QDISTRO_DEPS_OFFLINE truthy.
@@ -123,13 +124,14 @@ table inet $QD_OFFLINE_EGRESS_TABLE {
         type ipv4_addr
         flags interval
         elements = { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16,
-                     172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4,
+                     172.16.0.0/12, 192.0.2.0/24, 192.168.0.0/16,
+                     198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4,
                      255.255.255.255 }
     }
     set allow6 {
         type ipv6_addr
         flags interval
-        elements = { ::1, fc00::/7, fe80::/10, fec0::/10, ff00::/8 }
+        elements = { ::1, 2001:db8::/32, fc00::/7, fe80::/10, fec0::/10, ff00::/8 }
     }
     set any4 { typeof ip daddr; size $n; flags dynamic; counter; }
     set any6 { typeof ip6 daddr; size $n; flags dynamic; counter; }

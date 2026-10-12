@@ -92,8 +92,9 @@ PYX
         ip addr add 10.9.9.2/24 dev d0; ip route add default via 10.9.9.1
         nft -f '$BATS_TEST_TMPDIR/r.nft' || exit 9
         nft -f '$BATS_TEST_TMPDIR/r.nft' || exit 8   # idempotent re-apply
-        timeout 3 bash -c 'exec 3<>/dev/tcp/192.0.2.1/443' 2>/dev/null; echo pub=\$?
+        timeout 3 bash -c 'exec 3<>/dev/tcp/198.18.0.1/443' 2>/dev/null; echo pub=\$?
         timeout 1 bash -c 'exec 3<>/dev/tcp/10.9.9.7/80' 2>/dev/null; echo priv=\$?
+        timeout 1 bash -c 'exec 3<>/dev/tcp/203.0.113.2/80' 2>/dev/null; echo docnet=\$?
         timeout 1 bash -c 'exec 3<>/dev/tcp/100.100.100.100/53' 2>/dev/null; echo dns=\$?
         timeout 3 bash -c 'exec 3<>/dev/tcp/100.100.100.100/443' 2>/dev/null; echo dnshost443=\$?
         timeout 3 bash -c 'exec 3<>/dev/tcp/100.64.0.5/53' 2>/dev/null; echo tailnetpeer=\$?
@@ -107,14 +108,17 @@ PYX
     # The private address has no host behind it: it times out (124), i.e. the
     # table let it through to the (absent) peer instead of rejecting it.
     grep -qx 'priv=124' <<<"$output"
+    # Documentation ranges (TEST-NET) are never routed to the internet; a
+    # guest test may use one as an in-guest peer (silo-egress), so they pass.
+    grep -qx 'docnet=124' <<<"$output"
     # DNS to the host's own (tailnet) nameserver passes; any other port to it,
     # and any other 100.64/10 address, is refused and recorded.
     grep -qx 'dns=124' <<<"$output"
     grep -qx 'dnshost443=1' <<<"$output"
     grep -qx 'tailnetpeer=1' <<<"$output"
     grep -qx 'blocked=3' <<<"$output"
-    grep -q '"val": {"concat": \["192.0.2.1", "tcp", 443, 0\]}, "counter": {"packets": 1' <<<"$output"
-    grep -q '"val": "192.0.2.1", "counter": {"packets": 1' <<<"$output"
+    grep -q '"val": {"concat": \["198.18.0.1", "tcp", 443, 0\]}, "counter": {"packets": 1' <<<"$output"
+    grep -q '"val": "198.18.0.1", "counter": {"packets": 1' <<<"$output"
     ! grep -q '10.9.9.7' <<<"$output"
     [ "$(tail -1 <<<"$output")" = 1 ]
 }
@@ -133,27 +137,27 @@ PYX
 
 @test "classify on a real table: recorded attempts classified; NTP expected (IPv6 forms: synthetic test below)" {
     userns_net_ok || skip "needs unprivileged user+net namespaces and /usr/sbin/nft"
-    real_scan "" "tcp 192.0.2.1 443" "udp 198.51.100.4 123" > "$BATS_TEST_TMPDIR/scan"
+    real_scan "" "tcp 198.18.0.1 443" "udp 198.18.0.4 123" > "$BATS_TEST_TMPDIR/scan"
     QCI_OFFLINE_EGRESS_EXPECTED="udp/123" run qd_offline_egress_classify < "$BATS_TEST_TMPDIR/scan"
     [ "$status" -eq 0 ]
-    grep -qx 'unexpected 192.0.2.1 \[tcp/443@0\]' <<<"$output"
-    grep -qx 'expected 198.51.100.4 \[udp/123@0\]' <<<"$output"
+    grep -qx 'unexpected 198.18.0.1 \[tcp/443@0\]' <<<"$output"
+    grep -qx 'expected 198.18.0.4 \[udp/123@0\]' <<<"$output"
     [ "$(grep -c . <<<"$output")" -eq 2 ]
 }
 
 @test "classify on a real table: a packet with no port is counted, so its destination is never expected" {
     userns_net_ok || skip "needs unprivileged user+net namespaces and /usr/sbin/nft"
-    real_scan "" "udp 198.51.100.4 123" "raw 198.51.100.4" > "$BATS_TEST_TMPDIR/scan"
+    real_scan "" "udp 198.18.0.4 123" "raw 198.18.0.4" > "$BATS_TEST_TMPDIR/scan"
     QCI_OFFLINE_EGRESS_EXPECTED="udp/123" run qd_offline_egress_classify < "$BATS_TEST_TMPDIR/scan"
     [ "$status" -eq 0 ]
-    grep -qx 'unexpected 198.51.100.4 \[udp/123@0,no-detail\]' <<<"$output"
+    grep -qx 'unexpected 198.18.0.4 \[udp/123@0,no-detail\]' <<<"$output"
 }
 
 @test "classify on a real table: a tampered live table is broken, never clean" {
     userns_net_ok || skip "needs unprivileged user+net namespaces and /usr/sbin/nft"
     for tamper in \
         "nft insert rule inet qci_offline_egress output accept" \
-        "nft add element inet qci_offline_egress allow4 '{ 192.0.2.0/24 }'" \
+        "nft add element inet qci_offline_egress allow4 '{ 198.18.0.0/15 }'" \
         "nft flush chain inet qci_offline_egress block" \
         "nft delete chain inet qci_offline_egress forward"; do
         real_scan "$tamper" > "$BATS_TEST_TMPDIR/scan"
