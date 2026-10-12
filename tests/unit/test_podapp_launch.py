@@ -31,14 +31,17 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
 from qdistro_session_manager import (
     PODAPP_LAUNCHER_FMT,
     BadArgument,
+    PodAppRunning,
     SessionError,
     _SiloStore,
+    _SystemOps,
 )
 
 from test_session_manager import _FakeOps
@@ -218,6 +221,58 @@ def test_failed_env_write_does_not_start_the_unit(store, ops):
     with pytest.raises(SessionError):
         store.launch_podapp("podapp-term", "weston-terminal", "[]")
     assert ops.systemctl_calls == []
+
+
+# ---- one pod, one container ------------------------------------------------
+#
+# spawn-tier2 runs every launch as `podman run --name <container>`, so a second
+# launch while the pod is up used to die at podman (exit 125) after the shell
+# had already put up a placeholder for it, which then sat there for 15 s.
+
+def test_launch_into_a_running_pod_is_refused_fast(store, ops):
+    ops.podapp_present.add("podapp-term")
+    with pytest.raises(PodAppRunning):
+        store.launch_podapp("podapp-term", "weston-terminal", "[]")
+    assert ops.systemctl_calls == []
+    assert ops.podapp_launch_envs == {}
+
+
+def test_other_pods_still_launch_while_one_runs(store, ops):
+    ops.podapp_present.add("podapp-other")
+    token = store.launch_podapp("podapp-term", "weston-terminal", "[]")
+    assert _TOKEN_RE.fullmatch(token)
+
+
+def test_an_unanswered_exists_check_does_not_block_the_launch(store, ops):
+    """The check is a fast path, not the arbiter: a wedged podman query must
+    not turn into a refusal (podman's own --name check still applies)."""
+    ops.podapp_exists_unknown = True
+    token = store.launch_podapp("podapp-term", "weston-terminal", "[]")
+    assert _TOKEN_RE.fullmatch(token)
+
+
+
+@pytest.mark.parametrize("rc,stdout,expect", [
+    (0, "PMRC=0\n", True),
+    (0, "PMRC=1\n", False),
+    (0, "PMRC=125\n", None),   # the query itself failed
+    (1, "", None),              # runuser chain delivered no verdict
+    (0, "noise\nPMRC=0\n", None),
+])
+def test_exists_check_reads_only_podmans_own_verdict(monkeypatch, rc, stdout,
+                                                     expect):
+    monkeypatch.setattr(
+        _SystemOps, "_runuser_exists",
+        staticmethod(lambda c, timeout=0: subprocess.CompletedProcess(
+            [], rc, stdout, "")))
+    assert _SystemOps().podapp_container_exists("podapp-term") is expect
+
+
+def test_exists_check_timeout_is_unknown_not_absent(monkeypatch):
+    def _wedged(c, timeout=0):
+        raise subprocess.TimeoutExpired("podman", timeout)
+    monkeypatch.setattr(_SystemOps, "_runuser_exists", staticmethod(_wedged))
+    assert _SystemOps().podapp_container_exists("podapp-term") is None
 
 
 # ---- shipped-source invariants -------------------------------------------
