@@ -55,3 +55,41 @@ def test_ui_describer_details_are_scoped_to_surface(image_name, expected_detail)
     assert expected_detail not in runner._describe_prompt_for(
         Path("panel_network.png")
     )
+
+
+@pytest.mark.parametrize(
+    ("votes", "expected"),
+    [
+        (["PASS"], "PASS"),
+        (["FAIL", "FAIL"], "FAIL"),
+        (["FAIL", "PASS", "PASS"], "PASS"),
+        (["FAIL", "PASS", "FAIL"], "FAIL"),
+        (["FAIL", "SKIP", "PASS"], "FAIL"),
+    ],
+)
+def test_visual_panel_confirmation_requires_independent_evidence(
+        monkeypatch, tmp_path, votes, expected):
+    seen = []
+    frame = tmp_path / "panel.png"
+    frame.write_bytes(b"saved frame")
+
+    def fake_judge(_reference, description):
+        vote = votes[len(seen)]
+        seen.append((description, vote))
+        missing = ["required content missing"] if vote == "FAIL" else []
+        return runner.JudgeResult(vote, f"VERDICT: {vote}", missing, [])
+
+    monkeypatch.setattr(runner, "judge", fake_judge)
+    monkeypatch.setattr(runner, "describe", lambda _frame: "fresh observation")
+    result = runner.judge_frame_consistently("required content", "initial", frame)
+
+    assert result.verdict == expected
+    assert [vote for _, vote in seen] == votes
+    evidence = frame.with_suffix(".judge-recheck.txt")
+    if len(votes) == 1:
+        assert not evidence.exists()
+    else:
+        assert evidence.exists()
+        assert evidence.read_text().count("Observation ") == len(votes)
+        if expected == "FAIL":
+            assert "required content missing" in result.missing

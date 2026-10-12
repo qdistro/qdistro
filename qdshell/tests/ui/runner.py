@@ -1896,7 +1896,9 @@ _DESCRIBE_SURFACE_HINTS = {
     "settings_keyboard": (
         "Under the Cursor heading, report any explanatory note about "
         "cursor preference persistence before the Cursor blink control. "
-        "Distinguish it from the capability note near the top."
+        "Distinguish it from the capability note near the top. If a control "
+        "is clipped by the frame edge, call it clipped rather than inferring "
+        "that it is disabled from the partial view."
     ),
     "settings_advanced": (
         "Inspect the warning card's color and icon separately from the "
@@ -2055,9 +2057,15 @@ Battery panel with only its header and no detected battery, use the reference's
 no-battery branch: do not require charge rows or time estimates even if they
 appear earlier in the reference. Still fail if the header or close button is
 absent. A list introduced by "any of which may appear" describes optional card
-types, not a requirement
-that every listed card render; still require the visible card stack to have
-the structure and controls the reference specifies for cards that are present.
+types, not a requirement that every listed card render; still require the
+visible card stack to have the structure and controls the reference specifies
+for cards that are present.
+
+An asset identifier in the reference is not literal on-screen text. Compare the
+described glyph shape and function: the System Monitor header's
+`device-analytics` asset is drawn as a monitor/chart glyph. Do not reject that
+same visible glyph merely because the description uses its appearance rather
+than its internal asset name.
 
 Read headings and notes as scope. A "Notes" paragraph that says a banner or
 control is absent under the observed capability is context, not a requirement
@@ -2114,6 +2122,50 @@ def judge(reference: str, actual: str) -> JudgeResult:
             if v and v.lower() != "none":
                 extra.append(v)
     return JudgeResult(verdict, raw, missing, extra)
+
+
+def judge_frame_consistently(reference: str, actual: str,
+                             image_path: Path) -> JudgeResult:
+    """Confirm a panel FAIL with independent reads of the same saved frame.
+
+    A vision-model omission must not turn a correct immutable screenshot red.
+    The first PASS retains the existing fast path. After a first FAIL, require
+    two independent FAILs to fail, or two independent PASSes to pass. An empty
+    description or unavailable judge cannot rescue a failure. Preserve every
+    observation and verdict beside the frame for audit.
+    """
+    first = judge(reference, actual)
+    if first.verdict != "FAIL":
+        return first
+
+    votes = [(actual, first)]
+    for _ in range(2):
+        refreshed = describe(image_path)
+        if not refreshed.strip():
+            break
+        verdict = judge(reference, refreshed)
+        votes.append((refreshed, verdict))
+        if sum(v.verdict == "FAIL" for _, v in votes) >= 2:
+            break
+        if sum(v.verdict == "PASS" for _, v in votes) >= 2:
+            break
+
+    transcript = []
+    for number, (description, verdict) in enumerate(votes, 1):
+        transcript.append(
+            f"Observation {number}: {verdict.verdict}\n"
+            f"Description:\n{description}\nJudge:\n{verdict.raw}\n"
+        )
+    evidence = image_path.with_suffix(".judge-recheck.txt")
+    evidence.write_text("\n".join(transcript))
+    passes = sum(v.verdict == "PASS" for _, v in votes)
+    if passes >= 2:
+        return JudgeResult("PASS", f"confirmed by 2/3 observations; {evidence}",
+                           [], [])
+    missing = [item for _, v in votes if v.verdict == "FAIL" for item in v.missing]
+    extra = [item for _, v in votes if v.verdict == "FAIL" for item in v.extra]
+    return JudgeResult("FAIL", f"panel failure confirmed; {evidence}\n"
+                       + "\n".join(v.raw for _, v in votes), missing, extra)
 
 
 def _judge_with_pi(prompt: str) -> str:
