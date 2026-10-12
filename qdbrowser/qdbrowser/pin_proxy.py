@@ -65,11 +65,11 @@ import ipaddress
 import logging
 import os
 import re
-import selectors
 import socket
 import ssl
 import sys
 import threading
+import time
 from collections.abc import Callable
 
 from .cert_policy import PinStore, canonical_host
@@ -101,8 +101,9 @@ def peer_uid(conn: socket.socket) -> int | None:
     The client's socket is the ``/proc/net/tcp*`` row whose local endpoint
     is our peer and whose remote endpoint is us — all four of address and
     port, so another uid binding the same source port on a different
-    loopback address cannot borrow the browser's row. More than one owner
-    for the tuple is ambiguous and also returns None.
+    loopback address cannot borrow the browser's row. Only ESTABLISHED
+    rows count; more than one owner for the tuple is ambiguous and also
+    returns None.
     """
     try:
         peer = conn.getpeername()
@@ -117,7 +118,7 @@ def peer_uid(conn: socket.socket) -> int | None:
                 next(f, None)
                 for line in f:
                     parts = line.split()
-                    if len(parts) < 8:
+                    if len(parts) < 8 or parts[3] != "01":  # ESTABLISHED
                         continue
                     try:
                         row = (*_proc_endpoint(parts[1]),
@@ -195,6 +196,11 @@ class PinProxy:
         self._stopped.set()
         if self._sock is not None:
             try:
+                # close() alone does not wake a thread blocked in accept().
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
                 self._sock.close()
             except OSError:
                 pass
@@ -208,6 +214,7 @@ class PinProxy:
             except OSError:
                 if self._stopped.is_set():
                     return
+                time.sleep(0.05)  # e.g. EMFILE: don't spin
                 continue
             if not self._slots.acquire(blocking=False):
                 _reply(conn, 503, "busy")
@@ -297,7 +304,7 @@ class PinProxy:
             log.warning("qdbrowser.cert reject host=%s reason=resolve_failed "
                         "path=probe detail=%s", host, exc)
             return None
-        last = "no_address"
+        last = ("no_address", "")
         for family, socktype, proto, _canon, sockaddr in addrs:
             verdict = self._probe(store, host, family, socktype, proto,
                                   sockaddr)
@@ -305,39 +312,41 @@ class PinProxy:
                 try:
                     up = self._open(family, socktype, proto, sockaddr)
                 except OSError as exc:
-                    last = f"connect_failed:{exc}"
+                    last = ("connect_failed", str(exc))
                     continue
                 log.info("qdbrowser.cert pin ok host=%s addr=%s path=probe",
                          host, sockaddr[0])
                 return up
-            if verdict.startswith("connect_failed"):
+            if verdict[0] == "connect_failed":
                 last = verdict
                 continue
             # A reachable address presented a bad chain: refuse outright
             # rather than trying the next address.
             log.warning("qdbrowser.cert reject host=%s reason=%s path=probe "
-                        "addr=%s", host, verdict, sockaddr[0])
+                        "addr=%s detail=%r", host, verdict[0], sockaddr[0],
+                        verdict[1])
             return None
-        log.warning("qdbrowser.cert reject host=%s reason=%s path=probe",
-                    host, last)
+        log.warning("qdbrowser.cert reject host=%s reason=%s path=probe "
+                    "detail=%r", host, last[0], last[1])
         return None
 
     def _probe(self, store: PinStore, host: str, family, socktype, proto,
-               sockaddr) -> str | None:
-        """None if the address's verified chain matches a pin, else a reason."""
+               sockaddr) -> tuple[str, str] | None:
+        """None if the address's verified chain matches a pin, else
+        ``(reason, detail)``; ``reason`` is a bare token for the journal."""
         try:
             raw = self._open(family, socktype, proto, sockaddr)
         except OSError as exc:
-            return f"connect_failed:{exc}"
+            return ("connect_failed", str(exc))
         raw.settimeout(self._probe_timeout)
         try:
             ctx = self._context_factory()
             try:
                 tls = ctx.wrap_socket(raw, server_hostname=host)
             except ssl.SSLCertVerificationError as exc:
-                return f"probe_unverified:{exc.verify_message}"
+                return ("probe_unverified", str(exc.verify_message))
             except (ssl.SSLError, OSError) as exc:
-                return f"probe_tls_error:{exc}"
+                return ("probe_tls_error", str(exc))
             try:
                 # Python >= 3.13: a list of DER bytes.
                 chain = [bytes(c) for c in tls.get_verified_chain()]
@@ -346,7 +355,7 @@ class PinProxy:
         finally:
             raw.close()
         decision = store.evaluate(host, chain)
-        return None if decision.allow else decision.kind
+        return None if decision.allow else (decision.kind, decision.detail)
 
 
 def _read_head(conn: socket.socket) -> bytes | None:
@@ -405,24 +414,28 @@ def _reply(conn: socket.socket, code: int, reason: str) -> None:
         pass
 
 
-def _splice(a: socket.socket, b: socket.socket) -> None:
-    """Copy bytes both ways until either side closes."""
-    sel = selectors.DefaultSelector()
-    sel.register(a, selectors.EVENT_READ, b)
-    sel.register(b, selectors.EVENT_READ, a)
+def _pump(src: socket.socket, dst: socket.socket) -> None:
+    """Copy ``src`` -> ``dst`` until EOF/error, then half-close ``dst``."""
     try:
         while True:
-            for key, _ in sel.select():
-                src, dst = key.fileobj, key.data
-                try:
-                    data = src.recv(65536)
-                except OSError:
-                    return
-                if not data:
-                    return
-                try:
-                    dst.sendall(data)
-                except OSError:
-                    return
+            data = src.recv(65536)
+            if not data:
+                break
+            dst.sendall(data)
+    except OSError:
+        pass
     finally:
-        sel.close()
+        try:
+            dst.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+
+def _splice(a: socket.socket, b: socket.socket) -> None:
+    """Copy bytes both ways until both directions end. One thread per
+    direction: a single loop doing blocking ``sendall`` can deadlock when
+    both directions are backed up at once."""
+    t = threading.Thread(target=_pump, args=(b, a), daemon=True)
+    t.start()
+    _pump(a, b)
+    t.join()

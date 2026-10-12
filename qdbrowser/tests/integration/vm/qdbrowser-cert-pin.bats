@@ -262,8 +262,9 @@ echo fixture_ok
     # The decision is the proxy's, on the verified chain ...
     [[ "$output" == *"qdbrowser.cert pin_violation host=pinned.test reason=pin_mismatch"* ]]
     [[ "$output" == *"qdbrowser.cert reject host=pinned.test reason=pin_mismatch path=probe"* ]]
-    # ... and Chromium itself had no complaint: no certificateError fired.
-    # This is the gap the error-path hook cannot see.
+    # The tunnel was refused before Chromium's handshake, so no
+    # certificateError fired either. That Chromium WOULD accept this
+    # chain is shown by case 6 (same CA trust, page loads).
     [[ "$output" != *"qdbrowser.cert default-handling host=pinned.test"* ]]
 }
 

@@ -126,15 +126,26 @@ def test_ca_valid_wrong_key_is_refused(pki, serve, caplog):
         proxy.stop()
 
 
-def test_appended_pinned_cert_does_not_satisfy_pin(pki, serve):
+def test_appended_pinned_cert_does_not_satisfy_pin(pki, serve, caplog):
     """Pinned certs are public. A forged chain that merely *carries* the
     pinned CA certificate must not match: only the verified chain counts."""
     srv = serve("rogue", extra=[pki.good_ca])
+    # Premise: the server really presents the pinned CA cert.
+    from cryptography.hazmat.primitives.serialization import Encoding
+    good_ca_der = pki.good_ca.public_bytes(Encoding.DER)
+    with pki.client_context().wrap_socket(
+            socket.create_connection(("127.0.0.1", srv.port), timeout=10),
+            server_hostname=HOST) as probe:
+        presented = [bytes(c) for c in probe.get_unverified_chain()]
+    assert good_ca_der in presented
     proxy = _proxy(pki, srv, {HOST: [spki_pin(pki.good_ca)]})
     try:
-        s, head = _connect(proxy.port)
+        with caplog.at_level(logging.INFO, logger="qdbrowser.cert"):
+            s, head = _connect(proxy.port)
         assert head.startswith("HTTP/1.1 502"), head
         s.close()
+        assert any("reason=pin_mismatch path=probe" in r.getMessage()
+                   for r in caplog.records)
     finally:
         proxy.stop()
 
@@ -331,6 +342,7 @@ def test_chromium_loads_pinned_host_with_matching_key(tmp_path):
     r = _harness("match", tmp_path)
     assert r["marker"] == "1", r
     assert int(r["connects"]) >= 1, r
+    assert r["cert_errors"] == "0", r
 
 
 def test_chromium_refuses_ca_valid_wrong_key(tmp_path):
@@ -338,7 +350,6 @@ def test_chromium_refuses_ca_valid_wrong_key(tmp_path):
     assert int(r["connects"]) >= 1, f"Chromium did not use the pin proxy: {r}"
     assert r["marker"] == "0", r
     assert r["served"] == "0", r
-    assert r["cert_errors"] == "0", r
 
 
 def test_chromium_proxies_loopback_names_too(tmp_path):
@@ -370,6 +381,8 @@ def test_chromium_control_wrong_key_loads_without_proxy(tmp_path):
     r = _harness("unproxied", tmp_path)
     assert r["connects"] == "0", r
     assert r["marker"] == "1", r
+    # Chromium itself accepts the wrong-key chain: no certificateError.
+    assert r["cert_errors"] == "0", r
 
 
 # --- startup wiring (__main__._start_pin_proxy) -----------------------------
@@ -435,3 +448,32 @@ def test_startup_user_proxy_flag_wins_and_is_logged(start_pin_proxy, monkeypatch
         assert start_pin_proxy() == "--proxy-server=10.0.0.1:3128"
     assert any("NOT checked on successful handshakes" in r.getMessage()
                for r in caplog.records)
+
+
+def test_tunnel_carries_simultaneous_bulk_both_ways(pki):
+    """No deadlock when both directions are backed up at once."""
+    from qdbrowser.pin_proxy import _splice
+    a1, a2 = socket.socketpair()
+    b1, b2 = socket.socketpair()
+    import threading
+    t = threading.Thread(target=_splice, args=(a2, b1), daemon=True)
+    t.start()
+    blob = os.urandom(8 * 1024 * 1024)
+    got = {"a": bytearray(), "b": bytearray()}
+
+    def send(sock):
+        sock.sendall(blob)
+        sock.shutdown(socket.SHUT_WR)
+
+    def recv(sock, key):
+        while chunk := sock.recv(65536):
+            got[key] += chunk
+    workers = [threading.Thread(target=f, args=a, daemon=True) for f, a in (
+        (send, (a1,)), (send, (b2,)), (recv, (a1, "a")), (recv, (b2, "b")))]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(timeout=30)
+    t.join(timeout=30)
+    assert not t.is_alive(), "splice deadlocked"
+    assert bytes(got["a"]) == blob and bytes(got["b"]) == blob
