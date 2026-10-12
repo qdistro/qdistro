@@ -105,7 +105,16 @@ EOF
     runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
     runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service
     sleep 3'
-case "$($VMEXEC "$VM" 'runuser -u admin -- bash -c "printf \"status\n\" | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock 2>/dev/null"' 2>/dev/null)" in
+# The ctrl socket can briefly reset a connection after the user-unit restart
+# while the Qt event loop is binding. Poll for an actual state reply rather
+# than treating one transport reset as a locked or unlocked result.
+locker_status=
+for _ in $(seq 1 20); do
+    locker_status=$($VMEXEC "$VM" 'runuser -u admin -- bash -c "printf \"status\n\" | socat -t 2 - UNIX-CONNECT:/run/user/1000/qdlocker.sock 2>/dev/null"' 2>/dev/null) || locker_status=
+    case "$locker_status" in *locked=False*|*locked=True*) break ;; esac
+    sleep 0.5
+done
+case "$locker_status" in
     *locked=False*) ;;
     *locked=True*)
         echo "FAIL(setup): qdlocker is locked; launcher input would be captured by the lock overlay"
