@@ -92,11 +92,16 @@ python314Packages.buildPythonApplication {
     runHook preCheck
     export QT_QPA_PLATFORM=offscreen
     export HOME="$TMPDIR"
-    export DBUS_SESSION_BUS_ADDRESS="$(dbus-daemon --fork --print-address=1 --config-file=${dbus}/share/dbus-1/session.conf)"
+    dbus-daemon --fork --print-address=3 --print-pid=4 \
+      --config-file=${dbus}/share/dbus-1/session.conf 3>"$TMPDIR/bus.addr" 4>"$TMPDIR/bus.pid"
+    export DBUS_SESSION_BUS_ADDRESS="$(cat "$TMPDIR/bus.addr")"
     export DBUS_SYSTEM_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS"
     # tmp_path under /nix/var/nix/builds/<hash>/ exceeds the 108-byte
     # AF_UNIX limit — qterminator socket tests need a short basetemp.
-    python -m pytest --basetemp=/tmp/qfm-pytest
+    rc=0
+    python -m pytest --basetemp=/tmp/qfm-pytest -o faulthandler_timeout=120 || rc=$?
+    kill "$(cat "$TMPDIR/bus.pid")" || true
+    [ "$rc" -eq 0 ]
     runHook postCheck
   '';
 

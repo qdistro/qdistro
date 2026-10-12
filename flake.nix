@@ -35,9 +35,15 @@
           daemons = pkgs.callPackage ./nix/daemons.nix { qdwin = self.packages.${system}.qdwin; };
           qdistro-presentation = pkgs.callPackage ./nix/qdistro-presentation.nix { };
           qdistro-app-sdk = pkgs.callPackage ./nix/qdistro-app-sdk.nix { };
+          qtermwidget-py = pkgs.callPackage ./nix/qtermwidget-py.nix { };
           qfileman = pkgs.callPackage ./nix/qfileman.nix {
             qdistro-presentation = self.packages.${system}.qdistro-presentation;
             qdistro-app-sdk = self.packages.${system}.qdistro-app-sdk;
+          };
+          qterminator = pkgs.callPackage ./nix/qterminator.nix {
+            qdistro-presentation = self.packages.${system}.qdistro-presentation;
+            qdistro-app-sdk = self.packages.${system}.qdistro-app-sdk;
+            qtermwidget-py = self.packages.${system}.qtermwidget-py;
           };
         }
       );
