@@ -65,6 +65,7 @@ let
     fileset = lib.fileset.unions [
       ../session_manager/qdistro_disposable_classes.py
       ../session_manager/disposable-classes.toml
+      ../session_manager/qdistro_disposables.py
     ];
   };
 in
