@@ -455,6 +455,10 @@ struct qdwin {
 	int move_grab_active;
 	uint32_t move_grab_handle;
 	struct weston_pointer_grab move_grab;
+	int resize_grab_active;
+	uint32_t resize_grab_handle;
+	struct weston_pointer_grab resize_grab;
+	uint32_t resize_anchor_handle;
 	int switcher_grab_active;
 	struct weston_keyboard_grab switcher_grab;
 	int overlay_grab_active;
@@ -729,6 +733,7 @@ SPLICED = [
     "qdwin_popup_teardown",
     "qdwin_move_grab_end_if_installed",
     "qdwin_move_grab_end_for",
+    "qdwin_resize_grab_end_for",
     "qdwin_switcher_grab_cancel",
     "qdwin_switcher_grab_end",
     "qdwin_overlay_grab_keyboard",

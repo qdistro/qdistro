@@ -87,8 +87,8 @@ def main() -> int:
         return fail("qdwin shell protocol lacks the authoritative input result")
     if "send_remote_output_input_result" not in shell_gate:
         return fail("qdwin does not acknowledge the backend input transition")
-    if 'interface name="qdwin_shell_v1" version="35"' not in protocol:
-        return fail("qdwin shell protocol must retain v35 alongside the v34 safety drain")
+    if 'interface name="qdwin_shell_v1" version="36"' not in protocol:
+        return fail("qdwin shell protocol must retain v36 alongside the v34 safety drain")
     if 'request name="drain_remote_output_state" since="34"' not in protocol:
         return fail("qdwin shell protocol lacks the safety drain request")
     for token in (
@@ -116,7 +116,8 @@ def main() -> int:
         "event": {30: "toplevel_app_id", 31: "capture_served_stale",
                   32: "nested_proxy_remote_identity", 33: "remote_output_input_result",
                   34: "remote_output_drain_result",
-                  35: "selection_set_source_peer_identity"},
+                  35: "selection_set_source_peer_identity",
+                  36: "toplevel_decoration"},
     }.items():
         entries = iface.findall(kind)
         for opcode, name in expected.items():

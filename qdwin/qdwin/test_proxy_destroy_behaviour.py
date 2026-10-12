@@ -235,6 +235,10 @@ struct qdwin {
 	int move_grab_active;
 	uint32_t move_grab_handle;
 	struct weston_pointer_grab move_grab;
+	int resize_grab_active;
+	uint32_t resize_grab_handle;
+	struct weston_pointer_grab resize_grab;
+	uint32_t resize_anchor_handle;
 };
 
 static struct qdwin *qdwin_singleton;
@@ -1034,6 +1038,7 @@ QDWIN_FNS = [
     ("void", "qdwin_proxy_default_grab_focus"),
     ("void", "qdwin_move_grab_end_if_installed"),
     ("void", "qdwin_move_grab_end_for"),
+    ("void", "qdwin_resize_grab_end_for"),
     ("void", "qdwin_popup_grab_cancel"),
     ("void", "qdwin_popup_grab_end_if_installed"),
     ("void", "qdwin_popup_teardown"),

@@ -1329,6 +1329,19 @@ test('shell-capture-policy',
   ],
 )
 
+# v36 server-side frames: decoration-mode tracking + lifetime, and the
+# live-press gates on client (xdg_toplevel.move/.resize) and shell
+# (begin_interactive_resize) drags.
+test('window-decoration-policy',
+  python3,
+  suite: 'source_invariant',
+  args: [
+    files('qdwin/test_window_decoration_policy.py'),
+    files('qdwin/qdwin.c'),
+    files('qdwin/qdwin-shell-v1.xml'),
+  ],
+)
+
 # v27 ext-workspace-v1 workspace-NAME parity invariants
 # (qdwin_shell_v1.set_workspace_name). Driven by
 # tests/host/21-ext-workspace-names.md; the live-VM half (a real
