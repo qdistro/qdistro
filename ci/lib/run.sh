@@ -93,6 +93,7 @@ finish_run() {
     # a worker's nonzero exit; fail the run loudly.
     rc=$(fragment_integrity_rc "$rc")
     rc=$(pool_rc_selfcheck "$rc")
+    rc=$(offline_egress_rc "$rc")
     # Reap any write-ahead orphan a worker left behind (spinner created a domain
     # whose name we could not parse, or a worker killed mid-provision before it
     # recorded the parsed name). Baseline-diff scoped, so pre-existing/concurrent
@@ -352,6 +353,19 @@ pool_rc_selfcheck() {
         log "pool_rc_selfcheck: pool rc=0 but $nfail fail row(s) present; escalating to EXIT_RUNNER"
         rc=$EXIT_RUNNER
     fi
+    printf '%s' "$rc"
+}
+
+# offline_egress_rc <rc> — QCI_OFFLINE: a blocked guest fetch
+# (qci_offline_egress_check, recorded from release_vm — often inside a pool
+# worker) fails the run even when every test passed: the run did not prove
+# it is offline-clean. A real failure keeps its own class.
+offline_egress_rc() {
+    local rc=$1
+    [ "$rc" -eq 0 ] && [ -f "$RDIR/results.tsv" ] \
+        && awk -F'\t' 'NR > 1 && $1 == "offline-egress" && $3 == "fail" { f = 1 } END { exit !f }' \
+            "$RDIR/results.tsv" \
+        && rc=$EXIT_BUILD
     printf '%s' "$rc"
 }
 

@@ -189,6 +189,16 @@ log "    starting + waiting for guest agent..."
 virsh -c qemu:///session start "$VM" >/dev/null 2>&1 || true
 "$SCRIPT_DIR/vm-start-and-wait" "$VM" >&2
 
+# Offline: block guest egress outside the host cache before anything in the
+# guest can fetch (lib/offline-egress.sh). A golden clone re-runs it to re-arm
+# the scan cursor. Fails closed: an offline VM without the block is refused.
+. "$REPO/scripts/vm/lib/offline-egress.sh"
+if qd_offline_egress_enabled; then
+    log "    offline: installing the guest egress block"
+    qd_offline_egress_install "$VM" "$SCRIPT_DIR/vm-exec" >&2 \
+        || { log "ERROR: offline: could not install the guest egress block"; exit 3; }
+fi
+
 # Stages 4-5 (source staging + in-guest fresh-vm-bootstrap build) are SKIPPED
 # when cloning from a run-golden: the golden disk already contains the built
 # compositor. We only boot + verify in that case. The body below is unindented

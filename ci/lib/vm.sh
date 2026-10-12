@@ -331,6 +331,37 @@ collect_vm_artifacts_ssh() {
         > "$RDIR/journals/$label-avc.log" 2>&1 || true
 }
 
+# qci_offline_egress_check <vm> — offline only: read the blocked-egress log
+# the spinner's guest table (scripts/vm/lib/offline-egress.sh) wrote since it
+# was armed. Any blocked attempt to a destination that is not declared
+# product chatter (QCI_OFFLINE_EGRESS_EXPECTED) is a FAILED row: something in
+# the guest tried to fetch past the host cache. A guest that cannot be asked
+# or was never armed is a failed row too: unknown is not clean.
+qci_offline_egress_check() {
+    local vm=$1 dir log cls unexpected expected
+    . "$VM_TOOLS/lib/offline-egress.sh"
+    qd_offline_egress_enabled || return 0
+    dir="$RDIR/offline-egress"
+    mkdir -p "$dir"
+    log="$dir/$vm.log"
+    if ! qd_offline_egress_scan "$vm" "$VM_TOOLS/vm-exec" > "$log" 2>&1; then
+        record_result offline-egress "$vm" fail "$EXIT_BUILD" build vm "$log" \
+            "QCI_OFFLINE: could not read the guest egress block (not armed or guest unreachable)"
+        return 0
+    fi
+    [ -s "$log" ] || return 0
+    cls="$(qd_offline_egress_classify < "$log")"
+    printf '%s\n' "$cls" > "$dir/$vm.classified"
+    unexpected="$(printf '%s\n' "$cls" | sed -n 's/^unexpected //p' | tr '\n' ' ')"
+    expected="$(printf '%s\n' "$cls" | sed -n 's/^expected //p' | tr '\n' ' ')"
+    if [ -n "$unexpected" ]; then
+        record_result offline-egress "$vm" fail "$EXIT_BUILD" build vm "$log" \
+            "QCI_OFFLINE: guest tried to reach ${unexpected% } past the host cache (blocked)${expected:+; expected chatter: ${expected% }}"
+    else
+        log "offline-egress $vm: only expected product chatter blocked (${expected% })"
+    fi
+}
+
 release_vm() {
     local vm=$1 rc=$2
     [ -n "$vm" ] || return 0
@@ -349,6 +380,7 @@ release_vm() {
         log "preserving pre-existing VM $vm"
         return 0
     }
+    qci_offline_egress_check "$vm"
     if [ "$rc" -ne 0 ] && [ "${QCI_DELETE_FAILED_VM:-0}" != 1 ] && [ "${QCI_KEEP_FAILED_VM:-$KEEP_FAILED_DEFAULT}" = 1 ]; then
         # Preserve the failed VM for debugging, but do NOT leave it running.
         # A long multi-VM gate (bats spins one disposable VM per file) would
@@ -651,6 +683,8 @@ ensure_run_golden() {
         record_result "$profile" "golden-build" fail "$EXIT_VM_PROVISION" vm_provision vm "$log" "could not resolve golden disk path"
         return "$EXIT_VM_PROVISION"
     fi
+    # Offline: the golden build is where most guest fetches happen.
+    qci_offline_egress_check "$gvm"
     # Quiesce: sync in-guest, clean shutdown, wait for shut off.
     "$VM_TOOLS/vm-exec" "$gvm" "sync" >/dev/null 2>&1 || true
     "${VIRSH[@]}" shutdown "$gvm" >/dev/null 2>&1 || true
