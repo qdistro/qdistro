@@ -122,7 +122,7 @@ def test_panel_degraded(vm_session, case):
     if not actual.strip():
         pytest.skip("no vision backend available to judge degraded state")
     reference = (runner.EXPECTATIONS_DIR / case.expectation).read_text()
-    verdict = runner.judge(reference, actual)
+    verdict = runner.judge_frame_consistently(reference, actual, png)
     if verdict.verdict == "SKIP":
         pytest.skip(verdict.raw)
     assert verdict.verdict == "PASS", (

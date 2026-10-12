@@ -218,6 +218,7 @@ SmartPanel {
                   value: brightnessMonitor ? brightnessMonitor.brightness : 0.5
                   stepSize: 0.01
                   enabled: brightnessMonitor ? brightnessMonitor.brightnessControlAvailable : false
+                  opacity: enabled ? 1.0 : 0.5
                   onMoved: value => {
                              if (brightnessMonitor && brightnessMonitor.brightnessControlAvailable) {
                                brightnessMonitor.setBrightness(value);

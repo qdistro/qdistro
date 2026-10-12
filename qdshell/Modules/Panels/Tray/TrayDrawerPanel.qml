@@ -45,22 +45,6 @@ SmartPanel {
     }
   }
 
-  // Force refresh panelContent settings when drawer opens
-  onOpened: {
-    if (panelContent && panelContent.settingsVersion !== undefined) {
-      panelContent.settingsVersion++;
-    }
-    // Auto-close must also cover the already-empty case:
-    // onTrayValuesChanged only fires on a transition TO empty, so a
-    // drawer opened while trayValues is [] would otherwise stay open as
-    // a bare stub (observed live in qdshell-ui test_panel_degraded[tray]).
-    if (panelContent) {
-      panelContent.updateFilteredItems();
-      if (trayValues.length === 0)
-        close();
-    }
-  }
-
   panelContent: Item {
     id: panelContent
 
@@ -116,6 +100,20 @@ SmartPanel {
       target: root
       function onTrayValuesAllChanged() {
         panelContent.updateFilteredItems();
+      }
+      // Handled here, not in a root onOpened: at root scope `panelContent`
+      // is SmartPanel's Component property, not this loaded item, so calls
+      // through it throw and the auto-close below never ran.
+      function onOpened() {
+        // Force refresh settings when drawer opens
+        panelContent.settingsVersion++;
+        // Auto-close must also cover the already-empty case:
+        // onTrayValuesChanged only fires on a transition TO empty, so a
+        // drawer opened while trayValues is [] would otherwise stay open as
+        // a bare stub (observed live in qdshell-ui test_panel_degraded[tray]).
+        panelContent.updateFilteredItems();
+        if (root.trayValues.length === 0)
+          root.close();
       }
     }
 

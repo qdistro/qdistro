@@ -70,8 +70,9 @@ _t3s_exit_trap() {
 trap _t3s_exit_trap EXIT
 
 as_admin() {   # the same scrubbed admin environment the spawn and cleanup use
+    # Quickshell IPC emits a warning before its reply under env -i's C locale.
     runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin USER=admin LOGNAME=admin \
-        XDG_RUNTIME_DIR=/run/user/1000 "$@"
+        XDG_RUNTIME_DIR=/run/user/1000 LANG=C.UTF-8 LC_ALL=C.UTF-8 "$@"
 }
 pm() { as_admin podman "$@"; }   # PLAIN podman: no --runtime, no --root, no runtime flags
 

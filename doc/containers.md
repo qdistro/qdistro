@@ -260,6 +260,28 @@ existing conventions.
 If the container is already running (warm start), the placeholder
 phase is usually under 500ms.
 
+### Clicking a pod that is already up
+
+A pod is one container: `spawn-tier2.sh` runs every launch as
+`podman run --name <container>`, and a templated pod's state path is locked
+by the running launch, so a second copy can never start. A click on any app
+of a pod that is up therefore does not launch
+(`qdshell/Services/Qdistro/PodAppLaunch.js`):
+
+- a live window of the pod (tier-2 engine, secctx app_id `<container>/…`)
+  is focused, the newest one if there are several;
+- a click while that pod's own launch is still pending (from the click
+  until its window or the 15 s placeholder cap) is ignored;
+- otherwise the shell calls `LaunchPodApp`, which refuses with
+  `PodAppRunning` if admin's podman already has the container (starting
+  without a window yet, or still shutting down); the shell shows an
+  "Already running" toast instead of a placeholder. The `container exists`
+  check is bounded at 3 s, and one that cannot run does not refuse:
+  podman's own name check still applies.
+
+Launching a *different* app into a running pod (a `podman exec` into its
+nested weston) is not supported; close the pod first.
+
 ## VM-side test infra
 
 `tests/integration/vm/tiered-isolation.bats` covers tier-2 end-to-end

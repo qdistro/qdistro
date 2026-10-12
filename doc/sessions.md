@@ -480,7 +480,8 @@ on the lock surface rather than as "no egress".
 
 Error names live under `org.qdistro.SessionManager1.*`:
 `UnknownSilo`, `SiloExists`, `SiloBusy`, `BadState`, `BadArgument`,
-`NotAuthorized`, plus a `Generic` fallback for unexpected
+`NotAuthorized`, `PodAppRunning` (`LaunchPodApp` into a pod whose container
+already exists), plus a `Generic` fallback for unexpected
 side-effect failures.
 
 `StartSilo` invokes `systemctl start qdshell-session-<name>@<uid>.service`.

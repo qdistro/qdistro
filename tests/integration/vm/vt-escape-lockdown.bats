@@ -165,6 +165,58 @@ EOF'
     assert_output_contains "PASS: locked-session VT escape is closed on tty3 (static checks only)"
 }
 
+# Real kernel keyboard input into the VM: `virsh send-key` goes through QEMU's
+# keyboard device, so it reaches the kernel input layer (SysRq handler, then
+# kbd_keycode) exactly like a physical keyboard — no compositor shortcut.
+_vt_send_key() {
+    virsh -c qemu:///session send-key "$VM_NAME" "$@" >/dev/null \
+        || fail_loud "virsh send-key $* failed for $VM_NAME"
+    sleep 0.3
+}
+
+@test "vt-escape: locked screen survives console-switch chords, SysRq r/k and a VT round trip" {
+    virsh -c qemu:///session dominfo "$VM_NAME" >/dev/null 2>&1 \
+        || fail_loud "$VM_NAME is not a local libvirt domain; host-side key injection is impossible"
+
+    stage_vm_driver "probes/vt-escape-locked.sh"
+    vm_run "curl -fsS -o /tmp/vt-escape-locked.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/vt-escape-locked.sh && chmod +x /tmp/vt-escape-locked.sh && bash /tmp/vt-escape-locked.sh pre"
+    assert_success
+    assert_output_contains "PASS: kernel.sysrq="
+    assert_output_contains "PASS: loaded console keymap has no SAK binding"
+    assert_output_contains "PASS: locked baseline: still on tty3, K_OFF, locked"
+    assert_output_contains "READY: inject keys now"
+
+    # openSUSE's xkb-converted keymap: `alt keycode 105 = Decr_Console` (and
+    # Incr_Console on Right), with `keycode 125 = Alt` making Super an Alt —
+    # plus the kernel's Ctrl+Alt+Fn Console_n bindings. All must be dead
+    # under K_OFF. The keymap itself is deliberately NOT neutered.
+    _vt_send_key KEY_LEFTALT KEY_LEFT
+    _vt_send_key KEY_LEFTALT KEY_RIGHT
+    _vt_send_key KEY_LEFTMETA KEY_LEFT
+    _vt_send_key KEY_LEFTMETA KEY_RIGHT
+    _vt_send_key KEY_LEFTCTRL KEY_LEFTALT KEY_F1
+    _vt_send_key KEY_LEFTCTRL KEY_LEFTALT KEY_F2
+    # A "password" typed after the chords: if any chord had switched VT this
+    # would land in login(1) and surface as a FAILED LOGIN username.
+    local k
+    for k in V T P R O B E S E N T I N E L; do _vt_send_key "KEY_$k"; done
+    _vt_send_key KEY_ENTER
+    # SysRq unRaw and SAK (bit 4): both revert K_OFF if the mask allows them.
+    _vt_send_key KEY_LEFTALT KEY_SYSRQ KEY_R
+    _vt_send_key KEY_LEFTALT KEY_SYSRQ KEY_K
+    sleep 2
+
+    vm_run "bash /tmp/vt-escape-locked.sh post"
+    assert_success
+    assert_output_contains "PASS: injected keystrokes reached the lock screen"
+    assert_output_contains "PASS: injected SysRq r/k reached the kernel and were refused"
+    assert_output_contains "PASS: after console-switch chords + SysRq: still on tty3, K_OFF, locked"
+    assert_output_contains "PASS: after console-switch chords + SysRq: no FAILED LOGIN"
+    assert_output_contains "PASS: after VT round trip: still on tty3, K_OFF, locked"
+    assert_output_contains "PASS: after VT round trip: no FAILED LOGIN"
+    assert_output_contains "PASS: locked-session VT escape is closed on tty3 (locked, injected input)"
+}
+
 @test "vt-escape: a freed compositor VT gets no login prompt (destructive)" {
     [ "${QDISTRO_VT_FREED_EXPERIMENT:-0}" = "1" ] \
         || skip "set QDISTRO_VT_FREED_EXPERIMENT=1 (stops greetd; disposable VM only)"

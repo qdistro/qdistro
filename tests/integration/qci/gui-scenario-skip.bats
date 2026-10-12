@@ -398,10 +398,10 @@ reason_full_stack() {
 # legacy + ssh-only gates preserved through the refactor
 # ---------------------------------------------------------------------------
 
-@test "gui skip: legacy qdwin md SKIPs when legacy ctrl-socket absent" {
-    run gui_scenario_skip_reason "qdwin/tests/gui/01-foo.md" 0 1 1 "2222"
+@test "gui skip: explicit-VM qdwin md SKIPs when the qdshell session is absent" {
+    run gui_scenario_skip_reason "qdwin/tests/gui/01-foo.md" 1 1 0 "2222"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"legacy qdshell ctrl-socket not available"* ]]
+    [[ "$output" == *"qdshell session not active"* ]]
 }
 
 @test "gui run: qdwin app scenarios do not require the legacy ctrl-socket" {
@@ -475,8 +475,10 @@ reason_full_stack() {
     [ "$status" -eq 0 ]
 }
 
-@test "gui run: legacy qdwin md RUNS when legacy ctrl-socket present" {
-    run gui_scenario_skip_reason "qdwin/tests/gui/01-foo.md" 1 1 1 "2222"
+@test "gui run: explicit-VM qdwin md RUNS on a qdshell session without the legacy ctrl-socket" {
+    # qci replay / qci gui --vm on a qdwin VM: the legacy probe is always 0 on
+    # the Quickshell session and must not skip modern scenarios.
+    run gui_scenario_skip_reason "qdwin/tests/gui/17-foo.md" 0 1 1 "2222"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }

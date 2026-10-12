@@ -322,6 +322,12 @@ runq() {
     [ "$output" = "/alt" ]
     run env -u QDISTRO_DEPS_CACHE_DIR -u QDWIN_CACHE_DIR HOME=/h bash -c ". '$LIB'; qd_deps_root"
     [ "$output" = "/h/.cache/qdistro" ]
+    # Kiwi's config.sh executes under nounset with no HOME in its chroot.
+    local passwd_home
+    passwd_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+    run env -u QDISTRO_DEPS_CACHE_DIR -u QDWIN_CACHE_DIR -u HOME bash -u -c ". '$LIB'; qd_deps_root"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$passwd_home/.cache/qdistro" ]
 }
 
 @test "qd_display_info_tarball: warm seed returns path offline, honors env pin override" {

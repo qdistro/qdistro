@@ -325,8 +325,56 @@ XML=$(printf '%s' "$XML" \
     | sed -e "s|<name>$TEMPLATE</name>|<name>$VM</name>|" \
           -e '/<uuid>/d' \
           -e "/<mac address=/c\\      <mac address='$NEW_MAC'/>" \
-          -e "s|<vcpu[^>]*>[0-9]\{1,\}</vcpu>|<vcpu placement='static'>${VCPUS}</vcpu>|" \
-          -e "s|$TEMPLATE.qcow2|${VM}.qcow2|g")
+          -e "s|<vcpu[^>]*>[0-9]\{1,\}</vcpu>|<vcpu placement='static'>${VCPUS}</vcpu>|")
+
+# The template domain may live in the default libvirt images directory while
+# this clone's overlay lives in QDWIN_IMG_DIR. Replace the primary disk's whole
+# source path, not just its basename, or libvirt will look in the old directory.
+# Keep the XML's formatting/quotes: later OVMF and NIC transforms use text
+# patterns, so reserializing the whole domain with ElementTree would alter them.
+XML=$(printf '%s' "$XML" | CLONE_DISK="$IMG/${VM}.qcow2" \
+    TEMPLATE_DISK="$TEMPLATE.qcow2" python3 -c '
+import html
+import os
+import re
+import sys
+
+xml = sys.stdin.read()
+disk_re = re.compile(r"(<disk\b[^>]*>)(.*?)</disk>", re.S)
+device_re = re.compile(r"\bdevice\s*=\s*([\"\x27])([^\"\x27]*)\1")
+source_re = re.compile(r"(<source\b[^>]*\bfile\s*=\s*)([\"\x27])([^\"\x27]*)\2")
+rewritten = 0
+
+def replace_disk(match):
+    global rewritten
+    opening, body = match.group(1), match.group(2)
+    device = device_re.search(opening)
+    if device is None or device.group(2) != "disk":
+        return match.group(0)
+    # dumpxml can include nested backingStore/source elements; those are
+    # stripped later and must not count as the primary disk source.
+    direct_body = body.split("<backingStore", 1)[0]
+    sources = list(source_re.finditer(direct_body))
+    if len(sources) != 1:
+        raise ValueError("primary disk must have exactly one file source")
+    source = sources[0]
+    old_path = html.unescape(source.group(3))
+    if os.path.basename(old_path) != os.environ["TEMPLATE_DISK"]:
+        raise ValueError(f"unexpected template disk source: {old_path}")
+    start, end = source.span(3)
+    body = body[:start] + html.escape(os.environ["CLONE_DISK"], quote=True) + body[end:]
+    rewritten += 1
+    return opening + body + "</disk>"
+
+try:
+    xml = disk_re.sub(replace_disk, xml)
+    if rewritten != 1:
+        raise ValueError(f"expected one primary disk, found {rewritten}")
+except ValueError as exc:
+    sys.stderr.write(f"ERROR: cloned XML disk source: {exc}\n")
+    sys.exit(2)
+sys.stdout.write(xml)
+') || exit 1
 
 # Strip any pre-existing <backingStore> blocks from the template's
 # disk XML — libvirt regenerates them from the qcow2's actual
@@ -537,7 +585,22 @@ printf '%s' "$XML" | virsh -c qemu:///session define /dev/stdin >/dev/null
 # The overlay is now an attached disk of a DEFINED domain, so the cleanup
 # ownership audit can see it; the shared storage lock is no longer needed.
 qci_release_storage_lock
-virsh -c qemu:///session start "$VM" >/dev/null
+# Offline (opted in by the caller, never by image builders): the guest boots
+# with its links down and only gets them back once the egress block is live,
+# so nothing in it can reach the internet before the block exists
+# (lib/offline-egress.sh). SSH-only clones cannot be armed over qga; they boot
+# from an armed run golden, whose boot unit loads the block before the
+# network, and the gate's scan verifies it is live.
+ARM_EGRESS=0
+if [ "${QD_OFFLINE_EGRESS_ARM:-0}" = 1 ]; then
+    . "$SCRIPT_DIR/lib/offline-egress.sh"
+    qd_offline_egress_arm_requested && [ "$SSH_CLONE" != 1 ] && ARM_EGRESS=1
+fi
+if [ "$ARM_EGRESS" = 1 ]; then
+    qd_offline_egress_start_dark "$VM" || { echo "ERROR: offline: could not start $VM with its links down" >&2; exit 1; }
+else
+    virsh -c qemu:///session start "$VM" >/dev/null
+fi
 
 # 4. Wait for the qemu-guest-agent so subsequent vm-exec works.
 #    Under --from-enforcing-baked, qga is denied by SELinux; the wait
@@ -584,6 +647,12 @@ if [ "$SSH_CLONE" = 1 ]; then
     fi
 else
     "$VM_TOOLS/vm-start-and-wait" "$VM" >/dev/null
+    if [ "$ARM_EGRESS" = 1 ]; then
+        qd_offline_egress_install "$VM" "$VM_TOOLS/vm-exec" >&2 \
+            || { echo "ERROR: offline: could not install the guest egress block in $VM" >&2; exit 3; }
+        qd_offline_egress_links_up "$VM" "$VM_TOOLS/vm-exec" \
+            || { echo "ERROR: offline: $VM got no network back after arming" >&2; exit 3; }
+    fi
 fi
 
 # Built successfully. Emit the name (and ssh_port) the caller consumes, THEN mark

@@ -48,3 +48,5 @@ tests/integration/vm/phase7-tier3s-netnone.bats	bats	vm	qdistro-session-manager.
 tests/integration/vm/phase7-tier3s-provfrag.bats	bats	vm	qdistro-session-manager.service,qdistro-admin-broker.service	loopback	none	tier3s	slow
 tests/integration/permissions-gui/58-tier3s-window-visible.md	gui	vm	qdistro-session-manager.service,qdistro-admin-broker.service,qdwin-compositor.service,qdshell.service	loopback	agent	tier3s	slow
 tests/integration/permissions-gui/59-tier3s-close-cleanup.md	gui	vm	qdistro-session-manager.service,qdistro-admin-broker.service,qdwin-compositor.service,qdshell.service	loopback	agent	tier3s	slow
+tests/integration/vm/templates-browser.bats	bats	vm	qdwin-compositor.service,qdshell.service	external	none	templates	slow
+tests/integration/vm/templates-promotion.bats	bats	vm	none	external	none	templates	slow

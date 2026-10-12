@@ -282,6 +282,10 @@ virt-customize -a "$BASE_QCOW" \
     --mkdir /etc/systemd/logind.conf.d \
     --copy-in "$LOGIND_DROPIN:/etc/systemd/logind.conf.d/" \
     --run-command 'echo "qdistro-tier5-base" >/etc/hostname' \
+    `# No NetworkManager connectivity check: a per-app guest has no` \
+    `# captive portal to detect, and the probe tells openSUSE every time` \
+    `# an app VM boots (offline qci counts it as blocked egress).` \
+    --run-command 'mkdir -p /etc/NetworkManager/conf.d && printf "[connectivity]\nenabled=false\n" > /etc/NetworkManager/conf.d/90-qdistro-no-conncheck.conf' \
     "${PW_ARGS[@]}" \
     --run-command 'modprobe vsock; modprobe vhost_vsock || true' \
     >/dev/null
