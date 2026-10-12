@@ -124,14 +124,26 @@ table inet $QD_OFFLINE_EGRESS_TABLE {
         type ipv4_addr
         flags interval
         elements = { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16,
-                     172.16.0.0/12, 192.0.2.0/24, 192.168.0.0/16,
-                     198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4,
+                     172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4,
                      255.255.255.255 }
     }
     set allow6 {
         type ipv6_addr
         flags interval
-        elements = { ::1, 2001:db8::/32, fc00::/7, fe80::/10, fec0::/10, ff00::/8 }
+        elements = { ::1, fc00::/7, fe80::/10, fec0::/10, ff00::/8 }
+    }
+    # Documentation (TEST-NET) ranges pass only out a veth, i.e. to a peer
+    # namespace inside the guest (silo-egress's forwarding peer); routed
+    # anywhere else they are blocked and recorded like any address.
+    set doc4 {
+        type ipv4_addr
+        flags interval
+        elements = { 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 }
+    }
+    set doc6 {
+        type ipv6_addr
+        flags interval
+        elements = { 2001:db8::/32 }
     }
     set any4 { typeof ip daddr; size $n; flags dynamic; counter; }
     set any6 { typeof ip6 daddr; size $n; flags dynamic; counter; }
@@ -150,6 +162,8 @@ table inet $QD_OFFLINE_EGRESS_TABLE {
         oifname "lo" accept
         ip daddr @allow4 accept
         ip6 daddr @allow6 accept
+        oifname "veth*" ip daddr @doc4 accept
+        oifname "veth*" ip6 daddr @doc6 accept
 ${dns:+$dns
 }        update @any4 { ip daddr }
         update @any6 { ip6 daddr }
@@ -161,6 +175,8 @@ ${dns:+$dns
         type filter hook forward priority filter - 10; policy accept;
         ip daddr @allow4 accept
         ip6 daddr @allow6 accept
+        oifname "veth*" ip daddr @doc4 accept
+        oifname "veth*" ip6 daddr @doc6 accept
         update @any4 { ip daddr }
         update @any6 { ip6 daddr }
         update @fwd4 { ip daddr . meta l4proto . th dport }

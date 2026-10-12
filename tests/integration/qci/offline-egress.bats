@@ -94,7 +94,10 @@ PYX
         nft -f '$BATS_TEST_TMPDIR/r.nft' || exit 8   # idempotent re-apply
         timeout 3 bash -c 'exec 3<>/dev/tcp/198.18.0.1/443' 2>/dev/null; echo pub=\$?
         timeout 1 bash -c 'exec 3<>/dev/tcp/10.9.9.7/80' 2>/dev/null; echo priv=\$?
-        timeout 1 bash -c 'exec 3<>/dev/tcp/203.0.113.2/80' 2>/dev/null; echo docnet=\$?
+        timeout 3 bash -c 'exec 3<>/dev/tcp/203.0.113.6/80' 2>/dev/null; echo docnet=\$?
+        ip link add veth-t type veth peer name veth-p; ip addr add 203.0.113.1/30 dev veth-t
+        ip link set veth-t up; ip link set veth-p up
+        timeout 1 bash -c 'exec 3<>/dev/tcp/203.0.113.2/80' 2>/dev/null; echo docveth=\$?
         timeout 1 bash -c 'exec 3<>/dev/tcp/100.100.100.100/53' 2>/dev/null; echo dns=\$?
         timeout 3 bash -c 'exec 3<>/dev/tcp/100.100.100.100/443' 2>/dev/null; echo dnshost443=\$?
         timeout 3 bash -c 'exec 3<>/dev/tcp/100.64.0.5/53' 2>/dev/null; echo tailnetpeer=\$?
@@ -108,15 +111,16 @@ PYX
     # The private address has no host behind it: it times out (124), i.e. the
     # table let it through to the (absent) peer instead of rejecting it.
     grep -qx 'priv=124' <<<"$output"
-    # Documentation ranges (TEST-NET) are never routed to the internet; a
-    # guest test may use one as an in-guest peer (silo-egress), so they pass.
-    grep -qx 'docnet=124' <<<"$output"
+    # A documentation (TEST-NET) peer passes only out a veth (an in-guest
+    # namespace, as silo-egress uses); routed out the uplink it is refused.
+    grep -qx 'docveth=124' <<<"$output"
+    grep -qx 'docnet=1' <<<"$output"
     # DNS to the host's own (tailnet) nameserver passes; any other port to it,
     # and any other 100.64/10 address, is refused and recorded.
     grep -qx 'dns=124' <<<"$output"
     grep -qx 'dnshost443=1' <<<"$output"
     grep -qx 'tailnetpeer=1' <<<"$output"
-    grep -qx 'blocked=3' <<<"$output"
+    grep -qx 'blocked=4' <<<"$output"
     grep -q '"val": {"concat": \["198.18.0.1", "tcp", 443, 0\]}, "counter": {"packets": 1' <<<"$output"
     grep -q '"val": "198.18.0.1", "counter": {"packets": 1' <<<"$output"
     ! grep -q '10.9.9.7' <<<"$output"
