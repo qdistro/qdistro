@@ -2528,6 +2528,10 @@
       "broker-error": "could not read broker rules",
       "title": "Permissions"
     },
+    "podapp": {
+      "running": "{container} is still running or shutting down. Close it, or wait a moment, before launching another app in it.",
+      "running-title": "Already running"
+    },
     "qdshell-performance": {
       "disabled": "Performance mode disabled",
       "enabled": "Performance mode enabled",
