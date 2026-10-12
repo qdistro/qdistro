@@ -1,27 +1,42 @@
-# 61 — window chrome strip: drag, right-click context menu, item actions
+# 61 — server-side window frame: title bar, buttons, edges, menu
 
 <!-- qci:visual: required -->
 
-**What**: on a plain admin toplevel, prove the shell-attached north
-chrome strip exists (visual + `attach_decoration` journal), that a
-left-drag on it drives `request_raise` + `begin_interactive_move` on a
-live input serial and actually moves the window, that a right-click on
-it opens the `show_popup` context menu (`show_popup parent=` journal +
-visible Minimize/Maximize/Close rows), that an outside click dismisses
-the menu (`popup dismissed by outside click`), that the Minimize row
-minimises the window (`set_minimized`), and that the Close row closes a
-window (`request_close` + `toplevel_removed`).
+**What**: qdshell frames exactly the toplevels whose client negotiated
+server-side decorations (qdwin v36 `toplevel_decoration`), and the
+frame works end to end. On a Qt toplevel (server-side): the title bar +
+E/S/W edges attach (`attach_decoration ... inset=N24 E4 S4 W4`); a
+left-drag on the title bar moves the window (`request_raise` +
+`begin_interactive_move` on a live serial); a right-click opens the
+`show_popup` window menu, which an outside click dismisses; the
+maximize button maximises (`set_maximized ... max=1`) and a double-click
+on the title bar restores; a drag on the bottom-right corner resizes
+(`begin_interactive_resize` → `end_interactive_resize`); the menu's
+Minimize row minimises; the close button closes a fresh window
+(`request_close` + `toplevel_removed`). On a self-decorated client
+(weston-terminal): NO shell frame (`mode=client_side`, no
+`attach_decoration`) — and its OWN title bar still drags it
+(`xdg_toplevel.move`).
 
-**Why**: this is the qdshell side of the D7/D9 GUI lane
-(`open-followups.md`). The `chrome_button`/`popup_button` wire events
-and the `show_popup` grab-serial contract had zero live callers before
-the shell-chrome milestone — every step here is a code path that did
-not exist before: `chrome_button(serial)` → `request_raise` +
-`begin_interactive_move(serial)` for the drag, and
-`chrome_button(serial)` → `showPopup(serial)` → `popup_button` →
-`popupItemTriggered` for the menu. The stale/forged-serial refusal
+**Why**: Qt/KDE apps negotiate server-side decorations and therefore
+paint no frame; before this lane they rendered borderless with no
+move/close affordance (`issues/qdistro/app-window-decorations.md`,
+option A). Self-decorated clients must not get a second title bar
+stacked over their own, and their own move/resize requests used to be
+compositor stubs. This is also the qdshell side of the D7/D9 GUI lane
+(`open-followups.md`): `chrome_button(serial)` → `showPopup(serial)` →
+`popup_button` → `popupItemTriggered`. The stale/forged-serial refusal
 (`invalid_grab`) and the nested submenu grab remain pinned host-side
 (`test_popup_grab_hardening.py`); this lane proves the live path.
+
+**Frame layout** (for computing click points): the title bar is 24 px
+tall across the full outer width (window + 4 px edge each side), with
+three 24×24 buttons flush right: **minimize** (underscore glyph),
+**maximize** (square; overlapping squares = restore), **close** (X).
+The window title is drawn left-aligned. The top 4 px of the title bar
+are a resize grip — aim title-bar clicks/drags at its vertical middle
+(top + 12) and left of the buttons. The E/S/W edges are 4 px wide; the
+last 16 px of the bottom edge at either end are the corners.
 
 **Pointer note**: this scenario explicitly exercises pointer input, so
 it is exempt from the AGENTS.md "avoid raw coordinate clicks" default.
@@ -29,9 +44,9 @@ For EVERY click/drag, first take a `qdwin_screenshot`, compute the
 point from the frame, and verify the point with
 `vm-gui click-preview x y` (it parks the pointer + rings the target,
 no button event). Only then issue `vm-gui click` / `rightclick` /
-`drag` at the SAME coordinates. Grade every step's RESULT from the
-journal oracles named below plus a fresh `qdwin_screenshot` — never
-from a click's post frame alone.
+`doubleclick` / `drag` at the SAME coordinates. Grade every step's
+RESULT from the journal oracles named below plus a fresh
+`qdwin_screenshot` — never from a click's post frame alone.
 
 ## Setup
 
@@ -102,12 +117,12 @@ EOF
 
 ## Steps
 
-### S1 — the north chrome strip attaches to a plain toplevel
+### S1 — a server-side client gets the shell frame
 
-Launch the admin app (the shipped paint-waiting launcher), then wait
-for the compositor to log `attach_decoration ... inset=N20` for its
-handle — the 20 px north strip Qdwin.qml attaches once it learns the
-window width.
+Launch the admin app (PyQt6 — Qt negotiates server-side decorations;
+the shipped paint-waiting launcher), then wait for the compositor to
+log `toplevel_decoration ... mode=server_side` and the frame's
+`attach_decoration ... inset=N24 E4 S4 W4` for its handle.
 
 ```bash
 $VMEXEC "$VM" 'bash /tmp/61-driver.sh true'
@@ -118,29 +133,31 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
     echo "$H" > /tmp/61-app.handle
     echo "window pid=$APP_PID handle=$H"'
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
-    bash /tmp/61-driver.sh await_qdwin_line "attach_decoration handle=$H inset=N20"' \
-    || { echo "FAIL(S1): no attach_decoration inset=N20 for the window"; exit 1; }
-qdwin_screenshot "$ART/s1-chrome-strip.png"
+    bash /tmp/61-driver.sh await_qdwin_line "toplevel_decoration handle=$H mode=server_side" &&
+    bash /tmp/61-driver.sh await_qdwin_line "attach_decoration handle=$H inset=N24 E4 S4 W4"' \
+    || { echo "FAIL(S1): no server-side frame for the window"; exit 1; }
+qdwin_screenshot "$ART/s1-frame.png"
 ```
 
-**Assert** (hard, agent-visual): `s1-chrome-strip.png` shows a solid
-~20 px horizontal strip spanning the full width of the admin-approvals
-window along its TOP edge, visibly distinct from the window content
-below it. No strip / a strip that is part of the client's own painting
-(a normal titlebar INSIDE the window) is a FAIL — the strip is a
-shell-attached surface above the client content.
+**Assert** (hard, agent-visual): `s1-frame.png` shows, along the TOP
+edge of the admin-approvals window, a ~24 px title bar spanning its
+full width, carrying the window title on the left and three button
+glyphs (underscore, square, X) on the right; and thin (~4 px) edges of
+the same colour down both sides and along the bottom. No title bar, a
+title bar without text or buttons, or two stacked title bars is a FAIL.
 
-### S2 — left-drag on the strip raises and moves the window
+### S2 — left-drag on the title bar raises and moves the window
 
-From `s1-chrome-strip.png`, compute the strip's midpoint
-(`window_left + width/2`, `strip_top + 10`). Verify the point with
-`click-preview`, then drag ~120 px right and ~60 px down.
+From `s1-frame.png`, pick a title-bar point left of the buttons at the
+bar's vertical middle (`window_left + width/3`, `bar_top + 12`). Verify
+the point with `click-preview`, then drag ~120 px right and ~60 px
+down.
 
 ```bash
 qdwin_screenshot "$ART/s2-before-drag.png"
-# Runner: compute (X,Y) on the strip midpoint from the frame;
-# confirm the red ring sits ON the strip:
-$VMGUI "$VM" click-preview X Y strip-midpoint
+# Runner: compute (X,Y) on the title bar from the frame;
+# confirm the red ring sits ON the bar, not on a button:
+$VMGUI "$VM" click-preview X Y title-bar
 $VMGUI "$VM" drag X Y $((X + 120)) $((Y + 60))
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
     bash /tmp/61-driver.sh await_qdwin_line "request_raise handle=$H"
@@ -150,34 +167,31 @@ $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
 qdwin_screenshot "$ART/s2-after-drag.png"
 ```
 
-**Assert** (hard): the three journal lines exist for this handle
-(`chrome_button` forwarded the live serial → qdshell issued
-`request_raise` + `begin_interactive_move`; the compositor ran the
-move-drag to its release). **And** (agent-visual)
-`s2-after-drag.png` shows the window displaced by roughly the drag
-delta (~+120 x, ~+60 y) versus `s2-before-drag.png`. Journal-only is
-not enough — a move that logged but never moved pixels is a compositor
-defect, not a pass.
+**Assert** (hard): the three journal lines exist for this handle.
+**And** (agent-visual) `s2-after-drag.png` shows the window AND its
+frame displaced by roughly the drag delta (~+120 x, ~+60 y) versus
+`s2-before-drag.png`. Journal-only is not enough — a move that logged
+but never moved pixels is a compositor defect, not a pass.
 
-### S3 — right-click on the strip opens the context menu
+### S3 — right-click on the title bar opens the context menu
 
-Recompute the strip midpoint on `s2-after-drag.png` (the window moved),
+Recompute a title-bar point on `s2-after-drag.png` (the window moved),
 verify with `click-preview`, then `rightclick`. The compositor must log
 `show_popup parent=<H>` — proof that `chrome_button(serial)` reached
 qdshell and `showPopup(serial)` passed the live-grab check.
 
 ```bash
-# Runner: new strip midpoint (X2,Y2) from s2-after-drag.png
-$VMGUI "$VM" click-preview X2 Y2 strip-midpoint
+# Runner: new title-bar point (X2,Y2) from s2-after-drag.png
+$VMGUI "$VM" click-preview X2 Y2 title-bar
 $VMGUI "$VM" rightclick X2 Y2
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
     bash /tmp/61-driver.sh await_qdwin_line "show_popup parent=$H"' \
-    || { echo "FAIL(S3): right-click on the strip produced no show_popup"; exit 1; }
+    || { echo "FAIL(S3): right-click on the title bar produced no show_popup"; exit 1; }
 qdwin_screenshot "$ART/s3-menu-open.png"
 ```
 
 **Assert** (hard, agent-visual): `s3-menu-open.png` shows a small dark
-menu anchored at the click point with at least the rows **Minimize**,
+menu anchored at the click point with the rows **Minimize**,
 **Maximize** (or **Restore**), **Close**. No menu despite a logged
 `show_popup` is a compositing defect; a logged refusal
 (`show_popup refused: stale/invalid`) is the serial-contract bug this
@@ -200,57 +214,115 @@ qdwin_screenshot "$ART/s4-menu-gone.png"
 **Assert** (hard, agent-visual): `s4-menu-gone.png` shows no menu; the
 window is unchanged.
 
-### S5 — the Minimize row minimises the window
+### S5 — maximize button, then double-click on the title bar restores
 
-Reopen the menu (strip midpoint on `s4-menu-gone.png`), then click the
-first row's centre — the Minimize item — computed from the menu's
-position in a `s5-menu.png` capture (row height ≈ 1/3 of menu height;
-Minimize is the top row). `popup_button` forwards the press; qdshell's
-hit-test maps it to row 0 → `requestMinimize`.
+Click the **maximize** button (the middle of the three, square glyph)
+from `s4-menu-gone.png`. qdshell acts on the release over the same
+button → `request_maximize` → `set_maximized ... max=1`. Then
+double-click the (now full-width) title bar left of the buttons →
+`set_maximized ... max=0`.
 
 ```bash
-$VMGUI "$VM" click-preview X2 Y2 strip-midpoint
-$VMGUI "$VM" rightclick X2 Y2
+# Runner: maximize-button centre (BX,BY) from s4-menu-gone.png
+$VMGUI "$VM" click-preview BX BY maximize-button
+$VMGUI "$VM" click BX BY
+$VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
+    bash /tmp/61-driver.sh await_qdwin_line "set_maximized handle=$H max=1"' \
+    || { echo "FAIL(S5): maximize button did not maximise"; exit 1; }
+qdwin_screenshot "$ART/s5-maximized.png"
+# Runner: title-bar point (DX,DY) on s5-maximized.png, left of the buttons
+$VMGUI "$VM" click-preview DX DY title-bar
+$VMGUI "$VM" doubleclick DX DY
+$VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
+    bash /tmp/61-driver.sh await_qdwin_line "set_maximized handle=$H max=0"' \
+    || { echo "FAIL(S5): double-click on the title bar did not restore"; exit 1; }
+qdwin_screenshot "$ART/s5-restored.png"
+```
+
+**Assert** (hard, agent-visual): `s5-maximized.png` shows the window
+filling the work area with its title bar at the top, the middle button
+now drawn as overlapping squares (restore), and no side/bottom edges.
+`s5-restored.png` shows it back at roughly its `s4-menu-gone.png` size
+and position, edges back.
+
+### S6 — dragging the bottom-right corner resizes the window
+
+On `s5-restored.png`, take a point on the bottom edge within its last
+~8 px from the right (`frame_right - 6`, `bottom_edge_top + 2`) —
+the edge is only 4 px tall, so `click-preview` it carefully. Drag it
+~100 px right and ~80 px down.
+
+```bash
+qdwin_screenshot "$ART/s6-before-resize.png"
+# Runner: corner point (RX,RY) from s6-before-resize.png
+$VMGUI "$VM" click-preview RX RY bottom-right-corner
+$VMGUI "$VM" drag RX RY $((RX + 100)) $((RY + 80))
+$VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
+    bash /tmp/61-driver.sh await_qdwin_line "begin_interactive_resize handle=$H edges=0xa" &&
+    bash /tmp/61-driver.sh await_qdwin_line "end_interactive_resize handle=$H"' \
+    || { echo "FAIL(S6): corner drag produced no resize-drag journal lines"; exit 1; }
+qdwin_screenshot "$ART/s6-after-resize.png"
+```
+
+**Assert** (hard): both journal lines exist for this handle
+(`edges=0xa` = bottom|right). **And** (agent-visual)
+`s6-after-resize.png` shows the window roughly 100 px wider and 80 px
+taller than in `s6-before-resize.png`, its top-left corner unmoved, and
+the frame (title bar + edges) hugging the new size. If the journal shows
+`begin_interactive_resize ... ignored` the press missed the edge —
+re-aim once before grading FAIL.
+
+### S7 — the menu's Minimize row minimises the window
+
+Open the menu on the title bar (point from `s6-after-resize.png`), then
+click the first row's centre — the Minimize item — computed from the
+menu's position in a `s7-menu.png` capture (row height ≈ 1/3 of menu
+height; Minimize is the top row). `popup_button` forwards the press;
+qdshell's hit-test maps it to row 0 → `requestMinimize`.
+
+```bash
+# Runner: title-bar point (X5,Y5) from s6-after-resize.png
+$VMGUI "$VM" click-preview X5 Y5 title-bar
+$VMGUI "$VM" rightclick X5 Y5
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
     bash /tmp/61-driver.sh await_qdwin_line "show_popup parent=$H"' \
-    || { echo "FAIL(S5): menu did not reopen"; exit 1; }
-qdwin_screenshot "$ART/s5-menu.png"
-# Runner: compute the Minimize row centre (MX,MY) from s5-menu.png;
+    || { echo "FAIL(S7): menu did not reopen"; exit 1; }
+qdwin_screenshot "$ART/s7-menu.png"
+# Runner: compute the Minimize row centre (MX,MY) from s7-menu.png;
 # confirm with click-preview, then click.
 $VMGUI "$VM" click-preview MX MY minimize-row
 $VMGUI "$VM" click MX MY
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
     bash /tmp/61-driver.sh await_qdwin_line "set_minimized handle=$H"' \
-    || { echo "FAIL(S5): Minimize row did not minimise the window"; exit 1; }
-qdwin_screenshot "$ART/s5-minimized.png"
+    || { echo "FAIL(S7): Minimize row did not minimise the window"; exit 1; }
+qdwin_screenshot "$ART/s7-minimized.png"
 ```
 
-**Assert** (hard, agent-visual): `s5-minimized.png` shows the admin
-window AND its chrome strip gone from the desktop (menu gone too —
-the item action tears the popup down). The window must still exist as
-a toplevel (minimised, not closed):
+**Assert** (hard, agent-visual): `s7-minimized.png` shows the admin
+window AND its frame gone from the desktop (menu gone too — the item
+action tears the popup down). The window must still exist as a
+toplevel (minimised, not closed):
 
 ```bash
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
     H=$(cat /tmp/61-app.handle)
     qdwin_windows | grep -q "^$H"' \
-    || { echo "FAIL(S5): handle vanished instead of minimising"; exit 1; }
+    || { echo "FAIL(S7): handle vanished instead of minimising"; exit 1; }
 ```
 
-### S6 — the Close row closes a fresh window
+### S8 — a self-decorated client gets no shell frame and drags itself
 
-Launch `weston-terminal` (a second, independent native-Wayland
-toplevel; the baked base ships it with weston — the XWayland-backed
-admin TUI launcher is an opt-in lane), wait for its chrome strip, reopen its menu, and
-click the **Close** row (bottom row). `request_close` must be
-dispatched and the toplevel removed — the whole chrome/popup state for
-the handle dies with it.
+Launch `weston-terminal` (native Wayland, draws its own light-grey
+title bar, never binds xdg-decoration; the baked base ships it with
+weston). The compositor must report `mode=client_side` for it and
+qdshell must attach NO frame. Then drag weston-terminal's OWN title bar:
+the client's `xdg_toplevel.move` must start a compositor move-drag.
 
 ```bash
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
     runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
         WAYLAND_DISPLAY=wayland-1 setsid weston-terminal </dev/null \
-        >/tmp/61-tui.log 2>&1 &
+        >/tmp/61-csd.log 2>&1 &
     H2=""
     for i in $(seq 1 40); do
         TPID=$(pgrep -u admin -nx weston-terminal) \
@@ -258,45 +330,83 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
         sleep 0.5
     done
     [ -n "$H2" ] || { echo "ERROR: weston-terminal window never appeared" >&2; exit 2; }
-    echo "$H2" > /tmp/61-tui.handle
-    echo "second window pid=$TPID handle=$H2"'
-$VMEXEC "$VM" 'H2=$(cat /tmp/61-tui.handle)
-    bash /tmp/61-driver.sh await_qdwin_line "attach_decoration handle=$H2 inset=N20"' \
-    || { echo "FAIL(S6): no chrome strip on the second window"; exit 1; }
-qdwin_screenshot "$ART/s6-tui.png"
-# Runner: second-window strip midpoint (X4,Y4) from s6-tui.png.
-# weston-terminal draws its OWN light-grey title bar ("Wayland
-# Terminal", with -/[]/x buttons) whose right-click menu is the
-# client's (Close/Fullscreen) — that is NOT the target. The qdwin strip
-# is the separate dark 20 px band directly ABOVE that grey bar; take
-# Y4 ~10 px above the grey bar's top edge. A menu without
-# Minimize/Maximize means the click hit the client bar: re-aim.
-$VMGUI "$VM" click-preview X4 Y4 tui-strip
-$VMGUI "$VM" rightclick X4 Y4
-$VMEXEC "$VM" 'H2=$(cat /tmp/61-tui.handle)
-    bash /tmp/61-driver.sh await_qdwin_line "show_popup parent=$H2"' \
-    || { echo "FAIL(S6): no show_popup for the second window"; exit 1; }
-qdwin_screenshot "$ART/s6-menu.png"
-# Runner: Close row centre (CX,CY) — bottom row of the menu.
-$VMGUI "$VM" click-preview CX CY close-row
-$VMGUI "$VM" click CX CY
-$VMEXEC "$VM" 'H2=$(cat /tmp/61-tui.handle)
-    bash /tmp/61-driver.sh await_qdwin_line "request_close handle=$H2"
-    bash /tmp/61-driver.sh await_qdwin_line "toplevel_removed handle=$H2"' \
-    || { echo "FAIL(S6): Close row did not close the window"; exit 1; }
-qdwin_screenshot "$ART/s6-closed.png"
+    echo "$H2" > /tmp/61-csd.handle
+    echo "csd window pid=$TPID handle=$H2"'
+$VMEXEC "$VM" 'H2=$(cat /tmp/61-csd.handle)
+    bash /tmp/61-driver.sh await_qdwin_line "toplevel_decoration handle=$H2 mode=client_side" || exit 1
+    sleep 3
+    if bash /tmp/61-driver.sh qdwin_journal | grep -q "attach_decoration handle=$H2 "; then
+        echo "shell frame attached to a self-decorated client" >&2; exit 1
+    fi' \
+    || { echo "FAIL(S8): self-decorated client was framed by the shell"; exit 1; }
+qdwin_screenshot "$ART/s8-csd.png"
+# Runner: a point (TX,TY) on weston-terminal's OWN grey title bar, away
+# from its -/[]/x buttons; click-preview it, then drag ~100 px right.
+$VMGUI "$VM" click-preview TX TY csd-title-bar
+$VMGUI "$VM" drag TX TY $((TX + 100)) $((TY + 40))
+$VMEXEC "$VM" 'H2=$(cat /tmp/61-csd.handle)
+    bash /tmp/61-driver.sh await_qdwin_line "xdg_toplevel.move handle=$H2 anchor=" &&
+    bash /tmp/61-driver.sh await_qdwin_line "end_interactive_move handle=$H2"' \
+    || { echo "FAIL(S8): the client's own title bar did not move it"; exit 1; }
+qdwin_screenshot "$ART/s8-csd-moved.png"
 ```
 
-**Assert** (hard): `request_close handle=$H2` then
-`toplevel_removed handle=$H2` in the compositor journal, and
-(agent-visual) `s6-closed.png` shows the second window gone.
+**Assert** (hard, agent-visual): `s8-csd.png` shows weston-terminal
+with ONLY its own grey title bar — no dark shell title bar above it and
+no shell edges around it. `s8-csd-moved.png` shows it displaced by
+roughly the drag delta.
+
+### S9 — the close button closes a fresh server-side window
+
+Launch `qterminator` (Qt, server-side), wait for its frame, click its
+**close** button (rightmost, X glyph). qdshell acts on the release →
+`request_close` dispatched → the toplevel goes away.
+
+```bash
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
+    cd / && setsid -f runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+        WAYLAND_DISPLAY=wayland-1 \
+        DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+        qterminator >/tmp/61-qterm.log 2>&1 </dev/null
+    H3=""
+    for i in $(seq 1 60); do
+        QPID=$(pgrep -u admin -nf "[q]terminator") \
+            && H3=$(qdwin_window_handle ".*" "$QPID") && break
+        sleep 0.5
+    done
+    [ -n "$H3" ] || { echo "ERROR: qterminator window never appeared" >&2; exit 2; }
+    echo "$H3" > /tmp/61-qterm.handle
+    echo "qterminator pid=$QPID handle=$H3"'
+$VMEXEC "$VM" 'H3=$(cat /tmp/61-qterm.handle)
+    bash /tmp/61-driver.sh await_qdwin_line "attach_decoration handle=$H3 inset=N24 E4 S4 W4"' \
+    || { echo "FAIL(S9): no frame on qterminator"; exit 1; }
+qdwin_screenshot "$ART/s9-qterm.png"
+# Runner: close-button centre (CX,CY) — rightmost 24x24 cell of
+# qterminator's shell title bar (NOT any tab/strip inside the window).
+$VMGUI "$VM" click-preview CX CY close-button
+$VMGUI "$VM" click CX CY
+$VMEXEC "$VM" 'H3=$(cat /tmp/61-qterm.handle)
+    bash /tmp/61-driver.sh await_qdwin_line "request_close handle=$H3 dispatched" &&
+    bash /tmp/61-driver.sh await_qdwin_line "toplevel_removed handle=$H3"' \
+    || { echo "FAIL(S9): close button did not close the window"; exit 1; }
+qdwin_screenshot "$ART/s9-closed.png"
+```
+
+**Assert** (hard): `request_close handle=$H3 dispatched` then
+`toplevel_removed handle=$H3` in the compositor journal, and
+(agent-visual) `s9-closed.png` shows qterminator gone. If qterminator
+asks for confirmation instead of closing, the journal's `request_close
+... dispatched` alone proves the button; grade the step PASS with that
+note and close the dialog.
 
 ## Teardown
 
 ```bash
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app.py 2>/dev/null;
     pkill -u admin -x weston-terminal 2>/dev/null;
-    rm -f /tmp/61-driver.sh /tmp/61-app.pid /tmp/61-app.handle /tmp/61-tui.handle /tmp/61-tui.log'
+    pkill -u admin -f "[q]terminator" 2>/dev/null;
+    rm -f /tmp/61-driver.sh /tmp/61-app.pid /tmp/61-app.handle /tmp/61-csd.handle /tmp/61-csd.log \
+          /tmp/61-qterm.handle /tmp/61-qterm.log'
 ```
 
 ## Report format
