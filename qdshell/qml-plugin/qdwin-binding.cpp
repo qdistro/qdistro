@@ -1931,7 +1931,9 @@ void QdwinBinding::chromePurge(quint32 handle) {
             wl_buffer_destroy(cs.buffer);
     }
     chrome_.erase(it);
-    // No reattach — the toplevel itself is gone.
+    // No reattach — the toplevel itself is gone. Flush so the
+    // compositor drops the views now, not at the next unrelated request.
+    flushAfterRequest(__func__);
 }
 
 void QdwinBinding::popupTeardown(quint32 parent) {
@@ -1949,11 +1951,11 @@ void QdwinBinding::popupTeardown(quint32 parent) {
     if (e.buffer)
         wl_buffer_destroy(e.buffer);
     popups_.erase(it);
+    flushAfterRequest(__func__);
 }
 
 void QdwinBinding::destroyPopup(quint32 parent) {
     popupTeardown(parent);
-    flushAfterRequest(__func__);
 }
 
 // Press hit-test over the active menu. Layout MUST mirror the render

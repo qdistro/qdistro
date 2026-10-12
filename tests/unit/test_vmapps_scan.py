@@ -526,3 +526,117 @@ def test_duplicate_appid_never_emitted(tmp_path: Path) -> None:
     assert res.returncode == 0, res.stderr
     ids = [r["appId"] for r in _manifest(out)["apps"]]
     assert len(ids) == len(set(ids))
+
+
+def test_appid_outside_policy_key_charset_is_dropped(tmp_path: Path) -> None:
+    root, base, out = _fixture(tmp_path)
+    _exe(root, "usr/bin/foot")
+    _exe(root, "usr/bin/eviltool")
+    # The appId is the wrapper's --policy-key and the domain's bound
+    # identity; a desktop filename that derives an out-of-charset appId
+    # (space, +, UTF-8) must never be published — the wrapper would
+    # reject it at launch anyway, and silently re-binding could alias
+    # another app's guest (sol r4).
+    _write(root, f"{SHARE_APPS}/foot.desktop", _desktop("Foot", "foot"))
+    _write(root, f"{SHARE_APPS}/my app.desktop", _desktop("Bad", "eviltool"))
+    _write(root, f"{SHARE_APPS}/evil+tool.desktop", _desktop("Bad2", "eviltool"))
+    # Trailing newline in the id ("evil\n.desktop" → appId "tier5/evil\n"):
+    # re.match(...$) accepts it, the wrapper's `[[ =~ ]]` does not — the
+    # scanner must use fullmatch semantics to agree (sol r5).
+    _write(root, f"{SHARE_APPS}/evil\n.desktop", _desktop("Bad3", "eviltool"))
+    res = _scan(root, base, out)
+    assert res.returncode == 0, res.stderr
+    ids = [r["appId"] for r in _manifest(out)["apps"]]
+    assert ids == ["tier5/foot"], ids
+    assert "outside the policy-key charset" in res.stderr
+
+
+def test_manifest_pins_nanosecond_mtime(tmp_path: Path) -> None:
+    # ensures: the identity tuple carries st_mtime_ns — a same-inode
+    #          same-size rewrite inside one second must still read as
+    #          a different base (sol r16)
+    root, base, out = _fixture(tmp_path)
+    _exe(root, "usr/bin/foot")
+    res = _scan(root, base, out)
+    assert res.returncode == 0, res.stderr
+    st = base.stat()
+    doc = _manifest(out)
+    assert doc["baseMtimeNs"] == st.st_mtime_ns
+    assert isinstance(doc["baseMtimeNs"], int)
+
+
+def test_base_identity_sampled_before_scan_and_restat_refuses_torn():
+    # ensures: build_manifest samples the base identity BEFORE reading
+    #          contents (binding the catalogue to the pre-scan base) and
+    #          re-stats after the scan, refusing to publish when the
+    #          identity moved — a mid-scan rewrite can never produce a
+    #          manifest whose rows describe replaced contents (sol r16)
+    src = Path(__file__).parents[2] / "tier5-vm/vmapps-scan.py"
+    body = src.read_text()
+    fn = body[body.index("def build_manifest"):
+              body.index("def _row_ok")]
+    assert fn.index("_base_identity") < fn.index("select_apps")
+    assert "_base_identity(base_path) != ident" in fn
+    assert "ScanError" in fn
+    # the reaper's helper and --check both pin the ns field
+    assert '"baseMtimeNs"' in body
+
+
+def test_check_fails_on_missing_ns_identity(tmp_path: Path) -> None:
+    # ensures: an old-schema manifest without baseMtimeNs cannot pass
+    #          --check — pre-ns manifests are cannot-determine, never
+    #          proof of retirement (sol r16)
+    root, base, out = _fixture(tmp_path)
+    _exe(root, "usr/bin/foot")
+    res = _scan(root, base, out)
+    assert res.returncode == 0, res.stderr
+    doc = _manifest(out)
+    del doc["baseMtimeNs"]
+    out.write_text(json.dumps(doc))
+    res = subprocess.run(
+        [sys.executable, str(SCANNER), "--check", str(out),
+         "--base", str(base)],
+        text=True, capture_output=True, check=False,
+    )
+    assert res.returncode == 1
+
+
+def test_guestfish_script_never_quotes_unsafe_paths() -> None:
+    # ensures: a TryExec/guest path containing `"`, `\`, or a control
+    #          char never reaches a guestfish command — inside the
+    #          double-quoted arg it would break out of the quote and a
+    #          following `!cmd` would execute ON THE HOST as root
+    #          (sol r28). Unsafe paths report (False, 0), never quoted.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("vmapps_scan", SCANNER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    captured: list[str] = []
+
+    class _P:
+        stdout = b""
+        returncode = 0
+
+    src = mod.GuestfsSource.__new__(mod.GuestfsSource)
+    src._run = lambda script: (captured.append(script), _P())[1]
+
+    evil = '/bin/foo"\n!echo pwned > /tmp/pwned\n #'
+    res = src.stats(["/usr/bin/foot", evil, "/bin/ba\\d",
+                     "/bin/ta\tb", "/bin/qu'ote ok"])
+    assert res[evil] == (False, 0)
+    assert res["/bin/ba\\d"] == (False, 0)
+    assert res["/bin/ta\tb"] == (False, 0)
+    assert res.get("/usr/bin/foot", (False, 0)) == (False, 0)
+    # only the safe paths reach the script, and no unsafe byte does
+    assert len(captured) == 1
+    script = captured[0]
+    assert 'stat "/usr/bin/foot"' in script
+    assert 'stat "/bin/qu\'ote ok"' in script
+    assert "pwned" not in script
+    assert "!echo" not in script
+    # all-unsafe input never even launches guestfish
+    captured.clear()
+    res = src.stats([evil])
+    assert res == {evil: (False, 0)}
+    assert captured == []

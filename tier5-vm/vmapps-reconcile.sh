@@ -45,9 +45,10 @@ BACKOFF="${VMAPPS_BACKOFF_SECS:-5}"
 say() { echo "[vmapps-reconcile] $*"; }
 
 # Single-line identity tuple; must agree with the fields the scanner
-# records (baseDev baseIno baseMtime baseSize — compared inside
-# `vmapps-scan.py --check`).
-identity() { stat -c '%d %i %Y %s' "$1" 2>/dev/null || true; }
+# records (baseDev baseIno baseMtime baseMtimeNs baseSize — compared
+# inside `vmapps-scan.py --check`). %y carries nanoseconds — a
+# same-second same-size rewrite must still read as a replacement.
+identity() { stat -c '%d %i %y %s' "$1" 2>/dev/null || true; }
 
 admin_can_read() {
     runuser -u "$ADMIN_USER" -- test -r "$BASE" 2>/dev/null

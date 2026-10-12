@@ -355,10 +355,18 @@
         exactly as for an xdg_popup grab. The compositor starts a
         pointer grab for the popup (so an outside-click dismisses it),
         and like xdg-shell it validates the serial against a live grab
-        serial on the seat it grabs. A stale or fabricated serial
-        raises the `invalid_grab` error and no popup is created. This
-        keeps show_popup symmetric with the layer-popup grab path; the
-        request remains shell-only (require bound shell).
+        serial on the seat it grabs, or against the serial of the
+        latest press it forwarded as `chrome_button` (a second button
+        pressed while another is held never becomes the seat grab
+        serial). A stale or fabricated serial raises the `invalid_grab`
+        error and no popup is created. This keeps show_popup symmetric
+        with the layer-popup grab path; the request remains shell-only
+        (require bound shell).
+
+        A `parent` qdwin issued whose toplevel has since been removed
+        (its `toplevel_removed` may still be in flight) is not an
+        error: the popup object is created inert and `dismissed` at
+        once.
       </description>
       <arg name="popup" type="new_id" interface="qdwin_popup_v1"/>
       <arg name="parent" type="uint"

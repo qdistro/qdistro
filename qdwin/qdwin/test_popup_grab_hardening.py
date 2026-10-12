@@ -294,6 +294,22 @@ def check_d7_show_popup_serial_source(source):
     )
     if not advertised or int(advertised.group(1)) < 29:
         return fail("D7: shell global is not advertised at version >= 29")
+    # The second accepted serial is the latest chrome press qdwin itself
+    # forwarded — never 0, and cleared by any press elsewhere, so it
+    # cannot go stale behind a later interaction.
+    if "serial != qdwin->chrome_press_serial" not in body \
+            or "serial == 0" not in body:
+        return fail("D7: show_popup's chrome-press serial must be exact and non-zero")
+    if not re.search(r"chrome_press_serial\s*=\s*chrome_tl && side >= 0\s*"
+                     r"\?\s*wl_display_get_serial\([^;]*:\s*0;", code):
+        return fail("D7: a press off the chrome must clear chrome_press_serial")
+    # A parent that died with toplevel_removed in flight must not kill the
+    # shell's connection: inert popup + immediate dismissed, no error.
+    stale = re.search(r"parent <= qdwin->next_handle\)\s*\{(.*?)\bif \(!tl\)",
+                      body, re.S)
+    if not stale or "qdwin_popup_v1_send_dismissed" not in stale.group(1) \
+            or "post_error" in stale.group(1):
+        return fail("D7: a stale parent must be dismissed, not a protocol error")
     # The chrome_button/popup_button emits must forward the CURRENT button
     # serial (wl_display_get_serial), NOT the stale pointer->grab_serial that
     # notify_button only assigns AFTER the grab callback returns — otherwise a

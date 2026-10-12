@@ -254,9 +254,441 @@ run_as_admin() {
         "$@"
 }
 
+# qemu_pids_for_domain [name] — print the pid(s) of the qemu process(es)
+# backing a domain (default $VM_NAME). This is the ONLY reliable liveness
+# oracle here: on a nested-virt host libvirt's domstate lies (reports
+# "shut off" while qemu is still ALIVE — the failure mode commit 8ac0a39
+# was written for). RETURN CODES are the contract (sol r6):
+#   0 — pids printed: a backing qemu EXISTS
+#   1 — clean empty scan: confirmed NO backing qemu
+#   2 — scan unreliable: runuser/ps/proc lookup failed. NOT "dead" —
+#       callers must fail closed, never treat it as proof of absence.
+# libvirt launches the session qemu with `-name guest=<domain>,…`, so the
+# pattern requires the discrete `-name guest=` token — no false match on
+# another qemu carrying the string in an unrelated argument. The ps
+# table runs through run_as_admin to see admin-owned session processes;
+# candidates are narrowed to REAL qemu by /proc/<pid>/comm (truncated
+# to 15 chars, e.g. "qemu-system-x86"), which also discards the
+# run_as_admin wrapper chain (runuser/env/ps) carrying the pattern in
+# its own argv — and further verified against /proc/<pid>/cmdline:
+# the guest=<name>, token must be the argument right after `-name`,
+# so a foreign qemu carrying the string inside another argument can
+# never be reported (sol r18). A candidate whose comm cannot be READ
+# (vanished or permission) is unverifiable — never silently
+# discounted as "not qemu" (sol r7).
+qemu_pids_for_domain() {
+    local name="${1:-$VM_NAME}" p c out="" raw unread=""
+    # The scan's own plumbing must work before "empty" can mean "dead":
+    # runuser auth/exec failure (rc 1/126/127) is otherwise
+    # indistinguishable from a clean no-match scan.
+    run_as_admin true >/dev/null 2>&1 || return 2
+    # Literal substring match: pgrep -f treats the name as ERE, so a
+    # manual name like `t5.a` would also match `t5xa` — over-matching
+    # hands the caller FOREIGN qemu pids it may signal (sol r15). awk
+    # index() via ENVIRON needs no escaping at all.
+    raw=$(run_as_admin ps -eo pid=,args= 2>/dev/null) || return 2
+    raw=$(printf '%s\n' "$raw" \
+        | T5N="-name guest=$name," \
+            awk 'index($0, ENVIRON["T5N"]) {print $1}')
+    [ -n "$raw" ] || return 1
+    for p in $raw; do
+        # An unreadable /proc/<pid>/comm CANNOT be discounted — the pid
+        # might be our qemu; only a confirmed-qemu or a fully readable
+        # candidate list may produce a verdict (sol r7). A candidate
+        # that vanished between the ps scan and the read also lands
+        # here, which fails closed — the next scan settles it.
+        c=$(cat "/proc/$p/comm" 2>/dev/null) || { unread=1; continue; }
+        case "$c" in qemu-system-*|qemu-kvm) ;; *) continue ;; esac
+        # And the candidate's OWN argv must carry guest=<name>, as the
+        # argument right after `-name` — the ps-line substring alone
+        # also matches a foreign qemu carrying it inside another
+        # argument (file=/tmp/-name guest=t5-x,backup.qcow2) (sol r18).
+        # Parse on NUL — the only delimiter an argv entry cannot
+        # contain: newline-folding via tr lets a single crafted arg
+        # manufacture the fake "-name\nguest=..." pair (sol r19).
+        T5NAME="$name" python3 - "$p" >/dev/null <<'PY'
+import os, sys
+pid = sys.argv[1]
+needle = b"guest=" + os.environ["T5NAME"].encode() + b","
+try:
+    argv = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+except OSError:
+    sys.exit(2)
+sys.exit(0 if any(
+    a == b"-name" and argv[i + 1].startswith(needle)
+    for i, a in enumerate(argv[:-1])) else 1)
+PY
+        _avrc=$?
+        case $_avrc in 0) out="$out $p" ;; 2) unread=1 ;; esac
+    done
+    [ -n "$out" ] || { [ -n "$unread" ] && return 2; return 1; }
+    printf '%s' "$out"
+}
+
+# domain_is_live [name] — is the guest ACTUALLY alive? rc: 0 live,
+# 1 confirmed dead, 2 cannot determine. The qemu-pid scan is the ONLY
+# authority: domstate can lie in BOTH directions under nested virt —
+# "shut off" for a live qemu, and stale "running" for a dead one —
+# so it is not consulted here at all (a stale-running belt would wedge
+# the session watch on a dead guest, sol r8). No backing qemu process
+# IS death — libvirt cannot run a VM without one.
+domain_is_live() {
+    local name="${1:-$VM_NAME}"
+    qemu_pids_for_domain "$name" >/dev/null
+    case $? in 0) return 0 ;; 2) return 2 ;; esac
+    return 1
+}
+
+# domain_defined_state [name] — rc 0 = defined, 1 = CONFIRMED absent,
+# 2 = cannot determine. Uses `virsh list --all --name`, not dominfo
+# stderr: an enumeration that SUCCEEDS is authoritative (name in the
+# list = defined; not in it = confirmed absent), while ANY failure is
+# unverifiable. Dominfo absence detection would need error-text parsing
+# whose shape drifts across libvirt versions — 12.x prints only
+# "failed to get domain 'X'" while older releases print "Domain not
+# found", and a loose "not found" substring also matches outage text
+# like "libvirt socket not found" (sol r11). MUST stay defined before
+# the startup reaper (~line 380), which is the first caller.
+domain_defined_state() {
+    local name="${1:-$VM_NAME}" list
+    if ! list=$(run_as_admin virsh list --all --name 2>/dev/null); then
+        return 2
+    fi
+    printf '%s\n' "$list" | grep -Fxq -- "$name" && return 0
+    return 1
+}
+
+# manifest_app_state <appId> <base> — rc 0 = the CURRENT non-stale
+# catalogue publishes this appId; rc 1 = a VALID catalogue for THIS
+# base does not publish it (retired app — its disk is provably
+# stale); rc 2 = cannot determine. "Valid" mirrors the scanner's own
+# checks: parses, right schema, no "stale" marker (the reconciler
+# publishes a READABLE empty stale manifest on scan failure — sol
+# r13), well-formed rows, and the recorded base dev/ino/mtime/size
+# matching the CURRENT base file — a base swapped between scans
+# leaves a non-stale manifest that omits the new base's apps, and
+# that must not read as retirement either (sol r14). Must stay
+# defined before the startup reaper.
+# tier5_derived_name <appId> — port of VMApps._vmNameForApp so a
+# recorded binding/sidecar can be checked against the artifact's own
+# name: a t5-shaped name is only a SHAPE (a hand-made overlay can
+# match it); re-derivation proves the owner record names this very
+# guest (sol r17). appIds are ASCII by the --policy-key charset, so
+# JS charCodeAt == ord() here.
+tier5_derived_name() {
+    python3 - "$1" <<'PY'
+import re, sys
+s = sys.argv[1]
+fnv, djb = 0x811c9dc5, 0x00001505
+for c in (ord(ch) for ch in s):
+    fnv = ((fnv ^ c) * 0x01000193) & 0xFFFFFFFF
+    djb = ((djb * 33) ^ c) & 0xFFFFFFFF
+stub = re.sub(r"[^a-zA-Z0-9_-]", "-", s)
+stub = re.sub(r"-{2,}", "-", stub).strip("-")[:43]
+print("t5-" + (stub or "vmapp") + f"-{fnv:08x}{djb:08x}")
+PY
+}
+
+manifest_app_state() {
+    python3 - "$VMAPPS_MANIFEST" "$1" "$2" <<'PY'
+import json, os, sys
+mpath, side, base = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def _row_ok(r):
+    # Same strictness as the scanner's _row_ok — a catalogue that
+    # fails validation proves nothing about retirement (sol r15).
+    if not isinstance(r, dict):
+        return False
+    for k in ("appId", "desktopId", "name", "iconName", "comment"):
+        if not isinstance(r.get(k), str):
+            return False
+    a = r.get("execArgv")
+    if not isinstance(a, str):
+        return False
+    try:
+        argv = json.loads(a)
+    except Exception:
+        return False
+    return (isinstance(argv, list) and len(argv) > 0
+            and all(isinstance(x, str) for x in argv) and bool(argv[0]))
+
+
+try:
+    with open(mpath) as f:
+        doc = json.load(f)
+    st = os.stat(base)
+    mst = os.stat(mpath)
+except Exception:
+    sys.exit(2)
+if not isinstance(doc, dict) or doc.get("stale") or doc.get("schema") != 1:
+    sys.exit(2)
+ident = (doc.get("baseDev"), doc.get("baseIno"),
+         doc.get("baseMtime"), doc.get("baseMtimeNs"),
+         doc.get("baseSize"))
+if ident != (st.st_dev, st.st_ino, int(st.st_mtime), st.st_mtime_ns,
+             st.st_size):
+    sys.exit(2)
+# Identity is sampled by the scanner BEFORE reading base contents and
+# pinned to nanosecond mtime, so a mid-scan rewrite cannot repeat the
+# tuple. Write ORDER closes the residual hole — a base modified after
+# the manifest was published must not authorize retirement either
+# (sol r15/r16).
+if mst.st_mtime_ns < st.st_mtime_ns:
+    sys.exit(2)
+apps = doc.get("apps")
+# The scanner treats an empty catalogue as a transient state, not a
+# verdict — mirror that: empty apps is cannot-determine, not "every
+# app retired" (sol r15).
+if not isinstance(apps, list) or not apps or not all(map(_row_ok, apps)):
+    sys.exit(2)
+sys.exit(0 if any(r["appId"] == side for r in apps) else 1)
+PY
+}
+
 # domain_xml_tmpfile is provided by lib/spawn-common.sh (sourced below); it
 # renders into a private 0700 dir under the admin runtime. (A local definition
 # here would be shadowed by that source anyway.)
+
+# _read_owner_record <path> — read "<appId> <dev> <ino>" plus the
+# record file's OWN dev/ino (_sfid) through an open fd, so contents and
+# identity provably come from the SAME inode. A check→open swap can
+# hand us a foreign file, but _sfid then describes what we ACTUALLY
+# read and _unlink_verified below still removes only the inode that
+# passed the checks — the pair can never be split across two files
+# (sol r25). Sets _sapp _sident _sfid; empty _sapp means not a
+# readable regular file — callers treat that as unproven.
+_read_owner_record() {
+    _sapp="" _sident="" _sfid=""
+    local _out
+    # One root open with O_NOFOLLOW, and the opened inode must be a
+    # regular file OWNED BY ADMIN: contents and identity come from that
+    # fd alone, and a swapped-in symlink or a hard link to a root-only
+    # file is refused rather than read — root never discloses a file
+    # admin could not already read (astra r45).
+    _out=$(T5_UID="$ADMIN_UID" python3 - "$1" 2>/dev/null <<'PY'
+import os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError:
+    sys.exit(0)
+st = os.fstat(fd)
+if not stat.S_ISREG(st.st_mode) or st.st_uid != int(os.environ["T5_UID"]):
+    sys.exit(0)
+line = os.read(fd, 4096).split(b"\n", 1)[0].decode("utf-8", "replace")
+parts = line.split(None, 1)
+if not parts:
+    sys.exit(0)
+print(parts[0])
+print(parts[1].strip() if len(parts) > 1 else "")
+print("%d %d" % (st.st_dev, st.st_ino))
+PY
+)
+    [ -n "$_out" ] || return 0
+    { read -r _sapp; read -r _sident; read -r _sfid; } <<<"$_out"
+}
+
+# Root-side ownership registry: the .appid sidecar alone cannot prove
+# THIS script created the disk pair — it lives in the admin-writable
+# DISK_DIR, and a co-admin who can stat their own base-backed qcow2
+# can write the same plain-text record beside it (sol r33). The
+# registry duplicates "<appId> <dev> <ino>" in a root-owned 0700 dir
+# the co-admin can neither write nor read, so a planted pair can
+# never mint the record that acceptance requires. Persistent
+# (/var/lib, not /run) so ownership survives reboot.
+# _write_owned_record <dev-ino> — record that WE created the pair.
+# _read_owned <vm> — read it back; empty _oapp means unproven.
+# _drop_owned <vm> — remove it with its disk (root dir: plain rm).
+_write_owned_record() {
+    install -d -m 0700 "$OWNED_DIR" 2>/dev/null || return 1
+    printf '%s %s\n' "$POLICY_KEY" "$1" \
+        >"$OWNED_DIR/$VM_NAME" 2>/dev/null
+}
+_oapp=""; _oident=""
+_read_owned() {
+    _oapp=""; _oident=""
+    local _f="$OWNED_DIR/$1"
+    [ -f "$_f" ] && [ ! -L "$_f" ] || return 0
+    read -r _oapp _oident <"$_f" 2>/dev/null || true
+}
+_drop_owned() {
+    rm -f "$OWNED_DIR/$1" 2>/dev/null || true
+}
+
+# _unlink_verified <path> <dev-ino> — remove <path> only if it still
+# names the verified inode. A check→rm window lets a co-admin swap the
+# entry so `rm` deletes the replacement (sol r25): instead we
+# atomically CAPTURE whatever the path names into a private same-fs
+# directory, re-verify the captured inode, and unlink it there — a
+# co-admin cannot reach inside the dir to replace the entry between
+# stat and unlink (sol r26/r29). The dir is created AND opened through
+# the parent's dir fd (mkdirat/openat), and the opened fd is verified
+# to be OUR EMPTY directory (euid-owned, mode 0700) before anything
+# moves into it — a swapped-in symlink fails O_NOFOLLOW, a swapped-in
+# admin dir fails the uid/mode check, and a leftover chamber holding
+# a preserved entry fails the empty check, so no create→open window
+# can land the move on foreign ground or clobber a preserved "v"
+# (sol r28/r30); the capture itself is renameat2(RENAME_NOREPLACE).
+# A swapped entry fails
+# verification and its name is restored via link(2) — atomic
+# no-clobber, never overwriting a re-appeared path; directories
+# restore via renameat2(RENAME_NOREPLACE) for the same reason
+# (sol r27). Anything unrestored stays preserved inside the capture
+# dir and we warn. rc 0 = removed, 1 = kept.
+_unlink_verified() {
+    local _p=$1 _want=$2
+    [ -n "$_want" ] || return 1
+    T5U_PATH="$_p" T5U_WANT="$_want" python3 - <<'PY'
+import os, stat, sys
+
+_p = os.environ["T5U_PATH"]
+_wd, _wi = os.environ["T5U_WANT"].split()
+_want = (int(_wd), int(_wi))
+_parent = os.path.dirname(_p) or "."
+_name = os.path.basename(_p)
+
+
+def _rename_noreplace(srcfd, src, dstfd, dst):
+    # renameat2(RENAME_NOREPLACE): atomic no-clobber move, used to
+    # restore entry types link(2) cannot carry (directories). False
+    # on any failure — the caller then preserves rather than risking
+    # a clobber.
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        nr = {"x86_64": 316, "aarch64": 276}.get(os.uname().machine)
+        if nr is None:
+            return False
+        return libc.syscall(nr, srcfd, os.fsencode(src),
+                            dstfd, os.fsencode(dst), 1) == 0
+    except (OSError, AttributeError):
+        return False
+
+
+# O_NOFOLLOW on both opens: refuse symlinked dirs — ops below must
+# stay inside the directory the caller stat'd, not wherever a
+# swapped link lands.
+try:
+    pfd = os.open(_parent,
+                  os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError:
+    sys.exit(1)
+rc = 1
+cap = ".t5u-" + os.urandom(8).hex()
+try:
+    try:
+        # mkdirat: the name is resolved inside the parent's fd — the
+        # dir lands exactly where we verified, never on a raced path.
+        os.mkdir(cap, 0o700, dir_fd=pfd)
+    except OSError:
+        pass
+    else:
+        tfd = -1
+        try:
+            try:
+                tfd = os.open(cap,
+                              os.O_RDONLY | os.O_DIRECTORY
+                              | os.O_NOFOLLOW, dir_fd=pfd)
+            except OSError:
+                tfd = -1
+            else:
+                # Bind check: the fd must be OUR directory — a
+                # swapped-in symlink failed O_NOFOLLOW above, and a
+                # swapped-in foreign dir fails here (a co-admin can
+                # rename entries in _parent but cannot fabricate a
+                # root-owned 0700 dir). EMPTY is required too: a
+                # leftover chamber holding a preserved foreign "v" is
+                # also root-owned 0700, and the capture move must
+                # never clobber it (sol r30). Only then is tfd a
+                # chamber the attacker cannot reach into.
+                _st = os.fstat(tfd)
+                if not (stat.S_ISDIR(_st.st_mode)
+                        and _st.st_uid == os.geteuid()
+                        and _st.st_mode & 0o777 == 0o700
+                        and os.listdir(tfd) == []):
+                    os.close(tfd)
+                    tfd = -1
+            if tfd >= 0:
+                # Capture via renameat2(RENAME_NOREPLACE): even if the
+                # empty check were somehow raced, "v" can never be
+                # overwritten — the move fails instead of clobbering.
+                if _rename_noreplace(pfd, _name, tfd, "v"):
+                    try:
+                        st = os.stat("v", dir_fd=tfd,
+                                     follow_symlinks=False)
+                    except OSError:
+                        st = None
+                    if st is not None and stat.S_ISREG(st.st_mode) \
+                            and (st.st_dev, st.st_ino) == _want:
+                        os.unlink("v", dir_fd=tfd)
+                        rc = 0
+                    elif st is not None:
+                        # Foreign capture: restore _name without ever
+                        # clobbering a re-appeared entry. link(2) is
+                        # atomic no-clobber for files/symlinks; a
+                        # directory cannot link, so it restores via
+                        # renameat2(RENAME_NOREPLACE).
+                        restored = False
+                        try:
+                            os.link("v", _name, src_dir_fd=tfd,
+                                    dst_dir_fd=pfd,
+                                    follow_symlinks=False)
+                            os.unlink("v", dir_fd=tfd)
+                            restored = True
+                        except OSError:
+                            restored = _rename_noreplace(
+                                tfd, "v", pfd, _name)
+                        if not restored:
+                            sys.stderr.write(
+                                "[tier5] WARN: preserved foreign"
+                                " entry in %s/%s\n" % (_parent, cap))
+                    # st is None: the captured entry vanished before
+                    # we could verify it — refuse, nothing removed.
+        finally:
+            if tfd >= 0:
+                os.close(tfd)
+            try:
+                os.rmdir(cap, dir_fd=pfd)
+            except OSError:
+                pass
+finally:
+    os.close(pfd)
+sys.exit(rc)
+PY
+}
+
+# _bind_mount_disk <dev-ino> — serve the verified overlay inode at a
+# path with NO admin-writable components. The admin owns DISK_DIR, so
+# ANY path component under it can be renamed between our provenance
+# gate and qemu's open() at domain start (sol r26). A bind mount pins
+# the inode itself — a later swap of $DISK's name can never substitute
+# a foreign file under the mounted path — and $BOOT_DIR is root-owned
+# (0755: the admin's qemu may traverse but never replace the
+# mountpoint). The mounted inode is re-verified against <dev-ino>
+# because mount binds whatever $DISK names AT mount time: a swap
+# between the gate and mount(8) is caught here, and we refuse.
+# rc 0 = mounted and verified.
+_bind_mount_disk() {
+    local _want=$1
+    install -d -m 0755 "$BOOT_DIR" 2>/dev/null || return 1
+    [ -e "$BOOT_PATH" ] \
+        || install -m 0644 /dev/null "$BOOT_PATH" 2>/dev/null \
+        || return 1
+    # a stale mount serving a dead inode is detached before remounting
+    umount -l "$BOOT_PATH" 2>/dev/null || true
+    mount --bind -- "$DISK" "$BOOT_PATH" 2>/dev/null || return 1
+    [ "$(stat -c '%d %i' "$BOOT_PATH" 2>/dev/null)" = "$_want" ] \
+        || { umount -l "$BOOT_PATH" 2>/dev/null; return 1; }
+}
+
+# _unmount_boot_disk — drop the boot mount and its mountpoint. Both
+# live in the root-owned BOOT_DIR, so plain path ops are safe there.
+# BOOT_PATH is only set in --vm mode — loopback cleanup is a no-op.
+_unmount_boot_disk() {
+    [ -n "${BOOT_PATH:-}" ] || return 0
+    umount -l "$BOOT_PATH" 2>/dev/null || true
+    rm -f "$BOOT_PATH" 2>/dev/null || true
+}
 
 NO_GPU="${TIER5_NO_GPU:-1}"
 DEBUG="${TIER5_DEBUG:-0}"
@@ -275,7 +707,7 @@ if [ "$MODE" = "loopback" ]; then
     PORT="${EXPLICIT_PORT:-${TIER5_PORT:-7777}}"
 else
     # --vm mode: prereqs.
-    for tool in virsh qemu-img; do
+    for tool in virsh qemu-img flock mount umount python3; do
         command -v "$tool" >/dev/null || {
             echo "[tier5] FAIL: --vm needs $tool installed" >&2
             exit 2
@@ -289,6 +721,17 @@ else
     # be shared across admins.
     DISK_DIR="${TIER5_DISK_DIR:-$ADMIN_HOME/.local/share/libvirt/images}"
     DISK="$DISK_DIR/$VM_NAME.qcow2"
+    # The domain boots the overlay through a bind mount at a path whose
+    # every component is root-owned — DISK_DIR paths can be renamed by
+    # the admin between our provenance gate and qemu's open (sol r26)
+    BOOT_DIR="${TIER5_BOOT_DIR:-/run/qdistro-tier5-boot}"
+    BOOT_PATH="$BOOT_DIR/$VM_NAME.qcow2"
+    # Root-side ownership registry — the origin proof a planted
+    # disk+sidecar can never mint (sol r33). Persistent, root-owned.
+    OWNED_DIR="${TIER5_OWNED_DIR:-/var/lib/qdistro/tier5-owned}"
+    # The published app catalogue — the reaper uses it to tell an OWNED
+    # orphan (sidecar appId still published) from a retired app's disk.
+    VMAPPS_MANIFEST="${VMAPPS_MANIFEST:-/usr/share/qdistro/vmapps/base.json}"
     if [ ! -f "$DISK_BASE" ]; then
         echo "[tier5] FAIL: base disk $DISK_BASE missing — run tier5/build-guest-image.sh" >&2
         exit 3
@@ -309,36 +752,154 @@ else
     # Per-VM overlay qcow2 files in $DISK_DIR are orphaned when a
     # prior spawn-tier5.sh wrapper died without running its EXIT trap
     # (segfault, kill -9, host crash, OOM-killer). Reap those whose
-    # wrapper is no longer alive AND whose libvirt domain is either
-    # absent or not running. Conservative: only touches qcow2 files
-    # whose backing file is $DISK_BASE (won't accidentally rm a
-    # user's unrelated qcow2 in the same dir).
+    # wrapper is no longer alive AND whose libvirt domain is CONFIRMED
+    # ABSENT — a defined-but-stopped domain keeps its overlay: it has
+    # an owner record (its bound app restarts it on next launch) that
+    # the reaper cannot adjudicate (sol r11). Conservative: only
+    # touches qcow2 files in the t5-<stub>-<hash> namespace whose
+    # backing file is $DISK_BASE (won't
+    # accidentally rm a user's unrelated qcow2 in the same dir).
     if [ "${TIER5_NO_REAP:-0}" != "1" ] && [ -d "$DISK_DIR" ]; then
         for overlay in "$DISK_DIR"/*.qcow2; do
             [ -f "$overlay" ] || continue
             base=$(basename "$overlay" .qcow2)
             # Don't touch our own per-spawn name even before it's created.
             [ "$base" = "$VM_NAME" ] && continue
-            # Confirm the overlay is one of ours (backed by DISK_BASE).
-            if ! run_as_admin qemu-img info "$overlay" 2>/dev/null \
-                    | grep -qF "backing file: $DISK_BASE"; then
-                continue
-            fi
+            # Only names in OUR namespace — t5-<stub>-<64-bit hash> as
+            # VMApps._vmNameForApp derives them. Backing-file match
+            # alone does not prove tier-5 ownership: a separately
+            # created overlay of our base in the same shared dir is
+            # not ours to reap (sol r16).
+            [[ "$base" =~ ^t5-[A-Za-z0-9_-]{1,43}-[0-9a-f]{16}$ ]] \
+                || continue
+            # Confirm the overlay is one of ours — EXACT backing-file
+            # match from the JSON output, not a substring grep (sol r6).
+            _backing=$(run_as_admin qemu-img info --output=json "$overlay" \
+                2>/dev/null \
+                | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
+            [ "$_backing" = "$DISK_BASE" ] || continue
             # Live wrapper holding it? Skip.
             if pgrep -af "spawn-tier5\.sh.*--vm[[:space:]]+$base([[:space:]]|$)" \
                     >/dev/null 2>&1; then
                 continue
             fi
-            # Domain still running? Skip — admin may be using it via
-            # an out-of-band virsh start.
-            if run_as_admin virsh domstate "$base" 2>/dev/null \
-                    | grep -qw running; then
-                continue
+            # Per-target hold: a wrapper spawning THIS domain right now
+            # takes its fd9 SH on hold-$base, so our nonblocking EX
+            # either loses (a live or in-flight decision owns it →
+            # skip) or wins and serializes every later wrapper behind
+            # our reap (sol r7). Creating the file when absent matches
+            # the spawn's own `>>` create — hold files are never unlinked.
+            _holddir="${TIER5_HOLD_DIR:-/run/qdistro-tier5}"
+            install -d -m 0700 "$_holddir" 2>/dev/null || true
+            _holdf="$_holddir/hold-$base"
+            ( umask 077; : >>"$_holdf" ) 2>/dev/null || true
+            { exec {hfd}>>"$_holdf"; } 2>/dev/null || continue
+            flock -n -x "$hfd" 2>/dev/null || { exec {hfd}>&-; continue; }
+            # Domain still alive? Only a CONFIRMED-dead oracle verdict
+            # permits reaping — live OR unverifiable skips, so a false
+            # "shut off" can't cost a live guest its disk (sol r6).
+            domain_is_live "$base"; _lv=$?
+            if [ "$_lv" -ne 1 ]; then exec {hfd}>&-; continue; fi
+            # Only a CONFIRMED-ABSENT domain makes this a true file
+            # orphan. The reaper never undefines: a defined-but-dead
+            # domain has an owner record — its bound app restarts it on
+            # next launch, and deleting the disk under it is not ours
+            # to do (sol r11). Unverifiable queries skip the same way.
+            domain_defined_state "$base"; _ds=$?
+            if [ "$_ds" -ne 1 ]; then exec {hfd}>&-; continue; fi
+            # Owner record is REQUIRED and must bind THIS inode: the
+            # t5-shaped name is only a shape, and the "<appId> <dev>
+            # <ino>" sidecar must name the file it was stamped for —
+            # a record copied beside a different overlay is not proof
+            # (sol r17/r19). The appId must ALSO re-derive to this
+            # name and be manifest-RETIRED — an owned orphan's app
+            # relaunches under its own name. A missing/unreadable
+            # sidecar, an inode mismatch, a foreign derivation, or an
+            # unverifiable verdict all preserve (sol r12–r19).
+            _read_owner_record "$overlay.appid"
+            _read_owned "$base"
+            [ -f "$overlay" ] && [ ! -L "$overlay" ] \
+                || { exec {hfd}>&-; continue; }
+            _oino=$(stat -c '%d %i' "$overlay" 2>/dev/null)
+            # Sidecar AND registry must bind this inode — a planted
+            # pair satisfies the admin-writable sidecar but can never
+            # mint the root-side record, and reaping deletes, so the
+            # stronger proof is required (sol r33).
+            [ -n "$_sapp" ] && [ -n "$_oino" ] \
+                && [ "$_sident" = "$_oino" ] \
+                && [ "$_oapp" = "$_sapp" ] \
+                && [ "$_oident" = "$_oino" ] \
+                || { exec {hfd}>&-; continue; }
+            [ "$(tier5_derived_name "$_sapp")" = "$base" ] \
+                || { exec {hfd}>&-; continue; }
+            manifest_app_state "$_sapp" "$DISK_BASE"; _ms=$?
+            [ "$_ms" -eq 1 ] || { exec {hfd}>&-; continue; }
+            # Settle + re-verify: an out-of-band `virsh create` could
+            # still be exec'ing a qemu under this name. With no
+            # definition AND the per-target hold held, no cooperating
+            # start is possible, so a clean scan here is the last proof
+            # the overlay needs (sol r7/r11).
+            sleep 0.3
+            domain_is_live "$base"; _lv=$?
+            if [ "$_lv" -eq 0 ]; then
+                echo "[tier5] orphan $base came alive during reap — keeping overlay" >&2
             fi
-            # Orphan: undefine any stopped domain + unlink overlay.
-            run_as_admin virsh undefine "$base" >/dev/null 2>&1 || true
-            rm -f "$overlay" 2>/dev/null || true
-            echo "[tier5] reaped orphan overlay $overlay" >&2
+            if [ "$_lv" -ne 1 ]; then exec {hfd}>&-; continue; fi
+            # The settle window can also invalidate the OTHER verdicts —
+            # re-check defined-state and the owner record now: an
+            # out-of-band define, a newly dropped sidecar, or a fresh
+            # catalogue publication in the interval must all preserve
+            # the overlay (sol r16).
+            domain_defined_state "$base"; _ds=$?
+            if [ "$_ds" -ne 1 ]; then exec {hfd}>&-; continue; fi
+            # Same owner-record verdict, re-evaluated: the sidecar is
+            # re-read (it may have appeared, changed, or vanished
+            # during the settle) and must still bind this inode,
+            # re-derive to $base, and still be manifest-retired
+            # (sol r16/r17/r19). The inode AND its backing are read
+            # through ONE open fd — a name-swap between a path-based
+            # qemu-img and a later stat could otherwise check the
+            # backing of a different file than the one we unlink
+            # (sol r27).
+            _read_owner_record "$overlay.appid"
+            _read_owned "$base"
+            [ -f "$overlay" ] && [ ! -L "$overlay" ] \
+                || { exec {hfd}>&-; continue; }
+            { exec {ofd}< "$overlay"; } 2>/dev/null \
+                || { exec {hfd}>&-; continue; }
+            _oino=$(stat -Lc '%d %i' "/proc/$$/fd/$ofd" 2>/dev/null)
+            _backing=$(qemu-img info --output=json "/proc/$$/fd/$ofd" \
+                2>/dev/null \
+                | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
+            exec {ofd}<&-
+            [ -n "$_sapp" ] && [ -n "$_oino" ] \
+                && [ "$_sident" = "$_oino" ] \
+                && [ "$_oapp" = "$_sapp" ] \
+                && [ "$_oident" = "$_oino" ] \
+                && [ "$_backing" = "$DISK_BASE" ] \
+                || { exec {hfd}>&-; continue; }
+            [ "$(tier5_derived_name "$_sapp")" = "$base" ] \
+                || { exec {hfd}>&-; continue; }
+            manifest_app_state "$_sapp" "$DISK_BASE"; _ms=$?
+            [ "$_ms" -eq 1 ] || { exec {hfd}>&-; continue; }
+            # Check→rm is a swap window: a co-admin can replace the
+            # verified entry so the rm deletes the replacement
+            # (sol r25). _unlink_verified captures the entry by rename
+            # and removes only the inode that passed these checks.
+            if _unlink_verified "$overlay" "$_oino"; then
+                _unlink_verified "$overlay.appid" "$_sfid" \
+                    2>/dev/null || true
+                _drop_owned "$base"
+                # its stale boot mount (a crashed wrapper's leftover)
+                # pins the same inode — drop it with the overlay
+                umount -l "$BOOT_DIR/$base.qcow2" 2>/dev/null || true
+                rm -f "$BOOT_DIR/$base.qcow2" 2>/dev/null || true
+                echo "[tier5] reaped orphan overlay $overlay" >&2
+            else
+                echo "[tier5] orphan $base swapped during reap —" >&2
+                echo "        keeping overlay" >&2
+            fi
+            exec {hfd}>&-
         done
     fi
     # Make sure admin can read the base disk (qemu-img create -b reads it).
@@ -347,7 +908,13 @@ else
         echo "        chmod 0644 $DISK_BASE" >&2
         exit 3
     fi
-    install -d -o "$ADMIN_USER" -g "$ADMIN_USER" "$DISK_DIR"
+    # Created AS admin: $DISK_DIR defaults under admin's home, so a root
+    # `install -d -o` would follow an admin-planted symlink and re-own its
+    # target (astra r44).
+    if ! run_as_admin mkdir -p -- "$DISK_DIR"; then
+        echo "[tier5] FAIL: admin cannot create $DISK_DIR" >&2
+        exit 3
+    fi
     if ! [[ "$VM_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$ ]]; then
         echo "[tier5] FAIL: invalid vm_name '$VM_NAME'" >&2
         exit 1
@@ -410,11 +977,23 @@ if [ "$USE_SECCTX" = "1" ] && ! command -v qdistro-secctx-exec >/dev/null 2>&1; 
     exit 3
 fi
 
-CLIENT_LOG="$ADMIN_RUNTIME/tier5-${SILO_TAG}-${APP_BASENAME}-client.log"
-SERVER_LOG="$ADMIN_RUNTIME/tier5-${SILO_TAG}-${APP_BASENAME}-server.log"
+# Log names carry the launch token's short prefix: concurrent sessions of
+# the SAME app share $SILO_TAG (the per-app domain), so silo+app alone no
+# longer disambiguates two live wrappers' logs.
+CLIENT_LOG="$ADMIN_RUNTIME/tier5-${SILO_TAG}-${APP_BASENAME}-${LAUNCH_TOKEN:0:8}-client.log"
+SERVER_LOG="$ADMIN_RUNTIME/tier5-${SILO_TAG}-${APP_BASENAME}-${LAUNCH_TOKEN:0:8}-server.log"
 mkdir -p "$ADMIN_RUNTIME"
-: >"$CLIENT_LOG" >"$SERVER_LOG"
-chown "$ADMIN_USER" "$CLIENT_LOG" "$SERVER_LOG" 2>/dev/null || true
+# Log files are created AS ADMIN — a root-opened `>` (or a root chown)
+# on a path inside admin's runtime dir would follow a swapped symlink
+# at a privilege the planter does not hold; as admin the worst a swap
+# reaches is a file admin could truncate anyway (sol r25). For the
+# same reason every waypipe/qga redirect below is opened INSIDE the
+# admin shell, not by the root shell wrapping runuser.
+if ! run_as_admin sh -c ': >"$1" && : >"$2"' _ \
+        "$CLIENT_LOG" "$SERVER_LOG"; then
+    echo "[tier5] FAIL: cannot create waypipe logs under $ADMIN_RUNTIME" >&2
+    exit 4
+fi
 
 # --- tier-5 VM lifecycle policy (graceful shutdown / idle timeout / low-mem) --
 # How a finished/closed tier-5 VM is torn down. Policy is PER-APP: each value
@@ -430,16 +1009,26 @@ chown "$ADMIN_USER" "$CLIENT_LOG" "$SERVER_LOG" 2>/dev/null || true
 #
 # POLICY_KEY is the STABLE per-app identity: qdshell passes its catalogue appId
 # (e.g. "tier5/firefox") via --policy-key (argv survives pkexec; env does not).
-# Absent/invalid, we fall back to the app basename — stable enough for direct
-# CLI/test use but NOT for distinguishing catalogue entries that share an exe.
+# It is also the appId bound into the domain's <metadata> at define time —
+# adoption requires an exact match, so the key IS an isolation boundary.
+# An EXPLICIT key that fails the charset is a hard error, NOT a basename
+# fallback: silently rebinding would let two distinct invalid appIds
+# collapse onto one executable's binding and adopt one guest (sol r4).
+# `[[ =~ ]]`, NOT grep — grep anchors line-by-line, so a newline-bearing
+# key would slip past ^…$; `[[ =~ ]]` anchors against the whole string.
 LIFECYCLE_CONF="${TIER5_LIFECYCLE_CONF:-$ADMIN_HOME/.config/qdistro/tier5-lifecycle.conf}"
-POLICY_KEY="${EXPLICIT_POLICY_KEY:-${TIER5_POLICY_KEY:-$APP_BASENAME}}"
-# Validate the key (catalogue-shaped): reject control chars / pathological
-# section names; fall back to the app basename on a bad key. Use bash `[[ =~ ]]`,
-# NOT grep — grep matches line-by-line, so a newline-bearing key would slip past
-# an anchored ^…$ regex; `[[ =~ ]]` anchors against the whole string.
-if ! [[ "$POLICY_KEY" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]; then
-    POLICY_KEY="$APP_BASENAME"
+POLICY_KEY="${EXPLICIT_POLICY_KEY:-${TIER5_POLICY_KEY:-}}"
+if [ -n "$POLICY_KEY" ]; then
+    if ! [[ "$POLICY_KEY" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]; then
+        echo "[tier5] FAIL: invalid policy key '$POLICY_KEY'" >&2
+        exit 3
+    fi
+else
+    # Unkeyed direct/test use: derive from the app basename, sanitized to
+    # the same charset so the recorded binding is always well-formed.
+    POLICY_KEY=$(printf '%s' "$APP_BASENAME" | tr -c 'A-Za-z0-9._/-' '_')
+    case "$POLICY_KEY" in [A-Za-z0-9]*) ;; *) POLICY_KEY="x$POLICY_KEY";; esac
+    POLICY_KEY="${POLICY_KEY:0:128}"
 fi
 
 _conf_file_ok() {  # honor only a regular, admin/root-owned, sane-perm file
@@ -506,28 +1095,6 @@ host_mem_avail_mb() {  # host MemAvailable in MiB, or "" if unreadable
     printf '%s' $((kb / 1024))
 }
 
-# qemu_pids_for_domain — print the pid(s) of the qemu process(es) backing the
-# current domain, or nothing. Robust on a nested-virt host where libvirt's
-# domstate lies (reports "shut off" while qemu is still ALIVE). libvirt launches
-# the qemu:///session qemu with `-name guest=<domain>,debug-threads=on`, so we
-# match on `guest=$VM_NAME,`. pgrep runs through run_as_admin so it can see the
-# admin-owned session qemu. Candidates are then narrowed to REAL qemu processes
-# by /proc/<pid>/comm (truncated to 15 chars, e.g. "qemu-system-x86"); this also
-# discards the run_as_admin wrapper chain (runuser/env/pgrep) that carries the
-# same pattern in its own argv and would otherwise self-match.
-qemu_pids_for_domain() {
-    local p c out=""
-    for p in $(run_as_admin pgrep -f "guest=$VM_NAME," 2>/dev/null); do
-        c=$(cat "/proc/$p/comm" 2>/dev/null) || continue
-        case "$c" in qemu-system-*|qemu-kvm) out="$out $p" ;; esac
-    done
-    printf '%s' "$out"
-}
-
-domain_is_defined() {
-    run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1
-}
-
 # Try the ordinary undefine first. If libvirt reports retained per-domain state
 # or metadata, remove only that ephemeral VM state and retry. Do not ask libvirt
 # to remove storage: the wrapper owns the overlay and unlinks it only after the
@@ -538,9 +1105,13 @@ undefine_domain() {
         return 0
     fi
     echo "[tier5] WARN: undefine $VM_NAME failed: $err" >&2
-    if ! domain_is_defined; then
+    domain_defined_state; local ds=$?
+    if [ "$ds" -eq 1 ]; then
         return 0
     fi
+    # rc 2 (query outage) falls through to the metadata-aware retry —
+    # its own failure then reports honestly instead of faking success.
+    [ "$ds" -eq 0 ] || return 1
     if err=$(run_as_admin virsh undefine "$VM_NAME" \
         --managed-save --snapshots-metadata --checkpoints-metadata \
         --nvram --tpm 2>&1); then
@@ -590,70 +1161,183 @@ reap_domain() {
         esac
     fi
     # Force-destroy if still running (or method=force). Harmless if already off.
+    # Nested-KVM: domstate can falsely report "shut off" while qemu is still
+    # alive, so `virsh destroy` no-ops and a live TRANSIENT domain keeps
+    # reporting (perm-gui/21 S4). No pid-signalling fallback: the confirmed-dead
+    # gate then retains the overlay and the next launch adopts the live guest.
     run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-    # Nested-KVM safety net: domstate can falsely report "shut off" while qemu is
-    # still ALIVE, so `virsh destroy` no-ops and the undefine below then drops only
-    # the persistent config — leaving a live TRANSIENT domain that dominfo keeps
-    # reporting, so it never undefines (perm-gui/21 S4). If qemu survived destroy,
-    # signal it directly. A pure FALLBACK: when destroy already worked there is no
-    # qemu pid and we fall straight through to undefine.
-    local qpids
-    qpids=$(qemu_pids_for_domain)
-    if [ -n "$qpids" ]; then
-        echo "[tier5] destroy left qemu alive for $VM_NAME (pids:$qpids); killing" >&2
-        run_as_admin kill $qpids 2>/dev/null || true
-        for _ in 1 2 3 4 5 6; do
-            qpids=$(qemu_pids_for_domain)
-            [ -n "$qpids" ] || break
-            sleep 0.5
-        done
-        qpids=$(qemu_pids_for_domain)
-        [ -n "$qpids" ] && run_as_admin kill -9 $qpids 2>/dev/null || true
-    fi
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         undefine_domain || true
-        domain_is_defined || return 0
+        domain_defined_state; _ds=$?
+        [ "$_ds" -eq 1 ] && return 0
+        # rc 0 (still defined) or rc 2 (cannot verify): retry, then
+        # report honestly — either way the caller keeps the overlay.
         sleep 0.5
     done
-    echo "[tier5] ERROR: domain $VM_NAME remains defined after teardown" >&2
+    echo "[tier5] ERROR: domain $VM_NAME still defined or state unverifiable" >&2
     run_as_admin virsh dominfo "$VM_NAME" >&2 || true
     return 1
 }
 
-# idle_keep_warm — after the published app exits, optionally keep the (now idle)
-# VM up for IDLE_SHUTDOWN_SECS before teardown. This is a configurable shutdown
-# DELAY, not cross-spawn reuse (this wrapper owns one VM and tears it down on
-# exit; true relaunch-into-a-warm-VM needs a persistent pool manager — a
-# documented follow-up). Ends early under host memory pressure (LOWMEM_MB) or if
-# the guest stops on its own. A SIGTERM during the wait hits the force trap.
+# domain_appid — the appId this domain was bound to at define time (the
+# POLICY_KEY baked into its <metadata>). Empty when the domain is
+# undefined, undumpable, or carries no binding (hand-defined or
+# pre-binding domains): anything but an exact match is FOREIGN.
+domain_appid() {
+    run_as_admin virsh dumpxml "$VM_NAME" 2>/dev/null \
+        | tr -d '\n' \
+        | sed -n 's|.*<qdistro:appId[^>]*>\([^<]*\)</qdistro:appId>.*|\1|p'
+}
+
+# domain_disk_source [name] — print the domain's ONLY disk source path.
+# rc 1 unless the XML declares exactly one <disk> element with a file=
+# or dev= source: our render has exactly one device='disk' file source,
+# so any other shape is foreign construction a verifier must not
+# reason about piecemeal (sol r35).
+domain_disk_source() {
+    run_as_admin virsh dumpxml "${1:-$VM_NAME}" 2>/dev/null | python3 -c '
+import sys, xml.etree.ElementTree as ET
+try:
+    root = ET.parse(sys.stdin).getroot()
+except ET.ParseError:
+    sys.exit(1)
+disks = list(root.iter("disk"))
+if len(disks) != 1:
+    sys.exit(1)
+src = disks[0].find("source")
+p = (src.get("file") or src.get("dev")) if src is not None else ""
+if p:
+    print(p)
+'
+}
+
+# domain_holds_owned_disk <dev-ino> [name] — rc 0 only when the domain
+# provably runs the registry-recorded overlay inode. The root record
+# vouches for the disk pair, NOT for whichever domain currently holds
+# the name: an actor in the admin libvirt session can replace ours
+# with a same-tag domain on a different disk (sol r35).
+#   RUNNING — an argv-verified guest=<name> qemu (qemu_pids_for_domain)
+#   must hold the recorded inode open on the link naming the declared
+#   source — a post-boot path swap can alias a stat, not an open fd,
+#   and link+inode together stops a foreign boot disk smuggling our
+#   inode through a secondary source (serial log, second drive).
+#   STOPPED — confirmed no qemu: the single declared source must be
+#   our pinned boot path (a host reboot drops BOOT_DIR but the def
+#   remains ours to reclaim) or stat to the recorded inode.
+#   An UNRELIABLE scan is ambiguity — never converted into the
+#   stopped-domain proof (sol r36).
+domain_holds_owned_disk() {
+    local ident=$1 name=${2:-$VM_NAME} src qp qrc pid fd tgt
+    # An empty expected identity must never match an empty stat.
+    [ -n "$ident" ] || return 1
+    src=$(domain_disk_source "$name")
+    [ -n "$src" ] || return 1
+    qp=$(qemu_pids_for_domain "$name"); qrc=$?
+    [ "$qrc" -eq 2 ] && return 1
+    if [ "$qrc" -eq 0 ]; then
+        # Any argv-verified guest=<name> qemu holding the recorded
+        # inode open on the declared source proves it. (virsh has no
+        # `dompid`; a same-uid decoy is out of scope — README.)
+        for pid in $qp; do
+            [ -d "/proc/$pid/fd" ] || continue
+            for fd in "/proc/$pid"/fd/*; do
+                [ -e "$fd" ] || continue
+                tgt=$(readlink "$fd" 2>/dev/null) || continue
+                [ "$tgt" = "$src" ] || [ "$tgt" = "$src (deleted)" ] \
+                    || continue
+                [ "$(stat -Lc '%d %i' "$fd" 2>/dev/null)" = "$ident" ] \
+                    && return 0
+            done
+        done
+        return 1
+    fi
+    [ "$src" = "${BOOT_PATH:-}" ] \
+        || [ "$(stat -Lc '%d %i' -- "$src" 2>/dev/null)" = "$ident" ]
+}
+
+# --- teardown ownership -------------------------------------------------
+# REAP is the teardown decision: unset = undecided, 1 = this wrapper is the
+# last lock holder and must destroy+undefine+unlink, 0 = a live session (or
+# an in-flight decision) still owns the VM — leave it alone.
+REAP=
+
+# release_hold — drop the fd9 session hold so a relaunch's adoption probe
+# (or a teardown claim) is no longer blocked by this exiting wrapper.
+release_hold() {
+    flock -u 9 2>/dev/null || true
+}
+
+# decide_teardown — claim or relinquish teardown ownership via a BOUNDED
+# EX claim on fd10. Winning means NO wrapper holds the domain: every
+# actor either exited or is still waiting for the lock, so the winner
+# sees the final state of the world and may destroy it. Losing means
+# someone adopted (or is deciding) — leaving the VM is always safe then
+# because that holder runs this same decision at its own exit. The wait
+# is bounded rather than -n: a transient hold (e.g. a foreign spawn's
+# brief SH before its binding refusal) must not starve the last real
+# owner's claim and leak a running guest (sol r4). 2s outlasts any
+# refuse-path exit by orders of magnitude; a genuine session holds far
+# longer, so a losing claim just delays this exit slightly.
+decide_teardown() {
+    [ -n "$REAP" ] && return 0
+    release_hold
+    if flock -w 2 -x 10 2>/dev/null; then
+        REAP=1
+    else
+        REAP=0
+    fi
+}
+
+# idle_keep_warm — after the published app exits, release the session hold
+# and wait up to IDLE_SHUTDOWN_SECS for a RELAUNCH to adopt the still-running
+# VM (the per-app guest: qdshell derives the domain name from the catalogue
+# appId, so a relaunch of the same app names the same domain and attaches
+# under its own session hold). Any lock contention during the window means
+# an adoption is under way — leave the VM to it. The window still ends
+# early on guest self-stop or host memory pressure; at the deadline the
+# last holder claims teardown exclusively. A SIGTERM during the wait hits
+# the force trap, whose cleanup runs decide_teardown on the same protocol.
 idle_keep_warm() {
-    [ "${TIER5_KEEP_DOMAIN:-0}" = "1" ] && return 0
+    [ "${TIER5_KEEP_DOMAIN:-0}" = "1" ] && { REAP=0; return 0; }
+    release_hold
     [ "$IDLE_SHUTDOWN_SECS" -gt 0 ] || return 0
-    echo "[tier5] app exited; holding idle $VM_NAME up to ${IDLE_SHUTDOWN_SECS}s before shutdown" >&2
-    local waited=0 step avail st
+    echo "[tier5] app exited; holding idle $VM_NAME up to ${IDLE_SHUTDOWN_SECS}s for relaunch" >&2
+    local waited=0 step avail
     while [ "$waited" -lt "$IDLE_SHUTDOWN_SECS" ]; do
-        st=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '[:space:]')
-        case "$st" in shutoff|crashed|"")
-            echo "[tier5] guest stopped on its own during idle hold" >&2; return 0 ;;
-        esac
+        # End the window early only on a CONFIRMED-dead guest — a false
+        # "shut off" domstate must not cut the adoption window short and
+        # hand a live guest to the teardown claim (sol r6). Live or
+        # unverifiable keep watching (adoption probe + low-mem below);
+        # the deadline bounds the wait.
+        domain_is_live; _lv=$?
+        [ "$_lv" -eq 1 ] && {
+            echo "[tier5] guest stopped on its own during idle window" >&2; return 0
+        }
         if [ "$LOWMEM_MB" -gt 0 ]; then
             avail=$(host_mem_avail_mb)
             if [ -n "$avail" ] && [ "$avail" -lt "$LOWMEM_MB" ]; then
-                echo "[tier5] host low memory (${avail}MB < ${LOWMEM_MB}MB); ending idle hold for $VM_NAME" >&2
+                echo "[tier5] host low memory (${avail}MB < ${LOWMEM_MB}MB); ending idle window for $VM_NAME" >&2
                 return 0
             fi
         fi
+        # Adoption probe: an exclusive grab on fd10 can only succeed while
+        # NO session/decision lock exists. Take and drop it immediately so
+        # the adoption window stays open between polls.
+        if ! flock -n -x 10 2>/dev/null; then
+            echo "[tier5] $VM_NAME adopted by a relaunch; leaving it running" >&2
+            REAP=0
+            return 0
+        fi
+        flock -u 10
         step=5; [ $((IDLE_SHUTDOWN_SECS - waited)) -lt 5 ] && step=$((IDLE_SHUTDOWN_SECS - waited))
         sleep "$step"; waited=$((waited + step))
     done
-    echo "[tier5] idle timeout (${IDLE_SHUTDOWN_SECS}s) elapsed; shutting down $VM_NAME" >&2
+    echo "[tier5] idle window (${IDLE_SHUTDOWN_SECS}s) elapsed without relaunch" >&2
 }
 
 CLIENT_PID=
 SERVER_PID=
 LAUNCHREC_PATH=""
-DOMAIN_DEFINED=0
-DISK_CREATED=0
 CLEANUP_STARTED=0
 cleanup() {
     # force=1 (signal teardown) skips graceful and ALWAYS runs, even if a
@@ -676,22 +1360,146 @@ cleanup() {
             # Guard against pid reuse: only kill if it is still a waypipe. The
             # inner client may already be gone (C-side SIGTERM-forward above), in
             # which case the pid could be recycled by an unrelated process.
+            # The record lives in admin's runtime dir, so the signal
+            # carries admin's authority, never root's (astra r42).
             if grep -qx waypipe "/proc/$_inner_pid/comm" 2>/dev/null; then
-                kill "$_inner_pid" 2>/dev/null || true
+                run_as_admin kill "$_inner_pid" 2>/dev/null || true
             fi
         fi
     fi
     local domain_reaped=1
-    if [ "$MODE" = "vm" ] && [ "$DOMAIN_DEFINED" = "1" ] && \
-       [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ]; then
-        reap_domain "$force" || domain_reaped=0
-    fi
-    if [ "$MODE" = "vm" ] && [ "$DISK_CREATED" = "1" ] && \
-       [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ] && [ "$domain_reaped" = "1" ]; then
-        rm -f "$DISK" 2>/dev/null || true
+    if [ "$MODE" = "vm" ] && [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ]; then
+        # Decide teardown ownership if idle_keep_warm didn't already: only
+        # the last lock holder may destroy the shared per-app domain — an
+        # earlier wrapper's exit must never reap a VM a relaunch adopted.
+        decide_teardown
+        if [ "$REAP" = "1" ]; then
+            # The claim only proves no wrapper holds the domain NOW —
+            # not that it is still OURS. The original guest could have
+            # died during the idle window and the name been re-bound to
+            # another app; destroying that foreign replacement is
+            # exactly the cross-app kill the binding exists to prevent
+            # (sol r9). Re-verify before reaping: a DEFINED domain must
+            # carry our binding, confirmed-absent has no owner to
+            # protect, and an unverifiable state keeps everything.
+            domain_defined_state; _ds=$?
+            _bound=""
+            [ "$_ds" -eq 0 ] && _bound=$(domain_appid)
+            _read_owned "$VM_NAME"
+            if [ "$_ds" -eq 0 ] && [ "$_bound" != "$POLICY_KEY" ]; then
+                echo "[tier5] $VM_NAME re-bound to '${_bound:-<unbound>}'" >&2
+                echo "        — leaving domain and overlay alone" >&2
+                domain_reaped=0
+            elif [ "$_ds" -eq 0 ] && [ "$_oapp" != "$POLICY_KEY" ]; then
+                # A matching tag is forgeable session metadata — the
+                # domain may only be destroyed when the root-side
+                # record independently vouches we created it (sol r34)
+                echo "[tier5] $VM_NAME binding not backed by the" >&2
+                echo "        ownership record — leaving it alone" >&2
+                domain_reaped=0
+            elif [ "$_ds" -eq 0 ] && ! domain_holds_owned_disk "$_oident"; then
+                # The record binds the disk pair, not whichever domain
+                # now holds the name — a same-tag replacement on a
+                # different disk is not ours to destroy (sol r35).
+                echo "[tier5] $VM_NAME does not run the recorded" >&2
+                echo "        overlay — leaving domain and overlay" >&2
+                echo "        alone" >&2
+                domain_reaped=0
+            elif [ "$_ds" -eq 2 ]; then
+                echo "[tier5] cannot verify $VM_NAME state —" >&2
+                echo "        keeping domain and overlay" >&2
+                domain_reaped=0
+            else
+                # reap_domain is idempotent on absent/stopped domains,
+                # so it runs unconditionally under an exclusive claim:
+                # any defined leftover (a crashed predecessor) is ours.
+                reap_domain "$force" || domain_reaped=0
+                if [ "$domain_reaped" = "1" ]; then
+                    # The unlink needs its own proof of death: a destroy
+                    # that raced or a kill that missed can leave a qemu
+                    # alive after the definition is gone. Only a
+                    # confirmed-dead verdict lets the disk go; anything
+                    # else leaves it for the next spawn's orphan reaper
+                    # (sol r7).
+                    domain_is_live; _lv=$?
+                    if [ "$_lv" -eq 1 ]; then
+                        # confirmed dead — the boot mount goes with the
+                        # domain (it pins the disk inode at BOOT_PATH)
+                        _unmount_boot_disk
+                        # The disk unlink needs its own owner record in
+                        # EVERY case: the domain's binding vouched for
+                        # the path, not the inode — a file swapped in
+                        # while the domain was stopped is not ours to
+                        # delete (sol r21). And with the disk absent, a
+                        # sidecar still gets the same check — only OUR
+                        # regular-file record goes; a foreign,
+                        # symlinked, or unreadable one is an
+                        # unrecognized record and is preserved
+                        # (sol r22).
+                        _read_owner_record "$DISK.appid"
+                        _read_owned "$VM_NAME"
+                        if [ -f "$DISK" ] && [ ! -L "$DISK" ]; then
+                            _dino=$(stat -c '%d %i' "$DISK" 2>/dev/null)
+                            # Sidecar AND registry must both bind this
+                            # inode — a planted pair can satisfy the
+                            # admin-writable sidecar but never the
+                            # root-side record (sol r33).
+                            if [ "$_sapp" != "$POLICY_KEY" ] \
+                                || [ -z "$_dino" ] \
+                                || [ "$_sident" != "$_dino" ] \
+                                || [ "$_oapp" != "$POLICY_KEY" ] \
+                                || [ "$_oident" != "$_dino" ]; then
+                                domain_reaped=0
+                                echo "[tier5] WARN: keeping $DISK — overlay owner unproven" >&2
+                            elif _unlink_verified "$DISK" "$_dino"; then
+                                # verified-unlink the record too — a
+                                # check→rm swap could otherwise delete a
+                                # foreign replacement (sol r25)
+                                _unlink_verified "$DISK.appid" "$_sfid" \
+                                    2>/dev/null || true
+                                _drop_owned "$VM_NAME"
+                            else
+                                domain_reaped=0
+                                echo "[tier5] WARN: keeping $DISK — it" >&2
+                                echo "        changed under verification" >&2
+                            fi
+                        elif [ -e "$DISK" ] || [ -L "$DISK" ]; then
+                            # A symlinked or non-regular $DISK is foreign
+                            # construction: a symlink to the bound inode
+                            # would satisfy the dev/ino check while the
+                            # path itself is unowned (sol r24). Preserve.
+                            domain_reaped=0
+                            echo "[tier5] WARN: keeping $DISK — not a" >&2
+                            echo "        regular file (foreign construction)" >&2
+                        elif [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
+                            # A lone record also needs the registry —
+                            # the sidecar is admin-writable, so its
+                            # appId+inode match alone does not prove
+                            # this suite wrote it (sol r34).
+                            if [ "$_sapp" = "$POLICY_KEY" ] \
+                                && [ -n "$_sfid" ] \
+                                && [ "$_oapp" = "$POLICY_KEY" ] \
+                                && [ "$_oident" = "$_sident" ]; then
+                                _unlink_verified "$DISK.appid" "$_sfid" \
+                                    || domain_reaped=0
+                                [ "$domain_reaped" = "1" ] \
+                                    && _drop_owned "$VM_NAME"
+                            else
+                                domain_reaped=0
+                                echo "[tier5] WARN: keeping $DISK.appid —" >&2
+                                echo "        foreign or unreadable record" >&2
+                            fi
+                        fi
+                    else
+                        domain_reaped=0
+                        echo "[tier5] WARN: keeping $DISK — $VM_NAME live or unverifiable" >&2
+                    fi
+                fi
+            fi
+        fi
     fi
     if [ "$domain_reaped" != "1" ]; then
-        echo "[tier5] ERROR: retaining overlay $DISK because $VM_NAME is still defined" >&2
+        echo "[tier5] ERROR: retaining overlay $DISK — $VM_NAME still defined or unverifiably live" >&2
         return 1
     fi
     return 0
@@ -752,7 +1560,7 @@ if [ "$USE_SECCTX" = "1" ]; then
     LAUNCHREC_TOKEN="$(gen_launch_token "[tier5] FAIL")"
     LAUNCHREC_FILE_ID="$(gen_launch_token "[tier5] FAIL")"
     LAUNCHREC_PATH="$ADMIN_RUNTIME/qdistro-tier5-launchrec-$LAUNCHREC_FILE_ID.pid"
-    rm -f "$LAUNCHREC_PATH" 2>/dev/null || true
+    run_as_admin rm -f "$LAUNCHREC_PATH" 2>/dev/null || true
     SECCTX_WRAP=(env QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
         QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH"
         QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN"
@@ -767,7 +1575,9 @@ runuser -u "$ADMIN_USER" -- env \
     WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
     XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
     HOME="$ADMIN_HOME" \
-    "${SECCTX_WRAP[@]}" waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
+    "${SECCTX_WRAP[@]}" \
+    sh -c 'exec >"$0" 2>&1; exec "$@"' \
+    "$CLIENT_LOG" waypipe "${CLIENT_OPTS[@]}" client &
 CLIENT_PID=$!
 
 # Permission-lineage: register the inner waypipe-client pid (published by
@@ -802,7 +1612,8 @@ if [ "$MODE" = "loopback" ]; then
         HOME="$ADMIN_HOME" \
         USER="$ADMIN_USER" \
         LOGNAME="$ADMIN_USER" \
-        waypipe "${SERVER_OPTS[@]}" server -- "$@" 2>"$SERVER_LOG" &
+        sh -c 'exec 2>"$0"; exec "$@"' \
+        "$SERVER_LOG" waypipe "${SERVER_OPTS[@]}" server -- "$@" &
     SERVER_PID=$!
 
     wait "$SERVER_PID" 2>/dev/null
@@ -812,17 +1623,332 @@ if [ "$MODE" = "loopback" ]; then
 fi
 
 # --- 2'. --vm mode --------------------------------------------------
-# Linked-clone disk per VM if missing.
-if [ ! -f "$DISK" ]; then
-    if ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$DISK" >/dev/null 2>&1; then
+# Adopt-or-create under the per-VM hold lock. We already carry the fd9
+# SHARED session hold, so once a running domain is observed it cannot be
+# torn out from under us — a teardown claim needs an exclusive lock that
+# every SH holder conflicts with. A running domain is adopted as-is (the
+# guest is per-APP: qdshell derives the name from the catalogue appId, so
+# a relaunch of the same app names the same domain); a missing or stopped
+# one is (re)created under a short EXCLUSIVE upgrade that serializes
+# against a racing creator or an exiting wrapper's teardown claim.
+# _create_overlay_disk — create the linked clone under a PARTIAL name,
+# stamp its bound owner record "<appId> <dev> <ino>", then link it
+# into place. Crash residue is then always provable: a partial plus a
+# sidecar binding its inode is recoverable (finish the create), and a
+# bare partial is a harmless leak — while a file AT $DISK without a
+# matching record is NEVER our residue, so the caller refuses it
+# instead of deleting an unproven file (sol r19/r20). ln, not mv:
+# it atomically refuses to clobber a $DISK that appeared after the
+# caller's absence check.
+_create_overlay_disk() {
+    # mktemp claims the partial name with O_EXCL — a foreign file at a
+    # predictable $DISK.partial.$$ can then never be overwritten by our
+    # qemu-img or unlinked by our failure cleanup (sol r21). Run it as
+    # admin so the partial is admin-owned like every overlay here.
+    _tmp=$(run_as_admin mktemp "$DISK.partial.XXXXXX" 2>/dev/null) \
+        || { echo "[tier5] FAIL: cannot create partial under $DISK_DIR" >&2; exit 4; }
+    # The mktemp'd temp's own identity is captured NOW — every failure
+    # cleanup below removes it only if the path still names the inode
+    # we claimed (_unlink_verified), so a swapped temp name can never
+    # unlink a replacement (sol r26).
+    _tino=$(run_as_admin stat -c '%d %i' "$_tmp" 2>/dev/null)
+    if [ -L "$_tmp" ] \
+            || ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$_tmp" >/dev/null 2>&1; then
+        _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
         echo "[tier5] FAIL: qemu-img create -b $DISK_BASE failed at $DISK" >&2
         exit 4
     fi
-    DISK_CREATED=1
-fi
+    _di=$(run_as_admin stat -c '%d %i' "$_tmp" 2>/dev/null)
+    # The sidecar temp gets the same O_EXCL claim — a predictable
+    # $DISK.appid.$$ path could otherwise overwrite (or on failure
+    # unlink) a foreign file/symlink squatting there (sol r22).
+    _stmp=$(run_as_admin mktemp "$DISK.appid.tmp.XXXXXX" 2>/dev/null)
+    _sino=$(run_as_admin stat -c '%d %i' "$_stmp" 2>/dev/null)
+    # The record write goes through tee AS ADMIN — a root shell
+    # reopening the admin-claimed name would write through a swapped
+    # symlink at a privilege the planter does not hold; as admin the
+    # worst a symlink reaches is a file admin could write anyway
+    # (sol r24). The -L check is the explicit belt.
+    #
+    # _di MUST equal _tino: the record's authority is that it binds
+    # the inode OUR mktemp claimed and qemu-img wrote — a swapped
+    # partial name would otherwise let a planted base-backed qcow2 be
+    # stamped, published, and booted under our record (sol r32). On
+    # mismatch the failure cleanup unlinks the name only while it
+    # still binds _tino — a substitute is preserved, never removed.
+    if [ -z "$_di" ] || [ "$_di" != "$_tino" ] || [ -z "$_sino" ] \
+            || [ -L "$_stmp" ] \
+            || ! printf '%s %s\n' "$POLICY_KEY" "$_di" \
+                | run_as_admin tee "$_stmp" >/dev/null; then
+        _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
+        [ -n "$_sino" ] \
+            && _unlink_verified "$_stmp" "$_sino" 2>/dev/null || true
+        echo "[tier5] FAIL: could not stamp binding sidecar $DISK.appid" >&2
+        exit 4
+    fi
+    # ANY record already at the destination is unproven — a matching
+    # appId alone is not ownership: a lone record binds no inode this
+    # create can verify (a recoverable record+partial pair was already
+    # finished by the caller). Preserve it and refuse — removing it
+    # would convert an unproven record into permission to unlink it
+    # (sol r24); link(2) below fails closed the same way on a record
+    # raced in after this check.
+    if [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
+        _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
+        _unlink_verified "$_stmp" "$_sino" 2>/dev/null || true
+        echo "[tier5] FAIL: $DISK.appid holds an unproven record —" >&2
+        echo "        preserving it" >&2
+        exit 4
+    fi
+    # ln -T: the destination is a filename, never a directory sink —
+    # link(2) also refuses any existing path, so nothing can be
+    # clobbered between the check and the install (sol r23).
+    if ! ln -T "$_stmp" "$DISK.appid" 2>/dev/null \
+            || [ ! "$DISK.appid" -ef "$_stmp" ]; then
+        _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
+        _unlink_verified "$_stmp" "$_sino" 2>/dev/null || true
+        echo "[tier5] FAIL: $DISK.appid appeared during create" >&2
+        echo "        — refusing to clobber an unproven record" >&2
+        exit 4
+    fi
+    _unlink_verified "$_stmp" "$_sino" 2>/dev/null || true
+    # Root-side ownership record BEFORE the disk link: the sidecar
+    # alone is forgeable by anyone who can write DISK_DIR, so every
+    # later accept/recover/reap decision requires this registry entry
+    # to agree — a crash after it lands leaves the provable trio
+    # (record + registry + partial) the caller's recovery finishes
+    # (sol r33).
+    if ! _write_owned_record "$_di"; then
+        _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
+        _unlink_verified "$DISK.appid" "$_sino" 2>/dev/null || true
+        echo "[tier5] FAIL: cannot write ownership record for" >&2
+        echo "        $VM_NAME — refusing to publish unproven disk" >&2
+        exit 4
+    fi
+    if ! ln -T "$_tmp" "$DISK" 2>/dev/null \
+            || [ ! "$DISK" -ef "$_tmp" ]; then
+        _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
+        # withdraw the just-published pair too — a lone record left
+        # behind would refuse every later launch as unproven (both
+        # only while they still bind the inode we created)
+        _unlink_verified "$DISK.appid" "$_sino" 2>/dev/null || true
+        _drop_owned "$VM_NAME"
+        echo "[tier5] FAIL: $DISK appeared during create — refusing" >&2
+        echo "        to clobber an unproven file" >&2
+        exit 4
+    fi
+    _unlink_verified "$_tmp" "$_tino" 2>/dev/null || true
+    _bino=$_di
+}
 
-# Define domain if absent.
-if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+create_domain() {
+    # Defined-state FIRST: it decides both overlay provenance and
+    # whether a define is needed. An already-defined domain must be
+    # OURS before we may start it — the decision layer checked the
+    # binding, but a transient query outage could have hidden a
+    # foreign domain then (sol r8); an unverifiable query refuses.
+    domain_defined_state; _ds=$?
+    case "$_ds" in
+        0)  if [ "$(domain_appid)" != "$POLICY_KEY" ]; then
+                echo "[tier5] FAIL: existing domain $VM_NAME is bound to" >&2
+                echo "        another app — refusing to start it" >&2
+                REAP=0; exit 3
+            fi
+            # A forged def can carry our tag — before redefining and
+            # starting it the root record must vouch for the name AND
+            # the declared boot source must be our pinned path or the
+            # recorded inode itself (sol r34/r35).
+            _read_owned "$VM_NAME"
+            if [ "$_oapp" != "$POLICY_KEY" ] \
+                    || ! domain_holds_owned_disk "$_oident"; then
+                echo "[tier5] FAIL: defined domain $VM_NAME is not" >&2
+                echo "        backed by the ownership record/disk —" >&2
+                echo "        refusing to reclaim a forged guest" >&2
+                REAP=0; exit 3
+            fi ;;
+        1)  ;;  # confirmed absent — define below, disk needs its own record
+        *)  echo "[tier5] FAIL: cannot determine state of $VM_NAME — refusing" >&2
+            REAP=0; exit 3 ;;
+    esac
+
+    # Linked-clone disk per VM. An EXISTING overlay is reusable only
+    # with a provable owner bound to THIS inode — in EVERY state: a
+    # defined-ours domain's binding vouches for the path, not the
+    # inode, and a file swapped in while the domain was stopped would
+    # otherwise boot under our binding (sol r21). The <disk>.appid
+    # sidecar must name our appId and record the disk's own dev/ino;
+    # anything less — missing sidecar, foreign appId, inode mismatch —
+    # is refused AND preserved: our own crash residue never lands at
+    # $DISK without its record (the create goes through .partial), so
+    # an unproven file here is not ours to delete either
+    # (sol r12/r19/r20/r21). Backing provenance is checked once, later,
+    # on the MOUNTED inode — a path-based qemu-img read here could be
+    # raced into inspecting a different file than the one we boot
+    # (sol r27).
+    if [ -f "$DISK" ] && [ ! -L "$DISK" ]; then
+        _read_owner_record "$DISK.appid"
+        _read_owned "$VM_NAME"
+        # Sidecar AND registry must agree: the sidecar is
+        # admin-writable, so it only binds the inode; the root-side
+        # record is what proves THIS suite created the pair — a
+        # planted disk+sidecar can satisfy the sidecar check but can
+        # never mint the registry entry (sol r33).
+        if [ "$_sapp" != "$POLICY_KEY" ] \
+                || [ "$_sident" != "$(stat -c '%d %i' "$DISK" 2>/dev/null)" ] \
+                || [ "$_oapp" != "$POLICY_KEY" ] \
+                || [ "$_oident" != "$_sident" ]; then
+            echo "[tier5] FAIL: overlay $DISK bound to" >&2
+            echo "        '${_sapp:-<unbound>}' or an inode its records" >&2
+            echo "        do not name — refusing to boot an unproven" >&2
+            echo "        disk" >&2
+            REAP=0; exit 3
+        fi
+        _bino=$_sident
+    else
+        # $DISK absent: a crash between the sidecar stamp and the ln
+        # leaves a provable pair — the sidecar binds a $DISK.partial.*
+        # file's inode, and dev+ino cannot be forged by a planted file.
+        # Finish that create rather than leaking the partial. Only a
+        # REGULAR sidecar naming OUR appId may reach the create path:
+        # a foreign record, a symlink, or an unreadable/empty file is
+        # an unrecognized owner record — preserve it and refuse, never
+        # overwrite it (sol r21/r22).
+        # No sidecar leaves no owner record: reset it so `set -u` never
+        # aborts a clean first create below (astra r43).
+        _recover="" _sapp="" _sident="" _sfid=""
+        if [ -e "$DISK.appid" ] || [ -L "$DISK.appid" ]; then
+            _read_owner_record "$DISK.appid"
+            if [ "$_sapp" != "$POLICY_KEY" ]; then
+                echo "[tier5] FAIL: $DISK.appid holds a foreign or" >&2
+                echo "        unreadable record — preserving it" >&2
+                REAP=0; exit 3
+            fi
+        fi
+        _read_owned "$VM_NAME"
+        # Recovery needs the full provable trio: a planted
+        # sidecar+partial pair satisfies the two-file check, so the
+        # root-side registry must also name the same inode before the
+        # partial may be promoted to $DISK (sol r33).
+        if [ "$_sapp" = "$POLICY_KEY" ] && [ -n "$_sident" ] \
+                && [ "$_oapp" = "$POLICY_KEY" ] \
+                && [ "$_oident" = "$_sident" ]; then
+            for _cand in "$DISK".partial.*; do
+                [ -f "$_cand" ] && [ ! -L "$_cand" ] || continue
+                [ "$(stat -c '%d %i' "$_cand" 2>/dev/null)" = "$_sident" ] \
+                    && { _recover="$_cand"; break; }
+            done
+        fi
+        if [ -n "$_recover" ]; then
+            # The scan→link window can substitute the partial's path:
+            # ln -T then links the REPLACEMENT inode and -ef would still
+            # verify (it compares to whatever the path held at link
+            # time). The only trustworthy check is against the sidecar's
+            # recorded dev/ino — the installed disk must BE the bound
+            # inode — and the provenance recheck happens once, later, on
+            # the MOUNTED inode (sol r25/r27). On mismatch drop only OUR
+            # link name; the planted file keeps its own path.
+            if ln -T "$_recover" "$DISK" 2>/dev/null; then
+                _rino=$(stat -c '%d %i' "$DISK" 2>/dev/null)
+                if [ "$_rino" = "$_sident" ]; then
+                    # drop the redundant partial name — only if it still
+                    # binds the recorded inode (a swapped name is
+                    # restored, never unlinked) (sol r26)
+                    _unlink_verified "$_recover" "$_sident" 2>/dev/null \
+                        || true
+                    _bino=$_sident
+                    echo "[tier5] recovered crashed create at $DISK" >&2
+                else
+                    # Mismatch: the name's CURRENT inode is not proof
+                    # of anything — a racer may have swapped our link
+                    # for a planted file, and unlinking the sampled
+                    # _rino would delete THEIR entry (sol r31). Drop
+                    # the name only while it still provably binds the
+                    # sidecar's recorded inode (i.e. it IS our disk,
+                    # not a substituted one); anything else stays
+                    # preserved. The bound inode then survives at the
+                    # .partial name for the next launch to recover.
+                    _unlink_verified "$DISK" "$_sident" 2>/dev/null \
+                        || true
+                    echo "[tier5] FAIL: recovered partial was swapped" >&2
+                    echo "        — refusing to boot an unproven disk" >&2
+                    exit 4
+                fi
+            else
+                echo "[tier5] FAIL: $DISK appeared during create" >&2
+                echo "        recovery — refusing to clobber it" >&2
+                exit 4
+            fi
+        else
+            _create_overlay_disk
+        fi
+    fi
+
+    # Boot the VERIFIED inode, not the verified path: the gate above
+    # proved $DISK is ours, but DISK_DIR is admin-writable and a swap
+    # between here and qemu's open() at start would boot a foreign
+    # disk under our binding (sol r26). A bind mount pins the inode
+    # itself at a path no admin can redirect; the mount's own inode is
+    # re-verified against the provenance-bound _bino, so a swap that
+    # lands between the gate and mount(8) refuses here.
+    if ! _bind_mount_disk "$_bino"; then
+        echo "[tier5] FAIL: cannot pin the verified overlay at" >&2
+        echo "        $BOOT_PATH — refusing to boot a swapped disk" >&2
+        REAP=0; exit 3
+    fi
+
+    # Backing provenance is read on the PINNED path: the mounted inode
+    # is the only read surface a name-swap cannot redirect, and
+    # qemu-img on the mutable $DISK path could be raced into checking
+    # a different file than the inode we mount (sol r27).
+    _bback=$(run_as_admin qemu-img info --output=json "$BOOT_PATH" \
+        2>/dev/null \
+        | sed -n 's/.*"backing-filename": "\([^"]*\)".*/\1/p')
+    if [ "$_bback" != "$DISK_BASE" ]; then
+        echo "[tier5] FAIL: mounted overlay backs onto" >&2
+        echo "        '${_bback:-<unknown>}' — refusing to boot an" >&2
+        echo "        unproven disk" >&2
+        _unmount_boot_disk
+        REAP=0; exit 3
+    fi
+
+    # Define (or redefine) unconditionally so the STARTED domain always
+    # runs OUR render: a leftover or forged definition under our
+    # name+appId could point its disk source at an unverified path and
+    # bypass BOOT_PATH entirely (sol r27). Confirmed absence or a
+    # bound stopped domain both get the fresh XML.
+    _create_domain_define
+
+    # Start if not live. The qemu oracle decides — a false "shut off"
+    # domstate must not push `virsh start` at an already-live domain,
+    # and an unverifiable scan must not guess either (sol r7): rc 0
+    # means a racer started it, rc 1 starts it, rc 2 fails closed.
+    domain_is_live; _lv=$?
+    if [ "$_lv" -eq 1 ]; then
+        if ! run_as_admin virsh start "$VM_NAME" >/dev/null; then
+            echo "[tier5] FAIL: virsh start failed" >&2
+            exit 6
+        fi
+    elif [ "$_lv" -eq 0 ]; then
+        # A racer started a domain under our name between the decision
+        # lock and now. "Running" no longer implies OURS — before
+        # attaching, the qemu must provably hold the recorded overlay
+        # open as its drive; a forged start is refused, never adopted
+        # (sol r35). A just-exec'd qemu that has not opened its drive
+        # yet also refuses here — transient, the next launch adopts.
+        _read_owned "$VM_NAME"
+        if [ "$_oapp" != "$POLICY_KEY" ] \
+                || ! domain_holds_owned_disk "$_oident"; then
+            echo "[tier5] FAIL: racing domain $VM_NAME does not run" >&2
+            echo "        the recorded overlay — refusing to attach" >&2
+            REAP=0; exit 3
+        fi
+    elif [ "$_lv" -eq 2 ]; then
+        echo "[tier5] FAIL: cannot determine liveness of $VM_NAME before start" >&2
+        REAP=0; exit 3
+    fi
+}
+
+_create_domain_define() {
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     TMPL="${TIER5_DOMAIN_TEMPLATE:-}"
     if [ -z "$TMPL" ]; then
@@ -864,42 +1990,214 @@ if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     fi
     SERIAL_XML_ESCAPED=$(printf '%s' "$SERIAL_XML" | sed 's|[\\/&]|\\&|g')
 
+    # __DISK_PATH__ resolves to the bind-mounted BOOT_PATH — every
+    # component root-owned, the mount pinned to the inode the
+    # provenance gate verified (sol r26).
     sed \
         -e "s|__NIC_XML__|$NIC_XML_ESCAPED|g" \
         -e "s|__SERIAL_XML__|$SERIAL_XML_ESCAPED|g" \
         -e "s|__VM_NAME__|$VM_NAME|g" \
+        -e "s|__APP_ID__|$POLICY_KEY|g" \
         -e "s|__MAC__|$NEW_MAC|g" \
         -e "s|__MEM_KIB__|$MEM_KIB|g" \
         -e "s|__CID__|$CID|g" \
-        -e "s|__DISK_PATH__|$DISK|g" \
-        "$TMPL" >"$TMP_XML"
+        -e "s|__DISK_PATH__|$BOOT_PATH|g" \
+        "$TMPL" | run_as_admin tee "$TMP_XML" >/dev/null
 
     if grep -q '__[A-Z_]*__' "$TMP_XML"; then
         echo "[tier5] FAIL: unsubstituted markers in domain XML:" >&2
         grep -o '__[A-Z_]*__' "$TMP_XML" | sort -u >&2
-        rm -f "$TMP_XML"
+        _unlink_verified "$TMP_XML" \
+            "$(stat -c '%d %i' "$TMP_XML" 2>/dev/null)" 2>/dev/null || true
         exit 4
     fi
     # File is already 0600 + admin-owned inside a 0700 admin-owned dir
     # (domain_xml_tmpfile); no world-readable chmod 0644 here.
+    _xino=$(stat -c '%d %i' "$TMP_XML" 2>/dev/null)
     if ! run_as_admin virsh define "$TMP_XML" >/dev/null; then
         echo "[tier5] FAIL: virsh define failed" >&2
-        rm -f "$TMP_XML"
+        _unlink_verified "$TMP_XML" "$_xino" 2>/dev/null || true
         exit 5
     fi
-    rm -f "$TMP_XML"
-    DOMAIN_DEFINED=1
-fi
+    _unlink_verified "$TMP_XML" "$_xino" 2>/dev/null || true
+}
 
-# Start if not running.
-if ! run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
-    if ! run_as_admin virsh start "$VM_NAME" >/dev/null; then
-        echo "[tier5] FAIL: virsh start failed" >&2
-        exit 6
+# The decision: adopt a running domain under our shared session hold, or
+# create it under the separate create lock (fd11) while KEEPING that SH —
+# the SH excludes every EX actor (teardown claim, orphan reaper, cleanup),
+# and racing creators serialize on fd11, the loser re-checking and
+# adopting. The re-check under the create lock always sees a final state.
+# Early FOREIGN check, BEFORE we join the lock session: a LIVE domain
+# bound to a different appId means we refuse here — a mismatched spawn
+# that never takes fd9 can never starve the true owner's teardown claim
+# (sol r4). Liveness uses the qemu oracle, not domstate alone — a false
+# "shut off" must not slip a live foreign guest past this check either
+# (sol r6). An unverifiable scan falls through to the authoritative
+# locked checks below, which re-verify under the holds.
+domain_is_live; _early_lv=$?
+if [ "$_early_lv" -eq 0 ]; then
+    _early_bound=$(domain_appid)
+    if [ "$_early_bound" != "$POLICY_KEY" ]; then
+        echo "[tier5] FAIL: domain $VM_NAME is bound to app" >&2
+        echo "        '${_early_bound:-<unbound>}', not '$POLICY_KEY'" >&2
+        echo "        — refusing cross-app adoption" >&2
+        REAP=0; exit 3
     fi
 fi
-DOMAIN_DEFINED=1
-echo "[tier5] domain $VM_NAME running (cid=$CID)" >&2
+
+# --- per-VM ownership hold (relaunch reuse) ------------------------
+# flock(2) protocol on $HOLD_FILE, used by every wrapper invocation
+# that touches this domain:
+#   fd9  — session hold: SHARED for the whole session, so concurrent
+#          launches of the same app coexist on one guest, and every EX
+#          actor (teardown claim, orphan reaper, cleanup tool) is
+#          excluded while any session or create decision is in flight.
+#   fd11 — create lock on create-$VM_NAME: EX only around the
+#          dead-guest re-check + create_domain, serializing racing
+#          creators; the loser re-checks and adopts.
+#   fd10 — teardown claim: a BOUNDED EX claim (see decide_teardown). If
+#          it fails, a live session (or an in-flight decision) still
+#          owns the VM and this wrapper must leave it alone; if it wins,
+#          we are the last holder and own teardown.
+# Locks are fd-bound, so a crashed wrapper (SIGKILL, OOM) releases
+# everything automatically — a leftover running/defined domain is
+# then adopted or reaped by the next spawn. The hold FILES are never
+# unlinked while in use: unlink+recreate would split the flock
+# namespace across two inodes and lose mutual exclusion.
+HOLD_DIR="${TIER5_HOLD_DIR:-/run/qdistro-tier5}"
+install -d -m 0700 "$HOLD_DIR"
+HOLD_FILE="$HOLD_DIR/hold-$VM_NAME"
+# `>>` creates without ever replacing an existing inode (install
+# unlinks first, splitting the flock namespace under a racing first user).
+( umask 077; : >>"$HOLD_FILE" )
+exec 9>>"$HOLD_FILE"
+exec 10>>"$HOLD_FILE"
+if ! flock -w 120 -s 9; then
+    echo "[tier5] FAIL: timed out waiting for the $VM_NAME session hold" >&2
+    exit 3
+fi
+
+# Bound identity: a domain is OURS only when its recorded appId equals
+# our POLICY_KEY exactly. The name alone is not identity — catalogue
+# reloads can retire one appId and publish another that derives the same
+# name, and the running guest outlives the manifest it came from. A
+# RUNNING foreign domain is refused (its sessions may still be live);
+# a DEFINED foreign domain is refused outright even when its qemu is
+# confirmed dead — death proves we would not kill a live guest, but it
+# does not make the foreign definition or disk ours (sol r11). Refusals
+# pin REAP=0: a wrapper that never established ownership must never
+# tear down someone else's guest.
+ADOPTED=0
+domain_is_live; _lv=$?
+if [ "$_lv" -eq 0 ]; then
+    _bound=$(domain_appid)
+    if [ "$_bound" != "$POLICY_KEY" ]; then
+        echo "[tier5] FAIL: domain $VM_NAME is bound to app '${_bound:-<unbound>}'," >&2
+        echo "        not '$POLICY_KEY' — refusing cross-app adoption" >&2
+        REAP=0; exit 3
+    fi
+    # The XML tag is admin-writable metadata — anyone in the session
+    # can stamp a forged binding on a guest we never created. The
+    # root-side registry must independently vouch that WE created the
+    # pair this name came from before the guest is adopted (sol r34).
+    _read_owned "$VM_NAME"
+    if [ "$_oapp" != "$POLICY_KEY" ]; then
+        echo "[tier5] FAIL: domain $VM_NAME carries a tier-5 binding" >&2
+        echo "        with no root-side ownership record —" >&2
+        echo "        refusing to adopt a forged guest" >&2
+        REAP=0; exit 3
+    fi
+    # The record binds the DISK pair — it cannot vouch for whichever
+    # domain now holds the name. A same-tag replacement on a different
+    # disk satisfies both checks above yet is not ours; a running
+    # guest is only adopted when its qemu provably holds the recorded
+    # inode open as its drive (sol r35).
+    if ! domain_holds_owned_disk "$_oident"; then
+        echo "[tier5] FAIL: domain $VM_NAME does not run the recorded" >&2
+        echo "        overlay — refusing to adopt a replaced guest" >&2
+        REAP=0; exit 3
+    fi
+    ADOPTED=1
+elif [ "$_lv" -eq 2 ]; then
+    # Cannot prove the domain is dead OR alive — never guess on an
+    # isolation boundary; leaving is always safe (sol r6).
+    echo "[tier5] FAIL: cannot determine liveness of $VM_NAME — refusing" >&2
+    REAP=0; exit 3
+else
+    # Creators serialize on a SEPARATE create lock while keeping the fd9
+    # SH: a session hold would block an fd9 EX until the racing winner's
+    # whole session ended (astra r43). Our SH alone already excludes a
+    # teardown claim, the orphan reaper and the cleanup tool (all EX).
+    ( umask 077; : >>"$HOLD_DIR/create-$VM_NAME" )
+    exec 11>>"$HOLD_DIR/create-$VM_NAME"
+    if ! flock -w 120 -x 11; then
+        echo "[tier5] FAIL: timed out waiting for the $VM_NAME create lock" >&2
+        exit 3
+    fi
+    domain_is_live; _lv=$?
+    if [ "$_lv" -eq 0 ]; then
+        # A racing creator finished while we waited for exclusivity.
+        _bound=$(domain_appid)
+        if [ "$_bound" != "$POLICY_KEY" ]; then
+            echo "[tier5] FAIL: domain $VM_NAME is bound to app '${_bound:-<unbound>}'," >&2
+            echo "        not '$POLICY_KEY' — refusing cross-app adoption" >&2
+            REAP=0; exit 3
+        fi
+        # same forged-binding check as the unlocked adoption above
+        _read_owned "$VM_NAME"
+        if [ "$_oapp" != "$POLICY_KEY" ]; then
+            echo "[tier5] FAIL: domain $VM_NAME carries a tier-5" >&2
+            echo "        binding with no root-side ownership" >&2
+            echo "        record — refusing to adopt a forged guest" >&2
+            REAP=0; exit 3
+        fi
+        # and the same replacement check — the record binds the disk
+        # pair, not whichever domain holds the name now (sol r35)
+        if ! domain_holds_owned_disk "$_oident"; then
+            echo "[tier5] FAIL: domain $VM_NAME does not run the" >&2
+            echo "        recorded overlay — refusing to adopt a" >&2
+            echo "        replaced guest" >&2
+            REAP=0; exit 3
+        fi
+        ADOPTED=1
+    elif [ "$_lv" -eq 2 ]; then
+        echo "[tier5] FAIL: cannot determine liveness of $VM_NAME — refusing" >&2
+        REAP=0; exit 3
+    else
+        # Foreign-binding check needs a PRECISE defined-state: a query
+        # outage must not be read as "no domain" — create_domain would
+        # then skip define and `virsh start` a stopped foreign guest the
+        # moment the query recovers (sol r8).
+        domain_defined_state; _ds=$?
+        if [ "$_ds" -eq 2 ]; then
+            echo "[tier5] FAIL: cannot determine whether $VM_NAME" >&2
+            echo "        is defined — refusing to create over it" >&2
+            REAP=0; exit 3
+        fi
+        if [ "$_ds" -eq 0 ] && [ "$(domain_appid)" != "$POLICY_KEY" ]; then
+            # A defined domain that is NOT ours squats our name — bound
+            # to another app or to nothing. Refuse rather than reclaim:
+            # confirmed-dead proves no live guest is killed, but it does
+            # NOT make the foreign definition or the foreign disk ours —
+            # destroying another app's stopped guest crosses the same
+            # boundary the binding exists to protect (sol r11). The
+            # owner relaunches under its own name; an admin removes a
+            # genuinely stale squatting domain deliberately.
+            _fb=$(domain_appid)
+            echo "[tier5] FAIL: domain $VM_NAME is bound to app" >&2
+            echo "        '${_fb:-<unbound>}', not '$POLICY_KEY' —" >&2
+            echo "        refusing to reclaim another app's guest" >&2
+            REAP=0; exit 3
+        fi
+        create_domain
+    fi
+    exec 11>&-
+fi
+if [ "$ADOPTED" = "1" ]; then
+    echo "[tier5] adopted running domain $VM_NAME (per-app guest shared across relaunches)" >&2
+else
+    echo "[tier5] domain $VM_NAME running (cid=$CID)" >&2
+fi
 
 # Wait for qga. A deadline (rather than a fixed iteration count) keeps the
 # contract honest if individual virsh calls stall briefly under nested VM load.
@@ -937,11 +2235,14 @@ done
 
 QGA_REQ="{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/usr/local/bin/qdistro-tier5-publisher.sh\",\"arg\":[$QGA_ARGS_JSON],\"capture-output\":true}}"
 
-QGA_REPLY=$(run_as_admin virsh qemu-agent-command "$VM_NAME" "$QGA_REQ" 2>"$SERVER_LOG" || true)
+QGA_REPLY=$(run_as_admin sh -c \
+    'virsh qemu-agent-command "$1" "$2" 2>>"$3"' \
+    _ "$VM_NAME" "$QGA_REQ" "$SERVER_LOG" || true)
 if [ -z "$QGA_REPLY" ] || ! echo "$QGA_REPLY" | grep -q '"pid"'; then
     echo "[tier5] FAIL: guest-exec didn't return a pid" >&2
     echo "[tier5] reply: $QGA_REPLY" >&2
-    cat "$SERVER_LOG" >&2 || true
+    # admin-side read: the log path is admin-writable (astra r45)
+    run_as_admin cat -- "$SERVER_LOG" >&2 || true
     exit 8
 fi
 GUEST_PID=$(echo "$QGA_REPLY" | grep -oE '"pid"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)
@@ -955,33 +2256,44 @@ echo "[tier5] lifecycle[$POLICY_KEY]: method=$SHUTDOWN_METHOD grace=${SHUTDOWN_G
 # In loopback mode, waypipe-client has --oneshot and exits when the
 # server disconnects; wait for it directly.
 if [ "$MODE" = "vm" ]; then
-    # Poll for an EXPLICIT terminal state. A transient runuser/virsh query
-    # failure (e.g. virtqemud "End of file ... I/O error" under audit-backlog
-    # churn from this very poll) must NOT be read as "domain stopped": the old
-    # `grep -qw running` exited the loop on ANY non-"running" output, so a single
-    # blip declared a HEALTHY guest stopped and tore it down (perm-gui 20/21
-    # cold-start failed every run for this reason). Treat empty/error output as
-    # transient and ride it out; only an explicit terminal state ends the wait.
-    misses=0; exec_gone=0
+    # Session watch: the loop ends when the guest is confirmed dead OR
+    # the published app exits. A transient runuser/virsh query failure
+    # (e.g. virtqemud "End of file ... I/O error" under audit-backlog
+    # churn from this very poll) must NOT be read as "domain stopped":
+    # the old `grep -qw running` shape exited on ANY non-"running"
+    # domstate output, so a single blip declared a HEALTHY guest
+    # stopped and tore it down (perm-gui 20/21 cold-start failed every
+    # run for this reason).
+    exec_gone=0
     while :; do
-        d_state=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '[:space:]')
-        case "$d_state" in
-            running|paused|idle|pmsuspended) misses=0 ;;
-            "") misses=$((misses + 1)); [ "$misses" -ge 5 ] && break ;;
-            *) break ;;
-        esac
-        # Teardown-on-done: a tier-5 VM hosts a SINGLE published app, so once that
-        # app exits (e.g. its last window was closed -> request_close -> the app
-        # quit) the VM has no further purpose. Watch the published process via the
-        # guest agent; an explicit "exited":true ends the wait. We then optionally
-        # hold the idle VM (idle_keep_warm — IDLE_SHUTDOWN_SECS/low-mem policy)
-        # and break, so the EXIT-trap cleanup() reaps it (graceful ACPI shutdown
-        # by default — see reap_domain/SHUTDOWN_METHOD — then undefine + overlay
-        # unlink). Before this, the loop ended ONLY on a guest self-poweroff, so
-        # closing the app window leaked the whole nested VM + overlay (perm-gui/21
-        # S3-S5). Keying on the APP process (GUEST_PID), not a single toplevel,
-        # is deliberate: a multi-window app is reaped when it FULLY exits, not on
-        # the first window close.
+        # Liveness comes ONLY from the qemu oracle — domstate is not
+        # consulted: it can lie in both directions under nested virt
+        # ("shut off" for a live qemu — the original perm-gui 20/21
+        # cold-start killer — and stale "running" for a dead one, which
+        # would wedge this watch). Only a CONFIRMED-dead verdict ends
+        # the session watch: breaking on ambiguity would hand a
+        # possibly-live guest to teardown's destroy+kill (sol r7). A
+        # truly dead guest yields confirmed-dead as soon as the scan
+        # can run; a persistently broken oracle just keeps this
+        # harmless watch going — the app-exit watch below is the
+        # primary session-end signal anyway (sol r8).
+        domain_is_live; _lv=$?
+        [ "$_lv" -eq 1 ] && break
+        # Session-on-done: each session publishes ONE app; once that app exits
+        # (e.g. its last window was closed -> request_close -> the app quit)
+        # this wrapper's work is done. Watch the published process via the
+        # guest agent; an explicit "exited":true ends the wait. We then run
+        # idle_keep_warm — the relaunch window (IDLE_SHUTDOWN_SECS/low-mem
+        # policy plus last-holder teardown claim) — and break; the EXIT-trap
+        # cleanup() tears the domain down ONLY if no session adopted it in
+        # the meantime (graceful ACPI shutdown by default — see reap_domain/
+        # SHUTDOWN_METHOD — then undefine + overlay unlink). Before the
+        # app-process watch, the loop ended ONLY on a guest self-poweroff, so
+        # closing the app window leaked the whole nested VM + overlay
+        # (perm-gui/21 S3-S5). Keying on OUR app process (GUEST_PID), not a
+        # single toplevel or the whole guest, is deliberate: a multi-window
+        # app ends its session when it FULLY exits, and a guest may outlive
+        # us because a relaunched session of the same app adopted it.
         # --timeout is load-bearing: `qemu-agent-command` BLOCKS by default, so a
         # guest whose qga has gone unresponsive (a dying/OOMing guest is exactly
         # the case that matters) would hang this loop forever and the
@@ -990,7 +2302,7 @@ if [ "$MODE" = "vm" ]; then
         es=$(run_as_admin virsh qemu-agent-command --timeout 5 "$VM_NAME" \
              "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$GUEST_PID}}" 2>&1)
         if printf '%s' "$es" | grep -qE '"exited"[[:space:]]*:[[:space:]]*true'; then
-            echo "[tier5] published app (pid=$GUEST_PID) exited; reaping $VM_NAME" >&2
+            echo "[tier5] published app (pid=$GUEST_PID) exited; session done for $VM_NAME" >&2
             idle_keep_warm
             break
         elif printf '%s' "$es" | grep -qiE 'PID [0-9]+ does not exist|does not exist'; then
@@ -1004,7 +2316,7 @@ if [ "$MODE" = "vm" ]; then
             # and is left to the domstate path above (guest death) to handle.
             exec_gone=$((exec_gone + 1))
             if [ "$exec_gone" -ge 2 ]; then
-                echo "[tier5] published app (pid=$GUEST_PID) reaped by qga (no longer tracked); reaping $VM_NAME" >&2
+                echo "[tier5] published app (pid=$GUEST_PID) reaped by qga (no longer tracked); session done for $VM_NAME" >&2
                 idle_keep_warm
                 break
             fi
@@ -1013,7 +2325,7 @@ if [ "$MODE" = "vm" ]; then
         fi
         sleep 2
     done
-    echo "[tier5] $VM_NAME wait loop ended; cleanup will destroy+undefine+unlink" >&2
+    echo "[tier5] $VM_NAME wait loop ended; last-holder teardown claim decides teardown" >&2
     kill "$CLIENT_PID" 2>/dev/null; wait "$CLIENT_PID" 2>/dev/null
     exit 0
 else

@@ -289,6 +289,13 @@
     <package name="qemu-tools"/>
     <package name="qemu-audio-pipewire"/>
     <package name="qemu-audio-alsa"/>
+    <!-- The tier-5 VM-app scanner (tier5-vm/vmapps-scan.py, run by the
+         reconcile service at boot and on base changes) reads the guest
+         base through guestfish. Every profile that ships the tier-5
+         base needs it, or the first-boot rescan fails and the launcher
+         falls back to Foot only. -->
+    <package name="libguestfs"/>
+    <package name="guestfs-tools"/>
     <package name="socat"/>
     <package name="selinux-policy"/>
     <package name="selinux-policy-targeted"/>
@@ -376,8 +383,6 @@
     <package name="wireguard-tools"/>
     <package name="nftables"/>
     <package name="dnsmasq"/>
-    <package name="libguestfs"/>
-    <package name="guestfs-tools"/>
     <package name="qt6-base-devel"/>
     <package name="qt6-svg-devel"/>
     <package name="qt6-shadertools"/>

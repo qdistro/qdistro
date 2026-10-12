@@ -105,9 +105,10 @@ gen_launch_token() {
 #
 # The spawn scripts run privileged (root, via pkexec) but hand the rendered
 # XML to `virsh` running as the unprivileged admin user (run_as_admin).
-# Pass the admin user/runtime as $2/$3 so the private dir is created under
-# the admin's own /run/user/<uid> (tmpfs, 0700) and chowned to admin: the
+# Pass the admin user/runtime as $2/$3 so the private dir and file are
+# created AS admin under the admin's own /run/user/<uid> (tmpfs, 0700): the
 # admin can then read the file, while no OTHER uid can traverse the dir.
+# Callers write it as the owner too (`| run_as_admin tee "$TMP_XML"`).
 #   $1 = log/file prefix (e.g. qdistro-tier5)
 #   $2 = owner user that will read the file via virsh (default: current user)
 #   $3 = that owner's runtime dir, used as the private base (default:
@@ -157,31 +158,27 @@ domain_xml_tmpfile() {
     fi
     local need_subdir=1
     _qd_dir_is_private "$base" "$owner" && need_subdir=0
+    # With a distinct owner, the dir and file are created AS the owner
+    # (umask 077): root never chmods/chowns a pathname in a directory the
+    # owner can rewrite, so a swapped-in symlink cannot redirect a root
+    # ownership change (astra r43).
+    local -a as_owner=()
+    if [ -n "$owner" ] && [ "$owner" != "$(id -un)" ]; then
+        as_owner=(runuser -u "$owner" --)
+    fi
     if [ "$need_subdir" = 1 ]; then
-        dir="$(mktemp -d "$base/qdistro-domxml.XXXXXX")" || {
+        dir="$("${as_owner[@]}" sh -c 'umask 077; mktemp -d "$1/qdistro-domxml.XXXXXX"' \
+            sh "$base")" || {
             echo "${prefix}: failed to create private domain-XML dir under $base" >&2
             exit 5
         }
-        chmod 0700 "$dir"
-        # Owned by the reader (admin) so it can traverse its own 0700 dir.
-        if [ -n "$owner" ] && ! chown "$owner" "$dir" 2>/dev/null; then
-            echo "${prefix}: failed to chown private domain-XML dir to $owner" >&2
-            rm -rf "$dir"; exit 5
-        fi
         base="$dir"
     fi
-    f="$(mktemp "$base/${prefix}.XXXXXX.xml")" || {
+    f="$("${as_owner[@]}" sh -c 'umask 077; mktemp "$1/$2.XXXXXX.xml"' \
+        sh "$base" "$prefix")" || {
         echo "${prefix}: failed to create private domain-XML file under $base" >&2
         exit 5
     }
-    chmod 0600 "$f"
-    # The render runs as root but virsh reads the file as the admin owner — fail
-    # closed if we cannot hand ownership over, rather than defer to a confusing
-    # "virsh define: permission denied".
-    if [ -n "$owner" ] && ! chown "$owner" "$f" 2>/dev/null; then
-        echo "${prefix}: failed to chown domain-XML file to $owner" >&2
-        rm -f "$f"; exit 5
-    fi
     printf '%s' "$f"
 }
 

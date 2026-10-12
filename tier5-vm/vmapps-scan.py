@@ -49,6 +49,7 @@ import argparse
 import configparser
 import json
 import os
+import re
 import stat as statmod
 import subprocess
 import sys
@@ -69,6 +70,12 @@ APPS_DIRS = ("/usr/local/share/applications", "/usr/share/applications")
 
 # Bare TryExec/program names resolve against these guest dirs, in order.
 BIN_DIRS = ("/usr/local/bin", "/usr/bin", "/bin")
+
+# Guest paths are interpolated into double-quoted guestfish commands —
+# a `"`, `\`, or control character would break out of the quote and a
+# following `!cmd` would execute ON THE HOST as the scanning user
+# (sol r28). Paths carrying any of these are skipped, never quoted.
+_UNSAFE_GUEST_PATH = re.compile(r'["\\\x00-\x1f\x7f]')
 
 # foot is the operator escape hatch and the loader's deterministic
 # fallback. A catalogue-bearing base with no guest foot binary makes the
@@ -93,6 +100,13 @@ LEGACY_APP_IDS = {
 # VM has no foot server (footclient exits immediately) and a foot server
 # opens no window. The drop-in denylist file can extend this.
 BUILTIN_DENYLIST = {"footclient", "foot-server"}
+
+# The spawn wrapper's --policy-key / domain-binding charset — keep in
+# sync with the [[ =~ ]] rule in spawn-tier5.sh. Rows whose derived
+# appId violates it are dropped before publication. Checked with
+# fullmatch: re.match(...$) would accept a trailing '\n' that the
+# wrapper's `[[ =~ ]]` rejects.
+_APP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}")
 
 # Exec field codes the launcher side provides at activation time — we
 # have no file/URL to substitute, so the token is dropped entirely.
@@ -302,7 +316,7 @@ class GuestfsSource:
                         for member in tar.getmembers():
                             if not member.isfile():
                                 continue
-                            rel = member.name.lstrip("./")
+                            rel = member.name.removeprefix("./")
                             if not rel.endswith(".desktop"):
                                 continue
                             fh = tar.extractfile(member)
@@ -322,12 +336,26 @@ class GuestfsSource:
     def _stats(self, paths: list[str]) -> dict[str, tuple[bool, int]]:
         if not paths:
             return {}
+        # Paths land inside a double-quoted guestfish arg — a `"`,
+        # `\`, or control char (incl. newline) breaks out of the quote
+        # and a following `!cmd` would execute ON THE HOST (sol r28).
+        # Those paths simply don't get statted: they report missing,
+        # which is also the correct verdict for a path a real guest
+        # cannot cleanly address.
+        safe = [p for p in paths if not _UNSAFE_GUEST_PATH.search(p)]
+        dropped = set(paths) - set(safe)
+        for p in dropped:
+            log(f"unsafe guest path {p!r} — reported missing")
+        if not safe:
+            return {p: (False, 0) for p in dropped}
         script = "".join(
-            f'echo "::stat::{p}"\nstat "{p}"\n' for p in paths
+            f'echo "::stat::{p}"\nstat "{p}"\n' for p in safe
         )
         proc = self._run(script)
         text = proc.stdout.decode(errors="replace")
-        result: dict[str, tuple[bool, int]] = {}
+        result: dict[str, tuple[bool, int]] = {
+            p: (False, 0) for p in dropped
+        }
         current: str | None = None
         for line in text.splitlines():
             line = line.strip()
@@ -513,9 +541,21 @@ def select_apps(
             log(f"{desktop_id}: denylisted — skipped")
             continue
 
+        app_id = LEGACY_APP_IDS.get(desktop_id, f"tier5/{desktop_id}")
+        # The appId becomes the spawn wrapper's --policy-key AND the
+        # domain's bound identity, so it must satisfy the wrapper's key
+        # charset — an unshapeable desktop filename (spaces, +, UTF-8)
+        # would otherwise reach launch() and die at the wrapper, or
+        # worse, alias another app's binding (sol r4). Drop and log
+        # rather than publish an unusable row.
+        if not _APP_ID_RE.fullmatch(app_id):
+            log(f"{desktop_id}: appId {app_id!r} outside the policy-key "
+                f"charset — dropped")
+            continue
+
         rows.append(
             {
-                "appId": LEGACY_APP_IDS.get(desktop_id, f"tier5/{desktop_id}"),
+                "appId": app_id,
                 "desktopId": desktop_id,
                 "name": name,
                 "iconName": icon,
@@ -555,6 +595,7 @@ def _base_identity(base_path: str) -> dict[str, int | str]:
         "baseDev": st.st_dev,
         "baseIno": st.st_ino,
         "baseMtime": int(st.st_mtime),
+        "baseMtimeNs": st.st_mtime_ns,
         "baseSize": st.st_size,
     }
 
@@ -580,6 +621,13 @@ def _publish(out_path: str, doc: dict) -> None:
 
 
 def build_manifest(src, base_path: str, denylist: str | None) -> dict:
+    # Identity is sampled BEFORE the scan so it binds the catalogue to
+    # the base as it was when we started reading. A mid-scan rewrite
+    # then necessarily invalidates the recorded identity — a real
+    # write cannot repeat a nanosecond mtime — and the post-scan
+    # re-stat below refuses to publish a torn catalogue outright
+    # rather than relying on consumers to notice (sol r16).
+    ident = _base_identity(base_path)
     apps = select_apps(src, denylist)
     if apps:
         foot = next(
@@ -597,7 +645,12 @@ def build_manifest(src, base_path: str, denylist: str | None) -> dict:
         "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "apps": apps,
     }
-    doc.update(_base_identity(base_path))
+    doc.update(ident)
+    if _base_identity(base_path) != ident:
+        raise ScanError(
+            "base identity changed during the scan — refusing to "
+            "publish a catalogue that may describe torn contents"
+        )
     return doc
 
 
@@ -640,7 +693,8 @@ def manifest_problems(doc) -> list[str]:
         bad = [i for i, r in enumerate(apps) if not _row_ok(r)]
         if bad:
             problems.append(f"malformed app rows at {bad}")
-    for key in ("base", "baseDev", "baseIno", "baseMtime", "baseSize"):
+    for key in ("base", "baseDev", "baseIno", "baseMtime", "baseMtimeNs",
+                "baseSize"):
         if key not in doc:
             problems.append(f"missing identity field {key}")
     return problems
@@ -665,7 +719,8 @@ def cmd_check(manifest_path: str, base_path: str) -> int:
         print(f"check: base {base_path}: {exc}", file=sys.stderr)
         return 1
     stale_keys = [
-        k for k in ("baseDev", "baseIno", "baseMtime", "baseSize")
+        k for k in ("baseDev", "baseIno", "baseMtime", "baseMtimeNs",
+                    "baseSize")
         if doc[k] != ident[k]
     ]
     if doc["base"] != base_path:

@@ -977,6 +977,13 @@ struct qdwin {
 	uint32_t move_grab_handle;
 	double move_grab_anchor_dx;  /* pointer.x - view.origin.x at start */
 	double move_grab_anchor_dy;  /* pointer.y - view.origin.y at start */
+	/* Serial of the latest pointer press forwarded as chrome_button, 0
+	 * once any later press lands elsewhere. show_popup accepts it as
+	 * well as the seat grab serial: weston only advances grab_serial on
+	 * the FIRST held button, so a right-press on the title bar while
+	 * the left button is still down (e.g. a refused drag on a maximised
+	 * window) reports a serial grab_serial never takes. */
+	uint32_t chrome_press_serial;
 
 	/* v19: shell-driven global hotkeys. Each entry holds a
 	 * weston_compositor_add_key_binding registration; the handler
@@ -4831,6 +4838,12 @@ qdwin_proxy_default_grab_button(struct weston_pointer_grab *grab,
 		struct qdwin_toplevel *chrome_tl =
 			qdwin_chrome_at_pos(qdwin_singleton, pointer->pos,
 					    &side, &sx, &sy);
+		if (state == WL_POINTER_BUTTON_STATE_PRESSED)
+			qdwin_singleton->chrome_press_serial =
+				chrome_tl && side >= 0
+				? wl_display_get_serial(
+					pointer->seat->compositor->wl_display)
+				: 0;
 		if (chrome_tl && side >= 0) {
 			qdwin_shell_v1_send_chrome_button(
 				qdwin_singleton->shell_resource,
@@ -5184,7 +5197,8 @@ qdwin_handle_show_popup(struct wl_client *client,
 			break;
 		}
 	}
-	if (!qdwin_seat_grab_serial_matches(grab_seat, serial)) {
+	if (!qdwin_seat_grab_serial_matches(grab_seat, serial) &&
+	    (serial == 0 || serial != qdwin->chrome_press_serial)) {
 		weston_log("qdwin: show_popup refused: stale/invalid "
 			   "serial=%u\n", serial);
 		wl_resource_post_error(resource,
@@ -5195,6 +5209,25 @@ qdwin_handle_show_popup(struct wl_client *client,
 	}
 
 	struct qdwin_toplevel *tl = qdwin_toplevel_from_handle(qdwin, parent);
+	if (!tl && parent != 0 && parent <= qdwin->next_handle) {
+		/* Issued but gone: the user opened a menu on a window that
+		 * closed while its toplevel_removed was still in flight —
+		 * the same race attach_decoration ignores. Answer with an
+		 * inert popup the shell sees dismissed at once; it still
+		 * owns popup_id and will destroy it. */
+		weston_log("qdwin: show_popup parent=%u stale — dismissed\n",
+			   parent);
+		struct wl_resource *inert = wl_resource_create(
+			client, &qdwin_popup_v1_interface, 1, popup_id);
+		if (!inert) {
+			wl_client_post_no_memory(client);
+			return;
+		}
+		wl_resource_set_implementation(inert, &qdwin_popup_impl,
+					       NULL, NULL);
+		qdwin_popup_v1_send_dismissed(inert);
+		return;
+	}
 	if (!tl) {
 		wl_resource_post_error(resource,
 				       QDWIN_SHELL_V1_ERROR_INVALID_HANDLE,

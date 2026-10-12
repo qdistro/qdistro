@@ -102,7 +102,11 @@ Singleton {
     // execArgv that parses to a nonempty array of strings.
     function _validRow(row) {
         if (!row || typeof row !== "object") return false;
-        if (typeof row.appId !== "string" || !row.appId) return false;
+        // The appId is the wrapper's --policy-key and the domain's bound
+        // identity; out-of-charset ids must never reach launch (sol r4).
+        if (typeof row.appId !== "string"
+                || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(row.appId))
+            return false;
         if (typeof row.name !== "string" || !row.name) return false;
         let argv;
         try { argv = JSON.parse(row.execArgv); } catch (e) { return false; }
@@ -143,9 +147,19 @@ Singleton {
                 "execArgv":  r.execArgv,
             });
         }
+        const launchable = root._dropDomainCollisions(rows);
+        if (launchable.length === 0) {
+            Logger.e("VMApps", "manifest left no launchable apps "
+                     + "— foot-only fallback");
+            root._manifestMissing = false;
+            root.catalogue = root._footRows();
+            root.refreshed();
+            return;
+        }
         root._manifestMissing = false;
-        root.catalogue = rows;
-        Logger.i("VMApps", "manifest loaded: " + rows.length + " app(s)");
+        root.catalogue = launchable;
+        Logger.i("VMApps", "manifest loaded: " + launchable.length
+                 + " app(s)");
         root.refreshed();
     }
 
@@ -218,14 +232,66 @@ Singleton {
         return !!secctxAppId && secctxAppId.startsWith(root.tier5Prefix);
     }
 
-    // Generate a fresh VM name for a launch. spawn-tier5.sh validates
-    // [a-zA-Z0-9][a-zA-Z0-9_-]{0,62}, so use a short hex suffix.
-    function _generateVmName(appId) {
-        const stub = (appId || "vmapp").replace(/[^a-zA-Z0-9_-]/g, "-")
-                                       .slice(0, 24);
-        const suffix = Math.floor(Math.random() * 0xFFFFFF)
-                           .toString(16).padStart(6, "0");
-        return "t5-" + stub + "-" + suffix;
+    // Deterministic per-app VM name — the tier-5 guest is the SILO for
+    // the catalogue appId, so every launch of the same app names the same
+    // domain. spawn-tier5.sh's hold-lock protocol lets a relaunch adopt
+    // the still-running VM instead of paying a cold start, keeps
+    // concurrent same-app launches on one guest (same trust domain: the
+    // silo tag IS the VM name), and hands teardown to whichever session
+    // is last out of the idle window. The wrapper validates
+    // [a-zA-Z0-9][a-zA-Z0-9_-]{0,62}.
+    //
+    // The name is "t5-" + a human-readable stub + "-" + a 64-bit hash of
+    // the FULL appId. The hash narrows collisions to the practically
+    // impossible; the GUARANTEE that two distinct appIds never share a
+    // guest is _dropDomainCollisions() at catalogue load — a collision
+    // would run the second app inside the first app's guest and break
+    // per-app isolation, so colliders are dropped, never launched
+    // (sol r1/r2 P1).
+    function _appIdHash(appId) {
+        // Two independent 32-bit hashes (FNV-1a + djb2-xor) concatenated.
+        let fnv = 0x811c9dc5;
+        let djb = 0x00001505;
+        for (let i = 0; i < appId.length; i++) {
+            const c = appId.charCodeAt(i);
+            fnv = Math.imul(fnv ^ c, 0x01000193) >>> 0;
+            djb = (Math.imul(djb, 33) ^ c) >>> 0;
+        }
+        const pad = h => ("0000000" + h.toString(16)).slice(-8);
+        return pad(fnv) + pad(djb);
+    }
+
+    function _vmNameForApp(appId) {
+        const id = appId || "vmapp";
+        const stub = id.replace(/[^a-zA-Z0-9_-]/g, "-")
+                       .replace(/-{2,}/g, "-")
+                       .replace(/^-+|-+$/g, "")
+                       .slice(0, 43);
+        // 3 + <=43 + 1 + 16 = <=63, inside the wrapper's name budget.
+        return "t5-" + (stub || "vmapp") + "-" + _appIdHash(id);
+    }
+
+    // Derive every row's domain name and drop rows whose name is claimed
+    // by a DIFFERENT appId — both colliders go, since catalogue order is
+    // no trust signal (which row is the attacker's?). nameFn is
+    // injectable so the detection is unit-testable under a forced
+    // collision; production passes the real _vmNameForApp.
+    function _dropDomainCollisions(rows, nameFn) {
+        const nf = nameFn || (id => root._vmNameForApp(id));
+        const byName = ({});
+        const bad = new Set();
+        for (const r of rows) {
+            const n = nf(r.appId);
+            if (byName[n] !== undefined && byName[n] !== r.appId) {
+                bad.add(n);
+                Logger.e("VMApps", "domain-name collision " + n
+                         + " claimed by " + byName[n] + " and " + r.appId
+                         + " — both dropped");
+            } else {
+                byName[n] = r.appId;
+            }
+        }
+        return rows.filter(r => !bad.has(nf(r.appId)));
     }
 
     function rebuild() {
@@ -273,11 +339,12 @@ Singleton {
 
     // ---- launch ----------------------------------------------------------
     // Called from Launcher / Taskbar click handlers. Forks
-    // spawn-tier5.sh --vm <auto-name> -- <argv...>; the helper emits
+    // spawn-tier5.sh --vm <per-app-name> -- <argv...>; the helper emits
     // LAUNCH_TOKEN=<hex> early on stdout. We register a placeholder
     // keyed on the token; it's resolved when the inner toplevel
     // arrives carrying instance_id == launchToken (set by spawn-
-    // tier5.sh's qdistro-secctx-exec wrap).
+    // tier5.sh's qdistro-secctx-exec wrap). The VM name is the appId's
+    // deterministic silo name — relaunches adopt the running guest.
     //
     // row shape: { appId, name, iconName, execArgv (string JSON-encoded
     // array of strings) }
@@ -286,13 +353,30 @@ Singleton {
             Logger.w("VMApps", "launch: missing appId");
             return;
         }
+        // A provider row can outlive the catalogue it came from. Only
+        // rows still authorized by the CURRENT catalogue may reach a
+        // domain — a stale row could otherwise adopt a guest its appId
+        // no longer owns (the wrapper also enforces this via the
+        // domain's bound appId; this is the shell-side belt, sol r3).
+        let authorized = false;
+        for (const cat of root.catalogue) {
+            if (cat.appId === row.appId) { authorized = true; break; }
+        }
+        if (!authorized) {
+            Logger.w("VMApps", "launch: " + row.appId
+                     + " not in current catalogue — dropped");
+            return;
+        }
         let argv = [];
         try { argv = JSON.parse(row.execArgv); } catch (e) { argv = []; }
         if (argv.length === 0) {
             Logger.w("VMApps", "launch: empty execArgv for " + row.appId);
             return;
         }
-        const vmName = row.vmName || root._generateVmName(row.appId);
+        // The ONLY name source is the deterministic derivation — a
+        // manifest-supplied name would bypass _dropDomainCollisions and
+        // could pin two apps to one guest (sol r2 P1).
+        const vmName = root._vmNameForApp(row.appId);
         // Build: pkexec qdistro-tier5-spawn --vm <vmName> --policy-key <appId>
         //        -- <argv...>
         // --policy-key carries the STABLE catalogue appId so the wrapper can
