@@ -434,6 +434,12 @@ reason_full_stack() {
 
     run gui_scenario_requires_qdwin "tests/integration/permissions-gui/20-tier5-vm-cold-start.md"
     [ "$status" -eq 0 ]
+
+    run gui_scenario_requires_qdwin "tests/integration/permissions-gui/60-vmapps-manifest-catalogue.md"
+    [ "$status" -eq 0 ]
+
+    run gui_scenario_requires_qdwin "tests/integration/permissions-gui/61-window-chrome-context-menu.md"
+    [ "$status" -eq 0 ]
 }
 
 @test "gui classify: retained TUI rows do not require the qdwin profile" {

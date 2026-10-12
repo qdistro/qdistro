@@ -3027,6 +3027,21 @@ qdwin_toplevel_position_chrome(struct qdwin_toplevel *tl)
 			weston_desktop_surface_get_surface(tl->desktop_surface);
 		cw = content->width;
 		ch = content->height;
+		/* Native clients with CSD shadows (GTK, weston toytoolkit) publish
+		 * a window geometry inset into a larger surface. The chrome hugs
+		 * the visible window, not the shadow: anchoring at the surface
+		 * origin put the north strip ~32 px too high (under the panel)
+		 * and let the client's shadow take its clicks. XWayland keeps
+		 * the surface extent, matching apply_inset's outer rectangle. */
+		struct weston_geometry g =
+			weston_desktop_surface_get_geometry(tl->desktop_surface);
+		if (!qdwin_toplevel_is_xwayland(tl->qdwin, tl) &&
+		    g.width > 0 && g.height > 0) {
+			x += g.x;
+			y += g.y;
+			cw = g.width;
+			ch = g.height;
+		}
 	}
 
 	for (int s = 0; s < QDWIN_SIDES; s++) {
@@ -3261,6 +3276,16 @@ qdwin_handle_attach_decoration(struct wl_client *client,
 		return;
 	tl = qdwin_toplevel_from_handle(qdwin, handle);
 	if (!tl) {
+		/* A handle we issued whose toplevel has since gone: the shell
+		 * cannot avoid this race (toplevel_removed may still be in
+		 * flight when it decorates a short-lived window), so ignore
+		 * it like request_close does. Never-issued handles stay a
+		 * protocol error. */
+		if (handle != 0 && handle <= qdwin->next_handle) {
+			weston_log("qdwin: attach_decoration stale handle=%u "
+				   "(toplevel gone); ignored\n", handle);
+			return;
+		}
 		wl_resource_post_error(resource,
 				       QDWIN_SHELL_V1_ERROR_INVALID_HANDLE,
 				       "attach_decoration: unknown handle %u",

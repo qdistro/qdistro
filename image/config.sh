@@ -323,6 +323,19 @@ if [ -f /var/lib/libvirt/images/qdistro-tier5-base.qcow2 ]; then
     chown root:libvirt /var/lib/libvirt/images/qdistro-tier5-base.qcow2
     chmod 0640 /var/lib/libvirt/images/qdistro-tier5-base.qcow2
     echo "[qdistro-image] tier5 base qcow2 present — pinned root:libvirt 0640"
+    # vmapps-dynamic: the dynamic VM-app catalogue is a sidecar next to
+    # the base (build-guest-image.sh writes qdistro-tier5-base.json via
+    # vmapps-scan.py). Stage it at the path VMApps.qml reads. A staged
+    # base WITHOUT its sidecar is a broken pipeline — fail the image
+    # step rather than ship a launcher that silently degrades to foot.
+    SIDECAR=/var/lib/libvirt/images/qdistro-tier5-base.json
+    [ -f "$SIDECAR" ] || {
+        echo "[qdistro-image] FAIL: tier5 base staged without its vmapps sidecar $SIDECAR" >&2
+        exit 1
+    }
+    install -D -m 0644 -o root -g root "$SIDECAR" \
+        /usr/share/qdistro/vmapps/base.json
+    echo "[qdistro-image] tier5 vmapps manifest staged at /usr/share/qdistro/vmapps/base.json"
 else
     echo "[qdistro-image] WARN: no tier5 base qcow2 — launcher VM entries will not work"
 fi

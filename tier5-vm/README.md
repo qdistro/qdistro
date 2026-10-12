@@ -59,9 +59,59 @@ in `spec/29` . Reasons:
  `<vsock model='virtio'/>` and assigned CID. Linux-only guest
  per spec/00.
 - `qdistro-tier5-cleanup.sh` — destroy + undefine helper.
+- `vmapps-scan.py` — guest-base .desktop scanner. Reads
+  `usr/{local/,}share/applications` inside the base qcow2 via
+  libguestfs (read-only), applies XDG precedence/filtering, maps
+  desktop IDs onto the stable `tier5/<appId>` keys, and publishes the
+  catalogue manifest (`/usr/share/qdistro/vmapps/base.json`) atomically.
+  Requires a guest `foot` binary whenever the catalogue is non-empty —
+  foot is the launcher fallback and operator escape hatch.
+  `build-guest-image.sh` runs it after customizing the base and leaves
+  `qdistro-tier5-base.json` beside the qcow2.
+- `vmapps-reconcile.sh` — the `qdistro-tier5-vmapps-scan.service`
+  ExecStart: identity-samples the base, removes the manifest when the
+  base is absent, stale-publishes when admin cannot read it, takes a
+  fast path on a fresh valid manifest, and retries scans boundedly on
+  mid-scan replacement or failure. Always exits 0.
 - `loopback-bridge.sh` — same wrapper but using vsock CID=1
  loopback for in-VM smoke tests (no actual nested guest needed;
  exercises the data path).
+
+## The VM-app catalogue
+
+qdshell's tier-5 launcher catalogue is **derived from the guest base
+image**, not hardcoded. The pipeline:
+
+1. `vmapps-scan.py` reads the guest `.desktop` files out of the base
+   qcow2 (libguestfs, read-only — or a directory with `--root` for
+   tests), applies XDG precedence and filtering, expands Exec field
+   codes, and maps desktop IDs onto stable `tier5/<appId>` keys
+   (legacy aliases keep `tier5/firefox` etc. pinned across renames).
+2. `build-guest-image.sh` runs the scanner after customizing the base
+   and publishes `qdistro-tier5-base.json` beside the qcow2. A scan
+   failure fails the image build — a base that cannot publish its
+   catalogue is not installable.
+3. `image/config.sh` stages the sidecar at
+   `/usr/share/qdistro/vmapps/base.json` inside the product image and
+   fails when the qcow2 was built without one.
+4. On the installed system, `qdistro-tier5-vmapps-scan.service` +
+   `.path` (installed by `install-tier5-for-vm.sh`) re-run the scanner
+   through `vmapps-reconcile.sh` whenever the base image changes — a
+   rebuilt or replaced base republishes the catalogue without a
+   reboot. Absent base → manifest removed; unreadable base or scan
+   exhaustion → a `stale` manifest is published so the degradation is
+   explicit in the file itself.
+5. `qdshell/Services/Qdistro/VMApps.qml` loads the manifest via a
+   watched FileView, so a republish hot-swaps the catalogue in the
+   running session. Missing/empty/malformed/stale manifest → the
+   catalogue degrades to exactly the Foot entry (the operator escape
+   hatch; this is why the scanner requires a guest `foot` binary).
+
+The `appId` is the stable policy key end to end: Settings per-app
+lifecycle overrides key on `[app:tier5/<appId>]` sections, and
+`VMApps.launch()` passes it to `spawn-tier5.sh --policy-key`, so a
+manifest row, its Settings override, and its spawn policy are always
+the same identity.
 
 ## Modes
 

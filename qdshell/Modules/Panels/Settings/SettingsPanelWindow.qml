@@ -33,7 +33,9 @@ FloatingWindow {
         if (SettingsPanelService.requestedEntry) {
           const entry = SettingsPanelService.requestedEntry;
           SettingsPanelService.requestedEntry = null;
-          settingsContent.requestedTab = entry.tab;
+          // tabId entries carry the stable Tab enum id; legacy entries
+          // carry a display index resolved by navigateToResult.
+          settingsContent.requestedTab = (entry.tabId !== undefined && entry.tabId !== null) ? entry.tabId : entry.tab;
           settingsContent.initialize();
           Qt.callLater(() => settingsContent.navigateToResult(entry));
         } else {

@@ -838,6 +838,23 @@ check_req "[tier5] cleanup wrapper"       /usr/local/bin/qdistro-tier5-cleanup
 check_req "[tier5] guest-image build wrapper" /usr/local/bin/qdistro-tier5-build-guest-image
 check_req "[tier5] domain template"       /usr/share/qdistro/tier5/domain-template.xml
 check_req "[tier5] polkit action"         /usr/share/polkit-1/actions/org.qdistro.tier5.policy
+# vmapps-dynamic: the guest-base .desktop scanner, the reconcile service
+# run, and its boot/path/timer units keep the launcher's VM catalogue in
+# sync with whatever the tier-5 base actually ships.
+check_req "[tier5] vmapps scanner wrapper" /usr/local/bin/qdistro-tier5-vmapps-scan
+check_req "[tier5] vmapps reconcile wrapper" /usr/local/bin/qdistro-tier5-vmapps-reconcile
+check_req "[tier5] vmapps scan service"   /etc/systemd/system/qdistro-tier5-vmapps-scan.service
+check_req "[tier5] vmapps scan path"      /etc/systemd/system/qdistro-tier5-vmapps-scan.path
+check_req "[tier5] vmapps scan timer"     /etc/systemd/system/qdistro-tier5-vmapps-scan.timer
+check_link "[tier5] vmapps service enabled" /etc/systemd/system/multi-user.target.wants/qdistro-tier5-vmapps-scan.service
+check_link "[tier5] vmapps path enabled"  /etc/systemd/system/paths.target.wants/qdistro-tier5-vmapps-scan.path
+check_link "[tier5] vmapps timer enabled" /etc/systemd/system/timers.target.wants/qdistro-tier5-vmapps-scan.timer
+# The manifest itself is OPTIONAL — it is only staged when a guest base
+# qcow2 was injected at build time (config.sh fails a base staged
+# without its sidecar, so base-staged ⇒ manifest-present is enforced
+# upstream of this checklist). A base-less image legitimately carries
+# no manifest and VMApps falls back to Foot only.
+check_opt "[tier5] vmapps manifest"        /usr/share/qdistro/vmapps/base.json
 check_req "[tier5b] spawn wrapper"        /usr/local/bin/qdistro-tier5b-spawn
 check_req "[tier5b] cleanup wrapper"      /usr/local/bin/qdistro-tier5b-cleanup
 check_req "[tier5b] guest-image build wrapper" /usr/local/bin/qdistro-tier5b-build-guest-image

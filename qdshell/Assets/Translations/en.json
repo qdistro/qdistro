@@ -2615,6 +2615,7 @@
     "switch-to-light-mode": "Light Mode",
     "unmute": "Unmute",
     "up": "Parent directory",
+    "vm-app-settings": "VM app settings",
     "volume-at": "Output volume: {volume}%",
     "wallpaper-selector": "Wallpaper selector"
   },
