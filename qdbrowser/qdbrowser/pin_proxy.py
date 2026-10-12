@@ -1,30 +1,35 @@
-"""Success-path certificate pin check: a loopback CONNECT proxy.
+"""Best-effort success-path certificate pin check: a loopback CONNECT proxy.
 
 ``cert_policy``'s ``certificateError`` hook only sees chains the trust
 store already refused (iso2 `13` E2): QtWebEngine has no signal carrying
-the peer chain of a *successful* handshake. This module closes most of
-that gap without a new Qt API.
+the peer chain of a *successful* handshake. This module narrows that gap
+without a new Qt API. It is a probe, not pinning enforced on Chromium's
+own connection — read the residuals below before describing it.
 
 How it works:
 
   - ``__main__`` starts :class:`PinProxy` on ``127.0.0.1:<ephemeral>``
-    before ``QApplication`` exists, and hands Chromium a PAC script
-    (``--proxy-pac-url=data:...``, :func:`compose_pac`) that routes
-    ``https:``/``wss:`` requests for pinned hosts — and only those — to
-    the proxy. There is no ``DIRECT`` fallback in that rule, so a dead
-    proxy fails the load instead of bypassing the check.
-  - For each ``CONNECT host:port`` the proxy resolves ``host`` once, then
-    per address: runs its own TLS handshake to that address (system
-    trust + hostname check), evaluates the *verified* chain with
+    before ``QApplication`` exists and points Chromium's fixed proxy for
+    the ``https`` scheme at it (:func:`chromium_flags`). That covers
+    ``https:`` and ``wss:`` (and ``ws:``, tunnelled to port 80); ``http:``
+    stays direct. A fixed proxy, not a PAC script: Chromium falls back to
+    ``DIRECT`` when a PAC script fails, but never when a fixed proxy is
+    unreachable, so a dead proxy fails every https load instead of
+    skipping the check. ``--proxy-bypass-list=<-loopback>`` removes
+    Chromium's implicit ``localhost``/loopback/link-local bypass, so
+    those names are proxied too.
+  - ``CONNECT`` to a host that is not pinned (or is overridden) is a plain
+    tunnel. For a pinned host the proxy resolves it once, then per
+    address: runs its own TLS handshake to that address (system trust +
+    hostname check), evaluates the *verified* chain with
     ``PinStore.evaluate``, closes the probe, and opens the tunnel to the
     **same address**. A mismatch, an unverifiable chain or a probe error
     refuses the tunnel (``502``) and journals
     ``qdbrowser.cert reject host=<h> reason=<r> path=probe``.
   - Chromium still does its own normal validation inside the tunnel.
 
-Not an open relay: only ``CONNECT`` to a currently pinned, non-overridden
-host is served, and only to a client socket owned by this uid
-(``/proc/net/tcp*`` lookup; unknown owner = refused).
+Only clients owned by this uid are served (full TCP 4-tuple looked up in
+``/proc/net/tcp*``; unknown or ambiguous owner = refused).
 
 Matching uses the chain OpenSSL *verified*, never the presented one: the
 presented chain is attacker-controlled and pinned certificates are
@@ -33,16 +38,22 @@ intermediate to a forged chain.
 
 KNOWN RESIDUALS (keep these when editing docs; see cert_policy):
 
-  - The probe and Chromium's handshake are separate TLS sessions to the
-    same address. An on-path attacker that can tell them apart (e.g. by
-    ClientHello fingerprint) can pass the probe and intercept only
-    Chromium's session. Interception that applies to every connection —
-    a TLS-inspecting middlebox, a mis-issued certificate served by an
-    on-path attacker — is caught.
+  - NOT BOUND TO CHROMIUM'S CONNECTION. The probe and Chromium's
+    handshake are separate TLS sessions to the same address. An on-path
+    attacker that can tell them apart (ClientHello fingerprint, ALPN,
+    timing) can let the probe through to the real server and present its
+    CA-valid wrong-key certificate only to Chromium. What this catches is
+    interception applied to every connection: a TLS-inspecting middlebox,
+    a mis-issued certificate served indiscriminately by an on-path
+    attacker. Enforcing pins on Chromium's own handshake needs a Qt API
+    that does not exist (6.11).
   - The probe trusts OpenSSL's store (``SSL_CERT_FILE``/system bundle),
     not Chromium's NSS DB. A pinned host chaining to a CA present only in
     NSS fails the probe (fail closed), so its CA must be in both.
-  - Pins and the PAC host list are read once at startup.
+  - All https traffic goes through this proxy while any pin is
+    configured, and its host names are resolved here (system resolver),
+    not by Chromium.
+  - Pins are read once at startup.
   - A user-supplied ``--proxy-*`` Chromium flag disables the proxy (a
     second proxy config would be ambiguous); ``__main__`` logs it at
     ERROR.
@@ -50,82 +61,56 @@ KNOWN RESIDUALS (keep these when editing docs; see cert_policy):
 
 from __future__ import annotations
 
-import json
+import ipaddress
 import logging
 import os
 import re
 import selectors
 import socket
 import ssl
+import sys
 import threading
 from collections.abc import Callable
-from urllib.parse import quote
 
-from .cert_policy import PinStore
+from .cert_policy import PinStore, canonical_host
 
 log = logging.getLogger("qdbrowser.cert")
 
-_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$")
+_HOST_RE = re.compile(r"^[a-z0-9_]([a-z0-9_.-]{0,251}[a-z0-9_])?$")
 _MAX_HEAD = 8192
 _HEAD_TIMEOUT_S = 10.0
-_PROBE_TIMEOUT_S = 10.0
-_MAX_CLIENTS = 64
-# Chromium flags that already configure a proxy. With one present the PAC
-# is not added (two configs would race) and the success path is off.
+_CONNECT_TIMEOUT_S = 10.0
+_MAX_CLIENTS = 256
+# Chromium flags that already configure a proxy. With one present ours is
+# not added (two configs would race) and the success path is off.
 PROXY_FLAGS = ("--proxy-server", "--proxy-pac-url", "--no-proxy-server",
-               "--proxy-auto-detect")
+               "--proxy-auto-detect", "--proxy-bypass-list")
 
 
-def proxied_hosts(store: PinStore) -> list:
-    """Pinned, non-overridden hosts with a PAC-safe name."""
-    out = []
-    for host in store.pinned_hosts:
-        if store.is_overridden(host):
-            continue
-        if not _HOST_RE.match(host):
-            log.warning("qdbrowser.cert pin host %r not routable through "
-                        "the pin proxy (invalid name)", host)
-            continue
-        out.append(host)
-    return out
-
-
-def compose_pac(hosts: list, port: int) -> str:
-    """PAC script: ``https:``/``wss:`` for ``hosts`` go to the proxy,
-    everything else ``DIRECT``. Host names are JSON-embedded (they were
-    already restricted to ``[a-z0-9.-]``)."""
-    return (
-        "function FindProxyForURL(url, host) {\n"
-        f"  var pinned = {json.dumps(sorted(hosts))};\n"
-        "  var h = host.toLowerCase();\n"
-        "  if (h.charAt(h.length - 1) == '.') h = h.substring(0, h.length - 1);\n"
-        "  var s = url.substring(0, 6).toLowerCase();\n"
-        "  if ((s == 'https:' || s.substring(0, 4) == 'wss:')\n"
-        "      && pinned.indexOf(h) >= 0)\n"
-        f"    return 'PROXY 127.0.0.1:{int(port)}';\n"
-        "  return 'DIRECT';\n"
-        "}\n")
-
-
-def pac_flag(hosts: list, port: int) -> str:
-    """The ``--proxy-pac-url`` Chromium flag carrying :func:`compose_pac`."""
-    return ("--proxy-pac-url=data:application/x-ns-proxy-autoconfig,"
-            + quote(compose_pac(hosts, port), safe=""))
+def chromium_flags(port: int) -> list:
+    """Flags routing every https/wss request through the proxy on ``port``,
+    loopback names included. No spaces inside a flag: QtWebEngine splits
+    ``QTWEBENGINE_CHROMIUM_FLAGS`` on whitespace."""
+    return [f"--proxy-server=https=127.0.0.1:{int(port)}",
+            "--proxy-bypass-list=<-loopback>"]
 
 
 def peer_uid(conn: socket.socket) -> int | None:
     """uid owning the client end of a loopback TCP connection, or None.
 
-    The client's socket is the ``/proc/net/tcp*`` row whose local address
-    is our peer address and whose remote address is our local address.
+    The client's socket is the ``/proc/net/tcp*`` row whose local endpoint
+    is our peer and whose remote endpoint is us — all four of address and
+    port, so another uid binding the same source port on a different
+    loopback address cannot borrow the browser's row. More than one owner
+    for the tuple is ambiguous and also returns None.
     """
     try:
         peer = conn.getpeername()
         local = conn.getsockname()
     except OSError:
         return None
-    want_l = peer[1]
-    want_r = local[1]
+    want = (_norm_ip(peer[0]), peer[1], _norm_ip(local[0]), local[1])
+    owners = set()
     for path in ("/proc/net/tcp", "/proc/net/tcp6"):
         try:
             with open(path, encoding="ascii") as f:
@@ -134,13 +119,36 @@ def peer_uid(conn: socket.socket) -> int | None:
                     parts = line.split()
                     if len(parts) < 8:
                         continue
-                    lport = int(parts[1].rsplit(":", 1)[1], 16)
-                    rport = int(parts[2].rsplit(":", 1)[1], 16)
-                    if lport == want_l and rport == want_r:
-                        return int(parts[7])
-        except (OSError, ValueError, IndexError):
+                    try:
+                        row = (*_proc_endpoint(parts[1]),
+                               *_proc_endpoint(parts[2]))
+                    except ValueError:
+                        continue
+                    if row == want:
+                        owners.add(int(parts[7]))
+        except OSError:
             continue
-    return None
+    return owners.pop() if len(owners) == 1 else None
+
+
+def _norm_ip(addr: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    ip = ipaddress.ip_address(addr.split("%", 1)[0])
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        return ip.ipv4_mapped
+    return ip
+
+
+def _proc_endpoint(field: str):
+    """Decode a ``/proc/net/tcp*`` ``ADDR:PORT`` field (host-order words)."""
+    hexaddr, hexport = field.split(":")
+    raw = bytes.fromhex(hexaddr)
+    # The kernel prints each 32-bit word in host byte order.
+    words = [raw[i:i + 4][::-1] if sys.byteorder == "little" else raw[i:i + 4]
+             for i in range(0, len(raw), 4)]
+    ip = ipaddress.ip_address(b"".join(words))
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip, int(hexport, 16)
 
 
 def _default_context() -> ssl.SSLContext:
@@ -150,7 +158,7 @@ def _default_context() -> ssl.SSLContext:
 
 
 class PinProxy:
-    """Loopback CONNECT proxy that pin-checks each tunnel before opening it."""
+    """Loopback CONNECT proxy that pin-checks pinned hosts before tunnelling."""
 
     def __init__(self,
                  store_getter: Callable[[], PinStore | None],
@@ -158,7 +166,7 @@ class PinProxy:
                  resolver: Callable = socket.getaddrinfo,
                  context_factory: Callable[[], ssl.SSLContext] = _default_context,
                  uid: int | None = None,
-                 probe_timeout: float = _PROBE_TIMEOUT_S):
+                 probe_timeout: float = _CONNECT_TIMEOUT_S):
         self._store_getter = store_getter
         self._resolve = resolver
         self._context_factory = context_factory
@@ -176,7 +184,7 @@ class PinProxy:
     def start(self) -> int:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind(("127.0.0.1", 0))
-        sock.listen(32)
+        sock.listen(64)
         self._sock = sock
         threading.Thread(target=self._accept_loop, name="qdbrowser-pin-proxy",
                          daemon=True).start()
@@ -211,7 +219,7 @@ class PinProxy:
     def _serve(self, conn: socket.socket) -> None:
         try:
             self._handle(conn)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - never kill the accept loop
             log.error("qdbrowser.cert pin proxy error: %s", exc)
         finally:
             try:
@@ -237,14 +245,11 @@ class PinProxy:
         host, port = target
         store = self._store_getter()
         if store is None or not store.is_pinned(host) or store.is_overridden(host):
-            # Not an open relay: the PAC only sends pinned hosts here.
-            log.warning("qdbrowser.cert pin proxy refused unpinned host=%s",
-                        host)
-            _reply(conn, 403, "not a pinned host")
-            return
-        upstream = self._checked_upstream(store, host, port)
+            upstream = self._plain_upstream(host, port)
+        else:
+            upstream = self._checked_upstream(store, host, port)
         if upstream is None:
-            _reply(conn, 502, "certificate pin check failed")
+            _reply(conn, 502, "upstream refused")
             return
         try:
             conn.settimeout(None)
@@ -253,14 +258,41 @@ class PinProxy:
         finally:
             upstream.close()
 
-    # -- the check ------------------------------------------------------------
+    # -- upstreams ------------------------------------------------------------
+
+    def _addresses(self, host: str, port: int) -> list:
+        return self._resolve(host, port, type=socket.SOCK_STREAM)
+
+    def _open(self, family, socktype, proto, sockaddr) -> socket.socket:
+        s = socket.socket(family, socktype, proto)
+        try:
+            s.settimeout(self._probe_timeout)
+            s.connect(sockaddr)
+            s.settimeout(None)
+        except OSError:
+            s.close()
+            raise
+        return s
+
+    def _plain_upstream(self, host: str, port: int) -> socket.socket | None:
+        """Unpinned host: first reachable address, no check."""
+        try:
+            addrs = self._addresses(host, port)
+        except OSError:
+            return None
+        for family, socktype, proto, _canon, sockaddr in addrs:
+            try:
+                return self._open(family, socktype, proto, sockaddr)
+            except OSError:
+                continue
+        return None
 
     def _checked_upstream(self, store: PinStore, host: str,
                           port: int) -> socket.socket | None:
         """Probe each resolved address; return a plain socket to the first
         address whose verified chain matches a pin, else None."""
         try:
-            addrs = self._resolve(host, port, type=socket.SOCK_STREAM)
+            addrs = self._addresses(host, port)
         except OSError as exc:
             log.warning("qdbrowser.cert reject host=%s reason=resolve_failed "
                         "path=probe detail=%s", host, exc)
@@ -271,10 +303,7 @@ class PinProxy:
                                   sockaddr)
             if verdict is None:
                 try:
-                    up = socket.socket(family, socktype, proto)
-                    up.settimeout(self._probe_timeout)
-                    up.connect(sockaddr)
-                    up.settimeout(None)
+                    up = self._open(family, socktype, proto, sockaddr)
                 except OSError as exc:
                     last = f"connect_failed:{exc}"
                     continue
@@ -296,13 +325,12 @@ class PinProxy:
     def _probe(self, store: PinStore, host: str, family, socktype, proto,
                sockaddr) -> str | None:
         """None if the address's verified chain matches a pin, else a reason."""
-        raw = socket.socket(family, socktype, proto)
+        try:
+            raw = self._open(family, socktype, proto, sockaddr)
+        except OSError as exc:
+            return f"connect_failed:{exc}"
         raw.settimeout(self._probe_timeout)
         try:
-            try:
-                raw.connect(sockaddr)
-            except OSError as exc:
-                return f"connect_failed:{exc}"
             ctx = self._context_factory()
             try:
                 tls = ctx.wrap_socket(raw, server_hostname=host)
@@ -333,30 +361,40 @@ def _read_head(conn: socket.socket) -> bytes | None:
         if not chunk:
             return None
         buf += chunk
-    return buf.split(b"\r\n\r\n", 1)[0]
+    head, rest = buf.split(b"\r\n\r\n", 1)
+    if rest:
+        return None  # a client must wait for "200" before sending TLS
+    return head
 
 
 def _parse_connect(head: bytes) -> tuple[str, int] | None:
+    """``(canonical host, port)`` from a ``CONNECT`` request line."""
     try:
         line = head.split(b"\r\n", 1)[0].decode("ascii")
     except UnicodeDecodeError:
         return None
-    parts = line.split()
+    parts = line.split(" ")
     if len(parts) != 3 or parts[0] != "CONNECT" or not parts[2].startswith("HTTP/1."):
         return None
     hostport = parts[1]
     if hostport.startswith("["):
-        return None  # IP literals are never pinned names
-    host, sep, port_s = hostport.rpartition(":")
+        host, sep, port_s = hostport[1:].partition("]:")
+    else:
+        host, sep, port_s = hostport.rpartition(":")
     if not sep or not port_s.isdigit():
         return None
     port = int(port_s)
     if not 0 < port < 65536:
         return None
-    host = host.lower().rstrip(".")
-    if not _HOST_RE.match(host):
+    canon = canonical_host(host)
+    if not canon:
         return None
-    return host, port
+    try:
+        ipaddress.ip_address(canon)
+    except ValueError:
+        if not _HOST_RE.match(canon):
+            return None
+    return canon, port
 
 
 def _reply(conn: socket.socket, code: int, reason: str) -> None:

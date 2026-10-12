@@ -22,13 +22,15 @@ THE SUCCESS PATH IS NOT CHECKED HERE (iso2 `13` E2):
   ``QWebEngineLoadingInfo`` and ``QWebEngineProfile`` carry no
   certificate. This hook alone is therefore NOT HPKP / SPKI pinning.
 
-  The success path is covered by ``pin_proxy`` instead: ``__main__``
-  routes pinned hosts through a loopback CONNECT proxy that verifies the
-  server's chain and matches it against this store (``PinStore.evaluate``)
-  before opening the tunnel. ``[security] success_path_pinning = false``
-  turns it off, leaving only this hook. Its residuals (a probe separate
-  from Chromium's own handshake; OpenSSL rather than NSS trust) are
-  listed in ``pin_proxy``'s docstring.
+  ``pin_proxy`` adds a BEST-EFFORT success-path check: ``__main__``
+  routes https through a loopback CONNECT proxy that, for pinned hosts,
+  TLS-probes the server, matches the verified chain against this store
+  (``PinStore.evaluate``) and only then opens the tunnel. The probe is a
+  separate handshake from Chromium's, so an attacker who can tell the
+  two apart defeats it; it catches interception applied to every
+  connection, not a targeted one. ``[security] success_path_pinning =
+  false`` turns it off, leaving only this hook. Residuals:
+  ``pin_proxy``'s docstring.
 
 Historical defect: this module used to connect the signal on a
 ``QWebEngineProfile``. No Qt release has ever had
@@ -74,6 +76,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -107,21 +110,54 @@ class PinDecision:
                 f"detail={self.detail!r})")
 
 
+def canonical_host(host) -> str:
+    """One spelling per host for pin keys and every lookup.
+
+    Lowercase, no surrounding ``[]`` or trailing dot, IP literals in
+    ``ipaddress`` form, IDNs as punycode (Chromium's ``CONNECT`` line and
+    the pin proxy see punycode; ``QUrl.host()`` returns Unicode). Returns
+    ``""`` for anything that cannot be a host, which matches no pin.
+    """
+    if not isinstance(host, str):
+        return ""
+    h = host.strip().lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    h = h.rstrip(".")
+    if not h:
+        return ""
+    try:
+        return ipaddress.ip_address(h).compressed
+    except ValueError:
+        pass
+    if not h.isascii():
+        try:
+            h = h.encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            return ""
+    return h
+
+
 class PinStore:
     """In-memory pin map + override set."""
 
     def __init__(self,
                  pins: dict | None = None,
                  overrides: Iterable[str] | None = None):
-        # Normalize: lowercase host keys, strip any non-canonical pins.
+        # Normalize: canonical host keys, strip any non-canonical pins.
         self._pins: dict = {}
         for host, raw in (pins or {}).items():
             cleaned = [p for p in (raw or [])
                        if isinstance(p, str) and p.startswith(PIN_PREFIX)]
+            key = canonical_host(host)
+            if not key:
+                log.error("qdbrowser.cert pin entry %r is not a host name; "
+                          "ignored", host)
+                continue
             if cleaned:
-                self._pins[host.lower()] = cleaned
-        self._overrides: set = {h.lower() for h in (overrides or [])
-                                if isinstance(h, str)}
+                self._pins[key] = cleaned
+        self._overrides: set = {canonical_host(h) for h in (overrides or [])
+                                if isinstance(h, str)} - {""}
 
     @property
     def pinned_hosts(self) -> list:
@@ -132,13 +168,13 @@ class PinStore:
         return sorted(self._overrides)
 
     def pins_for(self, host: str) -> list:
-        return list(self._pins.get((host or "").lower(), []))
+        return list(self._pins.get(canonical_host(host), []))
 
     def is_pinned(self, host: str) -> bool:
-        return (host or "").lower() in self._pins
+        return canonical_host(host) in self._pins
 
     def is_overridden(self, host: str) -> bool:
-        return (host or "").lower() in self._overrides
+        return canonical_host(host) in self._overrides
 
     def evaluate(self, host: str, der_certs: Iterable[bytes]) -> PinDecision:
         """Decide whether to accept a TLS chain for ``host``.
@@ -327,8 +363,8 @@ def install_cert_policy(profile, store: PinStore) -> None:
     future Qt that does add a profile-level signal gets wired too.
 
     Scope reminder: the page hook only runs on the certificate *error*
-    path. A CA-valid wrong-key certificate is caught by ``pin_proxy``,
-    not here. See the module docstring.
+    path. CA-valid wrong-key certificates are ``pin_proxy``'s (best
+    effort), not this hook's. See the module docstring.
     """
     set_active_pin_store(store)
     signal = getattr(profile, "certificateError", None)

@@ -290,9 +290,10 @@ class MainWindow(QMainWindow):
         Scope of the cert-pin control here (iso2 `13` E2): an
         error-path hook, connected per page in ``WebView.__init__``,
         that hard-rejects a pinned host whose chain Chromium ALREADY
-        refused. CA-valid certificates are checked by the loopback pin
-        proxy ``__main__`` starts before QApplication (``pin_proxy``),
-        which reads the store registered here. See ``cert_policy``.
+        refused. CA-valid certificates get a best-effort probe from the
+        loopback pin proxy ``__main__`` starts before QApplication
+        (``pin_proxy``), which reads the store registered here. See
+        ``cert_policy``.
         """
         # 1. Security interceptor (HTTPS-only, DNT, UA validation).
         try:

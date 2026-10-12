@@ -3,10 +3,11 @@
 #
 # Two layers are exercised:
 #
-#   - The SUCCESS-path check (qdbrowser/pin_proxy.py, on by default): a
-#     pinned host's https traffic goes through the loopback pin proxy,
-#     which TLS-probes the server and checks its VERIFIED chain against the
-#     pins before opening the tunnel. Cases 5/6 serve a chain that BOTH
+#   - The best-effort SUCCESS-path check (qdbrowser/pin_proxy.py, on by
+#     default while pins exist): https goes through the loopback pin
+#     proxy, which for a pinned host TLS-probes the server and checks its
+#     VERIFIED chain against the pins before opening the tunnel (unpinned
+#     hosts, e.g. case 3, are tunnelled unchecked). Cases 5/6 serve a chain that BOTH
 #     the probe and Chromium accept (a CA-valid certificate); only the pin
 #     decides. Case 2 shows a matching pin never bypasses trust: an
 #     unverifiable chain is refused at the proxy.
