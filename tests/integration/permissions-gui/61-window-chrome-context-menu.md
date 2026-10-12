@@ -264,7 +264,13 @@ $VMEXEC "$VM" 'H2=$(cat /tmp/61-tui.handle)
     bash /tmp/61-driver.sh await_qdwin_line "attach_decoration handle=$H2 inset=N20"' \
     || { echo "FAIL(S6): no chrome strip on the second window"; exit 1; }
 qdwin_screenshot "$ART/s6-tui.png"
-# Runner: second-window strip midpoint (X4,Y4) from s6-tui.png
+# Runner: second-window strip midpoint (X4,Y4) from s6-tui.png.
+# weston-terminal draws its OWN light-grey title bar ("Wayland
+# Terminal", with -/[]/x buttons) whose right-click menu is the
+# client's (Close/Fullscreen) — that is NOT the target. The qdwin strip
+# is the separate dark 20 px band directly ABOVE that grey bar; take
+# Y4 ~10 px above the grey bar's top edge. A menu without
+# Minimize/Maximize means the click hit the client bar: re-aim.
 $VMGUI "$VM" click-preview X4 Y4 tui-strip
 $VMGUI "$VM" rightclick X4 Y4
 $VMEXEC "$VM" 'H2=$(cat /tmp/61-tui.handle)
