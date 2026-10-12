@@ -75,10 +75,18 @@ def test_new_event_is_the_last_event(shell_iface: ET.Element) -> None:
     # ensures: wire compatibility — event opcodes are positional, so a
     # new-version event MUST be appended after every existing event.
     # Inserting mid-list renumbers all later opcodes and breaks any
-    # pre-v35 build talking to this compositor (Sol r3 P1).
+    # pre-v35 build talking to this compositor (Sol r3 P1). Later
+    # versions append after it, so the rule is: the v35 event follows
+    # every older event and only newer-version events follow it, in
+    # non-decreasing version order.
     events = shell_iface.findall("./event")
     assert events, "qdwin_shell_v1 has no events"
-    assert events[-1].attrib["name"] == "selection_set_source_peer_identity"
+    since = [int(e.attrib.get("since", "1")) for e in events]
+    names = [e.attrib["name"] for e in events]
+    i = names.index("selection_set_source_peer_identity")
+    assert all(s < 35 for s in since[:i])
+    assert all(s > 35 for s in since[i + 1:])
+    assert since[i + 1:] == sorted(since[i + 1:])
 
 
 def test_secctx_context_has_consumed_state() -> None:
