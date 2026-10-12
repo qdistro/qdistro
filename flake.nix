@@ -25,6 +25,7 @@
           libweston-vendored = pkgs.callPackage ./nix/libweston-vendored.nix { };
           weston-qdistro = pkgs.callPackage ./nix/weston-qdistro.nix { inherit vendoredSrc; };
           qdwin = pkgs.callPackage ./nix/qdwin.nix { westonQdistro = self.packages.${system}.weston-qdistro; };
+          quickshell-vendored = pkgs.callPackage ./nix/quickshell-vendored.nix { };
         }
       );
     };
