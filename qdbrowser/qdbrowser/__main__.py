@@ -16,6 +16,12 @@ Chromium flags composed here, before QApplication construction:
     ``[security] isolate_origins`` in the user config. Each origin
     pinned to its own renderer process.
 
+  - ``--proxy-pac-url=data:...``: routes ``https:``/``wss:`` requests
+    for certificate-pinned hosts (only those) through the loopback pin
+    proxy, which checks the server's verified chain against the pins
+    before opening the tunnel (``pin_proxy``; ``[security]
+    success_path_pinning``).
+
 Site isolation is the cheapest hardening qdbrowser gets — it relies
 on the Chromium sandbox to enforce origin separation per renderer.
 """
@@ -64,6 +70,67 @@ def _compose_chromium_flags():
         parts.append("--site-per-process")
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(parts)
     log.info("qdbrowser.security isolate_origins=%s", ",".join(origins))
+
+
+# Kept alive for the process lifetime; Chromium's PAC points at its port.
+_PIN_PROXY = None
+
+
+def _start_pin_proxy():
+    """Start the success-path pin proxy and route pinned hosts through it.
+
+    Runs before QApplication: the PAC flag is read once at Chromium start.
+    No pins (or ``[security] success_path_pinning = false``) means no
+    proxy and no flag. If the proxy cannot start, pinned hosts are still
+    routed to a closed loopback port so they fail rather than load
+    unchecked. A user-supplied ``--proxy-*`` flag wins and leaves only the
+    error-path hook (logged at ERROR).
+    """
+    global _PIN_PROXY
+    try:
+        from qdbrowser.cert_policy import (
+            active_pin_store,
+            load_pin_store,
+            set_active_pin_store,
+        )
+        from qdbrowser.config import Config
+        from qdbrowser.pin_proxy import PROXY_FLAGS, PinProxy, pac_flag, proxied_hosts
+    except Exception as exc:  # noqa: BLE001
+        log.error("qdbrowser.cert pin proxy unavailable: %s", exc)
+        return
+    sec = Config().get("security", default={}) or {}
+    if not sec.get("success_path_pinning", True):
+        log.warning("qdbrowser.cert success-path pinning disabled by config")
+        return
+    store = load_pin_store(
+        system_path=sec.get("cert_pins_path"),
+        user_path=sec.get("cert_pins_user_path"),
+        overrides_path=sec.get("cert_overrides_path"),
+    )
+    hosts = proxied_hosts(store)
+    if not hosts:
+        return
+    existing = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
+    if any(f.split("=", 1)[0] in PROXY_FLAGS for f in existing):
+        log.error("qdbrowser.cert a --proxy-* Chromium flag is set; pinned "
+                  "hosts %s are NOT checked on successful handshakes",
+                  ",".join(hosts))
+        return
+    # The window replaces this with its own load of the same files; the
+    # proxy reads whichever store is active per connection.
+    set_active_pin_store(store)
+    proxy = PinProxy(lambda: active_pin_store() or store)
+    try:
+        port = proxy.start()
+        _PIN_PROXY = proxy
+    except OSError as exc:
+        log.error("qdbrowser.cert pin proxy failed to start (%s); pinned "
+                  "hosts will not load", exc)
+        port = 1  # closed loopback port: fail the load, never go DIRECT
+    existing.append(pac_flag(hosts, port))
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(existing)
+    log.info("qdbrowser.cert success-path pinning hosts=%s port=%d",
+             ",".join(hosts), port)
 
 
 def _apply_ca_bundle(profile):
@@ -180,6 +247,9 @@ def main(argv=None):
     # build, which reads the CA trust env once at network-process init.
     # See _apply_ca_bundle / ca_bundle.py.
     _apply_ca_bundle(args.profile)
+
+    # After the CA bundle: the pin proxy's probe trusts SSL_CERT_FILE.
+    _start_pin_proxy()
 
     app = QApplication(sys.argv)
     app.setApplicationName("qdbrowser")

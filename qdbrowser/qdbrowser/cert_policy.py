@@ -11,19 +11,24 @@ WHAT THIS MODULE DOES (read this before calling anything "pinning"):
     the hook calls ``rejectCertificate()`` so the load is hard-denied
     and the journal records it.
 
-WHAT IT DOES NOT DO — KNOWN LIMITATION (iso2 `13` E2):
+THE SUCCESS PATH IS NOT CHECKED HERE (iso2 `13` E2):
 
   ``certificateError`` fires only for chains the system trust store has
   already refused. A pinned host presenting a CA-valid certificate with
   the *wrong* key (public MITM CA, enterprise TLS interception, a
-  mis-issued cert) never raises the signal, so ``PinStore.evaluate`` is
-  never consulted and the connection succeeds. QtWebEngine 6.x exposes
-  the peer chain ONLY via ``QWebEngineCertificateError`` (error path);
+  mis-issued cert) never raises the signal. QtWebEngine 6.x exposes the
+  peer chain ONLY via ``QWebEngineCertificateError`` (error path);
   ``QWebEngineUrlRequestInterceptor``/``QWebEngineUrlRequestInfo``,
   ``QWebEngineLoadingInfo`` and ``QWebEngineProfile`` carry no
-  certificate. Until an API exposes the chain on successful handshakes
-  this is NOT HPKP / SPKI pinning and must not be described as such.
-  Tracked in qdistro ``todo/iso2/13-qdbrowser.md`` E2.
+  certificate. This hook alone is therefore NOT HPKP / SPKI pinning.
+
+  The success path is covered by ``pin_proxy`` instead: ``__main__``
+  routes pinned hosts through a loopback CONNECT proxy that verifies the
+  server's chain and matches it against this store (``PinStore.evaluate``)
+  before opening the tunnel. ``[security] success_path_pinning = false``
+  turns it off, leaving only this hook. Its residuals (a probe separate
+  from Chromium's own handshake; OpenSSL rather than NSS trust) are
+  listed in ``pin_proxy``'s docstring.
 
 Historical defect: this module used to connect the signal on a
 ``QWebEngineProfile``. No Qt release has ever had
@@ -321,9 +326,9 @@ def install_cert_policy(profile, store: PinStore) -> None:
     window can call this from its profile-created listener and so a
     future Qt that does add a profile-level signal gets wired too.
 
-    Scope reminder: even the page hook only runs on the certificate
-    *error* path. It cannot see a CA-valid wrong-key certificate. See the
-    module docstring.
+    Scope reminder: the page hook only runs on the certificate *error*
+    path. A CA-valid wrong-key certificate is caught by ``pin_proxy``,
+    not here. See the module docstring.
     """
     set_active_pin_store(store)
     signal = getattr(profile, "certificateError", None)
