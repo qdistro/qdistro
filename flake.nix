@@ -8,24 +8,43 @@
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
+      pkgsFor = system: nixpkgs.legacyPackages.${system};
+      vendoredSrcFor =
+        pkgs:
+        builtins.path {
+          path = ./qdwin/libweston-vendored/src;
+          filter =
+            path: type:
+            !(pkgs.lib.hasPrefix "build" (baseNameOf path) || pkgs.lib.hasSuffix ".lock" path);
+        };
     in
     {
       packages = forAllSystems (
         system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
-          vendoredSrc = builtins.path {
-            path = ./qdwin/libweston-vendored/src;
-            filter =
-              path: type:
-              !(pkgs.lib.hasPrefix "build-" (baseNameOf path) || pkgs.lib.hasSuffix ".lock" path);
-          };
+          pkgs = pkgsFor system;
         in
         {
           libweston-vendored = pkgs.callPackage ./nix/libweston-vendored.nix { };
-          weston-qdistro = pkgs.callPackage ./nix/weston-qdistro.nix { inherit vendoredSrc; };
+          weston-qdistro = pkgs.callPackage ./nix/weston-qdistro.nix {
+            vendoredSrc = vendoredSrcFor pkgs;
+          };
           qdwin = pkgs.callPackage ./nix/qdwin.nix { westonQdistro = self.packages.${system}.weston-qdistro; };
           quickshell-vendored = pkgs.callPackage ./nix/quickshell-vendored.nix { };
+          qdshell = pkgs.callPackage ./nix/qdshell.nix { qdwin = self.packages.${system}.qdwin; };
+        }
+      );
+
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        import ./nix/checks.nix {
+          inherit (pkgs) lib runCommand binutils;
+          westonQdistro = self.packages.${system}.weston-qdistro;
+          libwestonVendored = self.packages.${system}.libweston-vendored;
+          qdwin = self.packages.${system}.qdwin;
         }
       );
     };
