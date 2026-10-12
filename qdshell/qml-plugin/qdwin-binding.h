@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <QColor>
+#include <QImage>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -135,6 +137,10 @@ public:
     Q_INVOKABLE void requestMinimize(quint32 handle);
     Q_INVOKABLE void requestRaise(quint32 handle);
     Q_INVOKABLE void beginInteractiveMove(quint32 handle, quint32 serial);
+    // v36: `edges` is an xdg_toplevel.resize_edge mask (top=1, bottom=2,
+    // left=4, right=8); `serial` is the chrome_button press serial.
+    Q_INVOKABLE void beginInteractiveResize(quint32 handle, quint32 serial,
+                                            quint32 edges);
     Q_INVOKABLE void setBorderColor(quint32 handle, quint32 argb);
 
     // Shell chrome + context-menu popup plumbing. The wl_surfaces are
@@ -152,6 +158,17 @@ public:
     Q_INVOKABLE bool attachChrome(quint32 handle, quint32 side,
                                   int width, int height, quint32 argb);
     Q_INVOKABLE void detachChrome(quint32 handle, quint32 side);
+    // Server-side window frame: a title bar (N) painted with `title` and
+    // the `buttons` glyphs ("minimize", "maximize"/"restore", "close",
+    // left → right, flush right), plus `border`-px E/S/W edges (none
+    // when border is 0, e.g. maximised). All sides land in ONE
+    // attach_decoration. contentWidth/Height are the client's size.
+    Q_INVOKABLE bool attachFrame(quint32 handle, int contentWidth,
+                                 int contentHeight, int titleHeight,
+                                 int border, quint32 rgba,
+                                 const QString &title, bool active,
+                                 const QStringList &buttons);
+    Q_INVOKABLE void detachFrame(quint32 handle);
     // showPopup renders a vertical label menu (items: [{label:…}]) into
     // a popup wl_surface and calls show_popup anchored at (x, y) in
     // parent-local coordinates. `serial` must be the input-event serial
@@ -386,6 +403,8 @@ signals:
     void toplevelRemoved(quint32 handle);
     void toplevelTitle(quint32 handle, const QString &title);
     void toplevelAppId(quint32 handle, const QString &appId);
+    // v36: 0 = client draws its own frame, 1 = shell should frame it.
+    void toplevelDecoration(quint32 handle, quint32 mode);
     void toplevelGeometry(quint32 handle, int x, int y, quint32 width, quint32 height);
     void toplevelState(quint32 handle, quint32 state);
     void seatFocusChanged(const QString &seat, quint32 handle);
@@ -740,6 +759,12 @@ private:
     // caller owns the returned buffer; the pool/fd/mmap are internal.
     wl_buffer *makeArgbBuffer(const QImage &img);
     void reattachDecoration(quint32 handle);
+    bool setChromeSide(quint32 handle, quint32 side, const QImage &img);
+    bool dropChromeSide(quint32 handle, quint32 side);
+    static QColor rgbaColor(quint32 rgba);
+    static QImage renderTitleBar(int width, int height, quint32 rgba,
+                                 const QString &title, bool active,
+                                 const QStringList &buttons);
     void chromePurge(quint32 handle);      // all four sides for a handle
     void popupTeardown(quint32 parent);    // destroy proxies, drop entry
     void popupHit(quint32 parent, double x, double y,

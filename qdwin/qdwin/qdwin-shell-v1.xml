@@ -44,7 +44,7 @@
     "experimental" convention: version 1 is the first unstable draft.
   </description>
 
-  <interface name="qdwin_shell_v1" version="35">
+  <interface name="qdwin_shell_v1" version="36">
     <description summary="the qdwin shell attach point">
       The shell binds this global once and holds it for the lifetime of
       its process. qdwin rejects a second bind from the same client; a
@@ -317,9 +317,17 @@
 
     <request name="begin_interactive_resize">
       <description summary="user grabbed a resize edge">
-        v1 note: qdwin accepts the request but may refuse non-floating
-        toplevels. A future version will let the shell specify an
-        edge mask so the cursor hint and constraint are correct.
+        The shell reports the input serial of the button press on its
+        frame (from `chrome_button`) and the edges being dragged, as an
+        xdg_toplevel.resize_edge value (top=1, bottom=2, left=4,
+        right=8, and their corner combinations). qdwin starts an edge
+        drag: the client is configured to the dragged size while the
+        opposite edges stay put, until the button is released.
+
+        Ignored (not an error) when the serial is not the seat's live
+        pointer press, no button is held, another move/resize drag is
+        active, or the toplevel is maximised, fullscreen or tiled.
+        Since v36; earlier compositors accepted and ignored it.
       </description>
       <arg name="handle" type="uint"/>
       <arg name="serial" type="uint"/>
@@ -1993,6 +2001,33 @@
            summary="/proc/&lt;pid&gt;/exe resolved at accept time; empty when unreadable"/>
       <arg name="peer_selinux_label" type="string"
            summary="SELinux label at accept time; empty when unreadable"/>
+    </event>
+
+    <enum name="decoration_mode" since="36">
+      <description summary="who draws a toplevel's window frame"/>
+      <entry name="client_side" value="0"
+             summary="the client draws its own frame (or none)"/>
+      <entry name="server_side" value="1"
+             summary="the client draws no frame; the shell should"/>
+    </enum>
+
+    <event name="toplevel_decoration" since="36">
+      <description summary="who is responsible for a toplevel's frame">
+        Fires after `toplevel_added` (including the bind-time replay)
+        and again whenever the answer changes. `server_side` means the
+        client negotiated zxdg_decoration_manager_v1 and was configured
+        server_side, so it paints no title bar or border: the shell is
+        expected to frame it via `attach_decoration`. `client_side`
+        means the client decorates itself (GTK4, weston-terminal,
+        XWayland windows framed by the XWM); a shell frame on such a
+        window would stack a second title bar on the client's own, so
+        the shell should leave it undecorated.
+
+        Nested-proxy toplevels report `server_side`: the curtain carries
+        a remote window's pixels and nothing else frames it.
+      </description>
+      <arg name="handle" type="uint"/>
+      <arg name="mode" type="uint" enum="decoration_mode"/>
     </event>
 
   </interface>

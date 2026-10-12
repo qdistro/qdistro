@@ -96,7 +96,10 @@ namespace {
 // selection source's peer identity rather than the focused toplevel's
 // (tag equality is not peer equality — qdwin stamps the same secctx
 // tuple on every client accepted through one secctx listener).
-constexpr uint32_t kBindVersion = 35;
+// Version 36 adds `toplevel_decoration` (client- vs server-side frame per
+// toplevel; Qdwin.qml frames only the server-side ones) and a working
+// `begin_interactive_resize` for the frame's edges.
+constexpr uint32_t kBindVersion = 36;
 constexpr int kCaptureTimeoutMs = 8000;
 constexpr int kBrokerStartTimeoutMs = 250;
 constexpr int kBrokerGateTimeoutMs = 2000;
@@ -263,6 +266,11 @@ struct QdwinBindingDispatch {
                                 uint32_t handle, const char *app_id) {
         auto *b = static_cast<QdwinBinding *>(d);
         emit b->toplevelAppId(handle, qstr(app_id));
+    }
+    static void toplevel_decoration(void *d, qdwin_shell_v1 *,
+                                    uint32_t handle, uint32_t mode) {
+        auto *b = static_cast<QdwinBinding *>(d);
+        emit b->toplevelDecoration(handle, mode);
     }
     static void capture_served_stale(void *d, qdwin_shell_v1 *,
                                      const char *output_name, uint32_t age_ms,
@@ -546,6 +554,7 @@ static const qdwin_shell_v1_listener kShellListener = {
         QdwinBindingDispatch::remote_output_drain_result,
     .selection_set_source_peer_identity =
         QdwinBindingDispatch::selection_set_source_peer_identity,
+    .toplevel_decoration       = QdwinBindingDispatch::toplevel_decoration,
 };
 
 // ---- qdwin_popup_v1 dispatch ----
@@ -1797,6 +1806,13 @@ void QdwinBinding::beginInteractiveMove(quint32 handle, quint32 serial) {
     flushAfterRequest(__func__);
 }
 
+void QdwinBinding::beginInteractiveResize(quint32 handle, quint32 serial,
+                                          quint32 edges) {
+    if (!shell_) return;
+    qdwin_shell_v1_begin_interactive_resize(shell_, handle, serial, edges);
+    flushAfterRequest(__func__);
+}
+
 // -------- shell chrome + context-menu popups --------
 
 // Raster → shm wl_buffer on the SHELL's display (surfaces created from
@@ -1857,21 +1873,20 @@ void QdwinBinding::reattachDecoration(quint32 handle) {
     flushAfterRequest(__func__);
 }
 
-bool QdwinBinding::attachChrome(quint32 handle, quint32 side,
-                                int width, int height, quint32 argb) {
+// Paint `img` into the chrome surface for (handle, side) and commit it,
+// without re-issuing attach_decoration — callers batch the sides and
+// reattach once, so the compositor recomputes the inset (and
+// reconfigures the client) once per frame change, not once per side.
+bool QdwinBinding::setChromeSide(quint32 handle, quint32 side,
+                                 const QImage &img) {
     if (!shell_ || !bound_ || !compositor_ || !shm_ || side > 3 ||
-        width <= 0 || height <= 0)
+        img.isNull())
         return false;
-
-    // `argb` follows the set_border_color convention (0xRRGGBBAA), not
-    // the QImage/QRgb order — unpack explicitly.
-    QImage img(width, height, QImage::Format_ARGB32);
-    img.fill(QColor((argb >> 24) & 0xFF, (argb >> 16) & 0xFF,
-                    (argb >> 8) & 0xFF, argb & 0xFF));
     wl_buffer *buf = makeArgbBuffer(img);
     if (!buf)
         return false;
 
+    const int width = img.width(), height = img.height();
     ChromeSide &cs = chrome_[handle].sides[side];
     if (!cs.surface || cs.w != width || cs.h != height) {
         // Size change or first attach — the old surface's buffer dies
@@ -1881,6 +1896,7 @@ bool QdwinBinding::attachChrome(quint32 handle, quint32 side,
         if (cs.buffer)
             wl_buffer_destroy(cs.buffer);
         cs.surface = wl_compositor_create_surface(compositor_);
+        cs.buffer = nullptr;
         cs.w = width;
         cs.h = height;
         if (!cs.surface) {
@@ -1889,24 +1905,23 @@ bool QdwinBinding::attachChrome(quint32 handle, quint32 side,
             return false;
         }
     } else if (cs.buffer) {
-        // Same geometry, repaint only (e.g. border colour changed).
+        // Same geometry, repaint only (title, focus or colour changed).
         wl_buffer_destroy(cs.buffer);
     }
     cs.buffer = buf;
     wl_surface_attach(cs.surface, buf, 0, 0);
     wl_surface_damage_buffer(cs.surface, 0, 0, width, height);
     wl_surface_commit(cs.surface);
-    reattachDecoration(handle);
     return true;
 }
 
-void QdwinBinding::detachChrome(quint32 handle, quint32 side) {
-    if (side > 3)
-        return;
+// Drop one side's surface without reattaching. True if one existed.
+bool QdwinBinding::dropChromeSide(quint32 handle, quint32 side) {
     auto it = chrome_.find(handle);
-    if (it == chrome_.end())
-        return;
+    if (it == chrome_.end() || side > 3)
+        return false;
     ChromeSide &cs = it->second.sides[side];
+    const bool had = cs.surface != nullptr;
     if (cs.surface) {
         wl_surface_destroy(cs.surface);
         cs.surface = nullptr;
@@ -1916,8 +1931,146 @@ void QdwinBinding::detachChrome(quint32 handle, quint32 side) {
         cs.buffer = nullptr;
     }
     cs.w = cs.h = 0;
-    // attach_decoration with a NULL side removes that edge's view.
+    return had;
+}
+
+bool QdwinBinding::attachChrome(quint32 handle, quint32 side,
+                                int width, int height, quint32 argb) {
+    if (width <= 0 || height <= 0)
+        return false;
+    // `argb` follows the set_border_color convention (0xRRGGBBAA), not
+    // the QImage/QRgb order — unpack explicitly.
+    QImage img(width, height, QImage::Format_ARGB32);
+    img.fill(rgbaColor(argb));
+    if (!setChromeSide(handle, side, img))
+        return false;
     reattachDecoration(handle);
+    return true;
+}
+
+QColor QdwinBinding::rgbaColor(quint32 rgba) {
+    return QColor((rgba >> 24) & 0xFF, (rgba >> 16) & 0xFF,
+                  (rgba >> 8) & 0xFF, rgba & 0xFF);
+}
+
+// Title bar raster: the silo colour (dimmed when the window is not
+// focused), the elided title, and one square button per entry of
+// `buttons` (left → right, ending at the right edge). Qdwin.qml
+// hit-tests chrome_button against the same layout: button i spans
+// [width - (n - i) * height, width - (n - i - 1) * height).
+QImage QdwinBinding::renderTitleBar(int width, int height, quint32 rgba,
+                                    const QString &title, bool active,
+                                    const QStringList &buttons) {
+    QImage img(width, height, QImage::Format_ARGB32_Premultiplied);
+    QColor bg = rgbaColor(rgba);
+    bg.setAlpha(255);
+    if (!active)
+        bg = QColor((bg.red() + 0x60) / 2, (bg.green() + 0x60) / 2,
+                    (bg.blue() + 0x60) / 2);
+    img.fill(bg);
+    const bool light = bg.lightnessF() > 0.6;
+    QColor fg = light ? QColor(0x20, 0x20, 0x20) : QColor(0xf0, 0xf0, 0xf0);
+    if (!active)
+        fg.setAlphaF(0.65);
+
+    QPainter p(&img);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::TextAntialiasing, true);
+
+    const int n = static_cast<int>(buttons.size());
+    const int textRight = width - n * height - 4;
+    if (textRight > 8 && !title.isEmpty()) {
+        QFont font = QGuiApplication::font();
+        font.setPixelSize(std::max(9, height * 11 / 20));
+        p.setFont(font);
+        p.setPen(fg);
+        const QRect textRect(8, 0, textRight - 8, height);
+        const QString shown = QFontMetrics(font).elidedText(
+            title, Qt::ElideRight, textRect.width());
+        p.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, shown);
+    }
+
+    QPen pen(fg);
+    pen.setWidthF(std::max(1.0, height / 16.0));
+    pen.setCapStyle(Qt::SquareCap);
+    p.setPen(pen);
+    p.setBrush(Qt::NoBrush);
+    const qreal g = height * 0.3;  // glyph half-extent inset
+    for (int i = 0; i < n; i++) {
+        const qreal x0 = width - (n - i) * height;
+        const QRectF cell(x0, 0, height, height);
+        const QRectF glyph = cell.adjusted(g, g, -g, -g);
+        const QString &b = buttons.at(i);
+        if (b == QLatin1String("close")) {
+            p.drawLine(glyph.topLeft(), glyph.bottomRight());
+            p.drawLine(glyph.topRight(), glyph.bottomLeft());
+        } else if (b == QLatin1String("maximize")) {
+            p.drawRect(glyph);
+        } else if (b == QLatin1String("restore")) {
+            const qreal o = glyph.width() / 4;
+            p.drawRect(glyph.adjusted(0, o, -o, 0));
+            p.drawLine(QPointF(glyph.left() + o, glyph.top()),
+                       glyph.topRight());
+            p.drawLine(glyph.topRight(),
+                       QPointF(glyph.right(), glyph.bottom() - o));
+        } else if (b == QLatin1String("minimize")) {
+            p.drawLine(QPointF(glyph.left(), glyph.bottom()),
+                       glyph.bottomRight());
+        }
+    }
+    p.end();
+    return img;
+}
+
+bool QdwinBinding::attachFrame(quint32 handle, int contentWidth,
+                               int contentHeight, int titleHeight,
+                               int border, quint32 rgba,
+                               const QString &title, bool active,
+                               const QStringList &buttons) {
+    if (!shell_ || !bound_ || contentWidth <= 0 || contentHeight <= 0 ||
+        titleHeight <= 0 || border < 0)
+        return false;
+    const int outerWidth = contentWidth + 2 * border;
+    bool ok = setChromeSide(handle, 0 /* N */,
+                            renderTitleBar(outerWidth, titleHeight, rgba,
+                                           title, active, buttons));
+    if (ok && border > 0) {
+        QColor c = rgbaColor(rgba);
+        c.setAlpha(255);
+        if (!active)
+            c = QColor((c.red() + 0x60) / 2, (c.green() + 0x60) / 2,
+                       (c.blue() + 0x60) / 2);
+        QImage side(border, contentHeight, QImage::Format_ARGB32);
+        side.fill(c);
+        QImage bottom(outerWidth, border, QImage::Format_ARGB32);
+        bottom.fill(c);
+        ok = setChromeSide(handle, 1 /* E */, side) &&
+             setChromeSide(handle, 2 /* S */, bottom) &&
+             setChromeSide(handle, 3 /* W */, side);
+    } else if (ok) {
+        dropChromeSide(handle, 1);
+        dropChromeSide(handle, 2);
+        dropChromeSide(handle, 3);
+    }
+    // Reattach even on a partial failure so the compositor never keeps
+    // a view over a surface this side already replaced.
+    if (chrome_.count(handle))
+        reattachDecoration(handle);
+    return ok;
+}
+
+void QdwinBinding::detachFrame(quint32 handle) {
+    bool had = false;
+    for (quint32 side = 0; side < 4; side++)
+        had = dropChromeSide(handle, side) || had;
+    if (had)
+        reattachDecoration(handle);
+}
+
+void QdwinBinding::detachChrome(quint32 handle, quint32 side) {
+    // attach_decoration with a NULL side removes that edge's view.
+    if (dropChromeSide(handle, side))
+        reattachDecoration(handle);
 }
 
 void QdwinBinding::chromePurge(quint32 handle) {

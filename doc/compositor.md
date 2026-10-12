@@ -156,25 +156,23 @@ language pays for itself.
 
 ## Chrome and content are independent
 
-> **Status: the protocol ships; no client uses it.** `attach_decoration` and the
-> four-surface chrome model are implemented in `qdwin-shell-v1.xml` and in the
-> qdwin server, and exercised by the C test client
-> (`qdwin/test-client/qdwin-probe.c`). **Nothing in qdshell calls it.**
-> `qdwin-binding.cpp` has no `attach_decoration` path, and its `chrome_button`
-> listener is an empty stub with no QML consumer. qdwin says so itself at the
-> `toplevel_added` path: "qdshell … does not attach qdwin SSD chrome for
-> ordinary local applications", and it deliberately does not require a
-> decoration request before a normal surface becomes visible.
+> **Status: qdshell frames server-side windows.** A toplevel whose client
+> negotiates `zxdg_decoration_manager_v1` (Qt/KDE apps, foot) is configured
+> server-side and draws no frame of its own; qdwin reports that per toplevel
+> as `qdwin_shell_v1.toplevel_decoration` (v36), and qdshell's `Qdwin.qml`
+> attaches a frame to exactly those windows through `attach_decoration`: a
+> 24 px title bar (title, minimize / maximize / close, double-click to
+> maximise, right-click window menu via `show_popup`) and 4 px E/S/W edges
+> that start `begin_interactive_resize` drags. The frame carries the silo
+> colour qdshell records with `setBorderColor`. Clients that never negotiate
+> (GTK4, weston-terminal) and XWayland windows (framed by the XWM) keep their
+> own decorations and get no shell frame; their own title bars move and
+> resize them through `xdg_toplevel.move`/`.resize`. qdwin still does not
+> require a decoration request before a normal surface becomes visible
+> (`default_toplevel_policy`), so a window is never held waiting for qdshell.
 >
-> **What this means in practice.** Ordinary local applications on qdistro are
-> **undecorated by qdwin** and fall back to whatever client-side decoration they
-> draw themselves. qdshell does set a per-toplevel silo colour on qdwin
-> (`setBorderColor` → `qdwin_toplevel_border_rgba`), but qdwin's only reader of
-> that field is the `attach_decoration` handler — with no client attaching
-> decoration, the colour is stored and never painted. qdwin's own source calls
-> the SSD path "stub today". So there is no compositor-drawn trusted chrome
-> carrying silo identity on a v1 desktop; the four properties listed below are
-> properties of the design and are vacuous until a decorating client exists.
+> Self-decorated windows therefore carry no shell-drawn silo identity: the
+> trusted-chrome properties below hold for server-side windows only.
 
 Window decorations (titlebar, borders, buttons, context menus) and the content
 the user is working with (the application's `wl_surface`) are designed as
@@ -212,9 +210,8 @@ Properties this guarantees:
  so the remote viewer sees application output while the local user sees
  application + chrome. What `subscribe_view_stream` actually implements is
  self-described as "content+chrome": it pins the toplevel's content view *and*
- every attached chrome view onto the PipeWire output together. The distinction
- is unobservable today only because no client attaches chrome; if the
- decoration path above is ever exercised, the stream composites it too.
+ every attached chrome view onto the PipeWire output together, so a streamed
+ server-side window carries its shell frame too.
 
 ## Single-shell-client model
 

@@ -223,6 +223,24 @@ struct qdwin_view_stream;
 static void qdwin_chrome_detach(struct qdwin_chrome *c);
 static void qdwin_toplevel_position_chrome(struct qdwin_toplevel *tl);
 static void qdwin_move_grab_end_for(struct qdwin *qdwin, uint32_t handle);
+static void qdwin_resize_grab_end_for(struct qdwin *qdwin, uint32_t handle);
+static struct weston_pointer *qdwin_first_pointer(struct qdwin *qdwin);
+static void qdwin_move_grab_start(struct qdwin *qdwin,
+				  struct qdwin_toplevel *tl,
+				  struct weston_pointer *pointer,
+				  const char *why);
+static void qdwin_resize_grab_start(struct qdwin *qdwin,
+				    struct qdwin_toplevel *tl,
+				    struct weston_pointer *pointer,
+				    uint32_t edges, const char *why);
+static void qdwin_resize_grab_anchor(struct qdwin *qdwin,
+				     struct qdwin_toplevel *tl);
+static void qdwin_resize_grab_finish(struct qdwin *qd, const char *why);
+static void qdwin_emit_toplevel_decoration(struct qdwin *qdwin,
+					   struct qdwin_toplevel *tl);
+static bool qdwin_xdg_decoration_negotiated(
+	struct qdwin *qdwin, struct weston_desktop_surface *dsurf);
+static void qdwin_xdg_decorations_release_all(struct qdwin *qdwin);
 /* §6.8 S1 nested-mode forward decls (definitions near wet_shell_init). */
 static void qdwin_nested_publish_toplevel(struct qdwin_toplevel *tl);
 static void qdwin_nested_unpublish_toplevel(struct qdwin_toplevel *tl);
@@ -623,6 +641,12 @@ struct qdwin_toplevel {
 	struct qdwin_nested_toplevel *proxy_nested_owner;
 	/* Chrome inset, derived from attached chrome surfaces' sizes. */
 	int inset_n, inset_e, inset_s, inset_w;
+	/* The client holds a zxdg_toplevel_decoration_v1 for this
+	 * toplevel, i.e. it negotiated server-side decorations and draws
+	 * no frame of its own. Clients without one (GTK4, weston-terminal,
+	 * libdecor fallbacks) decorate themselves. Forwarded to the shell
+	 * as toplevel_decoration (v36) so it frames only the former. */
+	bool ssd_negotiated;
 	/* Last outer size we asked the client to configure to, so repeated
 	 * attach_decoration calls don't ratchet the window smaller. */
 	int outer_width;
@@ -984,6 +1008,34 @@ struct qdwin {
 	 * the left button is still down (e.g. a refused drag on a maximised
 	 * window) reports a serial grab_serial never takes. */
 	uint32_t chrome_press_serial;
+
+	/* Edge drag (qdwin_shell_v1.begin_interactive_resize, or a
+	 * client's xdg_toplevel.resize). Same one-at-a-time rule as the
+	 * move grab. The grab records the starting outer size and the
+	 * content-geometry edges opposite the dragged ones, so a left/top
+	 * drag keeps the right/bottom edge anchored as the client
+	 * commits each new size (qdwin_resize_grab_anchor). */
+	struct weston_pointer_grab resize_grab;
+	int resize_grab_active;
+	uint32_t resize_grab_handle;
+	uint32_t resize_edges;       /* xdg_toplevel resize_edge bitmask */
+	double resize_start_px, resize_start_py;
+	int resize_start_outer_w, resize_start_outer_h;
+	double resize_anchor_right, resize_anchor_bottom;
+	int resize_sent_w, resize_sent_h;  /* last inner size configured */
+	/* Anchoring outlives the grab by one commit: the configure for the
+	 * final pointer position may still be in flight at release, and
+	 * the commit answering it must also keep the opposite edges put.
+	 * resize_anchor_handle is 0 when nothing is anchored. */
+	uint32_t resize_anchor_handle;
+	bool resize_anchor_released;
+
+	/* zxdg_toplevel_decoration_v1 objects (struct qdwin_xdg_decoration).
+	 * Clients create them before their toplevel's first commit — i.e.
+	 * before libweston-desktop's surface_added gives qdwin a toplevel —
+	 * so the negotiated mode is looked up here when the toplevel
+	 * appears, and pushed to the toplevel directly afterwards. */
+	struct wl_list xdg_decorations;
 
 	/* v19: shell-driven global hotkeys. Each entry holds a
 	 * weston_compositor_add_key_binding registration; the handler
@@ -1851,6 +1903,39 @@ qdwin_send_toplevel_added(struct qdwin *qdwin, struct qdwin_toplevel *tl)
 	 * Mirrors the secctx event ordering — immediately after
 	 * toplevel_added so the shell has the row before it fills fields. */
 	qdwin_emit_toplevel_workspace(qdwin, tl);
+	qdwin_emit_toplevel_decoration(qdwin, tl);
+}
+
+/* v36: who draws this toplevel's frame. Nested-proxy curtains carry a
+ * remote window's pixels with no frame of their own (the inner
+ * compositor's toplevels negotiate against qdwin's nested mode), so the
+ * shell frames them. XWayland windows are framed by weston's XWM. */
+static uint32_t
+qdwin_toplevel_decoration_mode(struct qdwin *qdwin, struct qdwin_toplevel *tl)
+{
+	if (tl->is_nested_proxy)
+		return QDWIN_SHELL_V1_DECORATION_MODE_SERVER_SIDE;
+	if (qdwin_toplevel_is_xwayland(qdwin, tl))
+		return QDWIN_SHELL_V1_DECORATION_MODE_CLIENT_SIDE;
+	return tl->ssd_negotiated
+		? QDWIN_SHELL_V1_DECORATION_MODE_SERVER_SIDE
+		: QDWIN_SHELL_V1_DECORATION_MODE_CLIENT_SIDE;
+}
+
+static void
+qdwin_emit_toplevel_decoration(struct qdwin *qdwin, struct qdwin_toplevel *tl)
+{
+	if (!qdwin || !tl || !qdwin->shell_bound || !qdwin->shell_resource)
+		return;
+	if (wl_resource_get_version(qdwin->shell_resource) < 36)
+		return;
+	uint32_t mode = qdwin_toplevel_decoration_mode(qdwin, tl);
+	weston_log("qdwin: toplevel_decoration handle=%u mode=%s\n",
+		   tl->handle,
+		   mode == QDWIN_SHELL_V1_DECORATION_MODE_SERVER_SIDE
+			? "server_side" : "client_side");
+	qdwin_shell_v1_send_toplevel_decoration(qdwin->shell_resource,
+						tl->handle, mode);
 }
 
 /* v24: emit qdwin_shell_v1.toplevel_workspace (per-window occupancy
@@ -1998,6 +2083,7 @@ qdwin_surface_added(struct weston_desktop_surface *dsurf, void *data)
 	tl->decorated = 0;
 	/* v24: new windows open on the active workspace. */
 	tl->workspace = qdwin->active_workspace;
+	tl->ssd_negotiated = qdwin_xdg_decoration_negotiated(qdwin, dsurf);
 	for (int s = 0; s < QDWIN_SIDES; s++) {
 		tl->chrome[s].side = s;
 		tl->chrome[s].tl = tl;
@@ -2057,11 +2143,11 @@ qdwin_surface_added(struct weston_desktop_surface *dsurf, void *data)
 
 	qdwin_send_toplevel_added(qdwin, tl);
 
-	/* qdshell consumes qdwin_shell_v1 to track/focus toplevels, but it
-	 * does not attach qdwin SSD chrome for ordinary local applications.
-	 * Do not require a shell-side decoration/colour request before a
-	 * normal desktop surface can become visible. Nested proxy toplevels
-	 * still use their explicit allow/deny path. */
+	/* qdshell frames only server-side toplevels (toplevel_decoration),
+	 * and attaches that frame asynchronously. Do not require a
+	 * shell-side decoration/colour request before a normal desktop
+	 * surface can become visible. Nested proxy toplevels still use
+	 * their explicit allow/deny path. */
 	qdwin_toplevel_release_holding(tl, "default_toplevel_policy");
 	qdwin_maybe_promote_lock_toplevel(qdwin, tl, "surface_added");
 }
@@ -2345,6 +2431,8 @@ qdwin_surface_committed(struct weston_desktop_surface *dsurf,
 		weston_compositor_schedule_repaint(qdwin->compositor);
 	}
 
+	qdwin_resize_grab_anchor(qdwin, tl);
+
 	if (tl->last_width != surface->width ||
 	    tl->last_height != surface->height) {
 		tl->last_width = surface->width;
@@ -2364,6 +2452,35 @@ qdwin_surface_committed(struct weston_desktop_surface *dsurf,
 	}
 }
 
+/* xdg_toplevel.move / .resize come from a client's own (client-side)
+ * title bar or border. Honour them only for the press that is still
+ * driving the pointer: the serial is the seat's live grab serial, a
+ * button is held, the pointer is over this very toplevel, and no other
+ * grab (popup, drag, confine) owns the pointer — the same gate
+ * weston's desktop-shell applies. */
+static struct weston_pointer *
+qdwin_client_drag_pointer(struct qdwin *qdwin, struct qdwin_toplevel *tl,
+			  struct weston_seat *seat, uint32_t serial,
+			  const char *why)
+{
+	struct weston_pointer *pointer =
+		seat ? weston_seat_get_pointer(seat) : NULL;
+	struct weston_surface *surface =
+		weston_desktop_surface_get_surface(tl->desktop_surface);
+	if (qdwin->locked || !pointer || pointer->button_count == 0 ||
+	    pointer->grab_serial != serial ||
+	    pointer->grab != &pointer->default_grab ||
+	    !pointer->focus ||
+	    weston_surface_get_main_surface(pointer->focus->surface) !=
+		surface) {
+		weston_log("qdwin: %s handle=%u serial=%u refused — not the "
+			   "live press on this window\n",
+			   why, tl->handle, serial);
+		return NULL;
+	}
+	return pointer;
+}
+
 static void
 qdwin_surface_move(struct weston_desktop_surface *dsurf,
 		   struct weston_seat *seat, uint32_t serial, void *data)
@@ -2371,17 +2488,13 @@ qdwin_surface_move(struct weston_desktop_surface *dsurf,
 	struct qdwin *qdwin = data;
 	struct qdwin_toplevel *tl =
 		weston_desktop_surface_get_user_data(dsurf);
-	(void)seat;
-	if (!tl)
+	if (!tl || !tl->view)
 		return;
-	weston_log("qdwin: desktop_surface_move handle=%u serial=%u (stub)\n",
-		   tl->handle, serial);
-	/* S2: no-op. The archive validated that the shell, not the
-	 * compositor, initiates drag via begin_interactive_move when
-	 * the user grabs the chrome — this callback only fires for
-	 * client-side move grabs (xdg_toplevel.move), which qdwin
-	 * doesn't route through in the normal flow. */
-	(void)qdwin;
+	struct weston_pointer *pointer =
+		qdwin_client_drag_pointer(qdwin, tl, seat, serial,
+					  "xdg_toplevel.move");
+	if (pointer)
+		qdwin_move_grab_start(qdwin, tl, pointer, "xdg_toplevel.move");
 }
 
 static void
@@ -2392,12 +2505,14 @@ qdwin_surface_resize(struct weston_desktop_surface *dsurf,
 	struct qdwin *qdwin = data;
 	struct qdwin_toplevel *tl =
 		weston_desktop_surface_get_user_data(dsurf);
-	(void)seat; (void)edges;
-	if (!tl)
+	if (!tl || !tl->view)
 		return;
-	weston_log("qdwin: desktop_surface_resize handle=%u serial=%u (stub)\n",
-		   tl->handle, serial);
-	(void)qdwin;
+	struct weston_pointer *pointer =
+		qdwin_client_drag_pointer(qdwin, tl, seat, serial,
+					  "xdg_toplevel.resize");
+	if (pointer)
+		qdwin_resize_grab_start(qdwin, tl, pointer, (uint32_t)edges,
+					"xdg_toplevel.resize");
 }
 
 /* xdg_toplevel.set_maximized / .set_fullscreen / .set_minimized
@@ -3300,6 +3415,8 @@ qdwin_handle_attach_decoration(struct wl_client *client,
 		return;
 	}
 
+	const int old_n = tl->inset_n, old_e = tl->inset_e;
+	const int old_s = tl->inset_s, old_w = tl->inset_w;
 	struct wl_resource *sides[QDWIN_SIDES] = { north, east, south, west };
 	for (int s = 0; s < QDWIN_SIDES; s++) {
 		if (qdwin_chrome_attach_side(tl, s, sides[s]) < 0) {
@@ -3335,7 +3452,17 @@ qdwin_handle_attach_decoration(struct wl_client *client,
 
 	qdwin_toplevel_release_holding(tl, "attach_decoration");
 
-	if (tl->inset_n || tl->inset_e || tl->inset_s || tl->inset_w)
+	/* Reconfigure the client only when the frame's thickness changed.
+	 * The shell re-attaches on every repaint (title, focus, and each
+	 * size the client commits); re-running apply_inset then would
+	 * configure the client back to the size it just committed — during
+	 * an edge drag that is a configure for an OLDER size than the one
+	 * the drag already sent, which libweston does not dedupe, so the
+	 * window would jitter and could settle short of the pointer. */
+	bool inset_changed = tl->inset_n != old_n || tl->inset_e != old_e ||
+			     tl->inset_s != old_s || tl->inset_w != old_w;
+	if (inset_changed &&
+	    (tl->inset_n || tl->inset_e || tl->inset_s || tl->inset_w))
 		qdwin_toplevel_apply_inset(tl);
 
 	qdwin_toplevel_position_chrome(tl);
@@ -4187,6 +4314,417 @@ qdwin_move_grab_end_for(struct qdwin *qdwin, uint32_t handle)
 	qdwin_move_grab_end_if_installed(qdwin);
 }
 
+static int qdwin_resize_grab_live(struct qdwin *qdwin);
+
+/* Start a title-bar drag on `tl`. `pointer` is NULL for the shell path
+ * (first seat wins; multi-seat drag is uncommon). Shared by begin_interactive_move (shell frame) and
+ * xdg_toplevel.move (the client's own title bar). Refusals are silent,
+ * per the XML. */
+static void
+qdwin_move_grab_start(struct qdwin *qdwin, struct qdwin_toplevel *tl,
+		      struct weston_pointer *pointer, const char *why)
+{
+	uint32_t handle = tl->handle;
+
+	/* One drag at a time. Silently drop a second begin request. */
+	if (qdwin_move_grab_live(qdwin) || qdwin_resize_grab_live(qdwin)) {
+		weston_log("qdwin: %s handle=%u ignored — drag already "
+			   "active\n", why, handle);
+		return;
+	}
+	if (tl->nested_proxy_pending_decision) {
+		weston_log("qdwin: %s handle=%u ignored — nested-proxy "
+			   "waiting for admin decision\n", why, handle);
+		return;
+	}
+	/* Per XML: maximised / fullscreen refuse silently. */
+	if (tl->state & (QDWIN_TS_MAXIMIZED | QDWIN_TS_FULLSCREEN)) {
+		weston_log("qdwin: %s handle=%u ignored — toplevel is "
+			   "maximised/fullscreen\n", why, handle);
+		return;
+	}
+
+	/* v25: dragging a tiled window floats it — clear the tiled flag so a
+	 * later request_tile(none) doesn't snap it back to stale geometry. */
+	qdwin_toplevel_clear_tiled(tl);
+	/* A move ends any edge anchoring left over from a resize: the next
+	 * commit must not pull the window back to the old right/bottom. */
+	if (qdwin->resize_anchor_handle == handle)
+		qdwin->resize_anchor_handle = 0;
+
+	if (!pointer)
+		pointer = qdwin_first_pointer(qdwin);
+	if (!pointer) {
+		weston_log("qdwin: %s handle=%u ignored — no pointer on any "
+			   "seat\n", why, handle);
+		return;
+	}
+
+	struct weston_coord_global origin =
+		weston_view_get_pos_offset_global(tl->view);
+	qdwin->move_grab_handle = handle;
+	qdwin->move_grab_anchor_dx = pointer->pos.c.x - origin.c.x;
+	qdwin->move_grab_anchor_dy = pointer->pos.c.y - origin.c.y;
+	qdwin->move_grab.interface = &qdwin_move_grab_iface;
+	qdwin->move_grab_active = 1;
+	weston_pointer_start_grab(pointer, &qdwin->move_grab);
+	weston_log("qdwin: %s handle=%u anchor=(%.1f,%.1f)\n",
+		   why, handle,
+		   qdwin->move_grab_anchor_dx,
+		   qdwin->move_grab_anchor_dy);
+}
+
+/* ------------------------------------------------------------------
+ * Edge drag (resize).
+ *
+ * Entered from begin_interactive_resize (the shell's frame edges) and
+ * from xdg_toplevel.resize (a self-decorated client's own border).
+ * Each motion configures the client to the start size plus the pointer
+ * delta along the dragged edges, clamped to the client's min/max size.
+ * Dragging a left/top edge must keep the right/bottom edge still: the
+ * client only learns its new size, so every commit while anchored
+ * moves the view by however much the content box grew or shrank
+ * (qdwin_resize_grab_anchor, called from qdwin_surface_committed).
+ * ------------------------------------------------------------------ */
+
+/* The global box the user sees as the window body: the desktop window
+ * geometry for native clients (CSD shadows sit outside it), the surface
+ * extent for XWayland — the same rule qdwin_toplevel_position_chrome
+ * frames. */
+static void
+qdwin_toplevel_content_box(struct qdwin_toplevel *tl,
+			   double *x, double *y, int *w, int *h)
+{
+	struct weston_coord_global vp =
+		weston_view_get_pos_offset_global(tl->view);
+	struct weston_surface *surface =
+		weston_desktop_surface_get_surface(tl->desktop_surface);
+	struct weston_geometry g =
+		weston_desktop_surface_get_geometry(tl->desktop_surface);
+	*x = vp.c.x;
+	*y = vp.c.y;
+	*w = surface ? surface->width : 0;
+	*h = surface ? surface->height : 0;
+	if (!qdwin_toplevel_is_xwayland(tl->qdwin, tl) &&
+	    g.width > 0 && g.height > 0) {
+		*x += g.x;
+		*y += g.y;
+		*w = g.width;
+		*h = g.height;
+	}
+}
+
+static int
+qdwin_resize_clamp(int v, int32_t min, int32_t max)
+{
+	if (min < 1)
+		min = 1;
+	if (v < min)
+		v = min;
+	if (max > 0 && v > max)
+		v = max;
+	return v;
+}
+
+static void
+qdwin_resize_grab_focus(struct weston_pointer_grab *grab)
+{
+	(void)grab;
+}
+
+static void
+qdwin_resize_grab_motion(struct weston_pointer_grab *grab,
+			 const struct weston_pointer_motion_event *event)
+{
+	struct weston_pointer *pointer = grab->pointer;
+	weston_pointer_move(pointer, event);
+
+	struct qdwin *qd = wl_container_of(grab, qd, resize_grab);
+	if (!qd->resize_grab_active)
+		return;
+	struct qdwin_toplevel *tl =
+		qdwin_toplevel_from_handle(qd, qd->resize_grab_handle);
+	if (!tl || !tl->view || !tl->desktop_surface)
+		return;
+	/* Maximised / fullscreened / tiled mid-drag (keyboard shortcut,
+	 * client request): the drag is over — keep sizing it and the window
+	 * would leave the geometry that state just set. */
+	if ((tl->state & (QDWIN_TS_MAXIMIZED | QDWIN_TS_FULLSCREEN)) ||
+	    tl->tiled != 0) {
+		qdwin_resize_grab_finish(qd, "state change");
+		qd->resize_anchor_handle = 0;
+		weston_pointer_end_grab(pointer);
+		return;
+	}
+
+	double dx = pointer->pos.c.x - qd->resize_start_px;
+	double dy = pointer->pos.c.y - qd->resize_start_py;
+	uint32_t e = qd->resize_edges;
+	int ow = qd->resize_start_outer_w;
+	int oh = qd->resize_start_outer_h;
+	if (e & WESTON_DESKTOP_SURFACE_EDGE_RIGHT)
+		ow += (int)dx;
+	else if (e & WESTON_DESKTOP_SURFACE_EDGE_LEFT)
+		ow -= (int)dx;
+	if (e & WESTON_DESKTOP_SURFACE_EDGE_BOTTOM)
+		oh += (int)dy;
+	else if (e & WESTON_DESKTOP_SURFACE_EDGE_TOP)
+		oh -= (int)dy;
+
+	/* 64x48 floor keeps a dragged window grabbable even when the
+	 * client publishes no min size. */
+	struct weston_size mn =
+		weston_desktop_surface_get_min_size(tl->desktop_surface);
+	struct weston_size mx =
+		weston_desktop_surface_get_max_size(tl->desktop_surface);
+	int iw = qdwin_resize_clamp(ow - tl->inset_w - tl->inset_e,
+				    mn.width > 64 ? mn.width : 64, mx.width);
+	int ih = qdwin_resize_clamp(oh - tl->inset_n - tl->inset_s,
+				    mn.height > 48 ? mn.height : 48, mx.height);
+	if (iw == qd->resize_sent_w && ih == qd->resize_sent_h)
+		return;
+	qd->resize_sent_w = iw;
+	qd->resize_sent_h = ih;
+	tl->outer_width = iw + tl->inset_w + tl->inset_e;
+	tl->outer_height = ih + tl->inset_n + tl->inset_s;
+	if (qdwin_toplevel_is_xwayland(qd, tl))
+		/* XWayland configures the client extent, not the
+		 * geometry; apply_inset owns that conversion. */
+		qdwin_toplevel_apply_inset(tl);
+	else
+		weston_desktop_surface_set_size(tl->desktop_surface, iw, ih);
+}
+
+static void
+qdwin_resize_grab_finish(struct qdwin *qd, const char *why)
+{
+	uint32_t handle = qd->resize_grab_handle;
+	struct qdwin_toplevel *tl = qdwin_toplevel_from_handle(qd, handle);
+	qd->resize_grab_active = 0;
+	weston_log("qdwin: end_interactive_resize handle=%u (%s)\n",
+		   handle, why);
+	if (!tl || !tl->desktop_surface) {
+		qd->resize_anchor_handle = 0;
+		return;
+	}
+	weston_desktop_surface_set_resizing(tl->desktop_surface, false);
+	/* Keep anchoring for the commit that answers the last configure
+	 * unless the client already shows that size. */
+	double cx, cy;
+	int cw, ch;
+	qdwin_toplevel_content_box(tl, &cx, &cy, &cw, &ch);
+	if (cw == qd->resize_sent_w && ch == qd->resize_sent_h)
+		qd->resize_anchor_handle = 0;
+	else
+		qd->resize_anchor_released = true;
+	if (qd->shell_bound && qd->shell_resource) {
+		struct weston_coord_global op =
+			weston_view_get_pos_offset_global(tl->view);
+		qdwin_shell_v1_send_toplevel_geometry(
+			qd->shell_resource, handle,
+			(int)(op.c.x - tl->inset_w),
+			(int)(op.c.y - tl->inset_n),
+			(uint32_t)tl->last_width,
+			(uint32_t)tl->last_height);
+	}
+}
+
+static void
+qdwin_resize_grab_button(struct weston_pointer_grab *grab,
+			 const struct weston_pointer_button_event *button_event)
+{
+	struct weston_pointer *pointer = grab->pointer;
+	struct qdwin *qd = wl_container_of(grab, qd, resize_grab);
+
+	if (!qd->resize_grab_active) {
+		weston_log("qdwin: resize-grab swallowed button %u while "
+			   "resize_grab_active=0 (grab still installed)\n",
+			   button_event->button);
+		return;
+	}
+	/* Same rule as the move grab: any release ends the drag. */
+	if (button_event->button_state == WL_POINTER_BUTTON_STATE_RELEASED) {
+		qdwin_resize_grab_finish(qd, "release");
+		weston_pointer_end_grab(pointer);
+	}
+}
+
+static void
+qdwin_resize_grab_axis(struct weston_pointer_grab *grab,
+		       const struct weston_pointer_axis_event *event)
+{
+	(void)grab; (void)event;
+}
+
+static void
+qdwin_resize_grab_axis_source(struct weston_pointer_grab *grab,
+			      uint32_t source)
+{
+	(void)grab; (void)source;
+}
+
+static void
+qdwin_resize_grab_frame(struct weston_pointer_grab *grab)
+{
+	(void)grab;
+}
+
+static void
+qdwin_resize_grab_cancel(struct weston_pointer_grab *grab)
+{
+	struct qdwin *qd = wl_container_of(grab, qd, resize_grab);
+	if (qd->resize_grab_active)
+		qdwin_resize_grab_finish(qd, "cancel");
+	/* As qdwin_move_grab_cancel: cancel does not uninstall the grab. */
+	if (grab->pointer && grab->pointer->grab == grab)
+		weston_pointer_end_grab(grab->pointer);
+}
+
+static const struct weston_pointer_grab_interface qdwin_resize_grab_iface = {
+	qdwin_resize_grab_focus,
+	qdwin_resize_grab_motion,
+	qdwin_resize_grab_button,
+	qdwin_resize_grab_axis,
+	qdwin_resize_grab_axis_source,
+	qdwin_resize_grab_frame,
+	qdwin_resize_grab_cancel,
+};
+
+/* Same replaced-without-cancel hazard as qdwin_move_grab_live. */
+static int
+qdwin_resize_grab_live(struct qdwin *qdwin)
+{
+	if (!qdwin->resize_grab_active)
+		return 0;
+	struct weston_pointer *pointer = qdwin->resize_grab.pointer;
+	if (pointer && pointer->grab == &qdwin->resize_grab)
+		return 1;
+	weston_log("qdwin: resize-drag handle=%u lost its grab to another "
+		   "grab — clearing\n", qdwin->resize_grab_handle);
+	qdwin_resize_grab_finish(qdwin, "lost grab");
+	return 0;
+}
+
+/* Toplevel gone or shell unbound: drop the drag and any anchoring. */
+static void
+qdwin_resize_grab_end_for(struct qdwin *qdwin, uint32_t handle)
+{
+	if (qdwin->resize_anchor_handle == handle)
+		qdwin->resize_anchor_handle = 0;
+	if (!qdwin->resize_grab_active || qdwin->resize_grab_handle != handle)
+		return;
+	weston_log("qdwin: cancelling resize-drag handle=%u "
+		   "(toplevel/shell gone)\n", handle);
+	qdwin->resize_grab_active = 0;
+	struct weston_pointer *pointer = qdwin->resize_grab.pointer;
+	if (pointer && pointer->grab == &qdwin->resize_grab)
+		weston_pointer_end_grab(pointer);
+}
+
+/* Called from qdwin_surface_committed before the size change is
+ * published: keep the edges opposite the dragged ones where they were
+ * when the drag started. */
+static void
+qdwin_resize_grab_anchor(struct qdwin *qdwin, struct qdwin_toplevel *tl)
+{
+	if (qdwin->resize_anchor_handle != tl->handle)
+		return;
+	/* Maximise / fullscreen / tile own the placement now; a held anchor
+	 * would shove the window off the position they chose. */
+	if ((tl->state & (QDWIN_TS_MAXIMIZED | QDWIN_TS_FULLSCREEN)) ||
+	    tl->tiled != 0) {
+		qdwin->resize_anchor_handle = 0;
+		return;
+	}
+	uint32_t e = qdwin->resize_edges;
+	double x, y;
+	int w, h;
+	qdwin_toplevel_content_box(tl, &x, &y, &w, &h);
+	double dx = (e & WESTON_DESKTOP_SURFACE_EDGE_LEFT)
+		? qdwin->resize_anchor_right - (x + w) : 0;
+	double dy = (e & WESTON_DESKTOP_SURFACE_EDGE_TOP)
+		? qdwin->resize_anchor_bottom - (y + h) : 0;
+	if (dx != 0 || dy != 0) {
+		struct weston_coord_global vp =
+			weston_view_get_pos_offset_global(tl->view);
+		struct weston_coord_global p = {
+			.c = weston_coord(vp.c.x + dx, vp.c.y + dy),
+		};
+		weston_view_set_position(tl->view, p);
+		weston_view_update_transform(tl->view);
+		qdwin_toplevel_position_chrome(tl);
+	}
+	if (qdwin->resize_anchor_released)
+		qdwin->resize_anchor_handle = 0;
+}
+
+static void
+qdwin_resize_grab_start(struct qdwin *qdwin, struct qdwin_toplevel *tl,
+			struct weston_pointer *pointer, uint32_t edges,
+			const char *why)
+{
+	uint32_t handle = tl->handle;
+	const uint32_t lr = WESTON_DESKTOP_SURFACE_EDGE_LEFT |
+			    WESTON_DESKTOP_SURFACE_EDGE_RIGHT;
+	const uint32_t tb = WESTON_DESKTOP_SURFACE_EDGE_TOP |
+			    WESTON_DESKTOP_SURFACE_EDGE_BOTTOM;
+
+	if (edges == 0 || (edges & ~(lr | tb)) ||
+	    (edges & lr) == lr || (edges & tb) == tb) {
+		weston_log("qdwin: %s handle=%u ignored — bad edges %#x\n",
+			   why, handle, edges);
+		return;
+	}
+	if (qdwin_move_grab_live(qdwin) || qdwin_resize_grab_live(qdwin)) {
+		weston_log("qdwin: %s handle=%u ignored — drag already "
+			   "active\n", why, handle);
+		return;
+	}
+	/* Curtains are sized by the nested compositor's own configure
+	 * path; an edge drag on one is not wired yet. */
+	if (tl->is_nested_proxy || !tl->desktop_surface) {
+		weston_log("qdwin: %s handle=%u ignored — nested proxy\n",
+			   why, handle);
+		return;
+	}
+	if ((tl->state & (QDWIN_TS_MAXIMIZED | QDWIN_TS_FULLSCREEN)) ||
+	    tl->tiled != 0) {
+		weston_log("qdwin: %s handle=%u ignored — toplevel is "
+			   "maximised/fullscreen/tiled\n", why, handle);
+		return;
+	}
+	if (!pointer)
+		pointer = qdwin_first_pointer(qdwin);
+	if (!pointer) {
+		weston_log("qdwin: %s handle=%u ignored — no pointer on any "
+			   "seat\n", why, handle);
+		return;
+	}
+
+	double x, y;
+	int w, h;
+	qdwin_toplevel_content_box(tl, &x, &y, &w, &h);
+	qdwin_toplevel_seed_outer_from_committed(tl);
+	qdwin->resize_grab_handle = handle;
+	qdwin->resize_edges = edges;
+	qdwin->resize_start_px = pointer->pos.c.x;
+	qdwin->resize_start_py = pointer->pos.c.y;
+	qdwin->resize_start_outer_w = tl->outer_width;
+	qdwin->resize_start_outer_h = tl->outer_height;
+	qdwin->resize_anchor_right = x + w;
+	qdwin->resize_anchor_bottom = y + h;
+	qdwin->resize_sent_w = w;
+	qdwin->resize_sent_h = h;
+	qdwin->resize_anchor_handle = handle;
+	qdwin->resize_anchor_released = false;
+	qdwin->resize_grab.interface = &qdwin_resize_grab_iface;
+	qdwin->resize_grab_active = 1;
+	weston_desktop_surface_set_resizing(tl->desktop_surface, true);
+	weston_pointer_start_grab(pointer, &qdwin->resize_grab);
+	weston_log("qdwin: %s handle=%u edges=%#x outer=%dx%d\n",
+		   why, handle, edges, tl->outer_width, tl->outer_height);
+}
+
 static void
 qdwin_handle_begin_interactive_move(struct wl_client *client,
 				    struct wl_resource *resource,
@@ -4202,66 +4740,13 @@ qdwin_handle_begin_interactive_move(struct wl_client *client,
 		return;
 	}
 
-	/* One drag at a time. Silently drop a second begin request. */
-	if (qdwin_move_grab_live(qdwin)) {
-		weston_log("qdwin: begin_interactive_move handle=%u "
-			   "ignored — drag already active on handle=%u\n",
-			   handle, qdwin->move_grab_handle);
-		return;
-	}
-
 	struct qdwin_toplevel *tl = qdwin_toplevel_from_handle(qdwin, handle);
 	if (!tl || !tl->view) {
 		weston_log("qdwin: begin_interactive_move handle=%u "
 			   "ignored — no such toplevel\n", handle);
 		return;
 	}
-	if (tl->nested_proxy_pending_decision) {
-		weston_log("qdwin: begin_interactive_move handle=%u ignored — "
-			   "nested-proxy waiting for admin decision\n", handle);
-		return;
-	}
-
-	/* Per XML: maximised / fullscreen refuse silently. */
-	if (tl->state & (QDWIN_TS_MAXIMIZED | QDWIN_TS_FULLSCREEN)) {
-		weston_log("qdwin: begin_interactive_move handle=%u "
-			   "ignored — toplevel is maximised/fullscreen\n",
-			   handle);
-		return;
-	}
-
-	/* v25: dragging a tiled window floats it — clear the tiled flag so a
-	 * later request_tile(none) doesn't snap it back to stale geometry. */
-	qdwin_toplevel_clear_tiled(tl);
-
-	/* Find a seat with an active pointer + start the grab on it.
-	 * MVP: first seat wins. Multi-seat drag is uncommon and adds
-	 * complexity that nothing currently exercises. */
-	struct weston_seat *seat;
-	struct weston_pointer *pointer = NULL;
-	wl_list_for_each(seat, &qdwin->compositor->seat_list, link) {
-		pointer = weston_seat_get_pointer(seat);
-		if (pointer)
-			break;
-	}
-	if (!pointer) {
-		weston_log("qdwin: begin_interactive_move handle=%u "
-			   "ignored — no pointer on any seat\n", handle);
-		return;
-	}
-
-	struct weston_coord_global origin =
-		weston_view_get_pos_offset_global(tl->view);
-	qdwin->move_grab_handle = handle;
-	qdwin->move_grab_anchor_dx = pointer->pos.c.x - origin.c.x;
-	qdwin->move_grab_anchor_dy = pointer->pos.c.y - origin.c.y;
-	qdwin->move_grab.interface = &qdwin_move_grab_iface;
-	qdwin->move_grab_active = 1;
-	weston_pointer_start_grab(pointer, &qdwin->move_grab);
-	weston_log("qdwin: begin_interactive_move handle=%u anchor=(%.1f,%.1f)\n",
-		   handle,
-		   qdwin->move_grab_anchor_dx,
-		   qdwin->move_grab_anchor_dy);
+	qdwin_move_grab_start(qdwin, tl, NULL, "begin_interactive_move");
 }
 
 static void
@@ -4279,8 +4764,24 @@ qdwin_handle_begin_interactive_resize(struct wl_client *client,
 				       QDWIN_SHELL_V1_ERROR_LOCKED, "locked");
 		return;
 	}
-	weston_log("qdwin: begin_interactive_resize handle=%u serial=%u edges=%#x (stub)\n",
-		   handle, serial, edges);
+	struct weston_pointer *pointer = qdwin_first_pointer(qdwin);
+	/* The serial must be the press the shell saw on its frame, with
+	 * the button still held — a late or replayed request must not
+	 * start a drag the user is no longer making. */
+	if (!pointer || pointer->button_count == 0 ||
+	    pointer->grab_serial != serial) {
+		weston_log("qdwin: begin_interactive_resize handle=%u ignored "
+			   "— serial=%u is not a held press\n", handle, serial);
+		return;
+	}
+	struct qdwin_toplevel *tl = qdwin_toplevel_from_handle(qdwin, handle);
+	if (!tl || !tl->view) {
+		weston_log("qdwin: begin_interactive_resize handle=%u "
+			   "ignored — no such toplevel\n", handle);
+		return;
+	}
+	qdwin_resize_grab_start(qdwin, tl, pointer, edges,
+				"begin_interactive_resize");
 }
 
 /* ------------------------------------------------------------------
@@ -5690,6 +6191,7 @@ qdwin_toplevel_release_dependents(struct qdwin *qdwin, struct qdwin_toplevel *tl
 		qdwin_popup_teardown(tl->popup);
 	}
 	qdwin_move_grab_end_for(qdwin, tl->handle);
+	qdwin_resize_grab_end_for(qdwin, tl->handle);
 
 	struct qdwin_view_stream *vs, *next;
 	wl_list_for_each_safe(vs, next, &qdwin->view_streams, link)
@@ -13963,7 +14465,8 @@ qdwin_neutralize_binding_resource(struct wl_resource *resource, void *data)
 	    (strcmp(cls, qdwin_shell_v1_interface.name) == 0 ||
 	     strcmp(cls, qdwin_locker_v1_interface.name) == 0 ||
 	     strcmp(cls, qdwin_lock_surface_v1_interface.name) == 0 ||
-	     strcmp(cls, qdwin_locker_surface_v1_interface.name) == 0))
+	     strcmp(cls, qdwin_locker_surface_v1_interface.name) == 0 ||
+	     strcmp(cls, zxdg_decoration_manager_v1_interface.name) == 0))
 		wl_resource_set_user_data(resource, NULL);
 	return WL_ITERATOR_CONTINUE;
 }
@@ -14083,6 +14586,7 @@ qdwin_destroy(struct wl_listener *listener, void *data)
 	if (qdwin->shell_background)
 		wl_resource_destroy(qdwin->shell_background->resource);
 	qdwin_neutralize_binding_resources(qdwin);
+	qdwin_xdg_decorations_release_all(qdwin);
 	qdwin->shell_resource = NULL;
 	qdwin->shell_bound = 0;
 	qdwin->locker_resource = NULL;
@@ -20130,6 +20634,8 @@ qdwin_output_boundary_cancel_state(struct qdwin *qdwin,
 
 	if (qdwin->move_grab_active)
 		qdwin_move_grab_end_for(qdwin, qdwin->move_grab_handle);
+	if (qdwin->resize_grab_active)
+		qdwin_resize_grab_end_for(qdwin, qdwin->resize_grab_handle);
 	qdwin_switcher_grab_end(qdwin);
 	qdwin_overlay_grab_end(qdwin);
 	wl_list_for_each(stream, &qdwin->view_streams, link)
@@ -21910,16 +22416,18 @@ bind_xdg_activation(struct wl_client *client, void *data,
 }
 
 /* ------------------------------------------------------------------
- * zxdg_decoration_manager_v1 — always-server_side stub.
+ * zxdg_decoration_manager_v1 — server-side mode, shell-drawn frames.
  *
- * Background. qdwin's design has qdshell draw chrome via the private
- * qdwin_shell_v1 protocol, so the compositor never wants toolkit-drawn
- * CSDs (they would stack on top of qdshell's chrome — see
- * tests/gui/AGENTS.md pitfall #2 for the foot case). The natural way
- * to tell toolkits "skip CSD" is to advertise xdg-decoration-v1 and
- * always reply with mode=server_side; Qt-Wayland and GTK4 both honour
- * this. We don't actually draw any decoration in response — qdshell
- * does that via qdwin_shell_v1.attach_decoration.
+ * qdwin's design has qdshell draw window frames via the private
+ * qdwin_shell_v1 protocol (attach_decoration), so every toplevel that
+ * negotiates xdg-decoration is configured server_side and the client
+ * draws no frame of its own; Qt-Wayland and foot honour this.
+ * Clients that never create a zxdg_toplevel_decoration_v1 (GTK4,
+ * weston-terminal, libdecor without the protocol) keep their own
+ * client-side frame. qdwin records which toplevels negotiated and
+ * forwards it as qdwin_shell_v1.toplevel_decoration (v36), so qdshell
+ * frames exactly the server-side ones — a self-decorated window never
+ * gets a second title bar stacked on its own.
  *
  * Without this global, PyQt6 (Qt-Wayland built-in bradient/adwaita
  * CSD plugin) aborts in QApplication during first-widget construction:
@@ -21929,10 +22437,97 @@ bind_xdg_activation(struct wl_client *client, void *data,
  *     Extension modules: PyQt6.QtCore, PyQt6.QtGui, PyQt6.QtWidgets
  *
  * Set QT_WAYLAND_DISABLE_WINDOWDECORATION=1 and the abort disappears,
- * which is what isolated the crash to the CSD attach path. With this
- * stub global the abort also disappears because Qt opts out of CSD
- * on its own. See todo/qdwin-crash.md.
+ * which is what isolated the crash to the CSD attach path. With the
+ * global the abort also disappears because Qt opts out of CSD on its
+ * own. See todo/qdwin-crash.md.
  * ------------------------------------------------------------------ */
+
+struct qdwin_xdg_decoration {
+	struct wl_resource *resource;
+	struct qdwin *qdwin;
+	/* The decorated xdg_toplevel resource, NULLed when it is destroyed
+	 * (toplevel_destroy). Never cache its weston_desktop_surface:
+	 * libweston frees that when the wl_surface dies and only NULLs the
+	 * resource's user data — the resource itself (and so this
+	 * listener) can outlive it. Resolve it per use via
+	 * qdwin_xdg_decoration_dsurf; NULL means the object is inert. */
+	struct wl_resource *toplevel_res;
+	struct wl_listener toplevel_destroy;
+	struct wl_list link;           /* qdwin::xdg_decorations */
+};
+
+/* Is `dsurf` decorated by a live zxdg_toplevel_decoration_v1? Called
+ * from surface_added, which runs at the toplevel's first commit —
+ * after the client created its decoration object. */
+static struct weston_desktop_surface *
+qdwin_xdg_decoration_dsurf(struct qdwin_xdg_decoration *d)
+{
+	return d->toplevel_res ? wl_resource_get_user_data(d->toplevel_res)
+			       : NULL;
+}
+
+static bool
+qdwin_xdg_decoration_negotiated(struct qdwin *qdwin,
+				struct weston_desktop_surface *dsurf)
+{
+	struct qdwin_xdg_decoration *d;
+	if (!dsurf)
+		return false;
+	wl_list_for_each(d, &qdwin->xdg_decorations, link)
+		if (qdwin_xdg_decoration_dsurf(d) == dsurf)
+			return true;
+	return false;
+}
+
+static void
+qdwin_xdg_decoration_toplevel_destroyed(struct wl_listener *listener,
+					void *data)
+{
+	struct qdwin_xdg_decoration *d =
+		wl_container_of(listener, d, toplevel_destroy);
+	(void)data;
+	wl_list_remove(&d->toplevel_destroy.link);
+	wl_list_init(&d->toplevel_destroy.link);
+	d->toplevel_res = NULL;
+}
+
+static void
+qdwin_toplevel_decoration_resource_destroyed(struct wl_resource *resource)
+{
+	struct qdwin_xdg_decoration *d = wl_resource_get_user_data(resource);
+	if (!d)
+		return;
+	wl_list_remove(&d->link);
+	wl_list_remove(&d->toplevel_destroy.link);
+	/* Destroying the object hands decoration back to the client
+	 * (xdg-decoration: "the client should draw its own decorations").
+	 * Tell the shell so it drops the frame. */
+	struct weston_desktop_surface *dsurf = qdwin_xdg_decoration_dsurf(d);
+	struct qdwin_toplevel *tl = dsurf
+		? weston_desktop_surface_get_user_data(dsurf) : NULL;
+	if (tl && tl->ssd_negotiated &&
+	    !qdwin_xdg_decoration_negotiated(d->qdwin, dsurf)) {
+		tl->ssd_negotiated = false;
+		qdwin_emit_toplevel_decoration(d->qdwin, tl);
+	}
+	free(d);
+}
+
+/* Compositor teardown: the client-owned decoration resources outlive
+ * qdwin. Detach every one (its destructor then sees NULL user data) and
+ * free the bookkeeping, so no late destructor touches the freed list. */
+static void
+qdwin_xdg_decorations_release_all(struct qdwin *qdwin)
+{
+	struct qdwin_xdg_decoration *d, *tmp;
+	wl_list_for_each_safe(d, tmp, &qdwin->xdg_decorations, link) {
+		wl_list_remove(&d->link);
+		wl_list_remove(&d->toplevel_destroy.link);
+		wl_resource_set_user_data(d->resource, NULL);
+		free(d);
+	}
+	wl_list_init(&qdwin->xdg_decorations);
+}
 
 static void
 qdwin_toplevel_decoration_destroy(struct wl_client *client,
@@ -21984,16 +22579,62 @@ qdwin_xdg_decoration_manager_get_toplevel_decoration(
 	uint32_t id,
 	struct wl_resource *xdg_toplevel_resource)
 {
-	(void)manager_resource; (void)xdg_toplevel_resource;
+	struct qdwin *qdwin = wl_resource_get_user_data(manager_resource);
+	/* libweston-desktop sets every xdg_toplevel resource's user data
+	 * to its weston_desktop_surface (NULL once that is gone). */
+	struct weston_desktop_surface *dsurf =
+		wl_resource_get_user_data(xdg_toplevel_resource);
+	if (!qdwin) {
+		/* qdwin is tearing down (manager neutralized): answer with an
+		 * untracked object that still honours the protocol. */
+		uint32_t v = wl_resource_get_version(manager_resource);
+		struct wl_resource *dec = wl_resource_create(
+			client, &zxdg_toplevel_decoration_v1_interface, v, id);
+		if (!dec) {
+			wl_client_post_no_memory(client);
+			return;
+		}
+		wl_resource_set_implementation(
+			dec, &qdwin_toplevel_decoration_impl, NULL, NULL);
+		return;
+	}
+	if (qdwin_xdg_decoration_negotiated(qdwin, dsurf)) {
+		wl_resource_post_error(
+			manager_resource,
+			ZXDG_TOPLEVEL_DECORATION_V1_ERROR_ALREADY_CONSTRUCTED,
+			"xdg_toplevel already has a decoration object");
+		return;
+	}
 	uint32_t version = wl_resource_get_version(manager_resource);
 	struct wl_resource *dec = wl_resource_create(
 		client, &zxdg_toplevel_decoration_v1_interface, version, id);
-	if (!dec) {
+	struct qdwin_xdg_decoration *d = calloc(1, sizeof(*d));
+	if (!dec || !d) {
+		free(d);
+		if (dec)
+			wl_resource_destroy(dec);
 		wl_client_post_no_memory(client);
 		return;
 	}
+	d->resource = dec;
+	d->qdwin = qdwin;
+	d->toplevel_res = xdg_toplevel_resource;
+	wl_list_insert(&qdwin->xdg_decorations, &d->link);
+	d->toplevel_destroy.notify = qdwin_xdg_decoration_toplevel_destroyed;
+	wl_resource_add_destroy_listener(xdg_toplevel_resource,
+					 &d->toplevel_destroy);
 	wl_resource_set_implementation(dec, &qdwin_toplevel_decoration_impl,
-				       NULL, NULL);
+				       d,
+				       qdwin_toplevel_decoration_resource_destroyed);
+	/* A client may also create the object after its toplevel mapped
+	 * (the protocol only forbids it once a buffer is attached, which
+	 * qdwin does not police); pick the change up now. */
+	struct qdwin_toplevel *tl = dsurf
+		? weston_desktop_surface_get_user_data(dsurf) : NULL;
+	if (tl && !tl->ssd_negotiated) {
+		tl->ssd_negotiated = true;
+		qdwin_emit_toplevel_decoration(qdwin, tl);
+	}
 	/* Send the initial configure immediately. The client must ack
 	 * via xdg_surface.ack_configure before attaching a buffer; Qt
 	 * and GTK both handle a same-frame initial mode correctly. */
@@ -24888,6 +25529,7 @@ wet_shell_init(struct weston_compositor *ec, int *argc, char *argv[])
 	weston_compositor_set_default_pointer_grab(
 		ec, &qdwin_proxy_default_pointer_grab_iface);
 	wl_list_init(&qdwin->hotkeys);
+	wl_list_init(&qdwin->xdg_decorations);
 	qdwin_wm_policy_set_defaults(&qdwin->wm_policy);
 	/* v28: only the DRM/libinput backend's seats embed a real udev_seat
 	 * with a devices_list we can walk for set_pointer_config. */
@@ -25009,10 +25651,10 @@ wet_shell_init(struct weston_compositor *ec, int *argc, char *argv[])
 	}
 
 	/* Advertise the full interface version so the shell can bind every
-	 * request/event through v35 (selection_set_source_peer_identity). */
+	 * request/event through v36 (toplevel_decoration). */
 	qdwin->shell_global = wl_global_create(ec->wl_display,
 					       &qdwin_shell_v1_interface,
-					       35, qdwin, bind_qdwin_shell);
+					       36, qdwin, bind_qdwin_shell);
 	if (!qdwin->shell_global) {
 		weston_log("qdwin: wl_global_create failed\n");
 		goto fail;

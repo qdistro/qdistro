@@ -79,6 +79,9 @@ Cases:
      still installed on a live seat's keyboard, whatever the flag says,
      leaves a replacing grab alone, and never touches a keyboard whose
      seat is gone.
+ 19. xdg-decoration teardown: live decoration objects are detached (NULL
+     user data), their xdg_toplevel listeners unhooked and the list emptied;
+     the decoration manager class is neutralized with the other bindings.
 """
 
 from pathlib import Path
@@ -426,6 +429,7 @@ struct qdwin {
 	struct wl_list notifications;
 	struct wl_list launchers;
 	struct wl_list hotkeys;
+	struct wl_list xdg_decorations;
 	struct wl_list idle_notifications;
 	struct wl_list fractional_scales;
 	struct wl_list activation_tokens;
@@ -455,6 +459,10 @@ struct qdwin {
 	int move_grab_active;
 	uint32_t move_grab_handle;
 	struct weston_pointer_grab move_grab;
+	int resize_grab_active;
+	uint32_t resize_grab_handle;
+	struct weston_pointer_grab resize_grab;
+	uint32_t resize_anchor_handle;
 	int switcher_grab_active;
 	struct weston_keyboard_grab switcher_grab;
 	int overlay_grab_active;
@@ -553,6 +561,15 @@ static const struct wl_interface qdwin_lock_surface_v1_interface =
 	{ .name = "qdwin_lock_surface_v1" };
 static const struct wl_interface qdwin_locker_surface_v1_interface =
 	{ .name = "qdwin_locker_surface_v1" };
+static const struct wl_interface zxdg_decoration_manager_v1_interface =
+	{ .name = "zxdg_decoration_manager_v1" };
+struct qdwin_xdg_decoration {
+	struct wl_resource *resource;
+	struct qdwin *qdwin;
+	struct wl_resource *toplevel_res;
+	struct wl_listener toplevel_destroy;
+	struct wl_list link;
+};
 
 static int probe_event_source_remove(struct wl_event_source *s)
 { event_source_remove_calls++; s->removed = 1; return 0; }
@@ -729,6 +746,8 @@ SPLICED = [
     "qdwin_popup_teardown",
     "qdwin_move_grab_end_if_installed",
     "qdwin_move_grab_end_for",
+    "qdwin_resize_grab_end_for",
+    "qdwin_xdg_decorations_release_all",
     "qdwin_switcher_grab_cancel",
     "qdwin_switcher_grab_end",
     "qdwin_overlay_grab_keyboard",
@@ -844,6 +863,7 @@ static struct qdwin *q_new(void)
 	wl_list_init(&q->notifications);
 	wl_list_init(&q->launchers);
 	wl_list_init(&q->hotkeys);
+	wl_list_init(&q->xdg_decorations);
 	wl_list_init(&q->idle_notifications);
 	wl_list_init(&q->fractional_scales);
 	wl_list_init(&q->activation_tokens);
@@ -1843,10 +1863,14 @@ static int case_unclaimed_bindings(void)
 	struct wl_resource *lks =
 		res_new(q, qdwin_lock_surface_resource_destroyed);
 	lks->class_name = "qdwin_locker_surface_v1";
+	/* get_toplevel_decoration reads qdwin from the manager's user data. */
+	struct wl_resource *decman = res_new(q, NULL);
+	decman->class_name = "zxdg_decoration_manager_v1";
 	struct wl_resource *foreign = res_new(q, NULL);
 	foreign->class_name = "wl_data_device";
 	/* Foreign first: the walk must cover the whole list. */
 	wl_list_insert(&client->resource_list, &foreign->link);
+	wl_list_insert(&client->resource_list, &decman->link);
 	wl_list_insert(&client->resource_list, &lks->link);
 	wl_list_insert(&client->resource_list, &lsr->link);
 	wl_list_insert(&client->resource_list, &ulk->link);
@@ -1858,7 +1882,8 @@ static int case_unclaimed_bindings(void)
 	      unclaimed->user_data == NULL &&
 	      ulk->user_data == NULL &&
 	      lsr->user_data == NULL &&
-	      lks->user_data == NULL,
+	      lks->user_data == NULL &&
+	      decman->user_data == NULL,
 	      "a qdwin-class binding kept its freed-qdwin user_data");
 	CHECK(foreign->user_data == q,
 	      "neutralizer touched a foreign resource");
@@ -1877,9 +1902,39 @@ static int case_unclaimed_bindings(void)
 	      "a neutralized destructor ran teardown work on freed qdwin");
 
 	free(claimed); free(unclaimed); free(ulk);
-	free(lsr); free(lks); free(foreign);
+	free(lsr); free(lks); free(foreign); free(decman);
 	free(client);
 	comp.wl_display = NULL;
+	return 0;
+}
+
+/* 19: live xdg-decoration objects at teardown. Their resources are
+ * client-owned and outlive qdwin; release_all must detach each one
+ * (NULL user data, so the late destructor no-ops), unhook its
+ * xdg_toplevel destroy listener and empty the list head inside qdwin. */
+static int case_xdg_decorations_released(void)
+{
+	reset_counters();
+	struct qdwin *q = q_new();
+	struct wl_resource *dec = res_new(NULL, NULL);
+	struct wl_list toplevel_listeners;
+	wl_list_init(&toplevel_listeners);
+	struct qdwin_xdg_decoration *d = calloc(1, sizeof *d);
+	d->resource = dec;
+	d->qdwin = q;
+	dec->user_data = d;
+	wl_list_insert(&toplevel_listeners, &d->toplevel_destroy.link);
+	wl_list_insert(&q->xdg_decorations, &d->link);
+
+	qdwin_xdg_decorations_release_all(q);
+	CHECK(dec->user_data == NULL,
+	      "decoration resource kept a pointer into freed bookkeeping");
+	CHECK(wl_list_empty(&q->xdg_decorations),
+	      "decoration list not emptied");
+	CHECK(wl_list_empty(&toplevel_listeners),
+	      "xdg_toplevel destroy listener left armed");
+	free(dec);
+	free(q);
 	return 0;
 }
 
@@ -2005,11 +2060,12 @@ int main(void)
 	if ((r = case_grab_suppression())) return r;
 	if ((r = case_full_pass())) return r;
 	if ((r = case_unclaimed_bindings())) return r;
+	if ((r = case_xdg_decorations_released())) return r;
 	if ((r = case_lock_attach_promote())) return r;
 	if ((r = case_layer_popup_grab_cancel())) return r;
 	if ((r = case_switcher_grab_cancel())) return r;
 	if ((r = case_overlay_grab_cancel())) return r;
-	printf("destroy-drain behaviour: 17 cases OK\n");
+	printf("destroy-drain behaviour: 18 cases OK\n");
 	return 0;
 }
 """
