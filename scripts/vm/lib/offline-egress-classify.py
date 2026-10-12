@@ -60,7 +60,8 @@ def comparable(objs):
     for o in strip(objs):
         s = o.get("set")
         if isinstance(s, dict) and s.get("name") in RECORD_SETS:
-            o = {"set": {k: v for k, v in s.items() if k != "elem"}}
+            # "count" (newer nft) is how many elements were recorded.
+            o = {"set": {k: v for k, v in s.items() if k not in ("elem", "count")}}
         out.append(o)
     return out
 

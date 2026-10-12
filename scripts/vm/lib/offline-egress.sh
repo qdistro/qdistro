@@ -252,13 +252,18 @@ qd_offline_egress_expected_hosts() {
 # resolves an expected host to. rc 2 when the guest cannot be asked or the
 # table is not live: the caller must not read that as clean.
 qd_offline_egress_scan() {
-    local vm="$1" vmx="${2:-${VM_TOOLS:-$QD_OFFLINE_EGRESS_LIBDIR/..}/vm-exec}" out hosts rules t=$QD_OFFLINE_EGRESS_TABLE
+    local vm="$1" vmx="${2:-${VM_TOOLS:-$QD_OFFLINE_EGRESS_LIBDIR/..}/vm-exec}" out hosts rules rc t=$QD_OFFLINE_EGRESS_TABLE
     hosts="$(qd_offline_egress_expected_hosts | tr '\n' ' ')"
     rules="$(qd_offline_egress_ruleset | base64 -w0)"
-    out="$("$vmx" "$vm" "live=\$(nft -j list table inet $t 2>/dev/null) || { echo QCI_EGRESS_UNARMED; exit 0; }; echo QCI_EGRESS_ARMED; echo \"QCI-EGRESS-LIVE \$live\"; echo \"QCI-EGRESS-REF \$(printf '%s' '$rules' | base64 -d | unshare -n sh -c 'nft -f - && nft -j list table inet $t' 2>&1 | tr '\n' ' ')\"; for h in $hosts; do getent ahosts \$h 2>/dev/null | awk -v h=\$h '{print \"QCI-OFFLINE-EGRESS-RESOLVED \" h \" \" \$1}' | sort -u; done")" || return 2
+    out="$("$vmx" "$vm" "live=\$(nft -j list table inet $t 2>/dev/null) || { echo QCI_EGRESS_UNARMED; exit 0; }; echo QCI_EGRESS_ARMED; echo \"QCI-EGRESS-LIVE \$live\"; echo \"QCI-EGRESS-REF \$(printf '%s' '$rules' | base64 -d | unshare -n sh -c 'nft -f - && nft -j list table inet $t' 2>&1 | tr '\n' ' ')\"; for h in $hosts; do getent ahosts \$h 2>/dev/null | awk -v h=\$h '{print \"QCI-OFFLINE-EGRESS-RESOLVED \" h \" \" \$1}' | sort -u; done")" || {
+        rc=$?
+        printf 'offline-egress: asking %s failed (rc %s): %s\n' "$vm" "$rc" "$(printf '%s' "$out" | head -c 2000)" >&2
+        return 2
+    }
     case "$out" in
         QCI_EGRESS_ARMED*) printf '%s\n' "$out" | sed '1d' | grep -E '^(QCI-EGRESS-LIVE|QCI-EGRESS-REF|QCI-OFFLINE-EGRESS-RESOLVED) ' || true ;;
-        *) return 2 ;;
+        *) printf 'offline-egress: %s is not armed: %s\n' "$vm" "$(printf '%s' "$out" | head -c 2000)" >&2
+           return 2 ;;
     esac
 }
 

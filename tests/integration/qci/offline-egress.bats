@@ -68,6 +68,7 @@ def table(with_elems):
         s = {"family": "inet", "name": n, "table": "qci_offline_egress", "flags": ["dynamic"], "size": 65535}
         if with_elems and e:
             s["elem"] = e
+            s["count"] = len(e)   # newer nft reports it on a non-empty set
         objs.append({"set": s})
     return json.dumps({"nftables": objs})
 print("QCI-EGRESS-LIVE " + table(True))
