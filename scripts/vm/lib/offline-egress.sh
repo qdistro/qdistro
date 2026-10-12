@@ -149,13 +149,14 @@ EOF
 }
 
 # qd_offline_egress_dump_cmd — sh that saves the live table into the
-# history, named <boot_id>-<ns>.json; no table is nothing to save. A table
-# that exists but cannot be dumped leaves a sticky dump-failed marker (the
-# scan reports it as broken) and fails the command. In a unit file, % is
-# doubled.
+# history, named <boot_id>-<ns>.json. Only a table nft reports as absent
+# ("No such file or directory") is nothing to save; any other failure — of
+# the lookup or of the dump — leaves a sticky dump-failed marker (the scan
+# reports it as broken) and fails the command. No single quotes: the unit
+# wraps it in sh -c '...'. In a unit file, % is doubled.
 qd_offline_egress_dump_cmd() {
-    local h=$QD_OFFLINE_EGRESS_STATE/history
-    printf '%s' "if nft list table inet $QD_OFFLINE_EGRESS_TABLE >/dev/null 2>&1; then mkdir -p $h && f=$h/\$(cat /proc/sys/kernel/random/boot_id)-\$(date +%s%N).json && nft -j list table inet $QD_OFFLINE_EGRESS_TABLE > \$f.tmp && mv \$f.tmp \$f || { touch $QD_OFFLINE_EGRESS_STATE/dump-failed; false; }; fi"
+    local h=$QD_OFFLINE_EGRESS_STATE/history t=$QD_OFFLINE_EGRESS_TABLE
+    printf '%s' "if e=\$(nft list table inet $t 2>&1 >/dev/null); then mkdir -p $h && f=$h/\$(cat /proc/sys/kernel/random/boot_id)-\$(date +%s%N).json && nft -j list table inet $t > \$f.tmp && mv \$f.tmp \$f || { touch $QD_OFFLINE_EGRESS_STATE/dump-failed; false; }; else case \"\$e\" in *\"No such file or directory\"*) ;; *) touch $QD_OFFLINE_EGRESS_STATE/dump-failed; false ;; esac; fi"
 }
 
 # qd_offline_egress_unit — the oneshot that loads the table on every boot,

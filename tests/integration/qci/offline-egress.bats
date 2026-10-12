@@ -282,6 +282,16 @@ EOF
     grep -q '^ExecStop=.*sealed ] || {.*nft -j list table inet qci_offline_egress > ' <<<"$unit"
     grep -q 'date +%%s%%N' <<<"$unit"                     # % escaped for systemd
     grep -qx 'ExecStartPre=-/bin/rm -f /var/lib/qci-offline-egress/sealed' <<<"$unit"
+    # The dump nests inside ExecStop's sh -c '...': no single quote in it, and
+    # the ExecStop line, unquoted the way systemd does, runs the dump.
+    ! qd_offline_egress_dump_cmd | grep -q "'"
+    stop="$(sed -n "s/^ExecStop=\/bin\/sh -c '\(.*\)'$/\1/p" <<<"$unit" | sed 's/%%/%/g')"
+    [ -n "$stop" ]
+    mkdir -p "$BATS_TEST_TMPDIR/bin"
+    printf '#!/bin/bash\n[ "$1" = -j ] && echo "{\\"nftables\\": []}"; exit 0\n' > "$BATS_TEST_TMPDIR/bin/nft"; chmod +x "$BATS_TEST_TMPDIR/bin/nft"
+    run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" sh -c "${stop//\/var\/lib\/qci-offline-egress/$BATS_TEST_TMPDIR/st}"
+    [ "$status" -eq 0 ]
+    ls "$BATS_TEST_TMPDIR"/st/history/*.json
     script="$(qd_offline_egress_guest_script)"
     # The installer dumps, then always loads (whatever the live table was).
     [ "$(grep -n 'nft -j list table' <<<"$script" | cut -d: -f1)" -lt "$(grep -n '^nft -f' <<<"$script" | cut -d: -f1)" ]
@@ -300,7 +310,16 @@ EOF
     # The dump: table present but unlistable as JSON -> marker + failure;
     # no table -> nothing to save, success.
     mkdir -p "$BATS_TEST_TMPDIR/bin" "$BATS_TEST_TMPDIR/state"
-    printf '#!/bin/bash\ncase "$*" in "list table inet qci_offline_egress") exit ${NO_TABLE:-0} ;; *-j*) exit 1 ;; esac\n' > "$BATS_TEST_TMPDIR/bin/nft"
+    cat > "$BATS_TEST_TMPDIR/bin/nft" <<'EOF'
+#!/bin/bash
+case "$*" in
+    "list table inet qci_offline_egress")
+        [ -n "${NO_TABLE:-}" ] && { echo "Error: No such file or directory" >&2; exit 1; }
+        [ -n "${LOOKUP_FAILS:-}" ] && { echo "Error: Could not process rule: Resource busy" >&2; exit 1; }
+        exit 0 ;;
+    *-j*) exit 1 ;;
+esac
+EOF
     chmod +x "$BATS_TEST_TMPDIR/bin/nft"
     cmd="$(QD_OFFLINE_EGRESS_STATE="$BATS_TEST_TMPDIR/state" qd_offline_egress_dump_cmd)"
     run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" sh -c "$cmd"
@@ -310,10 +329,14 @@ EOF
     run env NO_TABLE=1 PATH="$BATS_TEST_TMPDIR/bin:$PATH" sh -c "$cmd"
     [ "$status" -eq 0 ]
     [ ! -e "$BATS_TEST_TMPDIR/state/dump-failed" ]
+    # A lookup that fails for any other reason is not "no table".
+    run env LOOKUP_FAILS=1 PATH="$BATS_TEST_TMPDIR/bin:$PATH" sh -c "$cmd"
+    [ "$status" -ne 0 ]
+    [ -e "$BATS_TEST_TMPDIR/state/dump-failed" ]
     # In the installer the failed dump stops the script before nft -f.
     script="$(qd_offline_egress_guest_script)"
     grep -q '^set -eu$' <<<"$script"
-    grep -q 'touch /var/lib/qci-offline-egress/dump-failed; false; }; fi$' <<<"$script"
+    grep -q 'touch /var/lib/qci-offline-egress/dump-failed; false ;; esac; fi$' <<<"$script"
 }
 
 @test "classify: missing, unparsable or overflowing tables are broken" {
