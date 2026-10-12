@@ -1,0 +1,95 @@
+"""The VM screenshot describer uses the sanctioned visual Codex driver."""
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from tests.ui import runner
+
+
+@pytest.mark.parametrize("with_image", [False, True])
+def test_ui_codex_driver_pins_luna_and_keeps_rollout(monkeypatch, with_image):
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append((cmd, kwargs))
+        out = Path(cmd[cmd.index("--output-last-message") + 1])
+        out.write_text("VERDICT: PASS\n")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    image = Path("/tmp/qdistro-ui-driver.png") if with_image else None
+    assert runner._run_codex("describe this frame", image) == "VERDICT: PASS"
+
+    cmd, kwargs = seen[0]
+    assert cmd[:2] == ["codex", "exec"]
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.6-luna"
+    assert cmd[cmd.index("-c") + 1] == "model_reasoning_effort=medium"
+    assert "--ephemeral" not in cmd
+    assert (f"--image={image}" in cmd) == with_image
+    assert cmd[-1] == "describe this frame"
+    assert kwargs["timeout"] == 180
+
+
+@pytest.mark.parametrize(
+    ("image_name", "expected_detail"),
+    [
+        ("bar_idle.png", "narrow strip pinned"),
+        ("panel_calendar.png", "date whose cell"),
+        ("panel_launcher.png", "visible caret"),
+        ("settings_defaultapps-p2.png", "explanatory paragraph"),
+        ("settings_bar_widgets.png", "Launcher widget itself"),
+        ("settings_keyboard-p2.png", "cursor preference persistence"),
+        ("settings_advanced.png", "warning card's color"),
+        ("settings_windowmanager-p2.png", "dropdown arrow"),
+        ("panel_battery.png", "only a header"),
+        ("panel_wallpaper.png", "hidden-files eye"),
+        ("panel_sessionmenu.png", "corner keybind badge"),
+        ("panel_brightness.png", "icon before the slider"),
+        ("panel_tray_degraded.png", "separate tray drawer surface"),
+    ],
+)
+def test_ui_describer_details_are_scoped_to_surface(image_name, expected_detail):
+    prompt = runner._describe_prompt_for(Path(image_name))
+    assert expected_detail in prompt
+    assert expected_detail not in runner._describe_prompt_for(
+        Path("panel_network.png")
+    )
+
+
+@pytest.mark.parametrize(
+    ("votes", "expected"),
+    [
+        (["PASS"], "PASS"),
+        (["FAIL", "FAIL"], "FAIL"),
+        (["FAIL", "PASS", "PASS"], "PASS"),
+        (["FAIL", "PASS", "FAIL"], "FAIL"),
+        (["FAIL", "SKIP", "PASS"], "FAIL"),
+    ],
+)
+def test_visual_panel_confirmation_requires_independent_evidence(
+        monkeypatch, tmp_path, votes, expected):
+    seen = []
+    frame = tmp_path / "panel.png"
+    frame.write_bytes(b"saved frame")
+
+    def fake_judge(_reference, description):
+        vote = votes[len(seen)]
+        seen.append((description, vote))
+        missing = ["required content missing"] if vote == "FAIL" else []
+        return runner.JudgeResult(vote, f"VERDICT: {vote}", missing, [])
+
+    monkeypatch.setattr(runner, "judge", fake_judge)
+    monkeypatch.setattr(runner, "describe", lambda _frame: "fresh observation")
+    result = runner.judge_frame_consistently("required content", "initial", frame)
+
+    assert result.verdict == expected
+    assert [vote for _, vote in seen] == votes
+    evidence = frame.with_suffix(".judge-recheck.txt")
+    if len(votes) == 1:
+        assert not evidence.exists()
+    else:
+        assert evidence.exists()
+        assert evidence.read_text().count("Observation ") == len(votes)
+        if expected == "FAIL":
+            assert "required content missing" in result.missing

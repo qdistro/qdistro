@@ -241,6 +241,8 @@ SmartPanel {
                   value: localOutputVolume
                   stepSize: 0.01
                   heightRatio: 0.5
+                  enabled: !!(AudioService.sink && AudioService.sink.audio)
+                  opacity: enabled ? 1.0 : 0.5
                   onMoved: function (value) {
                     localOutputVolume = value;
                   }
@@ -254,6 +256,7 @@ SmartPanel {
                   pointSize: Style.fontSizeM
                   family: Settings.data.ui.fontFixed
                   color: Color.mOnSurface
+                  enabled: !!(AudioService.sink && AudioService.sink.audio)
                   opacity: enabled ? 1.0 : 0.6
                   Layout.alignment: Qt.AlignVCenter
                   Layout.preferredWidth: 45 * Style.uiScaleRatio
@@ -264,6 +267,7 @@ SmartPanel {
                   icon: AudioService.getOutputIcon()
                   tooltipText: I18n.tr("tooltips.output-muted")
                   baseSize: Style.baseWidgetSize * 0.7
+                  enabled: !!(AudioService.sink && AudioService.sink.audio)
                   onClicked: {
                     AudioService.suppressOutputOSD();
                     AudioService.setOutputMuted(!AudioService.muted);
@@ -316,6 +320,8 @@ SmartPanel {
                   value: localInputVolume
                   stepSize: 0.01
                   heightRatio: 0.5
+                  enabled: !!(AudioService.source && AudioService.source.audio)
+                  opacity: enabled ? 1.0 : 0.5
                   onMoved: function (value) {
                     localInputVolume = value;
                   }
@@ -329,6 +335,7 @@ SmartPanel {
                   pointSize: Style.fontSizeM
                   family: Settings.data.ui.fontFixed
                   color: Color.mOnSurface
+                  enabled: !!(AudioService.source && AudioService.source.audio)
                   opacity: enabled ? 1.0 : 0.6
                   Layout.alignment: Qt.AlignVCenter
                   Layout.preferredWidth: 45 * Style.uiScaleRatio
@@ -339,6 +346,7 @@ SmartPanel {
                   icon: AudioService.getInputIcon()
                   tooltipText: I18n.tr("tooltips.input-muted")
                   baseSize: Style.baseWidgetSize * 0.7
+                  enabled: !!(AudioService.source && AudioService.source.audio)
                   onClicked: {
                     AudioService.suppressInputOSD();
                     AudioService.setInputMuted(!AudioService.inputMuted);

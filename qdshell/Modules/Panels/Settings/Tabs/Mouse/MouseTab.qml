@@ -17,6 +17,27 @@ ColumnLayout {
     PointerInputService.refresh();
   }
 
+  // Settings.data is proxy-backed JS. Replacing this nested map persists and
+  // emits settingChanged, but does not invalidate QML bindings by itself.
+  property int overridesRevision: 0
+  readonly property var deviceOverrides: {
+    overridesRevision;
+    return Settings.data.pointer.perDeviceOverrides;
+  }
+
+  Connections {
+    target: Settings
+    function onSettingChanged(owner, key) {
+      if (owner === Settings.data.pointer && key === "perDeviceOverrides")
+        root.overridesRevision++;
+    }
+  }
+
+  function effectiveDeviceSettings(deviceId) {
+    overridesRevision;
+    return PointerInputService.effectiveSettings(deviceId);
+  }
+
   // ─── Helper models ───────────────────────────────────────────────
   readonly property var accelProfileModel: [
     {
@@ -620,7 +641,7 @@ ColumnLayout {
           visible: !isTablet
           label: I18n.tr("panels.mouse.device-customize-label")
           description: I18n.tr("panels.mouse.device-customize-description")
-          checked: PointerInputParse.hasDeviceOverride(Settings.data.pointer.perDeviceOverrides, devId)
+          checked: PointerInputParse.hasDeviceOverride(root.deviceOverrides, devId)
           onToggled: checked => {
             if (checked) {
               // Seed the override with the current global speed so the override
@@ -635,13 +656,13 @@ ColumnLayout {
         ColumnLayout {
           Layout.fillWidth: true
           spacing: Style.marginS
-          visible: !isTablet && PointerInputParse.hasDeviceOverride(Settings.data.pointer.perDeviceOverrides, devId)
+          visible: !isTablet && PointerInputParse.hasDeviceOverride(root.deviceOverrides, devId)
 
           NComboBox {
             Layout.fillWidth: true
             label: I18n.tr("panels.mouse.accel-profile-label")
             model: root.accelProfileModel
-            currentKey: PointerInputService.effectiveSettings(devId).accelProfile
+            currentKey: root.effectiveDeviceSettings(devId).accelProfile
             onSelected: key => PointerInputService.setOverride(devId, "accelProfile", key)
           }
 
@@ -651,22 +672,22 @@ ColumnLayout {
             from: 0.0
             to: 1.0
             stepSize: 0.05
-            value: PointerInputService.effectiveSettings(devId).pointerSpeed
-            text: Math.round(PointerInputService.effectiveSettings(devId).pointerSpeed * 100) + "%"
+            value: root.effectiveDeviceSettings(devId).pointerSpeed
+            text: Math.round(root.effectiveDeviceSettings(devId).pointerSpeed * 100) + "%"
             onMoved: value => PointerInputService.setOverride(devId, "pointerSpeed", value)
           }
 
           NToggle {
             Layout.fillWidth: true
             label: I18n.tr("panels.mouse.natural-scroll-label")
-            checked: PointerInputService.effectiveSettings(devId).naturalScroll
+            checked: root.effectiveDeviceSettings(devId).naturalScroll
             onToggled: checked => PointerInputService.setOverride(devId, "naturalScroll", checked)
           }
 
           NToggle {
             Layout.fillWidth: true
             label: I18n.tr("panels.mouse.left-handed-label")
-            checked: PointerInputService.effectiveSettings(devId).leftHanded
+            checked: root.effectiveDeviceSettings(devId).leftHanded
             onToggled: checked => PointerInputService.setOverride(devId, "leftHanded", checked)
           }
 

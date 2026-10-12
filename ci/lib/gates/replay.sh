@@ -109,7 +109,7 @@ gate_replay() {
             # Restrict gate_gui to just this one scenario by overriding the
             # scenario producer, exactly like `qci gui --scenario` does.
             agent_scenarios() { printf '%s\n' "$path"; }
-            gate_gui "$vm"
+            QCI_GUI_REPLAY_ONLY=1 gate_gui "$vm"
             return $?
             ;;
         *)

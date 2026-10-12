@@ -325,8 +325,56 @@ XML=$(printf '%s' "$XML" \
     | sed -e "s|<name>$TEMPLATE</name>|<name>$VM</name>|" \
           -e '/<uuid>/d' \
           -e "/<mac address=/c\\      <mac address='$NEW_MAC'/>" \
-          -e "s|<vcpu[^>]*>[0-9]\{1,\}</vcpu>|<vcpu placement='static'>${VCPUS}</vcpu>|" \
-          -e "s|$TEMPLATE.qcow2|${VM}.qcow2|g")
+          -e "s|<vcpu[^>]*>[0-9]\{1,\}</vcpu>|<vcpu placement='static'>${VCPUS}</vcpu>|")
+
+# The template domain may live in the default libvirt images directory while
+# this clone's overlay lives in QDWIN_IMG_DIR. Replace the primary disk's whole
+# source path, not just its basename, or libvirt will look in the old directory.
+# Keep the XML's formatting/quotes: later OVMF and NIC transforms use text
+# patterns, so reserializing the whole domain with ElementTree would alter them.
+XML=$(printf '%s' "$XML" | CLONE_DISK="$IMG/${VM}.qcow2" \
+    TEMPLATE_DISK="$TEMPLATE.qcow2" python3 -c '
+import html
+import os
+import re
+import sys
+
+xml = sys.stdin.read()
+disk_re = re.compile(r"(<disk\b[^>]*>)(.*?)</disk>", re.S)
+device_re = re.compile(r"\bdevice\s*=\s*([\"\x27])([^\"\x27]*)\1")
+source_re = re.compile(r"(<source\b[^>]*\bfile\s*=\s*)([\"\x27])([^\"\x27]*)\2")
+rewritten = 0
+
+def replace_disk(match):
+    global rewritten
+    opening, body = match.group(1), match.group(2)
+    device = device_re.search(opening)
+    if device is None or device.group(2) != "disk":
+        return match.group(0)
+    # dumpxml can include nested backingStore/source elements; those are
+    # stripped later and must not count as the primary disk source.
+    direct_body = body.split("<backingStore", 1)[0]
+    sources = list(source_re.finditer(direct_body))
+    if len(sources) != 1:
+        raise ValueError("primary disk must have exactly one file source")
+    source = sources[0]
+    old_path = html.unescape(source.group(3))
+    if os.path.basename(old_path) != os.environ["TEMPLATE_DISK"]:
+        raise ValueError(f"unexpected template disk source: {old_path}")
+    start, end = source.span(3)
+    body = body[:start] + html.escape(os.environ["CLONE_DISK"], quote=True) + body[end:]
+    rewritten += 1
+    return opening + body + "</disk>"
+
+try:
+    xml = disk_re.sub(replace_disk, xml)
+    if rewritten != 1:
+        raise ValueError(f"expected one primary disk, found {rewritten}")
+except ValueError as exc:
+    sys.stderr.write(f"ERROR: cloned XML disk source: {exc}\n")
+    sys.exit(2)
+sys.stdout.write(xml)
+') || exit 1
 
 # Strip any pre-existing <backingStore> blocks from the template's
 # disk XML — libvirt regenerates them from the qcow2's actual

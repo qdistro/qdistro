@@ -22,6 +22,7 @@ VM-only: real input injection has no host nested-compositor equivalent.
 import time
 
 import pytest
+from PIL import Image
 
 from . import runner
 
@@ -253,23 +254,46 @@ def test_launcher_shift_and_backspace(vm_session):
         time.sleep(0.5)
         png = runner.ARTIFACTS_DIR / "real_launcher_shift_bs.png"
         runner.screenshot_vm(s, png)
+        detail_png = runner.ARTIFACTS_DIR / "real_launcher_shift_bs_detail.png"
+        with Image.open(png) as image:
+            assert image.size == (1280, 800), (
+                f"launcher detail crop requires the 1280x800 GUI profile, got {image.size}"
+            )
+            # Keep the full frame for overlay evidence. The 14px search text
+            # is too small for reliable transcription in a 1280x800 frame;
+            # enlarge its actual pixels as separate, attested detail evidence.
+            field = image.crop((400, 138, 840, 182))
+            field.resize((1760, 176), Image.Resampling.NEAREST).save(detail_png)
         actual = runner.describe(png)
         if not actual.strip():
             pytest.skip("no vision backend available")
-        reference = (
-            "- A launcher overlay is open.\n"
+        detail_actual = runner.describe(detail_png)
+        assert detail_actual.strip(), "enlarged search-field evidence has no description"
+        # The crop removes the surrounding launcher context; identify the
+        # source region without supplying or inferring its rendered text.
+        detail_actual = f"Magnified launcher search-field crop: {detail_actual}"
+        overlay_verdict = runner.judge("- A launcher overlay is open.", actual)
+        reference_text = (
             "- The search field shows 'Firefo' — an uppercase F (Shift handled) "
             "followed by lowercase letters, with the final 'x' removed by "
             "Backspace.\n"
         )
-        verdict = runner.judge(reference, actual)
-        if verdict.verdict == "SKIP":
-            pytest.skip(verdict.raw)
-        assert verdict.verdict == "PASS", (
+        text_verdict = runner.judge(reference_text, detail_actual)
+        if overlay_verdict.verdict == "SKIP":
+            pytest.skip(overlay_verdict.raw)
+        if text_verdict.verdict == "SKIP":
+            pytest.skip(text_verdict.raw)
+        assert overlay_verdict.verdict == "PASS", (
+            "Launcher overlay was not established in the full screenshot.\n"
+            f"  missing: {overlay_verdict.missing}\n"
+            f"  judge: {overlay_verdict.raw}\n  png: {png}\n  actual:\n{actual}"
+        )
+        assert text_verdict.verdict == "PASS", (
             "Shift/Backspace not handled correctly in the launcher search field "
             "(or overlay keyboard-grab gap).\n"
-            f"  missing: {verdict.missing}\n  judge: {verdict.raw}\n  png: {png}\n"
-            f"  actual:\n{actual}"
+            f"  missing: {text_verdict.missing}\n"
+            f"  judge: {text_verdict.raw}\n  png: {detail_png}\n"
+            f"  actual:\n{detail_actual}"
         )
     finally:
         _close_launcher_best_effort(s)

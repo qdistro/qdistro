@@ -5,14 +5,17 @@ setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"
     FIXTURE="$BATS_TEST_TMPDIR/root/scripts/vm"
     BIN="$BATS_TEST_TMPDIR/bin"
-    IMG="$BATS_TEST_TMPDIR/images"
+    # The libvirt template's disk lives in the default directory while new
+    # overlays must be defined under the isolated QDWIN_IMG_DIR.
+    IMG="$BATS_TEST_TMPDIR/isolated-images"
+    TEMPLATE_IMG="$BATS_TEST_TMPDIR/default-images"
     XML_DIR="$BATS_TEST_TMPDIR/xml"
     # clone-baseweed.sh builds a real qcow2 overlay over a real backing image.
     # qemu-img is a host prerequisite of the VM gates; the offline dev container
     # (ci/bin/qci-host-run) does not ship it.
     command -v qemu-img >/dev/null 2>&1 \
         || skip "qemu-img not installed: clone-baseweed.sh builds real qcow2 overlays (run on the host, e.g. via qci selftest)"
-    mkdir -p "$FIXTURE/lib" "$BIN" "$IMG" "$XML_DIR"
+    mkdir -p "$FIXTURE/lib" "$BIN" "$IMG" "$TEMPLATE_IMG" "$XML_DIR"
     cp "$REPO_ROOT/scripts/vm/clone-baseweed.sh" "$FIXTURE/clone-baseweed.sh"
     cp "$REPO_ROOT/scripts/vm/vm-start-and-wait" "$FIXTURE/vm-start-and-wait"
     cp "$REPO_ROOT/scripts/vm/lib/vm-base.sh" "$FIXTURE/lib/vm-base.sh"
@@ -54,7 +57,13 @@ SH
   <vcpu>2</vcpu>
   <os><type arch='x86_64' machine='pc'>hvm</type></os>
   <devices>
-    <disk type='file' device='disk'><source file='$IMG/qdistro-template.qcow2'/></disk>
+    <disk type='file' device='disk'>
+      <source file='$TEMPLATE_IMG/qdistro-template.qcow2'/>
+      <backingStore type='file'>
+        <source file='$TEMPLATE_IMG/ancestor.qcow2'/>
+        <backingStore/>
+      </backingStore>
+    </disk>
     <interface type='user'><mac address='52:54:00:00:00:01'/></interface>
     <sound model='ich9'/>
   </devices>
@@ -94,17 +103,24 @@ EOF
     # template attribute. Otherwise qemu would mutate the shared seed.
     python3 - "$TEST_XML_DIR/$first.xml" "$IMG/$first.nvram.fd" \
               "$TEST_XML_DIR/$second.xml" "$IMG/$second.nvram.fd" \
-              "$TEST_OVMF_VARS" <<'PY'
+              "$TEST_OVMF_VARS" "$IMG" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 
 seed = sys.argv[5]
+image_dir = sys.argv[6]
 for xml_path, nvram_path in ((sys.argv[1], sys.argv[2]),
                              (sys.argv[3], sys.argv[4])):
-    nvram = ET.parse(xml_path).find("./os/nvram")
+    domain = ET.parse(xml_path)
+    nvram = domain.find("./os/nvram")
     assert nvram is not None, xml_path
     assert nvram.text == nvram_path, (xml_path, nvram.text)
     assert nvram.get("template") == seed, (xml_path, nvram.attrib)
     assert nvram.text != seed
+    disk = domain.find("./devices/disk[@device='disk']/source")
+    assert disk is not None, xml_path
+    name = domain.findtext("./name")
+    assert disk.get("file") == f"{image_dir}/{name}.qcow2", (xml_path, disk.attrib)
+    assert domain.find("./devices/disk/backingStore") is None, xml_path
 PY
 }

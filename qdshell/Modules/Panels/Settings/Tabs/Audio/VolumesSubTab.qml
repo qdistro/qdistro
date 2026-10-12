@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Quickshell.Services.Pipewire
 import qs.Commons
 import qs.Services.Media
 import qs.Widgets
@@ -121,6 +122,63 @@ ColumnLayout {
       description: I18n.tr("panels.audio.volumes-mute-input-description")
       checked: AudioService.inputMuted
       onToggled: checked => AudioService.setInputMuted(checked)
+    }
+  }
+
+  NDivider {
+    Layout.fillWidth: true
+  }
+
+  // The panel and Settings use the same live PipeWire playback streams. A
+  // disconnected stream disappears instead of leaving a stale volume row.
+  ColumnLayout {
+    spacing: Style.marginS
+    Layout.fillWidth: true
+
+    NLabel {
+      label: I18n.tr("panels.audio.volumes-applications-label")
+      description: I18n.tr("panels.audio.volumes-applications-description")
+      Layout.fillWidth: true
+    }
+
+    PwObjectTracker {
+      objects: AudioService.appStreams
+    }
+
+    Repeater {
+      model: AudioService.appStreams
+
+      NValueSlider {
+        required property PwNode modelData
+        readonly property var nodeAudio: modelData ? modelData.audio : null
+        readonly property var nodeProps: modelData ? modelData.properties : null
+        Layout.fillWidth: true
+        label: (nodeProps && (nodeProps["application.name"] || nodeProps["application.process.binary"]))
+               || modelData.description || modelData.name
+               || I18n.tr("panels.audio.volumes-app-unknown")
+        from: 0
+        to: Settings.data.audio.volumeOverdrive ? 1.5 : 1.0
+        value: nodeAudio ? nodeAudio.volume : 0
+        stepSize: 0.01
+        text: Math.round((nodeAudio ? nodeAudio.volume : 0) * 100) + "%"
+        enabled: !!(modelData && modelData.ready && nodeAudio)
+        opacity: enabled ? 1.0 : 0.5
+        onMoved: value => {
+                   if (modelData && modelData.ready && nodeAudio)
+                     nodeAudio.volume = value;
+                 }
+
+        PwObjectTracker {
+          objects: modelData ? [modelData] : []
+        }
+      }
+    }
+
+    NText {
+      visible: AudioService.appStreams.length === 0
+      text: I18n.tr("panels.audio.panel-applications-empty")
+      color: Color.mOnSurfaceVariant
+      Layout.fillWidth: true
     }
   }
 
