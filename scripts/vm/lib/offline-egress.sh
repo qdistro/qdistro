@@ -147,15 +147,22 @@ table inet $QD_OFFLINE_EGRESS_TABLE {
 EOF
 }
 
-# qd_offline_egress_dump_cmd — sh that saves the live table (if any) into
-# the history, named <boot_id>-<ns>.json. In a unit file, % is doubled.
+# qd_offline_egress_dump_cmd — sh that saves the live table into the
+# history, named <boot_id>-<ns>.json; no table is nothing to save. A table
+# that exists but cannot be dumped leaves a sticky dump-failed marker (the
+# scan reports it as broken) and fails the command. In a unit file, % is
+# doubled.
 qd_offline_egress_dump_cmd() {
-    printf '%s' "mkdir -p $QD_OFFLINE_EGRESS_STATE/history && f=$QD_OFFLINE_EGRESS_STATE/history/\$(cat /proc/sys/kernel/random/boot_id)-\$(date +%s%N).json && { nft -j list table inet $QD_OFFLINE_EGRESS_TABLE > \$f 2>/dev/null || rm -f \$f; }"
+    local h=$QD_OFFLINE_EGRESS_STATE/history
+    printf '%s' "if nft list table inet $QD_OFFLINE_EGRESS_TABLE >/dev/null 2>&1; then mkdir -p $h && f=$h/\$(cat /proc/sys/kernel/random/boot_id)-\$(date +%s%N).json && nft -j list table inet $QD_OFFLINE_EGRESS_TABLE > \$f.tmp && mv \$f.tmp \$f || { touch $QD_OFFLINE_EGRESS_STATE/dump-failed; false; }; fi"
 }
 
 # qd_offline_egress_unit — the oneshot that loads the table on every boot,
 # before any network comes up, and dumps it to the history when stopped
-# (restart, reboot, shutdown) unless the guest is a sealed golden.
+# (restart, reboot, shutdown) unless the guest is a sealed golden. It must
+# load AFTER openSUSE's soft-reboot-cleanup.service (aaa_base), which runs
+# `nft flush ruleset` on every boot and is only ordered before
+# network-pre.target: loaded first, the table was flushed a moment later.
 qd_offline_egress_unit() {
     local dump
     dump="$(qd_offline_egress_dump_cmd | sed 's/%/%%/g')"
@@ -166,7 +173,7 @@ DefaultDependencies=no
 Before=network-pre.target shutdown.target
 Wants=network-pre.target
 Conflicts=shutdown.target
-After=local-fs.target
+After=local-fs.target soft-reboot-cleanup.service
 
 [Service]
 Type=oneshot
@@ -258,12 +265,13 @@ qd_offline_egress_links_up() {
     "$vmx" "$vm" 'for i in $(seq 90); do ip route show default | grep -q . && exit 0; sleep 1; done; exit 1' >/dev/null
 }
 
-# qd_offline_egress_seal <vm> [vm-exec] — after a golden's scan: clear its
+# qd_offline_egress_seal <vm> [vm-exec] — after a golden's final scan (taken
+# with its links down, so nothing it does afterwards can leave it): clear its
 # history and suppress the shutdown dump, so clones start without the
 # golden's history. The next boot (a clone's) unseals.
 qd_offline_egress_seal() {
     local vm="$1" vmx="${2:-${VM_TOOLS:-$QD_OFFLINE_EGRESS_LIBDIR/..}/vm-exec}"
-    "$vmx" "$vm" "mkdir -p $QD_OFFLINE_EGRESS_STATE && touch $QD_OFFLINE_EGRESS_STATE/sealed && rm -rf $QD_OFFLINE_EGRESS_STATE/history" >/dev/null
+    "$vmx" "$vm" "mkdir -p $QD_OFFLINE_EGRESS_STATE && touch $QD_OFFLINE_EGRESS_STATE/sealed && rm -rf $QD_OFFLINE_EGRESS_STATE/history $QD_OFFLINE_EGRESS_STATE/dump-failed" >/dev/null
 }
 
 # qd_offline_egress_expected_hosts — the host names in QCI_OFFLINE_EGRESS_EXPECTED.
@@ -286,13 +294,13 @@ qd_offline_egress_scan() {
     local vm="$1" vmx="${2:-${VM_TOOLS:-$QD_OFFLINE_EGRESS_LIBDIR/..}/vm-exec}" out hosts rules rc t=$QD_OFFLINE_EGRESS_TABLE
     hosts="$(qd_offline_egress_expected_hosts | tr '\n' ' ')"
     rules="$(qd_offline_egress_ruleset | base64 -w0)"
-    out="$("$vmx" "$vm" "live=\$(nft -j list table inet $t 2>&1) || { echo \"QCI_EGRESS_UNARMED nft: \$live; tables: \$(nft list tables 2>&1 | tr '\n' ' '); unit: \$(systemctl is-active $QD_OFFLINE_EGRESS_UNIT 2>&1); context: \$(id -Z 2>&1)\"; exit 0; }; echo QCI_EGRESS_ARMED; echo \"QCI-EGRESS-LIVE \$live\"; for f in $QD_OFFLINE_EGRESS_STATE/history/*.json; do [ -s \"\$f\" ] && echo \"QCI-EGRESS-HIST \$(tr -d '\n' < \"\$f\")\"; done; echo \"QCI-EGRESS-REF \$(printf '%s' '$rules' | base64 -d | unshare -n sh -c 'nft -f - && nft -j list table inet $t' 2>&1 | tr '\n' ' ')\"; for h in $hosts; do getent ahosts \$h 2>/dev/null | awk -v h=\$h '{print \"QCI-OFFLINE-EGRESS-RESOLVED \" h \" \" \$1}' | sort -u; done")" || {
+    out="$("$vmx" "$vm" "live=\$(nft -j list table inet $t 2>&1) || { echo \"QCI_EGRESS_UNARMED nft: \$live; tables: \$(nft list tables 2>&1 | tr '\n' ' '); unit: \$(systemctl is-active $QD_OFFLINE_EGRESS_UNIT 2>&1); context: \$(id -Z 2>&1); netns self/pid1: \$(readlink /proc/self/ns/net /proc/1/ns/net | tr '\n' ' '); file: \$(ls -Z $QD_OFFLINE_EGRESS_NFT 2>&1); unit log: \$(journalctl -b -u $QD_OFFLINE_EGRESS_UNIT -o cat --no-pager 2>&1 | tail -n 5 | tr '\n' ' ')\"; exit 0; }; echo QCI_EGRESS_ARMED; echo \"QCI-EGRESS-LIVE \$live\"; [ -e $QD_OFFLINE_EGRESS_STATE/dump-failed ] && echo QCI-EGRESS-DUMP-FAILED; for f in $QD_OFFLINE_EGRESS_STATE/history/*.json; do [ -s \"\$f\" ] && echo \"QCI-EGRESS-HIST \$(tr -d '\n' < \"\$f\")\"; done; echo \"QCI-EGRESS-REF \$(printf '%s' '$rules' | base64 -d | unshare -n sh -c 'nft -f - && nft -j list table inet $t' 2>&1 | tr '\n' ' ')\"; for h in $hosts; do getent ahosts \$h 2>/dev/null | awk -v h=\$h '{print \"QCI-OFFLINE-EGRESS-RESOLVED \" h \" \" \$1}' | sort -u; done")" || {
         rc=$?
         printf 'offline-egress: asking %s failed (rc %s): %s\n' "$vm" "$rc" "$(printf '%s' "$out" | head -c 2000)" >&2
         return 2
     }
     case "$out" in
-        QCI_EGRESS_ARMED*) printf '%s\n' "$out" | sed '1d' | grep -E '^(QCI-EGRESS-LIVE|QCI-EGRESS-HIST|QCI-EGRESS-REF|QCI-OFFLINE-EGRESS-RESOLVED) ' || true ;;
+        QCI_EGRESS_ARMED*) printf '%s\n' "$out" | sed '1d' | grep -E '^(QCI-EGRESS-LIVE|QCI-EGRESS-HIST|QCI-EGRESS-REF|QCI-OFFLINE-EGRESS-RESOLVED) |^QCI-EGRESS-DUMP-FAILED$' || true ;;
         *) printf 'offline-egress: %s is not armed: %s\n' "$vm" "$(printf '%s' "$out" | head -c 2000)" >&2
            return 2 ;;
     esac

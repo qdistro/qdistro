@@ -84,11 +84,14 @@ def proto_name(p):
 def main():
     live_raw = ref_raw = None
     hist_raw = []
+    dump_failed = False
     addrs = {}
     for line in sys.stdin:
         line = line.rstrip("\n")
         if line.startswith("QCI-EGRESS-LIVE "):
             live_raw = line[len("QCI-EGRESS-LIVE "):]
+        elif line == "QCI-EGRESS-DUMP-FAILED":
+            dump_failed = True
         elif line.startswith("QCI-EGRESS-HIST "):
             hist_raw.append(line[len("QCI-EGRESS-HIST "):])
         elif line.startswith("QCI-EGRESS-REF "):
@@ -98,6 +101,10 @@ def main():
             if len(parts) >= 3:
                 addrs.setdefault(parts[1], set()).add(canon(parts[2]))
 
+    if dump_failed:
+        print("broken the guest could not save its table before a reload or "
+              "reboot; attempts recorded before it may be lost")
+        return
     if live_raw is None:
         print("broken no live table in the scan")
         return

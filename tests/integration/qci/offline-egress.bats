@@ -274,6 +274,10 @@ EOF
 @test "every reload path saves the live table first; a golden is sealed after its scan" {
     unit="$(qd_offline_egress_unit)"
     grep -qx 'Conflicts=shutdown.target' <<<"$unit"
+    # openSUSE flushes the whole ruleset at boot (soft-reboot-cleanup), so the
+    # table must load after it, and still before the network.
+    grep -qx 'After=local-fs.target soft-reboot-cleanup.service' <<<"$unit"
+    grep -q '^Before=network-pre.target' <<<"$unit"
     grep -q '^Before=.*shutdown.target' <<<"$unit"
     grep -q '^ExecStop=.*sealed ] || {.*nft -j list table inet qci_offline_egress > ' <<<"$unit"
     grep -q 'date +%%s%%N' <<<"$unit"                     # % escaped for systemd
@@ -284,6 +288,32 @@ EOF
     ! grep -q 'cmp -s' <<<"$script"
     n=$(grep -n 'qci_offline_egress_check "\$gvm"' "$REPO_ROOT/ci/lib/vm.sh" | cut -d: -f1)
     sed -n "$n,$((n + 4))p" "$REPO_ROOT/ci/lib/vm.sh" | grep -q 'qd_offline_egress_seal "\$gvm"'
+    # ... and its links go down before that final scan.
+    sed -n "$((n - 6)),$((n - 1))p" "$REPO_ROOT/ci/lib/vm.sh" | grep -q 'qd_offline_egress_set_links "\$gvm" down'
+}
+
+@test "a table that cannot be saved before a reload is sticky-broken, and the installer refuses to reload" {
+    synth_scan > "$BATS_TEST_TMPDIR/scan"
+    echo QCI-EGRESS-DUMP-FAILED >> "$BATS_TEST_TMPDIR/scan"
+    run qd_offline_egress_classify < "$BATS_TEST_TMPDIR/scan"
+    grep -q '^broken the guest could not save its table' <<<"$output"
+    # The dump: table present but unlistable as JSON -> marker + failure;
+    # no table -> nothing to save, success.
+    mkdir -p "$BATS_TEST_TMPDIR/bin" "$BATS_TEST_TMPDIR/state"
+    printf '#!/bin/bash\ncase "$*" in "list table inet qci_offline_egress") exit ${NO_TABLE:-0} ;; *-j*) exit 1 ;; esac\n' > "$BATS_TEST_TMPDIR/bin/nft"
+    chmod +x "$BATS_TEST_TMPDIR/bin/nft"
+    cmd="$(QD_OFFLINE_EGRESS_STATE="$BATS_TEST_TMPDIR/state" qd_offline_egress_dump_cmd)"
+    run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" sh -c "$cmd"
+    [ "$status" -ne 0 ]
+    [ -e "$BATS_TEST_TMPDIR/state/dump-failed" ]
+    rm -f "$BATS_TEST_TMPDIR/state/dump-failed"
+    run env NO_TABLE=1 PATH="$BATS_TEST_TMPDIR/bin:$PATH" sh -c "$cmd"
+    [ "$status" -eq 0 ]
+    [ ! -e "$BATS_TEST_TMPDIR/state/dump-failed" ]
+    # In the installer the failed dump stops the script before nft -f.
+    script="$(qd_offline_egress_guest_script)"
+    grep -q '^set -eu$' <<<"$script"
+    grep -q 'touch /var/lib/qci-offline-egress/dump-failed; false; }; fi$' <<<"$script"
 }
 
 @test "classify: missing, unparsable or overflowing tables are broken" {
