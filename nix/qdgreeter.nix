@@ -53,5 +53,8 @@ python314Packages.buildPythonApplication {
     test -f "$out/${python314Packages.python.sitePackages}/qdgreeter/qml/Main.qml"
   '';
 
-  meta.description = "qdistro boot greeter — PyQt6/QML greetd greeter";
+  meta = {
+    description = "qdistro boot greeter — PyQt6/QML greetd greeter";
+    license = lib.licenses.mit;
+  };
 }

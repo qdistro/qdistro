@@ -48,5 +48,7 @@ buildNpmPackage {
     runHook postInstall
   '';
 
+  # No meta.license: neither extension declares one (root AGENTS.md
+  # licensing section) — not assigned the root GPL by default.
   meta.description = description;
 }

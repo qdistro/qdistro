@@ -27,6 +27,11 @@ python314Packages.buildPythonApplication {
     # tmux_web_share plugin's transport signing; undeclared in pyproject
     # but imported by the module (and its test) — a real runtime dep.
     python314Packages.cryptography
+    # bin/qterminator-mcp imports mcp.server.fastmcp; shadow_screen and the
+    # asciinema/instant-replay/agent-control plugins import pyte. Neither is
+    # declared in pyproject; both are needed by shipped features.
+    python314Packages.mcp
+    python314Packages.pyte
     qdistro-presentation
     qdistro-app-sdk
     qtermwidget-py
@@ -66,5 +71,8 @@ python314Packages.buildPythonApplication {
     ];
   };
 
-  meta.description = "qdistro terminal emulator — PyQt6 Terminator port on QTermWidget";
+  meta = {
+    description = "qdistro terminal emulator — PyQt6 Terminator port on QTermWidget";
+    license = lib.licenses.gpl3Only;
+  };
 }

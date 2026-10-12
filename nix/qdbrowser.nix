@@ -10,6 +10,7 @@
   qdistro-presentation,
   qdistro-app-sdk,
   qtPytestCheck,
+  nodejs,
 }:
 
 python314Packages.buildPythonApplication {
@@ -25,6 +26,9 @@ python314Packages.buildPythonApplication {
     pyqt6
     pyqt6-webengine
     jeepney
+    # bin/qdbrowser-mcp imports mcp.server.fastmcp ([project.optional-
+    # dependencies] mcp) — shipped command, so a hard dep here.
+    mcp
     qdistro-presentation
     qdistro-app-sdk
   ];
@@ -47,9 +51,16 @@ python314Packages.buildPythonApplication {
     python314Packages.pytest
     python314Packages.pytest-qt
     python314Packages.pillow
+    # test-only, as in qci's host image: cert/CA-bundle tests importorskip
+    # cryptography; reader-mode/restyle tests run their JS under node.
+    python314Packages.cryptography
+    nodejs
   ];
 
   checkPhase = qtPytestCheck { perFile = "tests/test_*.py"; };
 
-  meta.description = "qdistro first-party browser — PyQt6 + QtWebEngine";
+  meta = {
+    description = "qdistro first-party browser — PyQt6 + QtWebEngine";
+    license = lib.licenses.gpl3Only;
+  };
 }

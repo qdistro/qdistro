@@ -13,7 +13,9 @@
   wayland,
   wayland-scanner,
   wayland-protocols,
+  makeWrapper,
   qdwin,
+  quickshell,
 }:
 
 let
@@ -57,6 +59,7 @@ stdenv.mkDerivation {
     ninja
     pkg-config
     wayland-scanner
+    makeWrapper
     qt6.wrapQtAppsHook
   ];
 
@@ -73,6 +76,15 @@ stdenv.mkDerivation {
     ${lib.concatMapStringsSep "\n    " (d: "cp -r ${qdshellSrc}/${d} $out/share/quickshell/qdshell/") qmlDirs}
     ${lib.concatMapStringsSep "\n    " (f: "cp ${qdshellSrc}/${f} $out/share/quickshell/qdshell/") qmlFiles}
     chmod -R u=rwX,go=rX $out/share/quickshell/qdshell
+
+    # The session launcher: deploy/qdshell.service runs
+    #   qs -p /usr/share/quickshell/qdshell
+    # with QML_IMPORT_PATH=/usr/share/qdistro/qml (so `import Qdistro.Qdwin`
+    # resolves) and QS_ICON_THEME=Adwaita. Same contract, store paths.
+    makeWrapper ${quickshell}/bin/qs $out/bin/qdshell \
+      --add-flags "-p $out/share/quickshell/qdshell" \
+      --prefix QML_IMPORT_PATH : $out/share/qdistro/qml \
+      --set-default QS_ICON_THEME Adwaita
   '';
 
   # Mirror the spec's %check.
@@ -81,7 +93,11 @@ stdenv.mkDerivation {
     test -f $out/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so
     test -f $out/share/qdistro/qml/Qdistro/Qdwin/qmldir
     test -f $out/share/quickshell/qdshell/shell.qml
+    test -x $out/bin/qdshell
   '';
 
-  meta.description = "qdistro desktop shell — Qdistro.Qdwin QML plugin + QML tree";
+  meta = {
+    description = "qdistro desktop shell — Qdistro.Qdwin QML plugin + QML tree";
+    license = lib.licenses.gpl3Plus;
+  };
 }

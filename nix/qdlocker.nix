@@ -82,5 +82,8 @@ python314Packages.buildPythonApplication {
     test -f "$out/${python314Packages.python.sitePackages}/qdlocker/qml/shim/qmldir"
   '';
 
-  meta.description = "qdistro screen locker — PyQt6/QML client of qdwin_locker_v1";
+  meta = {
+    description = "qdistro screen locker — PyQt6/QML client of qdwin_locker_v1";
+    license = lib.licenses.mit;
+  };
 }

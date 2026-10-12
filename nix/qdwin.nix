@@ -52,5 +52,8 @@ stdenv.mkDerivation {
     libxkbcommon
   ];
 
-  meta.description = "qdistro compositor shell plugin for weston (libweston-16)";
+  meta = {
+    description = "qdistro compositor shell plugin for weston (libweston-16)";
+    license = lib.licenses.gpl3Plus;
+  };
 }

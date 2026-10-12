@@ -27,5 +27,8 @@ python314Packages.buildPythonPackage {
 
   pythonImportsCheck = [ "qdistro_app" ];
 
-  meta.description = "qdistro App1 SDK — app receiver, registration helper, recall module";
+  meta = {
+    description = "qdistro App1 SDK — app receiver, registration helper, recall module";
+    license = lib.licenses.gpl3Plus;
+  };
 }

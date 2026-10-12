@@ -48,5 +48,8 @@ python314Packages.buildPythonApplication {
 
   checkPhase = qtPytestCheck { };
 
-  meta.description = "qdistro notes/wiki app — PyQt6 Zim-style wiki editor";
+  meta = {
+    description = "qdistro notes/wiki app — PyQt6 Zim-style wiki editor";
+    license = lib.licenses.gpl2Plus;
+  };
 }

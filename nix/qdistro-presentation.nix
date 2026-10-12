@@ -31,5 +31,8 @@ python314Packages.buildPythonPackage {
     export HOME="$TMPDIR"
   '';
 
-  meta.description = "qdistro session presentation snapshot model, publisher, and Qt adapter";
+  meta = {
+    description = "qdistro session presentation snapshot model, publisher, and Qt adapter";
+    license = lib.licenses.gpl3Plus;
+  };
 }

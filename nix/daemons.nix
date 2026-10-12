@@ -52,5 +52,8 @@ stdenv.mkDerivation {
     runHook postCheck
   '';
 
-  meta.description = "qdistro wayland helper daemons (forward, pixelfeed, secctx-exec, tier1-exec, cursor-sprites)";
+  meta = {
+    description = "qdistro wayland helper daemons (forward, pixelfeed, secctx-exec, tier1-exec, cursor-sprites)";
+    license = lib.licenses.gpl3Plus;
+  };
 }

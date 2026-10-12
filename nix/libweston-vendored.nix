@@ -93,5 +93,8 @@ stdenv.mkDerivation {
     "-Dcolor-management-lcms=true"
   ];
 
-  meta.description = "qdistro's patched libweston-16 + backend modules";
+  meta = {
+    description = "qdistro's patched libweston-16 + backend modules";
+    license = lib.licenses.mit;
+  };
 }

@@ -42,7 +42,10 @@
           };
           qdwin = pkgs.callPackage ./nix/qdwin.nix { westonQdistro = self.packages.${system}.weston-qdistro; };
           quickshell-vendored = pkgs.callPackage ./nix/quickshell-vendored.nix { };
-          qdshell = pkgs.callPackage ./nix/qdshell.nix { qdwin = self.packages.${system}.qdwin; };
+          qdshell = pkgs.callPackage ./nix/qdshell.nix {
+            inherit (p) qdwin;
+            quickshell = p.quickshell-vendored;
+          };
           daemons = pkgs.callPackage ./nix/daemons.nix { qdwin = self.packages.${system}.qdwin; };
           qdistro-presentation = pkgs.callPackage ./nix/qdistro-presentation.nix { };
           qdistro-app-sdk = pkgs.callPackage ./nix/qdistro-app-sdk.nix { };
@@ -84,13 +87,27 @@
         }
       );
 
+      # Every package (so `nix flake check` builds each one and runs its
+      # checkPhase suite) plus the cross-package gates in nix/checks.nix.
       checks = forAllSystems (
         system:
         let
           pkgs = pkgsFor system;
         in
-        import ./nix/checks.nix {
-          inherit (pkgs) lib runCommand runtimeShell binutils;
+        self.packages.${system}
+        // import ./nix/checks.nix {
+          inherit (pkgs)
+            lib
+            runCommand
+            runtimeShell
+            binutils
+            coreutils
+            dbus
+            pkg-config
+            python314
+            wayland-scanner
+            wayland-protocols
+            ;
           apps = self.packages.${system};
           westonQdistro = self.packages.${system}.weston-qdistro;
           libwestonVendored = self.packages.${system}.libweston-vendored;

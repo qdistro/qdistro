@@ -103,5 +103,8 @@ stdenv.mkDerivation {
     runHook postInstall
   '';
 
-  meta.description = "qdistro's vendored Quickshell 0.3.2";
+  meta = {
+    description = "qdistro's vendored Quickshell 0.3.2";
+    license = with lib.licenses; [ lgpl3Only bsd3 ];
+  };
 }

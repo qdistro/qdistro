@@ -29,6 +29,7 @@ Wider than previously documented (was "xdg-shell.c only"). Diff sizes in
 |---|---|---|
 | `libweston/desktop/xdg-shell.c` | 404 | patches 0001 cover part; remainder is the four layer-popup helpers + related grab plumbing |
 | `libweston/output-capture.c` | 192 | output-capture additions (pixelfeed path) |
+| `libweston/output-capture.h` | 30 | declarations for the output-capture additions (carried) |
 | `libweston/backend-rdp/rdp.c` | 176 | patch 0006 covers part; remainder unrecorded |
 | `libweston/backend-drm/kms.c` | 82 | drm backend changes |
 | `include/libweston/desktop.h` | 39 | public API decls for the helpers |
@@ -40,7 +41,7 @@ Wider than previously documented (was "xdg-shell.c only"). Diff sizes in
 | `libweston/backend-drm/drm-internal.h` | 5 | |
 | `libweston/backend-drm/drm-kms-enums.h` | 2 | |
 | `libweston/backend-rdp/rdp.h` | 1 | |
-| `meson.build` | mixed | both stripping glue (subdir removals) and functional bits |
+| `meson.build` | build glue only | subdir removals (stripping) + `libevdev` made `required: false` for the libweston-only build — no functional change; NOT carried (upstream's full build keeps libevdev required and all subdirs) |
 
 New vendored-only file: `libweston/desktop/qdwin-xdg-constrain.h`
 (+ `releasing.md` at tree root, doc only).

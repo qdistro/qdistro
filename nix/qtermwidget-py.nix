@@ -67,5 +67,8 @@ stdenv.mkDerivation {
 
   # autoPatchelfHook binds the extension .so against qtermwidget6 + Qt.
 
-  meta.description = "QTermWidget 2.4.0 SIP Python binding (built from qdterm's vendored pyqt source)";
+  meta = {
+    description = "QTermWidget 2.4.0 SIP Python binding (built from qdterm's vendored pyqt source)";
+    license = lib.licenses.gpl2Plus;
+  };
 }

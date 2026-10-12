@@ -32,10 +32,21 @@ let
   ];
 in
 
-weston.overrideAttrs (old: {
+# nixpkgs defaults pipewireSupport = false; qdistro's production libweston
+# builds -Dbackend-pipewire=true (nix/libweston-vendored.nix) and qdwin links
+# against THIS libweston, so the backend must ship in this closure.
+(weston.override { pipewireSupport = true; }).overrideAttrs (old: {
   pname = "weston-qdistro";
 
   postPatch = ''
     ${lib.concatMapStringsSep "\n    " (f: "cp ${vendoredSrc}/${f} ${f}") delta}
+  '';
+
+  doInstallCheck = true;
+  installCheckPhase = ''
+    for b in drm headless pipewire rdp wayland x11; do
+      test -f $out/lib/libweston-16/$b-backend.so \
+        || { echo "missing $b-backend.so"; exit 1; }
+    done
   '';
 })
