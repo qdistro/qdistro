@@ -4084,8 +4084,14 @@ gui_scenario_skip_reason() {
     fi
     case "$rel" in
         qdwin/tests/gui/[0-9][0-9]-*.md)
-            [ "$legacy_ctrl" != 1 ] && \
-                printf '%s\n' "legacy qdshell ctrl-socket not available" ;;
+            # Reached only with an explicit --vm (`qci gui --vm`, `qci replay`):
+            # the default lane routes these to qdwin workers before this point.
+            # Legacy ctrl-socket scenarios were already skipped by content
+            # (gui_scenario_uses_legacy_ctrl); the runtime legacy_ctrl probe
+            # never answers on the Quickshell session, so gating on it skipped
+            # every modern scenario too. Require the qdwin session instead.
+            [ "$qdshell_active" != 1 ] && \
+                printf '%s\n' "qdshell session not active in this VM profile" ;;
         qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md|\
         qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md)
             # Tier-5 OUTER stack: the qdwin/qdshell compositor on wayland-1 +
@@ -4386,8 +4392,14 @@ gate_gui() {
     kv gui_qdwin_capture "$qdwin_capture"
     log "gui: qdwin shell-capture capability qdwin_capture=$qdwin_capture (0 => golden predates QDWIN_ENABLE_SHELL_CAPTURE; rebake with fresh-vm-bootstrap; capture-dependent lanes skip)"
 
-    run_qdwin_executable_gui_smokes "$qdwin_svm" "$qdwin_capture"; step_rc=$?
-    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    # `qci replay` reruns ONE scenario: the session sub-gates (deterministic
+    # smokes, the ~48 min qdshell-ui vision pytest) are not what was asked for.
+    local session_subgates=1
+    [ "${QCI_GUI_REPLAY_ONLY:-0}" = 1 ] && session_subgates=0
+    if [ "$session_subgates" = 1 ]; then
+        run_qdwin_executable_gui_smokes "$qdwin_svm" "$qdwin_capture"; step_rc=$?
+        [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    fi
     # The vision harness needs a LIVE qdshell quickshell session on wayland-1.
     # Authoritatively probe qdshell.service (the deployed qs unit) + the
     # wayland-1 socket rather than relying solely on the earlier
@@ -4396,7 +4408,9 @@ gate_gui() {
     if [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && { [ "$qdshell_active" = 1 ] || "$VM_TOOLS/vm-exec" "$qdwin_svm" "test -S /run/user/1000/wayland-1 && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdshell.service 2>/dev/null | grep -qx active" >/dev/null 2>&1; }; then
         qdshell_session=1
     fi
-    if [ "${QCI_GUI_SKIP_QDWIN:-0}" = 1 ]; then
+    if [ "$session_subgates" = 0 ]; then
+        log "gui: qci replay: session sub-gates (smokes, qdshell-ui) not run"
+    elif [ "${QCI_GUI_SKIP_QDWIN:-0}" = 1 ]; then
         record_result gui qdshell-ui skip 0 pass vision "" \
             "QCI_GUI_SKIP_QDWIN=1: qdwin/qdshell vision harness skipped"
     elif [ "$qdwin_capture" = 0 ]; then
