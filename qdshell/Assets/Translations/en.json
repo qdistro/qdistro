@@ -2529,7 +2529,7 @@
       "title": "Permissions"
     },
     "podapp": {
-      "running": "{container} is already running. Close it before launching another app in it.",
+      "running": "{container} is still running or shutting down. Close it, or wait a moment, before launching another app in it.",
       "running-title": "Already running"
     },
     "qdshell-performance": {

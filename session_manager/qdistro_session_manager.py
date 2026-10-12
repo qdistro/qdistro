@@ -1931,10 +1931,13 @@ class _SystemOps:
     def podapp_container_exists(self, container: str) -> bool | None:
         """Whether admin's rootless podman already has *container*: True
         present, False absent, None when the check itself failed or timed out
-        (the caller must not read that as either answer)."""
+        (the caller must not read that as either answer). Bounded like the
+        tier-2 status probe: this sits in front of a click on an offload
+        worker, and "unknown" already means "launch anyway", so a wedged
+        podman must not hold the click (or the worker) for _T_PODMAN."""
         try:
             verdict = self._podman_exists_verdict(
-                self._runuser_exists(container, timeout=_T_PODMAN))
+                self._runuser_exists(container, timeout=3))
         except (subprocess.TimeoutExpired, OSError) as e:
             log.warning("podman container exists %s failed: %s", container, e)
             return None
@@ -5237,7 +5240,7 @@ class _SiloStore:
         if present:
             msg = (f"pod {container!r} is already running (or still shutting "
                    f"down); close it before launching another app in it")
-            self._audit_record("podapp-launch", container, decision="refuse",
+            self._audit_record("podapp-launch", container, decision="deny",
                                reason=msg, caller=caller)
             raise PodAppRunning(msg)
         if present is None:

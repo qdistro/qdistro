@@ -270,14 +270,14 @@ of a pod that is up therefore does not launch
 
 - a live window of the pod (tier-2 engine, secctx app_id `<container>/…`)
   is focused, the newest one if there are several;
-- a click while that pod's own launch placeholder is still pending is
-  ignored;
+- a click while that pod's own launch is still pending (from the click
+  until its window or the 15 s placeholder cap) is ignored;
 - otherwise the shell calls `LaunchPodApp`, which refuses with
   `PodAppRunning` if admin's podman already has the container (starting
   without a window yet, or still shutting down); the shell shows an
-  "Already running" toast instead of a placeholder. A `container exists`
-  check that cannot run does not refuse: podman's own name check still
-  applies.
+  "Already running" toast instead of a placeholder. The `container exists`
+  check is bounded at 3 s, and one that cannot run does not refuse:
+  podman's own name check still applies.
 
 Launching a *different* app into a running pod (a `podman exec` into its
 nested weston) is not supported; close the pod first.

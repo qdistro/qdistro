@@ -74,5 +74,18 @@ assert.ok(launchFn.includes("Qdwin.focusWindow(verdict.handle)"));
 assert.ok(service.includes("PodAppLaunch.isRunningRefusal(err)"));
 assert.ok(/container:\s+container,/.test(service),
     "placeholders must carry their container");
+// Ensures: a click counts as pending from the moment it is sent, not from
+// the daemon's reply (the unit starts podman asynchronously, so two clicks
+// before the first container exists would both pass the daemon's check).
+assert.ok(launchFn.indexOf("_inflight[row.container]") >= 0
+          && launchFn.indexOf("_inflight[row.container]") < launchFn.indexOf("proc.running = true"),
+    "the in-flight mark must be set before the D-Bus call starts");
+assert.ok(/onExited:[^]*?root\._inflightDone\(launchProc\._container\)/.test(service),
+    "every answered call must clear its in-flight mark");
+const rowsFn = service.slice(service.indexOf("function _placeholderRows"),
+                             service.indexOf("function _registerPlaceholder"));
+assert.ok(rowsFn.includes("for (const c in _inflight)")
+          && rowsFn.includes("placeholderTimeoutMs"),
+    "in-flight launches count as pending, and expire with the placeholder cap");
 
 console.log("podapp-launch-policy: focus-existing / pending / refusal invariants passed");

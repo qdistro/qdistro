@@ -29,7 +29,8 @@ function isPodWindow(win, container) {
 }
 
 // windows:      [{ handle, sandboxEngine, secctxAppId }] in model order
-// placeholders: [{ container }] launches still waiting for their window
+// placeholders: [{ container }] launches still waiting for their window,
+//               including ones whose LaunchPodApp reply has not arrived
 // Returns one of:
 //   { action: "focus", handle }  the pod is up: raise its newest window
 //   { action: "pending" }        a launch into this pod is already starting

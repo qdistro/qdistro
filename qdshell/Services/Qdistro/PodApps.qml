@@ -306,7 +306,26 @@ Singleton {
             "_iconName": row.iconName || "",
             "_silo":     row.silo,
         });
+        // Pending from the click on, not from the reply: the unit starts
+        // podman asynchronously, so a second click before the first
+        // container exists would pass the daemon's check and collide.
+        _inflight[row.container] = (_inflight[row.container] || 0) + 1;
+        _inflightSince[row.container] = Date.now();
         proc.running = true;
+    }
+
+    // container -> LaunchPodApp calls not yet answered (+ when the last one
+    // was made). Expires with the placeholder cap, so a call whose process
+    // never reports an exit cannot wedge the pod's launcher entry.
+    property var _inflight: ({})
+    property var _inflightSince: ({})
+    function _inflightDone(container) {
+        if (_inflight[container] > 1) {
+            _inflight[container]--;
+        } else {
+            delete _inflight[container];
+            delete _inflightSince[container];
+        }
     }
 
     // Internal helper Process component. One per launch.
@@ -328,6 +347,7 @@ Singleton {
             stdout: StdioCollector { id: launchOut }
             stderr: StdioCollector { id: launchErr }
             onExited: (code, status) => {
+                root._inflightDone(launchProc._container);
                 const err = String(launchErr.text || "").trim();
                 if (code !== 0 && PodAppLaunch.isRunningRefusal(err)) {
                     // The pod is up but has no window we can raise (still
@@ -387,6 +407,11 @@ Singleton {
         const out = [];
         for (let i = 0; i < placeholders.count; i++)
             out.push({ container: placeholders.get(i).container });
+        const now = Date.now();
+        for (const c in _inflight) {
+            if (now - _inflightSince[c] <= placeholderTimeoutMs)
+                out.push({ container: c });
+        }
         return out;
     }
 
