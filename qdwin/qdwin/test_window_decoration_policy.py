@@ -101,8 +101,20 @@ def main():
     if "ZXDG_TOPLEVEL_DECORATION_V1_ERROR_ALREADY_CONSTRUCTED" not in get:
         return fail("a second decoration object per toplevel must be refused")
     gone = body(src, "qdwin_xdg_decoration_toplevel_destroyed")
-    if not gone or "d->dsurf = NULL" not in gone:
-        return fail("xdg_toplevel destroy must clear the decoration's surface")
+    if not gone or "d->toplevel_res = NULL" not in gone:
+        return fail("xdg_toplevel destroy must clear the decoration's toplevel")
+    # libweston frees the desktop surface when the wl_surface dies and only
+    # NULLs the xdg_toplevel resource's user data: a cached
+    # weston_desktop_surface pointer would dangle.
+    m = re.search(r"struct qdwin_xdg_decoration \{(.*?)\};", src, re.S)
+    if not m or "weston_desktop_surface" in re.sub(r"/\*.*?\*/", "", m.group(1), flags=re.S):
+        return fail("qdwin_xdg_decoration must not cache a weston_desktop_surface")
+    teardown = body(src, "qdwin_destroy")
+    if not teardown or "qdwin_xdg_decorations_release_all(qdwin)" not in teardown:
+        return fail("compositor teardown must release the decoration list")
+    neut = body(src, "qdwin_neutralize_binding_resource")
+    if not neut or "zxdg_decoration_manager_v1_interface.name" not in neut:
+        return fail("decoration manager resources must be neutralized at teardown")
     dead = body(src, "qdwin_toplevel_decoration_resource_destroyed")
     if not dead or "tl->ssd_negotiated = false" not in dead \
             or "qdwin_emit_toplevel_decoration" not in dead \

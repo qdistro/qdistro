@@ -235,10 +235,12 @@ static void qdwin_resize_grab_start(struct qdwin *qdwin,
 				    uint32_t edges, const char *why);
 static void qdwin_resize_grab_anchor(struct qdwin *qdwin,
 				     struct qdwin_toplevel *tl);
+static void qdwin_resize_grab_finish(struct qdwin *qd, const char *why);
 static void qdwin_emit_toplevel_decoration(struct qdwin *qdwin,
 					   struct qdwin_toplevel *tl);
 static bool qdwin_xdg_decoration_negotiated(
 	struct qdwin *qdwin, struct weston_desktop_surface *dsurf);
+static void qdwin_xdg_decorations_release_all(struct qdwin *qdwin);
 /* §6.8 S1 nested-mode forward decls (definitions near wet_shell_init). */
 static void qdwin_nested_publish_toplevel(struct qdwin_toplevel *tl);
 static void qdwin_nested_unpublish_toplevel(struct qdwin_toplevel *tl);
@@ -3413,6 +3415,8 @@ qdwin_handle_attach_decoration(struct wl_client *client,
 		return;
 	}
 
+	const int old_n = tl->inset_n, old_e = tl->inset_e;
+	const int old_s = tl->inset_s, old_w = tl->inset_w;
 	struct wl_resource *sides[QDWIN_SIDES] = { north, east, south, west };
 	for (int s = 0; s < QDWIN_SIDES; s++) {
 		if (qdwin_chrome_attach_side(tl, s, sides[s]) < 0) {
@@ -3448,7 +3452,17 @@ qdwin_handle_attach_decoration(struct wl_client *client,
 
 	qdwin_toplevel_release_holding(tl, "attach_decoration");
 
-	if (tl->inset_n || tl->inset_e || tl->inset_s || tl->inset_w)
+	/* Reconfigure the client only when the frame's thickness changed.
+	 * The shell re-attaches on every repaint (title, focus, and each
+	 * size the client commits); re-running apply_inset then would
+	 * configure the client back to the size it just committed — during
+	 * an edge drag that is a configure for an OLDER size than the one
+	 * the drag already sent, which libweston does not dedupe, so the
+	 * window would jitter and could settle short of the pointer. */
+	bool inset_changed = tl->inset_n != old_n || tl->inset_e != old_e ||
+			     tl->inset_s != old_s || tl->inset_w != old_w;
+	if (inset_changed &&
+	    (tl->inset_n || tl->inset_e || tl->inset_s || tl->inset_w))
 		qdwin_toplevel_apply_inset(tl);
 
 	qdwin_toplevel_position_chrome(tl);
@@ -4333,6 +4347,10 @@ qdwin_move_grab_start(struct qdwin *qdwin, struct qdwin_toplevel *tl,
 	/* v25: dragging a tiled window floats it — clear the tiled flag so a
 	 * later request_tile(none) doesn't snap it back to stale geometry. */
 	qdwin_toplevel_clear_tiled(tl);
+	/* A move ends any edge anchoring left over from a resize: the next
+	 * commit must not pull the window back to the old right/bottom. */
+	if (qdwin->resize_anchor_handle == handle)
+		qdwin->resize_anchor_handle = 0;
 
 	if (!pointer)
 		pointer = qdwin_first_pointer(qdwin);
@@ -4428,6 +4446,16 @@ qdwin_resize_grab_motion(struct weston_pointer_grab *grab,
 		qdwin_toplevel_from_handle(qd, qd->resize_grab_handle);
 	if (!tl || !tl->view || !tl->desktop_surface)
 		return;
+	/* Maximised / fullscreened / tiled mid-drag (keyboard shortcut,
+	 * client request): the drag is over — keep sizing it and the window
+	 * would leave the geometry that state just set. */
+	if ((tl->state & (QDWIN_TS_MAXIMIZED | QDWIN_TS_FULLSCREEN)) ||
+	    tl->tiled != 0) {
+		qdwin_resize_grab_finish(qd, "state change");
+		qd->resize_anchor_handle = 0;
+		weston_pointer_end_grab(pointer);
+		return;
+	}
 
 	double dx = pointer->pos.c.x - qd->resize_start_px;
 	double dy = pointer->pos.c.y - qd->resize_start_py;
@@ -4601,6 +4629,13 @@ qdwin_resize_grab_anchor(struct qdwin *qdwin, struct qdwin_toplevel *tl)
 {
 	if (qdwin->resize_anchor_handle != tl->handle)
 		return;
+	/* Maximise / fullscreen / tile own the placement now; a held anchor
+	 * would shove the window off the position they chose. */
+	if ((tl->state & (QDWIN_TS_MAXIMIZED | QDWIN_TS_FULLSCREEN)) ||
+	    tl->tiled != 0) {
+		qdwin->resize_anchor_handle = 0;
+		return;
+	}
 	uint32_t e = qdwin->resize_edges;
 	double x, y;
 	int w, h;
@@ -14430,7 +14465,8 @@ qdwin_neutralize_binding_resource(struct wl_resource *resource, void *data)
 	    (strcmp(cls, qdwin_shell_v1_interface.name) == 0 ||
 	     strcmp(cls, qdwin_locker_v1_interface.name) == 0 ||
 	     strcmp(cls, qdwin_lock_surface_v1_interface.name) == 0 ||
-	     strcmp(cls, qdwin_locker_surface_v1_interface.name) == 0))
+	     strcmp(cls, qdwin_locker_surface_v1_interface.name) == 0 ||
+	     strcmp(cls, zxdg_decoration_manager_v1_interface.name) == 0))
 		wl_resource_set_user_data(resource, NULL);
 	return WL_ITERATOR_CONTINUE;
 }
@@ -14550,6 +14586,7 @@ qdwin_destroy(struct wl_listener *listener, void *data)
 	if (qdwin->shell_background)
 		wl_resource_destroy(qdwin->shell_background->resource);
 	qdwin_neutralize_binding_resources(qdwin);
+	qdwin_xdg_decorations_release_all(qdwin);
 	qdwin->shell_resource = NULL;
 	qdwin->shell_bound = 0;
 	qdwin->locker_resource = NULL;
@@ -22408,12 +22445,13 @@ bind_xdg_activation(struct wl_client *client, void *data,
 struct qdwin_xdg_decoration {
 	struct wl_resource *resource;
 	struct qdwin *qdwin;
-	/* The decorated xdg_toplevel's desktop surface. NULLed when the
-	 * xdg_toplevel resource goes first (toplevel_destroy), which also
-	 * covers a toplevel that never committed and so never reached
-	 * surface_added/removed; the decoration object is then inert until
-	 * the client destroys it. */
-	struct weston_desktop_surface *dsurf;
+	/* The decorated xdg_toplevel resource, NULLed when it is destroyed
+	 * (toplevel_destroy). Never cache its weston_desktop_surface:
+	 * libweston frees that when the wl_surface dies and only NULLs the
+	 * resource's user data — the resource itself (and so this
+	 * listener) can outlive it. Resolve it per use via
+	 * qdwin_xdg_decoration_dsurf; NULL means the object is inert. */
+	struct wl_resource *toplevel_res;
 	struct wl_listener toplevel_destroy;
 	struct wl_list link;           /* qdwin::xdg_decorations */
 };
@@ -22421,13 +22459,22 @@ struct qdwin_xdg_decoration {
 /* Is `dsurf` decorated by a live zxdg_toplevel_decoration_v1? Called
  * from surface_added, which runs at the toplevel's first commit —
  * after the client created its decoration object. */
+static struct weston_desktop_surface *
+qdwin_xdg_decoration_dsurf(struct qdwin_xdg_decoration *d)
+{
+	return d->toplevel_res ? wl_resource_get_user_data(d->toplevel_res)
+			       : NULL;
+}
+
 static bool
 qdwin_xdg_decoration_negotiated(struct qdwin *qdwin,
 				struct weston_desktop_surface *dsurf)
 {
 	struct qdwin_xdg_decoration *d;
+	if (!dsurf)
+		return false;
 	wl_list_for_each(d, &qdwin->xdg_decorations, link)
-		if (d->dsurf == dsurf)
+		if (qdwin_xdg_decoration_dsurf(d) == dsurf)
 			return true;
 	return false;
 }
@@ -22441,7 +22488,7 @@ qdwin_xdg_decoration_toplevel_destroyed(struct wl_listener *listener,
 	(void)data;
 	wl_list_remove(&d->toplevel_destroy.link);
 	wl_list_init(&d->toplevel_destroy.link);
-	d->dsurf = NULL;
+	d->toplevel_res = NULL;
 }
 
 static void
@@ -22455,14 +22502,31 @@ qdwin_toplevel_decoration_resource_destroyed(struct wl_resource *resource)
 	/* Destroying the object hands decoration back to the client
 	 * (xdg-decoration: "the client should draw its own decorations").
 	 * Tell the shell so it drops the frame. */
-	struct qdwin_toplevel *tl = d->dsurf
-		? weston_desktop_surface_get_user_data(d->dsurf) : NULL;
+	struct weston_desktop_surface *dsurf = qdwin_xdg_decoration_dsurf(d);
+	struct qdwin_toplevel *tl = dsurf
+		? weston_desktop_surface_get_user_data(dsurf) : NULL;
 	if (tl && tl->ssd_negotiated &&
-	    !qdwin_xdg_decoration_negotiated(d->qdwin, d->dsurf)) {
+	    !qdwin_xdg_decoration_negotiated(d->qdwin, dsurf)) {
 		tl->ssd_negotiated = false;
 		qdwin_emit_toplevel_decoration(d->qdwin, tl);
 	}
 	free(d);
+}
+
+/* Compositor teardown: the client-owned decoration resources outlive
+ * qdwin. Detach every one (its destructor then sees NULL user data) and
+ * free the bookkeeping, so no late destructor touches the freed list. */
+static void
+qdwin_xdg_decorations_release_all(struct qdwin *qdwin)
+{
+	struct qdwin_xdg_decoration *d, *tmp;
+	wl_list_for_each_safe(d, tmp, &qdwin->xdg_decorations, link) {
+		wl_list_remove(&d->link);
+		wl_list_remove(&d->toplevel_destroy.link);
+		wl_resource_set_user_data(d->resource, NULL);
+		free(d);
+	}
+	wl_list_init(&qdwin->xdg_decorations);
 }
 
 static void
@@ -22517,10 +22581,24 @@ qdwin_xdg_decoration_manager_get_toplevel_decoration(
 {
 	struct qdwin *qdwin = wl_resource_get_user_data(manager_resource);
 	/* libweston-desktop sets every xdg_toplevel resource's user data
-	 * to its weston_desktop_surface. */
+	 * to its weston_desktop_surface (NULL once that is gone). */
 	struct weston_desktop_surface *dsurf =
 		wl_resource_get_user_data(xdg_toplevel_resource);
-	if (dsurf && qdwin_xdg_decoration_negotiated(qdwin, dsurf)) {
+	if (!qdwin) {
+		/* qdwin is tearing down (manager neutralized): answer with an
+		 * untracked object that still honours the protocol. */
+		uint32_t v = wl_resource_get_version(manager_resource);
+		struct wl_resource *dec = wl_resource_create(
+			client, &zxdg_toplevel_decoration_v1_interface, v, id);
+		if (!dec) {
+			wl_client_post_no_memory(client);
+			return;
+		}
+		wl_resource_set_implementation(
+			dec, &qdwin_toplevel_decoration_impl, NULL, NULL);
+		return;
+	}
+	if (qdwin_xdg_decoration_negotiated(qdwin, dsurf)) {
 		wl_resource_post_error(
 			manager_resource,
 			ZXDG_TOPLEVEL_DECORATION_V1_ERROR_ALREADY_CONSTRUCTED,
@@ -22540,7 +22618,7 @@ qdwin_xdg_decoration_manager_get_toplevel_decoration(
 	}
 	d->resource = dec;
 	d->qdwin = qdwin;
-	d->dsurf = dsurf;
+	d->toplevel_res = xdg_toplevel_resource;
 	wl_list_insert(&qdwin->xdg_decorations, &d->link);
 	d->toplevel_destroy.notify = qdwin_xdg_decoration_toplevel_destroyed;
 	wl_resource_add_destroy_listener(xdg_toplevel_resource,
