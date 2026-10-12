@@ -28,6 +28,7 @@
   lftp,
   qdistro-presentation,
   qdistro-app-sdk,
+  qtPytestCheck,
 }:
 
 python314Packages.buildPythonApplication {
@@ -56,11 +57,8 @@ python314Packages.buildPythonApplication {
     wrapQtApp "$out/bin/qfileman"
   '';
 
-  # qci runs the host suite inside dbus-run-session; the QtDBus paths
-  # (runner notifications, qterminator socket) block without a bus.
-  # dbus-run-session needs /etc/dbus-1 — spawn dbus-daemon against the
-  # package's own session.conf instead, and mirror enter-host.sh's
-  # system-bus alias.
+  # The QtDBus paths (runner notifications, qterminator socket) block
+  # without a bus — qtPytestCheck provides one, as qci's host container does.
   nativeCheckInputs = [
     dbus
     python314Packages.pytest
@@ -88,22 +86,7 @@ python314Packages.buildPythonApplication {
     lftp
   ];
 
-  checkPhase = ''
-    runHook preCheck
-    export QT_QPA_PLATFORM=offscreen
-    export HOME="$TMPDIR"
-    dbus-daemon --fork --print-address=3 --print-pid=4 \
-      --config-file=${dbus}/share/dbus-1/session.conf 3>"$TMPDIR/bus.addr" 4>"$TMPDIR/bus.pid"
-    export DBUS_SESSION_BUS_ADDRESS="$(cat "$TMPDIR/bus.addr")"
-    export DBUS_SYSTEM_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS"
-    # tmp_path under /nix/var/nix/builds/<hash>/ exceeds the 108-byte
-    # AF_UNIX limit — qterminator socket tests need a short basetemp.
-    rc=0
-    python -m pytest --basetemp=/tmp/qfm-pytest -o faulthandler_timeout=120 || rc=$?
-    kill "$(cat "$TMPDIR/bus.pid")" || true
-    [ "$rc" -eq 0 ]
-    runHook postCheck
-  '';
+  checkPhase = qtPytestCheck { };
 
   meta.description = "qdistro file manager — dual-pane PyQt6 file manager with plugin system";
 }

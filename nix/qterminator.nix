@@ -10,6 +10,7 @@
   qdistro-presentation,
   qdistro-app-sdk,
   qtermwidget-py,
+  qtPytestCheck,
 }:
 
 python314Packages.buildPythonApplication {
@@ -44,8 +45,6 @@ python314Packages.buildPythonApplication {
     done
   '';
 
-  # Same sandbox shims as qfileman: dbus session (agent-control paths) and
-  # a short basetemp for unix-socket tests.
   nativeCheckInputs = [
     dbus
     python314Packages.pytest
@@ -60,24 +59,12 @@ python314Packages.buildPythonApplication {
   # test_geometry_negative_values_rejected pins a Python 3.13 argparse quirk
   # (qci's host image is 3.13.15); 3.14 argparse accepts "-100x-200" as the
   # option value, so on the shipping python314 it does not raise.
-  checkPhase = ''
-    runHook preCheck
-    export QT_QPA_PLATFORM=offscreen
-    export HOME="$TMPDIR"
-    dbus-daemon --fork --print-address=3 --print-pid=4 \
-      --config-file=${dbus}/share/dbus-1/session.conf 3>"$TMPDIR/bus.addr" 4>"$TMPDIR/bus.pid"
-    export DBUS_SESSION_BUS_ADDRESS="$(cat "$TMPDIR/bus.addr")"
-    export DBUS_SYSTEM_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS"
-    rc=0
-    # faulthandler_timeout dumps the stack of any wedged test (no kill —
-    # just makes a hang diagnosable from the build log).
-    python -m pytest --basetemp=/tmp/qterm-pytest -o faulthandler_timeout=120 \
-      --ignore=tests/test_print_terminal.py \
-      --deselect=tests/test_cli.py::test_geometry_negative_values_rejected || rc=$?
-    kill "$(cat "$TMPDIR/bus.pid")" || true
-    [ "$rc" -eq 0 ]
-    runHook postCheck
-  '';
+  checkPhase = qtPytestCheck {
+    args = lib.concatStringsSep " " [
+      "--ignore=tests/test_print_terminal.py"
+      "--deselect=tests/test_cli.py::test_geometry_negative_values_rejected"
+    ];
+  };
 
   meta.description = "qdistro terminal emulator — PyQt6 Terminator port on QTermWidget";
 }

@@ -1,5 +1,5 @@
 {
-  description = "qdistro component derivations — phase-0 native-stack spike";
+  description = "qdistro component derivations — native stack, Python apps, WebExtensions";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/6510408d147d8c5e6d76043e899e9251756f6a75";
 
@@ -23,6 +23,17 @@
         system:
         let
           pkgs = pkgsFor system;
+          p = self.packages.${system};
+          qtPytestCheck = import ./nix/qt-pytest-check.nix { inherit (pkgs) dbus qt6; };
+          webExtension = pkgs.callPackage ./nix/webextension.nix { };
+          pyApp =
+            file: args:
+            pkgs.callPackage file (
+              {
+                inherit qtPytestCheck;
+              }
+              // args
+            );
         in
         {
           libweston-vendored = pkgs.callPackage ./nix/libweston-vendored.nix { };
@@ -36,14 +47,39 @@
           qdistro-presentation = pkgs.callPackage ./nix/qdistro-presentation.nix { };
           qdistro-app-sdk = pkgs.callPackage ./nix/qdistro-app-sdk.nix { };
           qtermwidget-py = pkgs.callPackage ./nix/qtermwidget-py.nix { };
-          qfileman = pkgs.callPackage ./nix/qfileman.nix {
-            qdistro-presentation = self.packages.${system}.qdistro-presentation;
-            qdistro-app-sdk = self.packages.${system}.qdistro-app-sdk;
+          qfileman = pyApp ./nix/qfileman.nix {
+            inherit (p) qdistro-presentation qdistro-app-sdk;
           };
-          qterminator = pkgs.callPackage ./nix/qterminator.nix {
-            qdistro-presentation = self.packages.${system}.qdistro-presentation;
-            qdistro-app-sdk = self.packages.${system}.qdistro-app-sdk;
-            qtermwidget-py = self.packages.${system}.qtermwidget-py;
+          qterminator = pyApp ./nix/qterminator.nix {
+            inherit (p) qdistro-presentation qdistro-app-sdk qtermwidget-py;
+          };
+          qnotebook = pyApp ./nix/qnotebook.nix {
+            inherit (p) qdistro-presentation qdistro-app-sdk;
+          };
+          qdbrowser = pyApp ./nix/qdbrowser.nix {
+            inherit (p) qdistro-presentation qdistro-app-sdk;
+          };
+          qdlocker = pyApp ./nix/qdlocker.nix { inherit (p) qdistro-presentation; };
+          qdgreeter = pyApp ./nix/qdgreeter.nix { };
+
+          qdchrome-extension = webExtension {
+            pname = "qdchrome-extension";
+            src = ./qdchrome-extension;
+            npmDepsHash = "sha256-sSjhPh7eIZDGB8DFgZc2buIgJcThOOt9PEFwtC/gS0s=";
+            siblingGolden = ./qdfirefox-extension/tests/fixtures/golden-frames.js;
+            description = "qdistro Chromium MV3 native-messaging WebExtension";
+          };
+          qdfirefox-extension = webExtension {
+            pname = "qdfirefox-extension";
+            src = ./qdfirefox-extension;
+            npmDepsHash = "sha256-7PqHW0RTNrGo/Zs2Xn/gXDPvRp7CyFVVi0oElukNTfk=";
+            siblingGolden = ./qdchrome-extension/tests/fixtures/golden-frames.js;
+            description = "qdistro Firefox MV3 native-messaging WebExtension";
+            # Execs `bash` with PATH pinned to /usr/bin:/bin — absent in the
+            # nix sandbox (ENOENT → status 1). It tests the FHS native-host
+            # install script (/usr/lib/qdistro/browser-bridge), which is
+            # install-chain/module scope, not the packaged extension.
+            excludeTests = [ "tests/install-native-host.test.js" ];
           };
         }
       );
@@ -54,7 +90,8 @@
           pkgs = pkgsFor system;
         in
         import ./nix/checks.nix {
-          inherit (pkgs) lib runCommand binutils;
+          inherit (pkgs) lib runCommand runtimeShell binutils;
+          apps = self.packages.${system};
           westonQdistro = self.packages.${system}.weston-qdistro;
           libwestonVendored = self.packages.${system}.libweston-vendored;
           qdwin = self.packages.${system}.qdwin;
