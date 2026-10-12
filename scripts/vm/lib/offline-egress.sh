@@ -8,37 +8,57 @@
 # firewall, so the block lives in the guest: a qci-owned nftables table
 # that accepts loopback, private, link-local and multicast destinations
 # (the host proxy is reached at the host's private IPv4 or slirp's
-# 10.0.2.2) and LOGS then REJECTS everything else, on the output hook and
-# on the forward hook (rootful containers, silo netns). Rejects are fast
-# (tcp reset / icmp), so a blocked fetch fails at once instead of timing
-# out.
+# 10.0.2.2) and REJECTS everything else, on the output hook and on the
+# forward hook (rootful containers, silo netns). Rejects are fast (tcp
+# reset / icmp), so a blocked fetch fails at once instead of timing out.
+# An accept in another table cannot bypass it: every base chain on a hook
+# sees the packet.
 #
-# It is a test-harness table, never part of an image: only the spinner
-# installs it (scripts/vm/spin-test-vm.sh, offline only), and the table and
-# its unit are qci-named so a product nft listing can tell them apart.
+# Every blocked attempt is RECORDED in dynamic sets inside the table
+# (destination, protocol, port and, for local sockets, the sending uid):
+# lossless, unlike a rate-limited log, and independent of the journal. The
+# log line stays for humans and is rate-limited. The table is reloaded at
+# every boot by a sysinit unit, so a VM cloned from an armed golden records
+# from its own boot; installing again with an unchanged ruleset keeps the
+# live table (and what it recorded).
 #
-# Gate side: qd_offline_egress_scan prints the blocked attempts logged since
-# the install cursor (a worker cloned from a golden re-arms the cursor, so
-# the golden's own history is not reported twice). ci/lib/vm.sh turns any
-# attempt to a destination outside QCI_OFFLINE_EGRESS_EXPECTED into a failed
-# row.
+# Boot window: a VM first armed after boot could reach the internet before
+# the table exists. qd_offline_egress_start_dark starts it with every NIC
+# link down; qga (virtio-serial, no network) installs the table; only then
+# do the links come up (qd_offline_egress_links_up).
+#
+# It is a test-harness table, never part of an image: only the spinner and
+# the mmnet gate arm guests (via QD_OFFLINE_EGRESS_ARM=1 to
+# scripts/vm/clone-baseweed.sh), offline only, and the table and its unit are
+# qci-named so a product nft listing can tell them apart.
+#
+# Gate side: qd_offline_egress_scan dumps the live table plus a reference
+# copy of the ruleset loaded into a throwaway netns in the guest;
+# offline-egress-classify.py fails a table that differs from the reference
+# (rules, chains, allow sets), and turns every recorded destination outside
+# QCI_OFFLINE_EGRESS_EXPECTED into an "unexpected" line, which ci/lib/vm.sh
+# records as a failed row.
 
 QD_OFFLINE_EGRESS_TABLE=qci_offline_egress
 QD_OFFLINE_EGRESS_PREFIX='QCI-OFFLINE-EGRESS: '
 QD_OFFLINE_EGRESS_NFT=/etc/qdistro/qci-offline-egress.nft
 QD_OFFLINE_EGRESS_UNIT=qci-offline-egress.service
-QD_OFFLINE_EGRESS_CURSOR=/var/lib/qci-offline-egress/cursor
+QD_OFFLINE_EGRESS_SET_SIZE=65535
+QD_OFFLINE_EGRESS_LIBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Product runtime chatter that is EXPECTED to be blocked offline and is not a
 # dependency fetch (it still is blocked; the gate only does not fail on it).
 # Space-separated tokens, each optionally suffixed @<uid> to match only
-# packets that uid sent (the log carries UID=):
+# packets that uid sent (forwarded packets carry no uid, so a scoped token
+# never matches them):
 #   <host>         its addresses, resolved on the host and in the guest at
-#                  scan time (weather/geocoding addresses rotate)
+#                  scan time, or a destination whose reverse name is the host
+#                  or under it AND resolves back to the destination
+#                  (weather/github load-balancer addresses rotate)
 #   <proto>/<port> any destination on that port (NTP: chrony's pool)
 # github.com is qdshell's plugin-registry fetch, so it is scoped to the
-# session user (uid 1000): a root build fetching a meson wrap from github is
-# still a failure. Keep hosts whose addresses are shared with a package or
+# session user (uid 1000): a root build fetching e.g. a meson wrap from
+# github still fails. Keep hosts whose addresses are shared with a package or
 # registry host out: NetworkManager's conncheck.opensuse.org shares
 # mirrors.opensuse.org's address, so its check is switched off instead.
 QCI_OFFLINE_EGRESS_EXPECTED="${QCI_OFFLINE_EGRESS_EXPECTED-api.open-meteo.com@1000 geocoding-api.open-meteo.com@1000 github.com@1000 udp/123}"
@@ -52,9 +72,17 @@ qd_offline_egress_enabled() {
     return 1
 }
 
+# qd_offline_egress_arm_requested — offline AND the caller asked clone paths
+# to arm (QD_OFFLINE_EGRESS_ARM=1). Image builders never set it, so the table
+# is never sealed into a baked image.
+qd_offline_egress_arm_requested() {
+    [ "${QD_OFFLINE_EGRESS_ARM:-0}" = 1 ] && qd_offline_egress_enabled
+}
+
 # qd_offline_egress_ruleset — the guest nft ruleset (idempotent to re-apply:
 # the add/delete pair drops any earlier copy of the table first).
 qd_offline_egress_ruleset() {
+    local n=$QD_OFFLINE_EGRESS_SET_SIZE
     cat <<EOF
 table inet $QD_OFFLINE_EGRESS_TABLE
 delete table inet $QD_OFFLINE_EGRESS_TABLE
@@ -73,9 +101,13 @@ table inet $QD_OFFLINE_EGRESS_TABLE {
         flags interval
         elements = { ::1, fc00::/7, fe80::/10, fec0::/10, ff00::/8 }
     }
-    chain egress {
-        ip daddr @allow4 return
-        ip6 daddr @allow6 return
+    set any4 { typeof ip daddr; size $n; flags dynamic; }
+    set any6 { typeof ip6 daddr; size $n; flags dynamic; }
+    set out4 { typeof ip daddr . meta l4proto . th dport . meta skuid; size $n; flags dynamic; }
+    set out6 { typeof ip6 daddr . meta l4proto . th dport . meta skuid; size $n; flags dynamic; }
+    set fwd4 { typeof ip daddr . meta l4proto . th dport; size $n; flags dynamic; }
+    set fwd6 { typeof ip6 daddr . meta l4proto . th dport; size $n; flags dynamic; }
+    chain block {
         limit rate 10/second burst 20 packets log prefix "$QD_OFFLINE_EGRESS_PREFIX" level warn flags skuid
         counter name "blocked"
         meta l4proto tcp reject with tcp reset
@@ -84,11 +116,23 @@ table inet $QD_OFFLINE_EGRESS_TABLE {
     chain output {
         type filter hook output priority filter - 10; policy accept;
         oifname "lo" accept
-        jump egress
+        ip daddr @allow4 accept
+        ip6 daddr @allow6 accept
+        update @any4 { ip daddr }
+        update @any6 { ip6 daddr }
+        update @out4 { ip daddr . meta l4proto . th dport . meta skuid }
+        update @out6 { ip6 daddr . meta l4proto . th dport . meta skuid }
+        jump block
     }
     chain forward {
         type filter hook forward priority filter - 10; policy accept;
-        jump egress
+        ip daddr @allow4 accept
+        ip6 daddr @allow6 accept
+        update @any4 { ip daddr }
+        update @any6 { ip6 daddr }
+        update @fwd4 { ip daddr . meta l4proto . th dport }
+        update @fwd6 { ip6 daddr . meta l4proto . th dport }
+        jump block
     }
 }
 EOF
@@ -116,9 +160,10 @@ EOF
 }
 
 # qd_offline_egress_guest_script — the root shell script that installs the
-# table, its unit and the NetworkManager conncheck drop-in, then records the
-# journal cursor the scan starts from. Fails (nonzero) when nft is missing
-# or the table is not live afterwards: offline enforcement fails closed.
+# table, its unit and the NetworkManager conncheck drop-in. An unchanged
+# ruleset over a live table is left loaded (its recorded attempts are kept).
+# Fails (nonzero) when nft is missing or the table is not live afterwards:
+# offline enforcement fails closed.
 qd_offline_egress_guest_script() {
     local rules unit
     rules="$(qd_offline_egress_ruleset | base64 -w0)"
@@ -126,40 +171,69 @@ qd_offline_egress_guest_script() {
     cat <<EOF
 set -eu
 command -v nft >/dev/null 2>&1 || { echo "offline-egress: nft not installed in the guest" >&2; exit 3; }
-mkdir -p "$(dirname "$QD_OFFLINE_EGRESS_NFT")" "$(dirname "$QD_OFFLINE_EGRESS_CURSOR")" /etc/NetworkManager/conf.d
-printf '%s' '$rules' | base64 -d > "$QD_OFFLINE_EGRESS_NFT"
+mkdir -p "$(dirname "$QD_OFFLINE_EGRESS_NFT")" /etc/NetworkManager/conf.d
+new="\$(mktemp)"
+printf '%s' '$rules' | base64 -d > "\$new"
 printf '%s' '$unit' | base64 -d > /etc/systemd/system/$QD_OFFLINE_EGRESS_UNIT
 printf '[connectivity]\nenabled=false\n' > /etc/NetworkManager/conf.d/90-qci-offline-no-conncheck.conf
 systemctl daemon-reload
 systemctl enable $QD_OFFLINE_EGRESS_UNIT >/dev/null 2>&1
-nft -f "$QD_OFFLINE_EGRESS_NFT"
-nft list table inet $QD_OFFLINE_EGRESS_TABLE >/dev/null
+if nft list table inet $QD_OFFLINE_EGRESS_TABLE >/dev/null 2>&1 && cmp -s "\$new" "$QD_OFFLINE_EGRESS_NFT"; then
+    rm -f "\$new"
+    echo "offline-egress: table $QD_OFFLINE_EGRESS_TABLE already live"
+else
+    mv "\$new" "$QD_OFFLINE_EGRESS_NFT"
+    nft -f "$QD_OFFLINE_EGRESS_NFT"
+    nft list table inet $QD_OFFLINE_EGRESS_TABLE >/dev/null
+    echo "offline-egress: table $QD_OFFLINE_EGRESS_TABLE live"
+fi
 nmcli general reload conf >/dev/null 2>&1 || true
-journalctl -n0 --show-cursor --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p' > "$QD_OFFLINE_EGRESS_CURSOR"
-echo "offline-egress: table $QD_OFFLINE_EGRESS_TABLE live"
 EOF
 }
 
 # qd_offline_egress_install <vm> [vm-exec] — install + arm in a running guest.
 qd_offline_egress_install() {
-    local vm="$1" vmx="${2:-${VM_TOOLS:-$(dirname "${BASH_SOURCE[0]}")/..}/vm-exec}" b64
+    local vm="$1" vmx="${2:-${VM_TOOLS:-$QD_OFFLINE_EGRESS_LIBDIR/..}/vm-exec}" b64
     b64="$(qd_offline_egress_guest_script | base64 -w0)"
     "$vmx" "$vm" "printf '%s' '$b64' | base64 -d | bash"
 }
 
-# qd_offline_egress_scan <vm> [vm-exec] — print the guest's blocked-attempt
-# log lines since the install cursor (empty = none), followed by one
-# "QCI-OFFLINE-EGRESS-RESOLVED <host> <addr>" line per address the guest
-# resolves an expected host to. rc 2 when the guest cannot be asked or the
-# table is not armed: the caller must not read that as clean.
-qd_offline_egress_scan() {
-    local vm="$1" vmx="${2:-${VM_TOOLS:-$(dirname "${BASH_SOURCE[0]}")/..}/vm-exec}" out hosts
-    hosts="$(qd_offline_egress_expected_hosts | tr '\n' ' ')"
-    out="$("$vmx" "$vm" "c=\$(cat $QD_OFFLINE_EGRESS_CURSOR 2>/dev/null) || { echo QCI_EGRESS_UNARMED; exit 0; }; echo QCI_EGRESS_ARMED; journalctl -k --no-pager -o short-iso --after-cursor=\"\$c\" -g '^$QD_OFFLINE_EGRESS_PREFIX' 2>/dev/null || true; for h in $hosts; do getent ahosts \$h 2>/dev/null | awk -v h=\$h '{print \"QCI-OFFLINE-EGRESS-RESOLVED \" h \" \" \$1}' | sort -u; done")" || return 2
-    case "$out" in
-        QCI_EGRESS_ARMED*) printf '%s\n' "$out" | sed '1d' | grep -E "^QCI-OFFLINE-EGRESS-RESOLVED |$QD_OFFLINE_EGRESS_PREFIX" || true ;;
-        *) return 2 ;;
-    esac
+# qd_offline_egress_macs <vm> — the MACs of the domain's interfaces.
+qd_offline_egress_macs() {
+    virsh -c qemu:///session domiflist "$1" 2>/dev/null \
+        | awk 'NR > 2 && $NF ~ /^([0-9a-f][0-9a-f]:){5}[0-9a-f][0-9a-f]$/ { print $NF }'
+}
+
+# qd_offline_egress_set_links <vm> up|down — set every NIC's link state and
+# verify it took.
+qd_offline_egress_set_links() {
+    local vm="$1" state="$2" mac
+    for mac in $(qd_offline_egress_macs "$vm"); do
+        virsh -c qemu:///session domif-setlink "$vm" "$mac" "$state" >/dev/null || return 1
+        virsh -c qemu:///session domif-getlink "$vm" "$mac" 2>/dev/null | grep -qw "$state" || return 1
+    done
+}
+
+# qd_offline_egress_start_dark <vm> — start a defined domain with every NIC
+# link down from its first instruction (start paused, links down, resume).
+qd_offline_egress_start_dark() {
+    local vm="$1"
+    virsh -c qemu:///session start --paused "$vm" >/dev/null || return 1
+    qd_offline_egress_set_links "$vm" down || {
+        echo "offline-egress: could not take $vm's links down" >&2
+        virsh -c qemu:///session destroy "$vm" >/dev/null 2>&1
+        return 1
+    }
+    virsh -c qemu:///session resume "$vm" >/dev/null
+}
+
+# qd_offline_egress_links_up <vm> [vm-exec] — after the install: links up,
+# then wait (90 s) for the guest to have a default route again.
+qd_offline_egress_links_up() {
+    local vm="$1" vmx="${2:-${VM_TOOLS:-$QD_OFFLINE_EGRESS_LIBDIR/..}/vm-exec}"
+    qd_offline_egress_set_links "$vm" up || return 1
+    # shellcheck disable=SC2016  # expands in the guest
+    "$vmx" "$vm" 'for i in $(seq 90); do ip route show default | grep -q . && exit 0; sleep 1; done; exit 1' >/dev/null
 }
 
 # qd_offline_egress_expected_hosts — the host names in QCI_OFFLINE_EGRESS_EXPECTED.
@@ -171,76 +245,34 @@ qd_offline_egress_expected_hosts() {
     done
 }
 
-# qd_offline_egress_classify — stdin: scan output. Prints "unexpected <dst>"
-# and "expected <dst>" lines (one per distinct destination, addresses in
-# canonical form; a destination is unexpected if ANY attempt to it is). An
-# attempt is expected when it matches a QCI_OFFLINE_EGRESS_EXPECTED token: a
-# host whose addresses (resolved on the host now, plus the guest's RESOLVED
-# lines) include the destination or that the destination's reverse name is or
-# is under (rotating CDN/load-balancer addresses), or a proto/port; and, with
-# @<uid>, only when the log line carries that UID.
+# qd_offline_egress_scan <vm> [vm-exec] — print the live table as JSON
+# ("QCI-EGRESS-LIVE <json>"), the reference ruleset loaded into a throwaway
+# netns in the guest ("QCI-EGRESS-REF <json>") and one
+# "QCI-OFFLINE-EGRESS-RESOLVED <host> <addr>" line per address the guest
+# resolves an expected host to. rc 2 when the guest cannot be asked or the
+# table is not live: the caller must not read that as clean.
+qd_offline_egress_scan() {
+    local vm="$1" vmx="${2:-${VM_TOOLS:-$QD_OFFLINE_EGRESS_LIBDIR/..}/vm-exec}" out hosts rules t=$QD_OFFLINE_EGRESS_TABLE
+    hosts="$(qd_offline_egress_expected_hosts | tr '\n' ' ')"
+    rules="$(qd_offline_egress_ruleset | base64 -w0)"
+    out="$("$vmx" "$vm" "live=\$(nft -j list table inet $t 2>/dev/null) || { echo QCI_EGRESS_UNARMED; exit 0; }; echo QCI_EGRESS_ARMED; echo \"QCI-EGRESS-LIVE \$live\"; echo \"QCI-EGRESS-REF \$(printf '%s' '$rules' | base64 -d | unshare -n sh -c 'nft -f - && nft -j list table inet $t' 2>&1 | tr '\n' ' ')\"; for h in $hosts; do getent ahosts \$h 2>/dev/null | awk -v h=\$h '{print \"QCI-OFFLINE-EGRESS-RESOLVED \" h \" \" \$1}' | sort -u; done")" || return 2
+    case "$out" in
+        QCI_EGRESS_ARMED*) printf '%s\n' "$out" | sed '1d' | grep -E '^(QCI-EGRESS-LIVE|QCI-EGRESS-REF|QCI-OFFLINE-EGRESS-RESOLVED) ' || true ;;
+        *) return 2 ;;
+    esac
+}
+
+# qd_offline_egress_classify — stdin: scan output. Prints "broken <why>" when
+# the live table is missing, unparsable or differs from the reference, else
+# one "expected <dst> <attempts>" / "unexpected <dst> <attempts>" line per
+# recorded destination (offline-egress-classify.py has the rules).
 qd_offline_egress_classify() {
     local h resolved=""
     for h in $(qd_offline_egress_expected_hosts); do
         resolved+="$(getent ahosts "$h" 2>/dev/null | awk -v h="$h" '{print "QCI-OFFLINE-EGRESS-RESOLVED " h " " $1}' | sort -u)"$'\n'
     done
-    { printf '%s' "$resolved"; cat; } | QCI_OFFLINE_EGRESS_EXPECTED="$QCI_OFFLINE_EGRESS_EXPECTED" python3 -c '
-import ipaddress, os, re, subprocess, sys
-
-def canon(a):
-    try:
-        return ipaddress.ip_address(a).compressed
-    except ValueError:
-        return a
-
-addrs = {}      # host -> set of canonical addresses
-attempts = []   # (dst, proto, port, uid)
-for line in sys.stdin:
-    if line.startswith("QCI-OFFLINE-EGRESS-RESOLVED "):
-        _, host, addr = line.split()[:3]
-        addrs.setdefault(host, set()).add(canon(addr))
-        continue
-    m = re.search(r" DST=(\S+) ", line)
-    if not m:
-        continue
-    f = dict(re.findall(r"\b(PROTO|DPT|UID)=(\S+)", line))
-    attempts.append((canon(m.group(1)), f.get("PROTO", "").lower(), f.get("DPT", ""), f.get("UID", "")))
-
-rules = []
-for tok in os.environ.get("QCI_OFFLINE_EGRESS_EXPECTED", "").split():
-    what, _, uid = tok.partition("@")
-    rules.append((what, uid))
-
-ptr_cache = {}
-def ptr(dst):
-    # Reverse name, best effort (empty when it does not resolve in 3 s).
-    if dst not in ptr_cache:
-        try:
-            out = subprocess.run(["getent", "hosts", dst], capture_output=True,
-                                 text=True, timeout=3).stdout.split()
-        except Exception:
-            out = []
-        ptr_cache[dst] = out[1].rstrip(".").lower() if len(out) > 1 else ""
-    return ptr_cache[dst]
-
-def expected(dst, proto, port, uid):
-    for what, ruid in rules:
-        if ruid and ruid != uid:
-            continue
-        if "/" in what:
-            if what == proto + "/" + port:
-                return True
-        elif dst in addrs.get(what, ()):
-            return True
-        elif what in (ptr(dst), ) or ptr(dst).endswith("." + what):
-            return True
-    return False
-
-verdict = {}
-for a in attempts:
-    ok = expected(*a)
-    verdict[a[0]] = verdict.get(a[0], True) and ok
-for dst in sorted(verdict):
-    print(("expected " if verdict[dst] else "unexpected ") + dst)
-'
+    { printf '%s' "$resolved"; cat; } \
+        | QCI_OFFLINE_EGRESS_EXPECTED="$QCI_OFFLINE_EGRESS_EXPECTED" \
+          QD_OFFLINE_EGRESS_SET_SIZE="$QD_OFFLINE_EGRESS_SET_SIZE" \
+          python3 "$QD_OFFLINE_EGRESS_LIBDIR/offline-egress-classify.py"
 }

@@ -537,7 +537,20 @@ printf '%s' "$XML" | virsh -c qemu:///session define /dev/stdin >/dev/null
 # The overlay is now an attached disk of a DEFINED domain, so the cleanup
 # ownership audit can see it; the shared storage lock is no longer needed.
 qci_release_storage_lock
-virsh -c qemu:///session start "$VM" >/dev/null
+# Offline (opted in by the caller, never by image builders): the guest boots
+# with its links down and only gets them back once the egress block is live,
+# so nothing in it can reach the internet before the block exists
+# (lib/offline-egress.sh). SSH-only clones cannot be armed over qga; they boot
+# from an armed run golden, whose boot unit loads the block before the
+# network, and the gate's scan verifies it is live.
+. "$SCRIPT_DIR/lib/offline-egress.sh"
+ARM_EGRESS=0
+qd_offline_egress_arm_requested && [ "$SSH_CLONE" != 1 ] && ARM_EGRESS=1
+if [ "$ARM_EGRESS" = 1 ]; then
+    qd_offline_egress_start_dark "$VM" || { echo "ERROR: offline: could not start $VM with its links down" >&2; exit 1; }
+else
+    virsh -c qemu:///session start "$VM" >/dev/null
+fi
 
 # 4. Wait for the qemu-guest-agent so subsequent vm-exec works.
 #    Under --from-enforcing-baked, qga is denied by SELinux; the wait
@@ -584,6 +597,12 @@ if [ "$SSH_CLONE" = 1 ]; then
     fi
 else
     "$VM_TOOLS/vm-start-and-wait" "$VM" >/dev/null
+    if [ "$ARM_EGRESS" = 1 ]; then
+        qd_offline_egress_install "$VM" "$VM_TOOLS/vm-exec" >&2 \
+            || { echo "ERROR: offline: could not install the guest egress block in $VM" >&2; exit 3; }
+        qd_offline_egress_links_up "$VM" "$VM_TOOLS/vm-exec" \
+            || { echo "ERROR: offline: $VM got no network back after arming" >&2; exit 3; }
+    fi
 fi
 
 # Built successfully. Emit the name (and ssh_port) the caller consumes, THEN mark

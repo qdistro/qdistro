@@ -141,7 +141,10 @@ if [ -z "${QCI_RUN_GOLDEN_BACKING:-}" ]; then
     esac
 fi
 
-# Stage 3.
+# Stage 3. Offline: ask clone-baseweed.sh to boot the clone dark and arm the
+# guest egress block before its links come up (lib/offline-egress.sh).
+. "$REPO/scripts/vm/lib/offline-egress.sh"
+qd_offline_egress_enabled && export QD_OFFLINE_EGRESS_ARM=1
 if [ -n "${QCI_RUN_GOLDEN_BACKING:-}" ]; then
     log "stage 3: cloning a fresh VM from run-golden ($QCI_RUN_GOLDEN_BACKING)..."
     VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" \
@@ -189,12 +192,13 @@ log "    starting + waiting for guest agent..."
 virsh -c qemu:///session start "$VM" >/dev/null 2>&1 || true
 "$SCRIPT_DIR/vm-start-and-wait" "$VM" >&2
 
-# Offline: block guest egress outside the host cache before anything in the
-# guest can fetch (lib/offline-egress.sh). A golden clone re-runs it to re-arm
-# the scan cursor. Fails closed: an offline VM without the block is refused.
-. "$REPO/scripts/vm/lib/offline-egress.sh"
+# Offline: clone-baseweed.sh (QD_OFFLINE_EGRESS_ARM=1, above) booted the
+# guest with its links down and armed the egress block before bringing them
+# up (lib/offline-egress.sh). Re-installing is a no-op on a live, unchanged
+# table and proves it is there. Fails closed: an offline VM without the
+# block is refused.
 if qd_offline_egress_enabled; then
-    log "    offline: installing the guest egress block"
+    log "    offline: verifying the guest egress block"
     qd_offline_egress_install "$VM" "$SCRIPT_DIR/vm-exec" >&2 \
         || { log "ERROR: offline: could not install the guest egress block"; exit 3; }
 fi

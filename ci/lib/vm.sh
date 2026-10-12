@@ -300,6 +300,7 @@ acquire_enforcing_vm() {
     [ -n "$wa_file" ] && rm -f "$wa_file" 2>/dev/null || true
     kv "vm_${gate}" "$vm"
     kv "vm_${gate}_ssh_port" "$port"
+    printf '%s\t%s\n' "$vm" "$port" >> "$RDIR/vm/ssh-ports.tsv"
     # The golden's session units come up after sshd; give the outer
     # compositor the same budget spin-test-vm.sh gives a permissive clone.
     # Not fatal here: the bats file asserts what it needs and its log then
@@ -331,34 +332,46 @@ collect_vm_artifacts_ssh() {
         > "$RDIR/journals/$label-avc.log" 2>&1 || true
 }
 
-# qci_offline_egress_check <vm> — offline only: read the blocked-egress log
-# the spinner's guest table (scripts/vm/lib/offline-egress.sh) wrote since it
-# was armed. Any blocked attempt to a destination that is not declared
-# product chatter (QCI_OFFLINE_EGRESS_EXPECTED) is a FAILED row: something in
-# the guest tried to fetch past the host cache. A guest that cannot be asked
-# or was never armed is a failed row too: unknown is not clean.
+# qci_offline_egress_check <vm> — offline only: read what the guest's egress
+# block (scripts/vm/lib/offline-egress.sh) recorded since boot. Any blocked
+# attempt to a destination that is not declared product chatter
+# (QCI_OFFLINE_EGRESS_EXPECTED) is a FAILED row: something in the guest tried
+# to fetch past the host cache. A guest that cannot be asked, was never
+# armed, or whose table no longer matches the ruleset is a failed row too:
+# unknown is not clean. Enforcing clones (no qga) are asked over SSH, on the
+# port acquire_enforcing_vm recorded.
 qci_offline_egress_check() {
-    local vm=$1 dir log cls unexpected expected
+    local vm=$1 dir log cls unexpected expected broken port vmx="$VM_TOOLS/vm-exec"
     . "$VM_TOOLS/lib/offline-egress.sh"
     qd_offline_egress_enabled || return 0
     dir="$RDIR/offline-egress"
     mkdir -p "$dir"
     log="$dir/$vm.log"
-    if ! qd_offline_egress_scan "$vm" "$VM_TOOLS/vm-exec" > "$log" 2>&1; then
+    port=$(awk -F'\t' -v v="$vm" '$1 == v { p = $2 } END { print p }' "$RDIR/vm/ssh-ports.tsv" 2>/dev/null || true)
+    if [ -n "$port" ]; then
+        vmx="$dir/.ssh-exec-$port"
+        printf '#!/bin/bash\nexec ssh -p %s -i "$HOME/.ssh/qdistro_enforcing_id_ed25519" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=8 -o BatchMode=yes root@127.0.0.1 "$2"\n' \
+            "$port" > "$vmx" && chmod +x "$vmx"
+    fi
+    if ! qd_offline_egress_scan "$vm" "$vmx" > "$log" 2>&1; then
         record_result offline-egress "$vm" fail "$EXIT_BUILD" build vm "$log" \
             "QCI_OFFLINE: could not read the guest egress block (not armed or guest unreachable)"
         return 0
     fi
-    [ -s "$log" ] || return 0
-    cls="$(qd_offline_egress_classify < "$log")"
-    [ -n "$cls" ] || return 0
+    cls="$(qd_offline_egress_classify < "$log" 2>&1)" || cls="broken classifier failed: $cls"
     printf '%s\n' "$cls" > "$dir/$vm.classified"
+    broken="$(printf '%s\n' "$cls" | sed -n 's/^broken //p' | head -n 1)"
+    if [ -n "$broken" ]; then
+        record_result offline-egress "$vm" fail "$EXIT_BUILD" build vm "$log" \
+            "QCI_OFFLINE: guest egress block not intact: $broken"
+        return 0
+    fi
     unexpected="$(printf '%s\n' "$cls" | sed -n 's/^unexpected //p' | tr '\n' ' ')"
-    expected="$(printf '%s\n' "$cls" | sed -n 's/^expected //p' | tr '\n' ' ')"
+    expected="$(printf '%s\n' "$cls" | sed -n 's/^expected \([^ ]*\).*/\1/p' | tr '\n' ' ')"
     if [ -n "$unexpected" ]; then
         record_result offline-egress "$vm" fail "$EXIT_BUILD" build vm "$log" \
             "QCI_OFFLINE: guest tried to reach ${unexpected% } past the host cache (blocked)${expected:+; expected chatter: ${expected% }}"
-    else
+    elif [ -n "$expected" ]; then
         log "offline-egress $vm: only expected product chatter blocked (${expected% })"
     fi
 }
