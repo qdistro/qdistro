@@ -78,8 +78,13 @@ log = logging.getLogger("qdbrowser.cert")
 
 _HOST_RE = re.compile(r"^[a-z0-9_]([a-z0-9_.-]{0,251}[a-z0-9_])?$")
 _MAX_HEAD = 8192
-_HEAD_TIMEOUT_S = 10.0
+_HEAD_TIMEOUT_S = 10.0     # absolute, for the whole CONNECT head
 _CONNECT_TIMEOUT_S = 10.0
+# Tunnels: a write that makes no progress for _STALL_S ends the tunnel,
+# and so does _IDLE_S with no byte in EITHER direction (a long one-way
+# download keeps the tunnel alive). Bounds how long a slot can be held.
+_STALL_S = 120.0
+_IDLE_S = 900.0
 _MAX_CLIENTS = 256
 # Chromium flags that already configure a proxy. With one present ours is
 # not added (two configs would race) and the success path is off.
@@ -241,8 +246,7 @@ class PinProxy:
             log.warning("qdbrowser.cert pin proxy refused client uid=%s",
                         owner)
             return
-        conn.settimeout(_HEAD_TIMEOUT_S)
-        head = _read_head(conn)
+        head = _read_head(conn, time.monotonic() + _HEAD_TIMEOUT_S)
         if head is None:
             return
         target = _parse_connect(head)
@@ -259,7 +263,7 @@ class PinProxy:
             _reply(conn, 502, "upstream refused")
             return
         try:
-            conn.settimeout(None)
+            conn.settimeout(_STALL_S)
             conn.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             _splice(conn, upstream)
         finally:
@@ -358,12 +362,18 @@ class PinProxy:
         return None if decision.allow else (decision.kind, decision.detail)
 
 
-def _read_head(conn: socket.socket) -> bytes | None:
+def _read_head(conn: socket.socket, deadline: float) -> bytes | None:
+    """The CONNECT head, or None. ``deadline`` is absolute: trickling a
+    byte at a time does not extend it."""
     buf = b""
     while b"\r\n\r\n" not in buf:
         if len(buf) > _MAX_HEAD:
             return None
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
         try:
+            conn.settimeout(left)
             chunk = conn.recv(4096)
         except OSError:
             return None
@@ -414,14 +424,32 @@ def _reply(conn: socket.socket, code: int, reason: str) -> None:
         pass
 
 
-def _pump(src: socket.socket, dst: socket.socket) -> None:
-    """Copy ``src`` -> ``dst`` until EOF/error, then half-close ``dst``."""
+class _Activity:
+    """Last time a byte moved in either direction of one tunnel."""
+
+    def __init__(self):
+        self.last = time.monotonic()
+
+
+def _pump(src: socket.socket, dst: socket.socket, act: _Activity,
+          idle: float = _IDLE_S) -> None:
+    """Copy ``src`` -> ``dst`` until EOF/error/idle, then half-close
+    ``dst``. Sockets carry a ``_STALL_S``-style timeout: a recv timeout
+    only ends the tunnel once BOTH directions have been idle ``idle`` s;
+    a send that stalls that long ends it outright."""
     try:
         while True:
-            data = src.recv(65536)
+            try:
+                data = src.recv(65536)
+            except TimeoutError:
+                if time.monotonic() - act.last >= idle:
+                    break
+                continue
             if not data:
                 break
+            act.last = time.monotonic()
             dst.sendall(data)
+            act.last = time.monotonic()
     except OSError:
         pass
     finally:
@@ -431,11 +459,15 @@ def _pump(src: socket.socket, dst: socket.socket) -> None:
             pass
 
 
-def _splice(a: socket.socket, b: socket.socket) -> None:
+def _splice(a: socket.socket, b: socket.socket, *, stall: float = _STALL_S,
+            idle: float = _IDLE_S) -> None:
     """Copy bytes both ways until both directions end. One thread per
     direction: a single loop doing blocking ``sendall`` can deadlock when
     both directions are backed up at once."""
-    t = threading.Thread(target=_pump, args=(b, a), daemon=True)
+    for sock in (a, b):
+        sock.settimeout(stall)
+    act = _Activity()
+    t = threading.Thread(target=_pump, args=(b, a, act, idle), daemon=True)
     t.start()
-    _pump(a, b)
+    _pump(a, b, act, idle)
     t.join()

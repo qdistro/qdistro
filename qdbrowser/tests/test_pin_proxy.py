@@ -302,6 +302,14 @@ def test_parse_connect(line, want):
     ("[::1]", "::1"),
     ("0:0::1", "::1"),
     ("bücher.test", "xn--bcher-kva.test"),
+    # UTS #46 nontransitional, as Chromium: not IDNA 2003's "fass.de".
+    ("faß.de", "xn--fa-hia.de"),
+    # URL-style IPv4, as Chromium canonicalizes it.
+    ("127.1", "127.0.0.1"),
+    ("0x7f.1", "127.0.0.1"),
+    ("017.1", "15.0.0.1"),
+    ("256.1.1.1", ""),
+    ("1.2.3.4x", "1.2.3.4x"),
     ("", ""),
     (None, ""),
 ])
@@ -477,3 +485,123 @@ def test_tunnel_carries_simultaneous_bulk_both_ways(pki):
     t.join(timeout=30)
     assert not t.is_alive(), "splice deadlocked"
     assert bytes(got["a"]) == blob and bytes(got["b"]) == blob
+
+
+def test_store_pins_deviation_idn_and_short_ipv4():
+    store = PinStore(pins={"faß.de": ["sha256/x"], "127.1": ["sha256/y"]})
+    assert store.is_pinned("xn--fa-hia.de")
+    assert not store.is_pinned("fass.de")
+    assert store.is_pinned("127.0.0.1")
+
+
+def test_head_deadline_is_absolute(pki, serve, monkeypatch):
+    """Trickling one byte at a time does not hold a slot past the
+    deadline."""
+    import time
+
+    import qdbrowser.pin_proxy as pp
+    monkeypatch.setattr(pp, "_HEAD_TIMEOUT_S", 1.0)
+    srv = serve("good")
+    proxy = _proxy(pki, srv, {HOST: [spki_pin(pki.good_leaf)]})
+    try:
+        s = socket.create_connection(("127.0.0.1", proxy.port), timeout=10)
+        start = time.monotonic()
+        closed = False
+        for ch in b"CONNECT pinned.test:443 HTTP/1.1\r\nX-Pad: " + b"a" * 200:
+            try:
+                s.send(bytes([ch]))
+            except OSError:
+                closed = True
+                break
+            time.sleep(0.05)
+            if time.monotonic() - start > 4:
+                break
+        if not closed:
+            s.settimeout(3)
+            try:
+                closed = s.recv(1) == b""
+            except (ConnectionResetError, BrokenPipeError):
+                closed = True
+        assert closed, "trickling client kept its slot past the deadline"
+        assert time.monotonic() - start < 6
+        s.close()
+    finally:
+        proxy.stop()
+
+
+def test_tunnel_idle_in_both_directions_ends():
+    import threading
+    import time
+
+    from qdbrowser.pin_proxy import _splice
+    a1, a2 = socket.socketpair()
+    b1, b2 = socket.socketpair()
+    t = threading.Thread(target=_splice, args=(a2, b1),
+                         kwargs={"stall": 0.2, "idle": 0.6}, daemon=True)
+    start = time.monotonic()
+    t.start()
+    t.join(timeout=5)
+    assert not t.is_alive(), "idle tunnel was not reaped"
+    assert time.monotonic() - start >= 0.5
+    for x in (a1, a2, b1, b2):
+        x.close()
+
+
+def test_tunnel_one_way_traffic_is_not_idle():
+    """A long download with a silent client must not be cut at idle."""
+    import threading
+    import time
+
+    from qdbrowser.pin_proxy import _splice
+    a1, a2 = socket.socketpair()
+    b1, b2 = socket.socketpair()
+    t = threading.Thread(target=_splice, args=(a2, b1),
+                         kwargs={"stall": 0.2, "idle": 0.6}, daemon=True)
+    t.start()
+    got = bytearray()
+    a1.settimeout(5)
+    for _ in range(15):  # 1.5 s of server->client traffic, client silent
+        b2.sendall(b"x" * 100)
+        time.sleep(0.1)
+        got += a1.recv(65536)
+    assert t.is_alive(), "one-way traffic was reaped as idle"
+    assert len(got) >= 1400
+    b2.shutdown(socket.SHUT_WR)
+    a1.shutdown(socket.SHUT_WR)
+    t.join(timeout=5)
+    assert not t.is_alive()
+    for x in (a1, a2, b1, b2):
+        x.close()
+
+
+def test_startup_setup_failure_fails_closed_when_pins_exist(monkeypatch, tmp_path):
+    import qdbrowser.__main__ as qmain
+    pins = tmp_path / "pins.json"
+    pins.write_text("{}")
+
+    def boom():
+        raise ImportError("simulated broken pin_proxy module")
+    monkeypatch.setattr(qmain, "_start_pin_proxy_inner", boom)
+    monkeypatch.setattr(qmain, "_DEFAULT_PIN_FILES", (str(pins),))
+    monkeypatch.setenv("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox")
+    qmain._start_pin_proxy()
+    assert os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] == (
+        "--no-sandbox --proxy-server=https=127.0.0.1:1 "
+        "--proxy-bypass-list=<-loopback>")
+    # The literal fallback equals the real dead-proxy flags.
+    assert qmain._DEAD_PROXY_FLAGS == chromium_flags(1)
+
+
+def test_startup_setup_failure_without_pins_continues(monkeypatch, tmp_path):
+    import qdbrowser.__main__ as qmain
+    import qdbrowser.config as qconfig
+
+    def boom():
+        raise ImportError("simulated")
+    _FakeConfig.security = {"cert_pins_path": str(tmp_path / "none.json")}
+    monkeypatch.setattr(qconfig, "Config", _FakeConfig)
+    monkeypatch.setattr(qmain, "_start_pin_proxy_inner", boom)
+    monkeypatch.setattr(qmain, "_DEFAULT_PIN_FILES", (str(tmp_path / "x"),))
+    monkeypatch.setenv("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox")
+    qmain._start_pin_proxy()
+    assert os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] == "--no-sandbox"

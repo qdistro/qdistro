@@ -76,24 +76,68 @@ def _compose_chromium_flags():
 _PIN_PROXY = None
 
 
+# Literal copies of pin_proxy.chromium_flags(1) for when that module itself
+# cannot be imported: https to a closed loopback port, no implicit bypass.
+_DEAD_PROXY_FLAGS = ["--proxy-server=https=127.0.0.1:1",
+                     "--proxy-bypass-list=<-loopback>"]
+_DEFAULT_PIN_FILES = ("/etc/qdistro/cert-pins.json",
+                      "~/.config/qdbrowser/cert-pins.json")
+
+
 def _start_pin_proxy():
     """Start the best-effort success-path pin proxy and route https to it.
 
     Runs before QApplication: the proxy flags are read once at Chromium
     start. No pins (or ``[security] success_path_pinning = false``) means
-    no proxy and no flag. If the proxy cannot start, https is still
-    pointed at a closed loopback port so pinned hosts fail rather than
-    load unchecked. A user-supplied ``--proxy-*`` flag wins and leaves only
-    the error-path hook (logged at ERROR).
+    no proxy and no flag. Fail closed: if the proxy cannot be set up at
+    all while a pin file exists, https is pointed at a closed loopback
+    port, so pinned hosts fail rather than load unchecked. A
+    user-supplied ``--proxy-*`` flag wins and leaves only the error-path
+    hook (logged at ERROR).
     """
-    global _PIN_PROXY
     try:
-        from qdbrowser.cert_policy import active_pin_store, load_pin_store, set_active_pin_store
+        _start_pin_proxy_inner()
+    except Exception as exc:  # noqa: BLE001 - decide fail-closed below
+        if not _pin_files_present():
+            log.error("qdbrowser.cert pin proxy setup failed (%s); no pin "
+                      "file present, continuing without it", exc)
+            return
+        log.error("qdbrowser.cert pin proxy setup failed (%s) with pins "
+                  "configured; https loads will fail", exc)
+        existing = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
+        if not any(f.startswith("--proxy-server=") for f in existing):
+            existing.extend(_DEAD_PROXY_FLAGS)
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(existing)
+
+
+def _pin_files_present() -> bool:
+    """Best guess, without the modules that just failed: does any pin
+    file exist? Config paths if Config still imports, else the defaults."""
+    paths = list(_DEFAULT_PIN_FILES)
+    try:
         from qdbrowser.config import Config
-        from qdbrowser.pin_proxy import PROXY_FLAGS, PinProxy, chromium_flags
-    except Exception as exc:  # noqa: BLE001
-        log.error("qdbrowser.cert pin proxy unavailable: %s", exc)
-        return
+        sec = Config().get("security", default={}) or {}
+        if not sec.get("success_path_pinning", True):
+            return False
+        paths += [sec.get("cert_pins_path"), sec.get("cert_pins_user_path")]
+    except Exception:  # noqa: BLE001, S110 - defaults are the fallback
+        pass
+    for path in paths:
+        if path and os.path.isfile(os.path.expanduser(path)):
+            return True
+    return False
+
+
+def _start_pin_proxy_inner():
+    global _PIN_PROXY
+    from qdbrowser.cert_policy import (
+        active_pin_store,
+        load_pin_store,
+        set_active_pin_store,
+    )
+    from qdbrowser.config import Config
+    from qdbrowser.pin_proxy import PROXY_FLAGS, PinProxy, chromium_flags
+
     sec = Config().get("security", default={}) or {}
     if not sec.get("success_path_pinning", True):
         log.warning("qdbrowser.cert success-path pinning disabled by config")

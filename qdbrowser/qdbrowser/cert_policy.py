@@ -80,12 +80,17 @@ import ipaddress
 import json
 import logging
 import os
+import re
+import socket
 from collections.abc import Iterable
 
 log = logging.getLogger("qdbrowser.cert")
 
 
 PIN_PREFIX = "sha256/"
+
+_IPV4_LAST_LABEL = re.compile(r"^(0x[0-9a-f]*|[0-9]+)$")
+_IPV4_CHARS = re.compile(r"^[0-9a-fx.]+$")
 
 
 class PinDecision:
@@ -113,10 +118,16 @@ class PinDecision:
 def canonical_host(host) -> str:
     """One spelling per host for pin keys and every lookup.
 
-    Lowercase, no surrounding ``[]`` or trailing dot, IP literals in
-    ``ipaddress`` form, IDNs as punycode (Chromium's ``CONNECT`` line and
-    the pin proxy see punycode; ``QUrl.host()`` returns Unicode). Returns
-    ``""`` for anything that cannot be a host, which matches no pin.
+    The goal is Chromium's spelling, since that is what reaches the pin
+    proxy's ``CONNECT`` line: lowercase, no surrounding ``[]`` or trailing
+    dot, IPv6 compressed, IPv4 in dotted-quad form after URL-style
+    parsing (``127.1``, ``0x7f.1`` and octal ``017.1`` are addresses, as
+    in a browser URL), IDNs as UTS #46 *nontransitional* punycode
+    (``faß.de`` -> ``xn--fa-hia.de``, not Python's IDNA 2003 ``fass.de``;
+    ``QUrl.toAce`` implements the same processing as Chromium).
+    ``QUrl.host()`` returns Unicode, so the error-path hook needs this
+    too. Returns ``""`` for anything that cannot be a host, which matches
+    no pin.
     """
     if not isinstance(host, str):
         return ""
@@ -132,8 +143,24 @@ def canonical_host(host) -> str:
         pass
     if not h.isascii():
         try:
-            h = h.encode("idna").decode("ascii").lower()
-        except UnicodeError:
+            from PyQt6.QtCore import QUrl
+            h = bytes(QUrl.toAce(h)).decode("ascii").lower()
+        except Exception as exc:  # noqa: BLE001 - no Qt: refuse, don't guess
+            log.error("qdbrowser.cert cannot canonicalize host %r: %s",
+                      host, exc)
+            return ""
+        if not h:
+            return ""
+    if _IPV4_LAST_LABEL.match(h.rsplit(".", 1)[-1]):
+        # WHATWG/Chromium: a numeric last label makes the host an IPv4
+        # address (or invalid). inet_aton has the same 1-4 part,
+        # hex/octal grammar; the charset check keeps glibc's tolerance of
+        # trailing junk out.
+        if not _IPV4_CHARS.match(h):
+            return ""
+        try:
+            return socket.inet_ntoa(socket.inet_aton(h))
+        except OSError:
             return ""
     return h
 
