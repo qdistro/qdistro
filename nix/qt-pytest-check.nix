@@ -6,7 +6,9 @@
 #     pid tracked and killed after the run
 #   - short --basetemp: tmp_path under /nix/var/nix/builds/<hash>/ blows the
 #     108-byte AF_UNIX limit for socket tests
-#   - faulthandler_timeout: a wedged test dumps its stack into the build log
+#   - faulthandler_timeout + exit_on_timeout: a wedged test (e.g. a modal
+#     QMessageBox nobody can click offscreen) dumps its stack into the build
+#     log and FAILS the build instead of hanging it forever
 #   - QML import path for components whose tests load QML
 # perFile = glob: one pytest process per matching file (qci's mode for
 # qdbrowser, bounding QtWebEngine residue); fails if the glob is empty.
@@ -16,7 +18,7 @@
   perFile ? null,
 }:
 let
-  pytest = "python -m pytest --basetemp=/tmp/nix-pytest -o faulthandler_timeout=120";
+  pytest = "python -m pytest --basetemp=/tmp/nix-pytest -o faulthandler_timeout=120 -o faulthandler_exit_on_timeout=true";
 in
 ''
   runHook preCheck
