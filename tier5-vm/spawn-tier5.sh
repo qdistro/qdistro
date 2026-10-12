@@ -287,9 +287,12 @@ qemu_pids_for_domain() {
     # hands the caller FOREIGN qemu pids it may signal (sol r15). awk
     # index() via ENVIRON needs no escaping at all.
     raw=$(run_as_admin ps -eo pid=,args= 2>/dev/null) || return 2
+    # The filter's own status is part of the verdict: an awk failure
+    # producing no output is UNVERIFIABLE, never "confirmed dead"
+    # (astra r43).
     raw=$(printf '%s\n' "$raw" \
         | T5N="-name guest=$name," \
-            awk 'index($0, ENVIRON["T5N"]) {print $1}')
+            awk 'index($0, ENVIRON["T5N"]) {print $1}') || return 2
     [ -n "$raw" ] || return 1
     for p in $raw; do
         # An unreadable /proc/<pid>/comm CANNOT be discounted — the pid
@@ -306,6 +309,9 @@ qemu_pids_for_domain() {
         # Parse on NUL — the only delimiter an argv entry cannot
         # contain: newline-folding via tr lets a single crafted arg
         # manufacture the fake "-name\nguest=..." pair (sol r19).
+        # Verdict codes: 0 match, 3 clean nonmatch, 2 /proc unreadable.
+        # EVERY other rc — interpreter missing/killed (126/127/137) or
+        # a crash (1) — is unverifiable, never a nonmatch (astra r43).
         T5NAME="$name" python3 - "$p" >/dev/null <<'PY'
 import os, sys
 pid = sys.argv[1]
@@ -316,10 +322,10 @@ except OSError:
     sys.exit(2)
 sys.exit(0 if any(
     a == b"-name" and argv[i + 1].startswith(needle)
-    for i, a in enumerate(argv[:-1])) else 1)
+    for i, a in enumerate(argv[:-1])) else 3)
 PY
         _avrc=$?
-        case $_avrc in 0) out="$out $p" ;; 2) unread=1 ;; esac
+        case $_avrc in 0) out="$out $p" ;; 3) ;; *) unread=1 ;; esac
     done
     [ -n "$out" ] || { [ -n "$unread" ] && return 2; return 1; }
     printf '%s' "$out"
