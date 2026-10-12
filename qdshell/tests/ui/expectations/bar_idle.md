@@ -8,10 +8,10 @@ What must be visible (the shipped default layout, `Assets/settings-default.json`
   date as text, and a few small icon-only indicators after it.
 - Center section: a workspace indicator — a row of small pills/circles, the
   active one highlighted and showing its number.
-- End (right) section: a group of about four small icon-only buttons, the first
-  a notification bell and the second a speaker/volume icon; both are required.
-  (The remaining icons are brightness and control-center glyphs; only their
-  exact identity is not checked.)
+- End (right) section: a group of at least four small icon-only buttons — fewer
+  than four is a failure. The first is a notification bell and the second a
+  speaker/volume icon; both are required. (The remaining two are the brightness
+  and control-center glyphs; only their exact identity is not checked.)
 - No slide-out panel, launcher, or menu is currently overlaid on the bar or the
   screen below it.
 - Background is the configured wallpaper, or empty/plain dark if wallpaper
