@@ -543,9 +543,11 @@ qci_release_storage_lock
 # (lib/offline-egress.sh). SSH-only clones cannot be armed over qga; they boot
 # from an armed run golden, whose boot unit loads the block before the
 # network, and the gate's scan verifies it is live.
-. "$SCRIPT_DIR/lib/offline-egress.sh"
 ARM_EGRESS=0
-qd_offline_egress_arm_requested && [ "$SSH_CLONE" != 1 ] && ARM_EGRESS=1
+if [ "${QD_OFFLINE_EGRESS_ARM:-0}" = 1 ]; then
+    . "$SCRIPT_DIR/lib/offline-egress.sh"
+    qd_offline_egress_arm_requested && [ "$SSH_CLONE" != 1 ] && ARM_EGRESS=1
+fi
 if [ "$ARM_EGRESS" = 1 ]; then
     qd_offline_egress_start_dark "$VM" || { echo "ERROR: offline: could not start $VM with its links down" >&2; exit 1; }
 else
