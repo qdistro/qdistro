@@ -19,6 +19,10 @@ setup() {
     mkdir -p "$WORK"
     TODAY="$(date -u +%Y%m%d)"
     YESTERDAY="$(date -u -d yesterday +%Y%m%d)"
+    # Never reach the real deps cache or start a proxy: guest repo wiring
+    # stays upstream (QDISTRO_REPO_PROXY=0), the cache root is a temp dir.
+    export QDISTRO_DEPS_CACHE_DIR="$BATS_TEST_TMPDIR/deps" QDISTRO_SERVE_PORT=0 QDISTRO_REPO_PROXY=0
+    unset QDISTRO_REPO_BASE _QD_REPO_BASE_WIRED QDWIN_CACHE_DIR
 }
 
 # The pinned fingerprint the helper trusts.

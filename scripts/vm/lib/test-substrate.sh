@@ -3,6 +3,13 @@
 # read by image/build.sh). Shared, explicit input for cloud-derived test VMs.
 # Callers may select a different qualified manifest with QDISTRO_TEST_SUBSTRATE=<absolute path>.
 
+# deps-cache ships alongside this file wherever test-substrate.sh is staged,
+# host or guest. Sourcing it here lets qdistro_substrate_repo_command wire a
+# complete host mirror automatically (qd_repo_wire_guest); inside a guest
+# there is no local mirror, so the call is a no-op and the passed-through
+# QDISTRO_REPO_BASE governs.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/deps-cache.sh"
+
 # Calendar-valid 20YYMMDD date, not in the future — no age bound. Used for
 # floor manifests, whose pin may legitimately be older than 14 days because
 # floating lanes re-resolve the real substrate before use.
@@ -92,7 +99,7 @@ qdistro_substrate_base_path() {
 qdistro_substrate_recipe_digest() {
     local kind="$1" vm_dir file digest joined=''
     vm_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    local -a files=("$vm_dir/lib/test-substrate.sh" "$vm_dir/lib/rpm-cache.sh" "$vm_dir/lib/opensuse-cloud-image.sh" "$vm_dir/lib/deps-cache.sh" "$vm_dir/qd-repo-mirror.py")
+    local -a files=("$vm_dir/lib/test-substrate.sh" "$vm_dir/lib/rpm-cache.sh" "$vm_dir/lib/opensuse-cloud-image.sh" "$vm_dir/lib/deps-cache.sh" "$vm_dir/qd-repo-cache.py")
     case "$kind" in
         admin) files+=("$vm_dir/build-baseweed-from-scratch.sh") ;;
         baked) files+=("$vm_dir/build-baked-baseweed.sh" "$vm_dir/install-deps.sh" "$vm_dir/../../tier5-vm/build-guest-image.sh") ;;
@@ -121,6 +128,11 @@ qdistro_substrate_recipe_digest() {
 # QDISTRO_REPO_BASE from qd_serve_guest_base.
 qdistro_substrate_repo_command() {
     local snap="${QDISTRO_SUBSTRATE_SNAPSHOT:?}" digest="${QDISTRO_SUBSTRATE_CLOUD_SHA256:?}"
+    # Auto-wire a complete host mirror for QEMU-slirp guests (10.0.2.2).
+    # Callers on a different transport (libguestfs appliance, podman build)
+    # must export QDISTRO_REPO_BASE themselves — qd_repo_wire_guest then
+    # returns early and their address wins.
+    qd_repo_wire_guest "$snap" 10.0.2.2
     local base="${QDISTRO_REPO_BASE:-}"
     if [ -z "$base" ]; then
         _v_off=
@@ -133,6 +145,10 @@ qdistro_substrate_repo_command() {
         fi
         base="https://download.opensuse.org/history"
     fi
+    qd_repo_base_safe "$base" || {
+        echo "ERROR: repo base is not a plain URL: ${base:0:80}" >&2
+        return 1
+    }
     cat <<EOF
 mkdir -p /etc/zypp/repos.d /etc/qdistro
 find /etc/zypp/repos.d -maxdepth 1 -name '*.repo' -delete

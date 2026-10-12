@@ -37,7 +37,10 @@ Usage:
 
 Options:
   --force        Rebuild even if dest already exists.
-  --mirror URL   Override Tumbleweed-Minimal-VM download URL.
+  --mirror URL   Override Tumbleweed-Minimal-VM download URL (floating,
+                 unverified — operator override). Default: the
+                 snapshot.conf-pinned image, fetched verified via the
+                 dep cache.
   --dest PATH    Output path
                  (default /var/lib/libvirt/images/qdistro-print-base.qcow2).
   --cache PATH   Cache dir for the upstream qcow2
@@ -49,10 +52,19 @@ Reqs:
 EOF
 }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Dep-cache libs: verified cloud fetch + snapshot pin + mirror wiring.
+# May run as root → the cache root follows the invoking user's HOME
+# (~root/.cache/qdistro under sudo); warm it with `sudo
+# scripts/vm/qd-cache-warm` or point QDISTRO_DEPS_CACHE_DIR at a
+# shared warm cache.
+. "$SCRIPT_DIR/../scripts/vm/lib/test-substrate.sh"
+. "$SCRIPT_DIR/../scripts/vm/lib/opensuse-cloud-image.sh"
+
 FORCE=0
 DEST=/var/lib/libvirt/images/qdistro-print-base.qcow2
 CACHE_DIR="${HOME}/.cache/qdistro"
-MIRROR=https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2
+MIRROR=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -89,19 +101,51 @@ fi
 
 install -d -m 0755 "$CACHE_DIR"
 CACHE_QCOW="$CACHE_DIR/tier5-base-cloud.qcow2"
-if [ ! -f "$CACHE_QCOW" ]; then
-    echo "[print-build] downloading base image to $CACHE_QCOW..."
-    wget -q --show-progress -O "$CACHE_QCOW.partial" "$MIRROR" || {
-        rm -f "$CACHE_QCOW.partial"
-        echo "[print-build] FAIL: download from $MIRROR" >&2
-        exit 3
-    }
-    mv "$CACHE_QCOW.partial" "$CACHE_QCOW"
+if [ -n "$MIRROR" ]; then
+    # Explicit operator override: historical floating fetch (unverified by
+    # design — the pinned default below is the verified path).
+    if [ ! -f "$CACHE_QCOW" ]; then
+        echo "[print-build] downloading base image to $CACHE_QCOW (--mirror override; unverified)..."
+        wget -q --show-progress -O "$CACHE_QCOW.partial" "$MIRROR" || {
+            rm -f "$CACHE_QCOW.partial"
+            echo "[print-build] FAIL: download from $MIRROR" >&2
+            exit 3
+        }
+        mv "$CACHE_QCOW.partial" "$CACHE_QCOW"
+    fi
+    SRC_QCOW="$CACHE_QCOW"
+    REPO_CMD=""
+else
+    # Default: the snapshot-pinned Minimal-VM image — the same verified
+    # artifact the test substrate consumes — content-addressed in the deps
+    # cache. Adopt a legacy flat cache hit before fetching.
+    qdistro_load_test_substrate floor || { echo "[print-build] snapshot.conf load failed" >&2; exit 2; }
+    qd_adopt cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$CACHE_QCOW" \
+        "$QDISTRO_SUBSTRATE_CLOUD_URL" || true
+    CLOUD_CACHE="$(qd_path cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$(basename "$QDISTRO_SUBSTRATE_CLOUD_URL")")"
+    download_verified_cloud_image "$QDISTRO_SUBSTRATE_CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" \
+        || { echo "[print-build] FAIL: verified cloud image ($QDISTRO_SUBSTRATE_CLOUD_URL)" >&2; exit 3; }
+    echo "[print-build] using verified pinned image: $CLOUD_CACHE"
+    SRC_QCOW="$CLOUD_CACHE"
+    # Pin the guest repos to the same snapshot as the base image: serve a
+    # complete local mirror when one exists (libguestfs appliance →
+    # passt/slirp addr), else point at the snapshot's history URL. Offline
+    # with no mirror fails closed here, not inside the guest.
+    GUESTFS_BACKEND="$(qd_guestfs_probe_backend)" \
+        || { echo "[print-build] ERROR: libguestfs backend probe failed" >&2; exit 3; }
+    if [ "$GUESTFS_BACKEND" = passt ]; then
+        qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" passt || true
+    else
+        qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2 || true
+    fi
+    REPO_CMD="$(qdistro_substrate_repo_command)" \
+        || { echo "[print-build] substrate repo command failed" >&2; exit 3; }
+    echo "[print-build] guest installs pinned against ${QDISTRO_REPO_BASE:-snapshot history} ($QDISTRO_SUBSTRATE_SNAPSHOT)"
 fi
 WORK="$(mktemp -d /tmp/print-build.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 BASE_QCOW="$WORK/base.qcow2"
-cp --reflink=auto "$CACHE_QCOW" "$BASE_QCOW"
+cp --reflink=auto "$SRC_QCOW" "$BASE_QCOW"
 
 # Stage the cupsd override. cupsd doesn't natively listen on
 # AF_VSOCK — we wrap it with a small socat bridge that forwards
@@ -251,7 +295,12 @@ PL
 chmod +x "$CONF_DIR/usr/local/bin/qdistro-print-set-page-limit"
 
 echo "[print-build] customizing..."
+# Repo pinning runs first: virt-customize applies argv-ordered ops, so the
+# .repo files are in place before --install resolves packages.
+REPO_ARGS=()
+if [ -n "${REPO_CMD:-}" ]; then REPO_ARGS=(--run-command "$REPO_CMD"); fi
 virt-customize -a "$BASE_QCOW" \
+    "${REPO_ARGS[@]}" \
     --install cups,cups-filters,cups-browsed,cups-pdf,socat,qemu-guest-agent \
     --copy-in "$CONF_DIR/etc/cups/cupsd.conf:/etc/cups/" \
     --copy-in "$CONF_DIR/etc/cups-browsed.conf:/etc/" \

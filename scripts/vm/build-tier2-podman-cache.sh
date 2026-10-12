@@ -22,6 +22,16 @@ command -v podman >/dev/null || { echo 'ERROR: rootless Podman is required' >&2;
 . "$here/lib/deps-cache.sh"
 base_image=registry.opensuse.org/opensuse/tumbleweed:$QDISTRO_SUBSTRATE_SNAPSHOT
 qd_oci_ensure "$base_image" >/dev/null || exit 3
+
+# Route the Containerfile RUN zypper steps through the repo cache. The wire
+# call must run in THIS shell — a subshell drops the export.
+mirror_args=()
+net_args=()
+# Online: proxy via host.containers.internal (misses fetched + cached).
+# Offline: ro file:// mount of the cache under --network=none.
+if qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror; then
+    mirror_args=("${QD_REPO_CONTAINER_ARGS[@]}")
+fi
 base_id=$(podman image inspect "$base_image" --format '{{.Id}}')
 
 cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}/tier2-podman/$QDISTRO_SUBSTRATE_SNAPSHOT/$QDISTRO_SUBSTRATE_ARCH
@@ -52,12 +62,12 @@ if [ -s "$archive" ] && [ -s "$receipt" ] \
     printf '%s\n' "$archive"
     exit 0
 fi
-case "${QCI_OFFLINE:-0}" in
-    1|true|yes|on)
-        echo "ERROR: no cached tier-2 archive for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT (QCI_OFFLINE=1)" >&2
-        exit 3
-        ;;
-esac
+# Offline the archive is built from the cache alone (wired above: ro cache
+# mount + --network=none) — or not at all.
+if qd_deps_offline && [ "${#mirror_args[@]}" -eq 0 ]; then
+    echo "ERROR: no cached tier-2 archive for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT and no cached repo metadata to build one offline (run qd-cache-warm)" >&2
+    exit 3
+fi
 
 mkdir -p "$work/context"
 tar -C "$work/context" -xf "$work/source.tar"
@@ -86,7 +96,7 @@ for workload in "${workloads[@]}"; do
         cp -a "$work/context/qdfileman" "$wcontext/qdfileman"
         cp -a "$work/context/sdk/presentation" "$wcontext/presentation"
     fi
-    podman build --pull=never --layers \
+    podman build --pull=never --layers "${net_args[@]}" "${mirror_args[@]}" \
         --file "$wcontext/Containerfile.$workload" \
         --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
         --build-arg "QDISTRO_REPO_BASE=${QDISTRO_REPO_BASE:-}" \

@@ -79,7 +79,9 @@ fail() { printf '\033[1;31m[test-vm] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
 url_for() {
     case "$1" in
         tumbleweed) echo "https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2" ;;
-        ubuntu)     echo "https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img" ;;
+        # The dated release dir keeps its bytes; .../release/ re-rolls in
+        # place on every point release — pinning against it would break.
+        ubuntu)     echo "https://cloud-images.ubuntu.com/releases/26.04/release-20260927/ubuntu-26.04-server-cloudimg-amd64.img" ;;
         *)          echo "" ;;
     esac
 }
@@ -117,12 +119,25 @@ prep_image() {
         download_verified_cloud_image "$url" "$cache" "$tw_sha" \
             || { log "[$distro] ERROR: cloud image failed openSUSE signature/digest verification"; return 1; }
         qd_write_manifest cloud "$tw_sha" "$url" "$(basename "$url")"
-    elif [ ! -s "$cache" ]; then
-        # NOTE (J25): the ubuntu base is not openSUSE-signed and has no
-        # verification helper yet — a separate follow-up. Transport is https.
-        log "[$distro] downloading cloud image..."
-        wget -q --show-progress -O "$cache.partial" "$url"
-        mv "$cache.partial" "$cache"
+    elif [ "$distro" = "ubuntu" ]; then
+        # The ubuntu base is not openSUSE-signed; the verification anchor is
+        # the sha256 pinned here (taken from Ubuntu's signed SHA256SUMS for
+        # release-20260927; override with QDISTRO_UBUNTU_CLOUD_SHA256 on a
+        # deliberate bump). qd_fetch verifies bytes before promoting, so a
+        # re-rolled upstream file fails loudly. Provenance lands in the
+        # dep-cache manifest. In-guest apt still reaches
+        # archive.ubuntu.com — a foreign distro's packages are outside the
+        # dep cache's remit.
+        local ubuntu_sha="${QDISTRO_UBUNTU_CLOUD_SHA256:-8800651811af9a85465ad1d552add729947bb16488dddb4a9b5305a3d97332b2}"
+        . "$SCRIPT_DIR/../vm/lib/deps-cache.sh"
+        # Adopt the legacy flat cache if it already holds these bytes.
+        qd_adopt cloud "$ubuntu_sha" "$CACHE_DIR/ubuntu-26.04-cloud-base.qcow2" "$url" || true
+        # qd_fetch prints the real stored path — a content-keyed hit may
+        # live under a different basename than the URL's.
+        cache="$(qd_fetch cloud "$url" "$ubuntu_sha" "$(basename "$url")")" \
+            || { log "[$distro] ERROR: ubuntu image failed digest verification (or is missing under offline mode)"; return 1; }
+        qd_write_manifest cloud "$ubuntu_sha" "$url" "$(basename "$cache")"
+        log "[$distro] verified image: $cache"
     else
         log "[$distro] reusing cached image: $cache ($(du -h "$cache" | cut -f1))"
     fi

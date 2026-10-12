@@ -172,33 +172,32 @@ select_host_resolvers() {
 
 # libguestfs 1.60 prefers passt when it is runnable, but that is an internal
 # backend decision: the presence of /usr/bin/passt alone does not prove the
-# appliance actually uses it.  Launch a diskless network appliance and inspect
-# the generated libvirt XML/direct-QEMU command before permitting passt's fixed
-# 169.254.2.0/16 recovery addresses.
+# appliance actually uses it.  Probe a diskless network appliance and inspect
+# the generated libvirt XML/direct-QEMU command before permitting passt's
+# fixed 169.254.2.0/16 recovery addresses.
+GUESTFS_BACKEND="$(qd_guestfs_probe_backend)" || exit 3
 PASST_CONFIRMED=0
-BACKEND_PROBE_LOG="$(mktemp)"
-if LIBGUESTFS_DEBUG=1 guestfish >"$BACKEND_PROBE_LOG" 2>&1 <<'GUESTFISH'
-set-network true
-run
-GUESTFISH
-then
-    if { grep -Fq '<backend type="passt"/>' "$BACKEND_PROBE_LOG" \
-         && grep -Fq 'address="169.254.2.15" prefix="16"' "$BACKEND_PROBE_LOG"; } \
-        || { grep -Fq 'command: run: passt' "$BACKEND_PROBE_LOG" \
-             && grep -Fq -- '--address 169.254.2.15' "$BACKEND_PROBE_LOG"; }; then
-        PASST_CONFIRMED=1
-    fi
-else
-    echo "ERROR: could not launch the libguestfs backend probe" >&2
-    tail -40 "$BACKEND_PROBE_LOG" >&2
-    rm -f "$BACKEND_PROBE_LOG"
-    exit 3
-fi
-rm -f "$BACKEND_PROBE_LOG"
+if [ "$GUESTFS_BACKEND" = passt ]; then PASST_CONFIRMED=1; fi
 
 mapfile -t HOST_DNS_SERVERS < <(select_host_resolvers || true)
 HOST_DNS="${HOST_DNS_SERVERS[*]:-}"
-NET_CHECK='getent ahostsv4 download.opensuse.org >/dev/null && curl -fsS --connect-timeout 10 --max-time 30 https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml >/dev/null'
+# Wire the mirror for the probed backend BEFORE repo_cmd is built below —
+# passt appliances reach the host at its default gateway (qd_passt_host_addr), slirp at 10.0.2.2.
+if [ "$PASST_CONFIRMED" -eq 1 ]; then
+    qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" passt
+else
+    qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2
+fi
+# Probe what zypper will actually fetch: the wired mirror URL when set —
+# honest under a host airgap — else upstream. The base interpolates into a
+# --run-command string: reject anything that isn't a plain URL token.
+if [ -n "${QDISTRO_REPO_BASE:-}" ]; then
+    qd_repo_base_safe "$QDISTRO_REPO_BASE" \
+        || { echo "ERROR: QDISTRO_REPO_BASE is not a plain URL: ${QDISTRO_REPO_BASE:0:80}" >&2; exit 3; }
+    NET_CHECK="curl -fsS --connect-timeout 10 --max-time 30 '$QDISTRO_REPO_BASE/$QDISTRO_SUBSTRATE_SNAPSHOT/tumbleweed/repo/oss/repodata/repomd.xml' >/dev/null"
+else
+    NET_CHECK='getent ahostsv4 download.opensuse.org >/dev/null && curl -fsS --connect-timeout 10 --max-time 30 https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml >/dev/null'
+fi
 if [ "$PASST_CONFIRMED" -eq 1 ]; then
     LIBGUESTFS_NET_ARGS=(
         --run-command "set -eu; if ! ip -4 addr show dev eth0 | grep -q 'inet '; then [ -n '$HOST_DNS' ] || { echo 'ERROR: libguestfs passt DHCP failed and no usable non-loopback IPv4 resolver was found (checked /etc/resolv.conf and resolvectl)' >&2; exit 70; }; ip address replace 169.254.2.15/16 dev eth0; ip route replace default via 169.254.2.2 dev eth0; ip -4 addr show dev eth0 | grep -Fq 'inet 169.254.2.15/16'; ip route show default | grep -Fq 'default via 169.254.2.2 dev eth0'; mount -o remount,rw /etc/resolv.conf; for dns in $HOST_DNS; do printf 'nameserver %s\\n' \"\$dns\"; done >/etc/resolv.conf; for dns in $HOST_DNS; do grep -Fxq \"nameserver \$dns\" /etc/resolv.conf; done; fi; $NET_CHECK"

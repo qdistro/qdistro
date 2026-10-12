@@ -18,6 +18,20 @@
 # libvirt: missing bats => skip+warn (matches the lint convention). EXIT_BATS
 # on failure.
 # ---------------------------------------------------------------------------
+# Deps-cache / offline knobs the nested self-test bats must not inherit. An
+# offline `qci full` exports them for its guests; inherited, they flip
+# hermetic cases onto offline/proxy paths or point fixture writes and the
+# proxy port at the operator's real cache. Suites that cover these set
+# them per case.
+QCI_SELFTEST_DEPS_SCRUB=(QCI_OFFLINE QDISTRO_DEPS_OFFLINE QDISTRO_REPO_BASE
+                         _QD_REPO_BASE_WIRED QDISTRO_REPO_PROXY
+                         QDISTRO_DEPS_CACHE_DIR QDISTRO_SERVE_PORT)
+qci_selftest_deps_scrub() {   # qci_selftest_deps_scrub <array>: append env -u args
+    local -n _qsd_args="$1"
+    local v
+    for v in "${QCI_SELFTEST_DEPS_SCRUB[@]}"; do _qsd_args+=(-u "$v"); done
+}
+
 gate_selftest() {
     qci_assert_run_dir || return $?
     local log_path="$RDIR/selftest/qci-selftest.log" rc=$EXIT_OK
@@ -105,6 +119,7 @@ gate_selftest() {
     # fixtures and assert lock contention (98), so an inherited marker would
     # turn them into false refusals (2). The refusal test sets it explicitly.
     local -a sf_scrub=(-u WORKSPACE -u QCI_GUI_SCENARIO_AGENT)
+    qci_selftest_deps_scrub sf_scrub
     local _sf_proj _sf_var
     for _sf_proj in "${PROJECTS[@]}"; do
         _sf_var=$(printf '%s' "$_sf_proj" | tr '[:lower:]-' '[:upper:]_')_REPO

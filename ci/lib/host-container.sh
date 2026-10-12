@@ -19,6 +19,10 @@ host_container_run() {
     deps_root=$(realpath "$deps_root") || return
     mounts+=(--volume "$deps_root:$deps_root:rw")
     envs+=(--env "QDISTRO_DEPS_CACHE_DIR=$deps_root")
+    # The cache is shared with the host, its proxy state included: nothing
+    # in here may start a proxy (its pid would be from this pid namespace,
+    # its port unreachable). Host-side wiring serves containers.
+    envs+=(--env QDISTRO_REPO_PROXY=0)
     # Linked-worktree .git files point outside the source mount. Git metadata
     # is read-only: tests may inspect provenance but cannot edit another tree.
     git_common=$(git -C "$QDISTRO_REPO" rev-parse --path-format=absolute --git-common-dir) || return

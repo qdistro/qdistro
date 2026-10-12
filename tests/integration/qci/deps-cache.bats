@@ -22,7 +22,10 @@ setup() {
     GOOD_SHA="$(sha256sum "$WORK/src/blob.bin" | awk '{print $1}')"
     BAD_SHA="0000000000000000000000000000000000000000000000000000000000000000"
     export QDISTRO_DEPS_CACHE_DIR="$WORK/cache"
-    unset QDISTRO_DEPS_OFFLINE QCI_OFFLINE
+    unset QDISTRO_DEPS_OFFLINE QCI_OFFLINE QDISTRO_REPO_BASE _QD_REPO_BASE_WIRED
+    # Kernel-assigned proxy port + a fixed guest host address: never collide
+    # with a live proxy on this user's stable port, never depend on routes.
+    export QDISTRO_SERVE_PORT=0 QDISTRO_GUEST_HOST_ADDR=192.0.2.10
 
     PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
     # exec so $! is python's own pid — without it the subshell may fork a
@@ -44,6 +47,8 @@ teardown() {
         kill "$COUNT_PID" 2>/dev/null
         wait "$COUNT_PID" 2>/dev/null || true
     fi
+    # Always: any test may start the proxy (online wiring always does).
+    bash -c '. "$1"; qd_serve_stop' _ "$LIB" 2>/dev/null || true
 }
 
 # start_counting_server <serve-dir> <hit-log> <delay-s>
@@ -84,6 +89,34 @@ PY
 runq() {
     run env QDISTRO_DEPS_CACHE_DIR="$WORK/cache" "${@:2}" \
         bash -c ". '$LIB'; $1" --
+}
+
+@test "qd_deps_root survives an unset HOME under set -u (kiwi chroot)" {
+    run env -u HOME -u QDISTRO_DEPS_CACHE_DIR -u QDWIN_CACHE_DIR bash -c \
+        'set -euo pipefail; . "$1"; qd_deps_root' _ "$LIB"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(getent passwd "$(id -u)" | cut -d: -f6)/.cache/qdistro" ]
+    run env -u HOME bash -c 'set -euo pipefail; . "$1"; qd_deps_root' _ "$LIB"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$WORK/cache" ]
+}
+
+@test "qd_deps_root failure propagates: no root means no path, override still wins" {
+    mkdir -p "$WORK/bin"
+    printf '#!/bin/sh\nexit 2\n' > "$WORK/bin/getent"; chmod +x "$WORK/bin/getent"
+    run env -u HOME -u QDISTRO_DEPS_CACHE_DIR -u QDWIN_CACHE_DIR PATH="$WORK/bin:$PATH" \
+        bash -c 'set -euo pipefail; . "$1"; qd_deps_root' _ "$LIB"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"set QDISTRO_DEPS_CACHE_DIR"* ]]
+    for fn in "qd_repo_dir 20260101" "qd_path src $GOOD_SHA blob.bin"; do
+        run env -u HOME -u QDISTRO_DEPS_CACHE_DIR -u QDWIN_CACHE_DIR PATH="$WORK/bin:$PATH" \
+            bash -c '. "$1"; $2' _ "$LIB" "$fn"
+        [ "$status" -ne 0 ]
+        [[ "$output" != *"/repos/"* && "$output" != *"/src/"* ]]
+    done
+    run env -u HOME PATH="$WORK/bin:$PATH" bash -c 'set -euo pipefail; . "$1"; qd_deps_root' _ "$LIB"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$WORK/cache" ]
 }
 
 @test "qd_fetch cold-stores an artifact under class/sha256/basename" {
@@ -637,4 +670,510 @@ oci_img_present() {
     grep -qx "sha256:$REF_SHA" "$WORK/cache/oci/refs/$REF_SHA.digest"
     # No staged tmp leftovers inside the entry dir.
     [ -z "$(find "$WORK/cache/oci/$REF_SHA" -name '.*' -type f -print -quit)" ]
+}
+
+# ---- lane wiring: qd_repo_wire_guest / qd_repo_wire_container ----------------
+# Cached metadata for wiring tests — qd_repo_present checks only the marker
+# qd-repo-cache.py publishes after repomd + every metadata file verified.
+fab_mirror() {
+    local snap="$1"
+    mkdir -p "$WORK/cache/repos/$snap/tumbleweed/repo/oss" \
+             "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss"
+    echo '{"repo":"oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/oss/metadata.json"
+    echo '{"repo":"non-oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss/metadata.json"
+}
+
+@test "qd_repo_wire_guest online: cold cache still wires the pull-through proxy" {
+    SERVE_STARTED=1
+    run bash -c ". '$LIB'; qd_repo_wire_guest 20260101 10.0.2.2; echo base=\$QDISTRO_REPO_BASE"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ base=http://192\.0\.2\.10:[0-9]+/repos ]]
+    [ "$(cat "$WORK/cache/.serve.mode")" = online ]
+}
+
+@test "qd_repo_wire_guest offline: no cached metadata → no-op, no server, no base" {
+    run env QCI_OFFLINE=1 bash -c ". '$LIB'; qd_repo_wire_guest 20260101 10.0.2.2; echo base=\${QDISTRO_REPO_BASE:-unset}"
+    [ "$status" -eq 0 ]
+    [ "$output" = "base=unset" ]
+    [ ! -s "$WORK/cache/.serve.port" ]
+}
+
+@test "qd_repo_wire_guest offline: cached metadata → cache-only proxy + guest base" {
+    fab_mirror 20260101
+    local d="$WORK/cache/repos/20260101/tumbleweed/repo/oss"
+    mkdir -p "$d/repodata"
+    echo '<repomd xmlns="http://linux.duke.edu/metadata/repo"/>' > "$d/repodata/repomd.xml"
+    # a real schema-3 marker pinning that repomd (the proxy re-hashes it)
+    printf '{"schema":3,"repomd_sha256":"%s","sidecars":{}}' \
+        "$(sha256sum "$d/repodata/repomd.xml" | awk '{print $1}')" > "$d/metadata.json"
+    SERVE_STARTED=1
+    run env QCI_OFFLINE=1 bash -c ". '$LIB'; qd_repo_wire_guest 20260101 169.254.2.2; echo base=\$QDISTRO_REPO_BASE"
+    [ "$status" -eq 0 ]
+    # the offline policy travels in the URL: cache-only whatever the server mode
+    [[ "$output" =~ base=http://192\.0\.2\.10:[0-9]+/offline/repos$ ]]
+    [ "$(cat "$WORK/cache/.serve.mode")" = offline ]
+    # the proxy serves the cached tree
+    port="$(bash -c '. "$1"; qd_serve_port' _ "$LIB")"
+    wget -q -O - "http://127.0.0.1:$port/offline/repos/20260101/tumbleweed/repo/oss/repodata/repomd.xml" \
+        | grep -q '<repomd xmlns'
+}
+
+@test "qd_repo_wire_guest: explicit QDISTRO_REPO_BASE wins, no server" {
+    run bash -c ". '$LIB'; export QDISTRO_REPO_BASE=http://hand.set/base; qd_repo_wire_guest 20260101; echo base=\$QDISTRO_REPO_BASE"
+    [ "$status" -eq 0 ]
+    [ "$output" = "base=http://hand.set/base" ]
+    [ ! -s "$WORK/cache/.serve.port" ]
+}
+
+@test "qd_repo_wire_guest: QDISTRO_REPO_PROXY=0 bypasses the proxy" {
+    run env QDISTRO_REPO_PROXY=0 bash -c ". '$LIB'; qd_repo_wire_guest 20260101; echo base=\${QDISTRO_REPO_BASE:-unset}"
+    [ "$status" -eq 0 ]
+    [ "$output" = "base=unset" ]
+    [ ! -s "$WORK/cache/.serve.port" ]
+}
+
+@test "qd_repo_wire_guest offline: only-oss metadata does not wire" {
+    mkdir -p "$WORK/cache/repos/20260101/tumbleweed/repo/oss"
+    echo '{}' > "$WORK/cache/repos/20260101/tumbleweed/repo/oss/metadata.json"
+    run env QCI_OFFLINE=1 bash -c ". '$LIB'; qd_repo_wire_guest 20260101; echo base=\${QDISTRO_REPO_BASE:-unset}"
+    [ "$status" -eq 0 ]
+    [ "$output" = "base=unset" ]
+}
+
+@test "qd_repo_wire_container offline: ro file:// mount + --network=none, in THIS shell" {
+    fab_mirror 20260101
+    # The contract is that the export reaches the CALLER — invoking
+    # through `run`/a subshell would hide exactly the bug this pins.
+    . "$LIB"
+    export QCI_OFFLINE=1
+    qd_repo_wire_container 20260101 /qdistro-mirror
+    [ "$QDISTRO_REPO_BASE" = "file:///qdistro-mirror" ]
+    [ "${QD_REPO_CONTAINER_ARGS[*]}" = "--volume $WORK/cache/repos:/qdistro-mirror:ro,z --network=none" ]
+}
+
+@test "qd_repo_wire_container online: proxy via host.containers.internal, no extra args" {
+    SERVE_STARTED=1
+    . "$LIB"
+    qd_repo_wire_container 20260101 /qdistro-mirror
+    [[ "$QDISTRO_REPO_BASE" =~ ^http://host\.containers\.internal:[0-9]+/repos$ ]]
+    [ "${#QD_REPO_CONTAINER_ARGS[@]}" -eq 0 ]
+}
+
+@test "qd_repo_wire_container offline: no metadata → rc 1, no base" {
+    . "$LIB"
+    export QCI_OFFLINE=1
+    run qd_repo_wire_container 20260101 /qdistro-mirror
+    [ "$status" -eq 1 ]
+    [ -z "${QDISTRO_REPO_BASE:-}" ]
+}
+
+@test "qd_repo_wire_container: explicit base wins" {
+    fab_mirror 20260101
+    . "$LIB"
+    export QDISTRO_REPO_BASE=http://hand.set/base
+    run qd_repo_wire_container 20260101 /qdistro-mirror
+    [ "$status" -eq 1 ]
+    [ "$QDISTRO_REPO_BASE" = "http://hand.set/base" ]
+}
+
+@test "qd_repo_base_safe rejects whitespace/metachar injection" {
+    . "$LIB"
+    run qd_repo_base_safe 'http://10.0.2.2:8000/repos'; [ "$status" -eq 0 ]
+    run qd_repo_base_safe 'file:///qdistro-mirror'; [ "$status" -eq 0 ]
+    run qd_repo_base_safe 'http://x/; rm -rf /'; [ "$status" -eq 1 ]
+    run qd_repo_base_safe "http://x/
+[evil]"; [ "$status" -eq 1 ]
+    run qd_repo_base_safe 'http://x/$(id)'; [ "$status" -eq 1 ]
+    run qd_repo_base_safe 'http://x/a&rm -rf /'; [ "$status" -eq 1 ]
+    run qd_repo_base_safe 'not-a-url'; [ "$status" -eq 1 ]
+}
+
+@test "qd_guestfs_host_addr: passt-era libguestfs + passt → the host's default gateway" {
+    mkdir -p "$WORK/fakebin"
+    # Real `guestfish version` output is multi-line key: value — NOT
+    # "guestfish 1.60.2".
+    printf '#!/bin/sh\nprintf "major: 1\\nminor: 60\\nrelease: 1\\nextra: \\n"\n' > "$WORK/fakebin/guestfish"
+    printf '#!/bin/sh\nexit 0\n' > "$WORK/fakebin/passt"
+    # passt maps the guest's view of the host's default gateway to the host.
+    printf '#!/bin/sh\necho "default via 192.0.2.77 dev eth0 proto dhcp"\n' > "$WORK/fakebin/ip"
+    chmod +x "$WORK/fakebin/guestfish" "$WORK/fakebin/passt" "$WORK/fakebin/ip"
+    run bash -c "export PATH='$WORK/fakebin':\"\$PATH\"; . '$LIB'; qd_guestfs_host_addr"
+    [ "$output" = "192.0.2.77" ]
+    run bash -c "export PATH='$WORK/fakebin':\"\$PATH\" QDISTRO_PASST_HOST_ADDR=198.51.100.9; . '$LIB'; qd_guestfs_host_addr"
+    [ "$output" = "198.51.100.9" ]
+}
+
+@test "qd_passt_host_addr: no default route fails closed" {
+    mkdir -p "$WORK/fakebin"
+    printf '#!/bin/sh\nexit 0\n' > "$WORK/fakebin/ip"
+    chmod +x "$WORK/fakebin/ip"
+    run bash -c "export PATH='$WORK/fakebin':\"\$PATH\"; . '$LIB'; qd_passt_host_addr"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no IPv4 default gateway"* ]]
+}
+
+@test "qd_guestfs_host_addr: no passt → 10.0.2.2" {
+    mkdir -p "$WORK/fakebin"
+    printf '#!/bin/sh\nprintf "major: 1\\nminor: 60\\nrelease: 1\\nextra: \\n"\n' > "$WORK/fakebin/guestfish"
+    chmod +x "$WORK/fakebin/guestfish"
+    # PATH restricted to the fake: the real passt must not be findable.
+    run bash -c "export PATH='$WORK/fakebin'; . '$LIB'; qd_guestfs_host_addr"
+    [ "$output" = "10.0.2.2" ]
+}
+
+@test "qd_guestfs_host_addr: pre-1.60 libguestfs + passt → 10.0.2.2" {
+    mkdir -p "$WORK/fakebin"
+    printf '#!/bin/sh\nprintf "major: 1\\nminor: 44\\nrelease: 3\\nextra: \\n"\n' > "$WORK/fakebin/guestfish"
+    printf '#!/bin/sh\nexit 0\n' > "$WORK/fakebin/passt"
+    chmod +x "$WORK/fakebin/guestfish" "$WORK/fakebin/passt"
+    run bash -c "export PATH='$WORK/fakebin':\"\$PATH\"; . '$LIB'; qd_guestfs_host_addr"
+    [ "$output" = "10.0.2.2" ]
+}
+
+@test "qd_oci_cached: refmap + complete entry → warm; missing sidecar → cold" {
+    mkdir -p "$WORK/oci-bin" "$WORK/cache/oci/refs"
+    REF_SHA="$(printf 'a%.0s' {1..64})"
+    printf 'sha256:%s\n' "$REF_SHA" > "$WORK/cache/oci/refs/$(printf 'oci.local/base:latest' | sha256sum | awk '{print $1}').digest"
+    run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest"
+    [ "$status" -eq 1 ]
+    mkdir -p "$WORK/cache/oci/$REF_SHA"
+    # Empty files are INCOMPLETE, not warm (interrupted-save shape).
+    touch "$WORK/cache/oci/$REF_SHA/image.tar"
+    run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest"
+    [ "$status" -eq 1 ]
+    printf 'fake-archive-bytes' > "$WORK/cache/oci/$REF_SHA/image.tar"
+    echo x > "$WORK/cache/oci/$REF_SHA/manifest.txt"
+    (cd "$WORK/cache/oci/$REF_SHA" && sha256sum image.tar > image.tar.sha256)
+    run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest"
+    [ "$status" -eq 0 ]
+    run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest --verify"
+    [ "$status" -eq 0 ]
+    # Corrupt bytes: structure still complete, --verify fails.
+    printf 'tampered' >> "$WORK/cache/oci/$REF_SHA/image.tar"
+    run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest"
+    [ "$status" -eq 0 ]
+    run bash -c ". '$LIB'; qd_oci_cached oci.local/base:latest --verify"
+    [ "$status" -eq 1 ]
+}
+
+@test "parallel qd_serve_start: one server, one port, all callers agree" {
+    fab_mirror 20260101
+    SERVE_STARTED=1
+    local pids=()
+    for i in 1 2 3; do
+        bash -c ". '$LIB'; qd_serve_start" >"$WORK/serve-out.$i" 2>"$WORK/serve-err.$i" &
+        pids+=("$!")
+    done
+    local rc=0
+    for i in "${pids[@]}"; do wait "$i" || rc=$((rc + 1)); done
+    [ "$rc" -eq 0 ]
+    # All three starters report the SAME bound port.
+    [ "$(sort -u "$WORK/serve-out".[123] | wc -l)" -eq 1 ]
+    # State files record a live server on that port, and it answers.
+    local port pid
+    port="$(cat "$WORK/cache/.serve.port")"
+    pid="$(cat "$WORK/cache/.serve.pid")"
+    kill -0 "$pid" 2>/dev/null
+    # answers (only /repos/... exists, so the root is a well-formed 404)
+    [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/")" = 404 ]
+}
+
+# Stub podman for the native-builder offline contract: records every call,
+# reports the builder image absent, and "builds" successfully.
+_native_builder_stub() {
+    mkdir -p "$WORK/bin"
+    cat > "$WORK/bin/podman" <<'SH'
+#!/bin/bash
+echo "podman $*" >> "$PODMAN_LOG"
+case "$1 $2" in
+    "info --format") echo true ;;
+    "image exists") exit 1 ;;
+    "image inspect")
+        case "$*" in *Labels*) echo 20260101 ;; *) echo sha256:base ;; esac ;;
+    build*) exit 0 ;;
+esac
+SH
+    chmod +x "$WORK/bin/podman"
+    export PATH="$WORK/bin:$PATH" PODMAN_LOG="$WORK/podman.log"
+    : > "$PODMAN_LOG"
+}
+
+_run_native_builder() {
+    run bash -c "
+        . '$REPO_ROOT/scripts/vm/lib/native-builder.sh'
+        . '$LIB'
+        qdistro_native_builder_base_image() { echo registry.example/tw:20260101; }
+        QDISTRO_SUBSTRATE_SNAPSHOT=20260101 QDISTRO_SUBSTRATE_ARCH=x86_64
+        QDWIN_CACHE_DIR='$WORK/qdwin'
+        qdistro_ensure_native_builder_image"
+}
+
+@test "native builder: offline with no cached repo metadata fails closed, never builds" {
+    _native_builder_stub
+    export QCI_OFFLINE=1
+    _run_native_builder
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"no cached repo metadata"* ]]
+    ! grep -q 'podman build' "$PODMAN_LOG"
+}
+
+@test "native builder: offline with cached metadata builds from cache under --network=none" {
+    _native_builder_stub
+    local snap=20260101
+    mkdir -p "$WORK/cache/repos/$snap/tumbleweed/repo/oss" "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss"
+    echo '{"repo":"oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/oss/metadata.json"
+    echo '{"repo":"non-oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss/metadata.json"
+    export QCI_OFFLINE=1
+    _run_native_builder
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"localhost/qdistro/native-builder:"* ]]
+    grep 'podman build' "$PODMAN_LOG" | grep -q -- '--network=none'
+    grep 'podman build' "$PODMAN_LOG" | grep -q -- "$WORK/cache/repos:/qdistro-mirror:ro,z"
+    grep 'podman build' "$PODMAN_LOG" | grep -q -- 'QDISTRO_REPO_BASE=file:///qdistro-mirror'
+}
+
+@test "native builder: offline ignores an exported external repo base — mirror + no network, or fail closed" {
+    _native_builder_stub
+    export QCI_OFFLINE=1 QDISTRO_REPO_BASE=https://download.example.org/history
+    _run_native_builder
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"no cached repo metadata"* ]]
+    ! grep -q 'podman build' "$PODMAN_LOG"
+
+    local snap=20260101
+    mkdir -p "$WORK/cache/repos/$snap/tumbleweed/repo/oss" "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss"
+    echo '{"repo":"oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/oss/metadata.json"
+    echo '{"repo":"non-oss"}' > "$WORK/cache/repos/$snap/tumbleweed/repo/non-oss/metadata.json"
+    _run_native_builder
+    [ "$status" -eq 0 ]
+    grep 'podman build' "$PODMAN_LOG" | grep -q -- '--network=none'
+    grep 'podman build' "$PODMAN_LOG" | grep -q -- 'QDISTRO_REPO_BASE=file:///qdistro-mirror'
+    ! grep 'podman build' "$PODMAN_LOG" | grep -q 'download.example.org'
+}
+
+@test "a generated guest base is re-derived when the offline mode flips (never a stale online URL)" {
+    fab_mirror 20260101
+    run bash -c ". '$LIB'
+        qd_repo_wire_guest 20260101 10.0.2.2 2>/dev/null
+        p1=\$(qd_serve_port)
+        export QCI_OFFLINE=1
+        qd_repo_wire_guest 20260101 10.0.2.2 2>/dev/null
+        echo \"\$QDISTRO_REPO_BASE \$( [ \"\$(qd_serve_port)\" = \"\$p1\" ] && echo same-server)\""
+    [ "$status" -eq 0 ]
+    # offline URL, and the live online server was NOT replaced under its clients
+    [[ "$output" =~ ^http://192\.0\.2\.10:[0-9]+/offline/repos\ same-server$ ]]
+}
+
+@test "qd_repo_wire_guest: failed route discovery under errexit still takes the transport fallback" {
+    mkdir -p "$WORK/fb"; printf '#!/bin/sh\nexit 1\n' > "$WORK/fb/ip"; chmod +x "$WORK/fb/ip"
+    SERVE_STARTED=1
+    run bash -c "set -euo pipefail; export QDISTRO_GUEST_HOST_ADDR=
+        export PATH='$WORK/fb':\"\$PATH\"; . '$LIB'; qd_repo_wire_guest 20260101 10.0.2.2 2>/dev/null; echo base=\$QDISTRO_REPO_BASE"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ base=http://10\.0\.2\.2:[0-9]+/repos$ ]]
+    run bash -c "set -euo pipefail; export QDISTRO_GUEST_HOST_ADDR= QDISTRO_PASST_HOST_ADDR=192.0.2.1
+        export PATH='$WORK/fb':\"\$PATH\"; . '$LIB'; qd_repo_wire_guest 20260101 passt 2>/dev/null; echo base=\$QDISTRO_REPO_BASE"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ base=http://192\.0\.2\.1:[0-9]+/repos$ ]]
+}
+
+@test "qd_repo_wire_container offline ignores an exported external base (either offline flag)" {
+    fab_mirror 20260101
+    . "$LIB"
+    export QDISTRO_DEPS_OFFLINE=1 QDISTRO_REPO_BASE=https://download.example.org/history
+    qd_repo_wire_container 20260101 /qdistro-mirror
+    [ "$QDISTRO_REPO_BASE" = "file:///qdistro-mirror" ]
+    [[ " ${QD_REPO_CONTAINER_ARGS[*]} " == *" --network=none "* ]]
+}
+
+@test "qd_repo_wire_container re-derives a generated guest base for the container transport" {
+    . "$LIB"
+    qd_repo_wire_guest 20260101 10.0.2.2 2>/dev/null
+    [[ "$QDISTRO_REPO_BASE" == http://192.0.2.10:* ]]
+    qd_repo_wire_container 20260101 /qdistro-mirror 2>/dev/null
+    [[ "$QDISTRO_REPO_BASE" == http://host.containers.internal:* ]]
+}
+
+@test "qd_repo_wire_guest: the host's primary IPv4 wins; the transport address is only the routeless fallback" {
+    run bash -c "export QDISTRO_GUEST_HOST_ADDR=; mkdir -p '$WORK/fb'; printf '#!/bin/sh\nexit 1\n' > '$WORK/fb/ip'; chmod +x '$WORK/fb/ip'
+        export PATH='$WORK/fb':\"\$PATH\"; . '$LIB'; qd_repo_wire_guest 20260101 10.0.2.2 2>/dev/null; echo base=\$QDISTRO_REPO_BASE"
+    [[ "$output" =~ base=http://10\.0\.2\.2:[0-9]+/repos ]]
+}
+
+@test "qd_serve_port_default: stable port only for the default root, override wins" {
+    # the default root (~/.cache/qdistro, here under a fake HOME) owns it
+    run env -u QDISTRO_SERVE_PORT -u QDISTRO_DEPS_CACHE_DIR -u QDWIN_CACHE_DIR HOME="$WORK/h" \
+        bash -c ". '$LIB'; qd_serve_port_default"
+    [ "$output" = "$((20000 + $(id -u) % 10000))" ]
+    run env -u QDISTRO_SERVE_PORT HOME="$WORK/h" QDISTRO_DEPS_CACHE_DIR="$WORK/h/.cache/qdistro" \
+        bash -c ". '$LIB'; qd_serve_port_default"
+    [ "$output" = "$((20000 + $(id -u) % 10000))" ]
+    # any other root (a test's temp cache) never squats it
+    run env -u QDISTRO_SERVE_PORT HOME="$WORK/h" bash -c ". '$LIB'; qd_serve_port_default"
+    [ "$output" = 0 ]
+    run env QDISTRO_SERVE_PORT=31337 bash -c ". '$LIB'; qd_serve_port_default"
+    [ "$output" = 31337 ]
+}
+
+@test "qd_serve_start: the server keeps no inherited fd and leaves the caller's session" {
+    exec 7>"$WORK/held"
+    run bash -c ". '$LIB'; qd_serve_start"
+    exec 7>&-
+    [ "$status" -eq 0 ]
+    local pid; pid="$(cat "$WORK/cache/.serve.pid")"
+    kill -0 "$pid"
+    run ls "/proc/$pid/fd"
+    local fds sid; fds="$(printf '%s\n' $output | sort -n | tr '\n' ' ')"
+    sid="$(ps -o sid= -p "$pid" | tr -d ' ')"
+    bash -c ". '$LIB'; qd_serve_stop"
+    [ "$fds" = "0 1 2 3 " ] || [ "$fds" = "0 1 2 3 4 " ]   # stdio + listen socket (+ epoll)
+    [ "$sid" = "$pid" ]   # setsid: its own session leader
+}
+
+@test "qd_serve_start: a forking setsid whose child starts late still publishes the server" {
+    mkdir -p "$WORK/fork"
+    printf '#!/bin/bash\n( sleep 1; exec "$@" ) &\nexit 0\n' > "$WORK/fork/setsid"
+    chmod +x "$WORK/fork/setsid"
+    run env PATH="$WORK/fork:$PATH" bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ]
+    local pid; pid="$(cat "$WORK/cache/.serve.pid")"
+    kill -0 "$pid"
+    [ "$output" = "$(cat "$WORK/cache/.serve.port")" ]
+    [ ! -e "$WORK/cache/.serve.pid.next" ] && [ ! -e "$WORK/cache/.serve.port.next" ]
+    bash -c ". '$LIB'; qd_serve_stop"
+    ! kill -0 "$pid" 2>/dev/null || { sleep 0.5; ! kill -0 "$pid" 2>/dev/null; }
+}
+
+@test "qd_serve_start: a server starting after the deadline exits instead of orphaning" {
+    mkdir -p "$WORK/late"
+    printf '#!/bin/bash\n( sleep 6.5; exec "$@" ) &\nexit 0\n' > "$WORK/late/setsid"
+    chmod +x "$WORK/late/setsid"
+    run env PATH="$WORK/late:$PATH" bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -ne 0 ]
+    sleep 3   # the late child has now run
+    run pgrep -f -- "--root $WORK/cache serve"
+    [ "$status" -ne 0 ]
+    [ ! -e "$WORK/cache/.serve.pid.next" ] && [ ! -e "$WORK/cache/.serve.port.next" ]
+    [ ! -e "$WORK/cache/.serve.pid" ]
+    run ls "$WORK/cache/.locks"
+    [[ "$output" != *serve-start.* ]]
+}
+
+@test "qd_serve_start: a server paused after publishing stays alive once accepted" {
+    mkdir -p "$WORK/pause"
+    # freeze the server right after it publishes; resume after acceptance
+    cat > "$WORK/pause/setsid" <<'SH'
+#!/bin/bash
+pf=; prev=
+for a in "$@"; do [ "$prev" = --port-file ] && pf="$a"; prev="$a"; done
+"$@" & c=$!
+for _ in $(seq 1 100); do [ -s "$pf" ] && break; sleep 0.02; done
+kill -STOP "$c"
+( sleep 1.5; kill -CONT "$c" ) >/dev/null 2>&1 &
+exit 0
+SH
+    chmod +x "$WORK/pause/setsid"
+    run env PATH="$WORK/pause:$PATH" bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ]
+    local port="$output" pid; pid="$(cat "$WORK/cache/.serve.pid")"
+    sleep 2.5   # resumed and past its post-publish check
+    kill -0 "$pid"
+    [ "$(cat "$WORK/cache/.serve.port")" = "$port" ]
+    run ls "$WORK/cache/.locks"
+    [[ "$output" != *serve-start.* ]]
+    bash -c ". '$LIB'; qd_serve_stop"
+}
+
+@test "qd_serve_start: a pid file naming a foreign process is neither reused nor killed" {
+    sleep 60 9>&- 3>&- &
+    local foreign=$!
+    mkdir -p "$WORK/cache"
+    printf '%s\n' "$foreign" > "$WORK/cache/.serve.pid"
+    printf '1' > "$WORK/cache/.serve.port"; echo online > "$WORK/cache/.serve.mode"
+    run bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ]
+    [ "$output" != 1 ]
+    kill -0 "$foreign"            # an unrelated process survives
+    [ "$(cat "$WORK/cache/.serve.pid")" != "$foreign" ]
+    bash -c ". '$LIB'; qd_serve_stop"
+    kill -0 "$foreign"
+    kill "$foreign"
+}
+
+@test "qd_serve_start: a process merely naming the script, root and serve is not ours" {
+    mkdir -p "$WORK/cache"
+    # The words appear, but not as `qd-repo-cache.py --root <root> serve`.
+    bash -c 'sleep 60; :' /x/qd-repo-cache.py serve "$WORK/cache" 9>&- 3>&- &
+    local impostor=$!
+    printf '%s\n' "$impostor" > "$WORK/cache/.serve.pid"
+    printf '1' > "$WORK/cache/.serve.port"; echo online > "$WORK/cache/.serve.mode"
+    run bash -c ". '$LIB'; _qd_serve_is_ours $impostor '$WORK/cache'"
+    [ "$status" -ne 0 ]
+    run bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ]
+    [ "$output" != 1 ]
+    kill -0 "$impostor"
+    bash -c ". '$LIB'; qd_serve_stop"
+    kill -0 "$impostor"
+    kill "$impostor"
+}
+
+@test "qd_serve_start: this root's unrecorded server on the stable port is adopted" {
+    local p; p="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    run env QDISTRO_SERVE_PORT="$p" bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ] && [ "$output" = "$p" ]
+    local pid; pid="$(cat "$WORK/cache/.serve.pid")"
+    rm -f "$WORK/cache/.serve.pid" "$WORK/cache/.serve.port"   # state lost
+    run env QDISTRO_SERVE_PORT="$p" bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ] && [ "$output" = "$p" ]
+    [ "$(cat "$WORK/cache/.serve.pid")" = "$pid" ]
+    # an online caller replaces an adopted offline-started server, port reused
+    bash -c ". '$LIB'; qd_serve_stop"
+    run env QCI_OFFLINE=1 QDISTRO_SERVE_PORT="$p" bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ]
+    pid="$(cat "$WORK/cache/.serve.pid")"
+    rm -f "$WORK/cache/.serve.pid" "$WORK/cache/.serve.port" "$WORK/cache/.serve.mode"
+    run env QDISTRO_SERVE_PORT="$p" bash -c ". '$LIB'; qd_serve_start"
+    [ "$status" -eq 0 ] && [ "$output" = "$p" ]
+    [ "$(cat "$WORK/cache/.serve.pid")" != "$pid" ]
+    [ "$(cat "$WORK/cache/.serve.mode")" = online ]
+    ! kill -0 "$pid" 2>/dev/null
+    bash -c ". '$LIB'; qd_serve_stop"
+}
+
+@test "qd_serve_start: a squatted port fails naming the holder" {
+    PORT2="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    python3 -c 'import socket,sys,time; s=socket.socket(); s.bind(("0.0.0.0",int(sys.argv[1]))); s.listen(); time.sleep(60)' "$PORT2" 9>&- 3>&- &
+    local squatter=$!
+    for _ in $(seq 1 50); do ss -ltnH "sport = :$PORT2" | grep -q . && break; sleep 0.1; done
+    run env QDISTRO_SERVE_PORT="$PORT2" bash -c ". '$LIB'; qd_serve_start"
+    kill "$squatter" 2>/dev/null || true
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"port $PORT2 is held by another process"* ]]
+}
+
+@test "qd_repo_wire_guest passt: no route and no passt host mapping fails loudly" {
+    run bash -c "export QDISTRO_GUEST_HOST_ADDR=; mkdir -p '$WORK/fb'; printf '#!/bin/sh\nexit 0\n' > '$WORK/fb/ip'; chmod +x '$WORK/fb/ip'
+        export PATH='$WORK/fb':\"\$PATH\"; . '$LIB'; qd_repo_wire_guest 20260101 passt; echo rc=\$? base=\${QDISTRO_REPO_BASE:-unset}"
+    [[ "$output" == *"rc=1 base=unset"* ]]
+}
+
+@test "selftest gate strips the offline knobs and cache wiring from its bats env" {
+    local repo v
+    local -a args=()
+    repo="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"
+    # shellcheck source=/dev/null
+    . "$repo/ci/lib/gates/selftest.sh"
+    qci_selftest_deps_scrub args
+    run env QCI_OFFLINE=1 QDISTRO_DEPS_OFFLINE=1 QDISTRO_REPO_BASE=http://x/ \
+        _QD_REPO_BASE_WIRED=1 QDISTRO_REPO_PROXY=0 QDISTRO_DEPS_CACHE_DIR=/nonexistent \
+        QDISTRO_SERVE_PORT=21005 KEEP_ME=1 env "${args[@]}" env
+    [ "$status" -eq 0 ]
+    for v in QCI_OFFLINE QDISTRO_DEPS_OFFLINE QDISTRO_REPO_BASE _QD_REPO_BASE_WIRED \
+             QDISTRO_REPO_PROXY QDISTRO_DEPS_CACHE_DIR QDISTRO_SERVE_PORT; do
+        ! grep -q "^$v=" <<<"$output" || { echo "selftest bats would inherit $v" >&2; return 1; }
+    done
+    grep -qx 'KEEP_ME=1' <<<"$output"
+    # ...and the gate actually applies it to the nested bats.
+    grep -q '^ *qci_selftest_deps_scrub sf_scrub$' "$repo/ci/lib/gates/selftest.sh"
 }

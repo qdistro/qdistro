@@ -104,6 +104,10 @@ QDISTRO_PKGS=(
   # build path working (it lands only in QDISTRO_PKGS, never the baked
   # runtime set — cmake/spirv-tools join the toolchain filter below).
   libjemalloc2 libcpptrace1 libpolkit-agent-1-0 libpolkit-gobject-1-0
+  # pkexec is its own package (split out of polkit). qdshell launches the
+  # tier-3/tier-5 spawn helpers through it, as image/config.xml ships it.
+  # Snapshots up to 20261008 pulled it in transitively; 20261009 does not.
+  pkexec
   cmake spirv-tools vulkan-devel pam-devel polkit-devel jemalloc-devel
   cpptrace-devel qt6-quick-private-devel qt6-qml-private-devel
   qt6-shadertools-devel qt6-waylandclient-devel

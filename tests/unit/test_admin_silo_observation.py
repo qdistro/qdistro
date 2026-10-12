@@ -5,7 +5,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt6.QtWidgets")
-from PyQt6.QtCore import QObject, QEventLoop, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QEventLoop, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 import qdistro_session_manager as sm
@@ -266,14 +266,24 @@ def test_real_bridge_production_timer_remains_responsive_and_expires_pending(rea
     heartbeat.start()
     clock["mono"] = 129.0
     loop = QEventLoop()
+    # Qt coalesces coarse timers into one wakeup with no ordering guarantee, so
+    # a fixed end time can see the only post-advance expiry tick run first.
+    # Finish on the first production expiry tick that observes the advanced
+    # clock; this slot is connected after _expire_observations, so it runs
+    # after the product handled that tick.
+    tab._expiry_timer.timeout.connect(lambda: clock["mono"] == 131.0 and loop.quit())
     advance = QTimer()
+    advance.setTimerType(Qt.TimerType.PreciseTimer)
     advance.setSingleShot(True)
     advance.timeout.connect(lambda: clock.update(mono=131.0))
     advance.start(5500)
+    # Failing-path guard only: the expiry tick after the advance is due within
+    # one 1000 ms interval; a watchdog firing first fails the pending check.
     end = QTimer()
+    end.setTimerType(Qt.TimerType.PreciseTimer)
     end.setSingleShot(True)
     end.timeout.connect(loop.quit)
-    end.start(6200)
+    end.start(7000)
     loop.exec()
     heartbeat.stop()
     advance.stop()

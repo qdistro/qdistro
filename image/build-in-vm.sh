@@ -172,6 +172,19 @@ host_free_check $(( IMAGE_SIZE_MB * 1024 * 1024 + 8 * 1024 * 1024 * 1024 )) "the
 # must exist; baseweed.qcow2 is not used by this path (iso/14 Phase A item 4).
 . "$VM_TOOLS/lib/test-substrate.sh"
 qdistro_load_test_substrate || die "invalid cloud test substrate manifest"
+# The builder VM is QEMU slirp — wire the host mirror at 10.0.2.2; the
+# QDISTRO_REPO_BASE env forwarded at the kiwi launch below carries it in.
+qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2
+# libweston's display-info subproject is the one non-RPM source the chroot
+# needs; its meson wrap would git-clone gitlab.freedesktop.org past the repo
+# cache. Stage the digest-verified tarball beside the sources — config.sh
+# hands it to build-libweston.sh and deletes it before the image is sealed.
+DI_TARBALL="$(qd_display_info_tarball)" || die "display-info tarball unavailable (warm the deps cache: scripts/vm/qd-cache-warm)"
+# A fresh real directory: never write through a pre-existing symlink.
+DI_STAGE="$HERE/root/root/qdistro-deps"
+rm -rf -- "$DI_STAGE"
+mkdir -- "$DI_STAGE" || die "cannot create $DI_STAGE"
+cp -- "$DI_TARBALL" "$DI_STAGE/display-info.tar.gz" || die "cannot stage display-info tarball"
 BAKED_BASE="$(qdistro_substrate_base_path baked)"
 [ -f "$BAKED_BASE" ] || die "$BAKED_BASE missing (build it via scripts/vm/build-baked-baseweed.sh)"
 # clone-baseweed.sh dumps QDWIN_VM_TEMPLATE (default qdistro-template), so
@@ -492,7 +505,7 @@ for attempt in \$(seq 1 $KIWI_TRIES); do
     started=\$(date +%s)
     # setsid: the build leads its own process group, so the group can be
     # killed as a whole without touching this shell (the guest agent's child).
-    env QDISTRO_PROFILE=$QDISTRO_PROFILE QDISTRO_KIWI_PROFILE=$QDISTRO_KIWI_PROFILE QDISTRO_BUILD_DIR=/build/out \\
+    env QDISTRO_PROFILE=$QDISTRO_PROFILE QDISTRO_KIWI_PROFILE=$QDISTRO_KIWI_PROFILE QDISTRO_BUILD_DIR=/build/out QDISTRO_REPO_BASE=${QDISTRO_REPO_BASE:-} QDISTRO_DEPS_OFFLINE=${QDISTRO_DEPS_OFFLINE:-} QCI_OFFLINE=${QCI_OFFLINE:-} \\
         setsid bash build.sh --no-sync >/root/kiwi-build.log 2>&1 &
     kpid=\$!
     last_active=\$started

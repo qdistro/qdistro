@@ -122,6 +122,19 @@ virt-resize --quiet --expand /dev/sda3 "$CLOUD_CACHE" "$PARTIAL" >/dev/null || {
 
 echo "[scratch] customizing: admin user + qga + SELinux + cloud-init mask..."
 qdistro_rpm_cache_import "$PARTIAL"
+# The virt-customize appliance reaches the host at the libguestfs backend's
+# address. Version/binary checks cannot prove which backend a launch picks
+# — probe a diskless appliance (as build-baked-baseweed.sh does) and wire
+# the mirror for the observed address before repo_cmd is built.
+GUESTFS_BACKEND="$(qd_guestfs_probe_backend)" || {
+    echo "[scratch] ERROR: libguestfs backend probe failed" >&2; exit 3;
+}
+echo "[scratch] libguestfs network backend: $GUESTFS_BACKEND"
+if [ "$GUESTFS_BACKEND" = passt ]; then
+    qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" passt
+else
+    qd_repo_wire_guest "$QDISTRO_SUBSTRATE_SNAPSHOT" 10.0.2.2
+fi
 repo_cmd="$(qdistro_substrate_repo_command)" || {
     echo "ERROR: substrate repo command failed (offline without QDISTRO_REPO_BASE?)" >&2
     exit 3

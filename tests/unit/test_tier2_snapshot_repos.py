@@ -143,6 +143,14 @@ def test_configurator_rejects_bad_pin_without_replacing_repos(tmp_path):
     assert inherited.read_text() == "rolling\n"
 
 
+def _online_env() -> dict[str, str]:
+    """os.environ minus the offline/repo-cache knobs an offline qci run
+    exports: this case pins the online history-URL contract."""
+    drop = {"QCI_OFFLINE", "QDISTRO_DEPS_OFFLINE", "QDISTRO_REPO_BASE",
+            "_QD_REPO_BASE_WIRED"}
+    return {k: v for k, v in os.environ.items() if k not in drop}
+
+
 def test_configurator_replaces_rolling_repos_with_signed_snapshot(tmp_path):
     repos = tmp_path / "repos"
     repos.mkdir()
@@ -151,7 +159,7 @@ def test_configurator_replaces_rolling_repos_with_signed_snapshot(tmp_path):
     pin.write_text(_image_snapshot() + "\n")
     subprocess.run(
         ["sh", str(TIER2 / "configure-snapshot-repos.sh"), str(pin)],
-        env={**os.environ, "QDISTRO_ZYPP_REPOS_D": str(repos)},
+        env={**_online_env(), "QDISTRO_ZYPP_REPOS_D": str(repos)},
         check=True,
     )
     assert sorted(path.name for path in repos.glob("*.repo")) == [
@@ -278,6 +286,8 @@ def test_qfileman_containerfile_is_a_presentation_consumer_without_webengine():
     assert "qt6-wayland" in text
     assert "google-noto-sans-fonts" in text
     assert "pip install --no-deps" in text
+    # Build deps from the pinned snapshot RPMs, never PyPI (offline builds).
+    assert "--no-index" in text and "--no-build-isolation" in text
     assert "/usr/src/presentation" in text
     assert "/usr/src/qdfileman" in text
     assert 'CMD ["qfileman"]' in text

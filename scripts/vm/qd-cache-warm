@@ -1,0 +1,187 @@
+#!/bin/bash
+# qd-cache-warm — warm the dependency cache for the snapshot pinned in
+# snapshot.conf so lanes can run under QCI_OFFLINE=1/QDISTRO_DEPS_OFFLINE=1.
+# Idempotent and safe to re-run; already-warm classes are skipped.
+#
+# Usage: qd-cache-warm [--check [--quick]] | --record
+#   (default) warm every class:
+#     repo    repo cache: verified metadata of both history repos (~110 MB)
+#             + every package in scripts/vm/repo-packages.list (only what
+#             builds actually install — never the whole repo)
+#     cloud   substrate qcow2 (snapshot.conf's pinned cloud_sha256)
+#     oci     podman base image registry.opensuse.org/opensuse/tumbleweed:<snapshot>
+#     meson   libdisplay-info tarball for the vendored-libweston wrap-git seed
+#   --check audit only: report which classes are warm; no downloads, no
+#           network. Exit 1 when anything is missing — the offline
+#           pre-flight before a QCI_OFFLINE run. The audit is deep: repo
+#           metadata re-verifies against repomd, every listed package
+#           re-hashes against primary, and cached artifacts re-hash against
+#           their content key, so a deleted or corrupt file fails the check
+#           rather than riding a stale marker. `--check --quick` audits
+#           structure/markers only.
+#   --record  rewrite scripts/vm/repo-packages.list as the union of the
+#           current list and every package the proxy served for this
+#           snapshot (used.txt) — run after an online build to capture new
+#           dependencies.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/test-substrate.sh
+. "$HERE/lib/test-substrate.sh"
+# shellcheck source=lib/deps-cache.sh
+. "$HERE/lib/deps-cache.sh"
+# shellcheck source=lib/opensuse-cloud-image.sh
+. "$HERE/lib/opensuse-cloud-image.sh"
+DEPS_ROOT="$(qd_deps_root)" || exit 1
+
+check=0 quick=0 record=0
+for arg in "$@"; do
+    case "$arg" in
+        --check) check=1 ;;
+        --quick) quick=1 ;;
+        --record) record=1 ;;
+        *) echo "usage: qd-cache-warm [--check [--quick]] | --record" >&2; exit 2 ;;
+    esac
+done
+
+# floor mode: a stale-but-valid snapshot still warms — the pin decides what
+# runs, freshness policy stays with the lanes.
+qdistro_load_test_substrate floor
+snap="$QDISTRO_SUBSTRATE_SNAPSHOT"
+cloud_base="$(basename "$QDISTRO_SUBSTRATE_CLOUD_URL")"
+oci_ref="registry.opensuse.org/opensuse/tumbleweed:$snap"
+# deps-cache.sh sets the defaults when sourced — never duplicate the pin.
+di_url="$QDISTRO_DISPLAY_INFO_URL"
+di_sha="$QDISTRO_DISPLAY_INFO_SHA256"
+
+ok=1
+mark() { # mark <class> <state>
+    if [ "$2" = ok ]; then
+        echo "  ok      $1"
+    else
+        echo "  MISSING $1"; ok=0
+    fi
+}
+
+if [ "$check" -eq 1 ]; then
+    echo "qd-cache-warm --check (snapshot $snap)$([ "$quick" -eq 1 ] && echo ' [quick]'):"
+    repo_state=missing
+    if qd_repo_present "$snap" oss && qd_repo_present "$snap" non-oss; then
+        repo_state=ok
+        # Read-only audit: metadata vs repomd, listed packages vs primary
+        # (--quick trusts the verified-files index instead of re-hashing).
+        deep=(--deep); [ "$quick" -eq 1 ] && deep=()
+        if ! qd_repo_cache audit "$snap" --list "$(qd_repo_list)" "${deep[@]}"; then
+            repo_state=missing
+        fi
+    fi
+    mark repo "$repo_state"
+
+    # Offline cloud verification re-verifies the signed sidecars — the
+    # image alone is NOT a warm entry. Deep mode also re-runs the full
+    # signature + digest verification.
+    cloud_dir="$(qd_path cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256")"
+    cloud_state=missing
+    if qd_has cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$cloud_base" \
+        && [ -s "$cloud_dir/$cloud_base.sha256" ] \
+        && [ -s "$cloud_dir/$cloud_base.sha256.asc" ]; then
+        cloud_state=ok
+        if [ "$quick" -eq 0 ] && ! verify_cached_cloud_image \
+                "$cloud_dir/$cloud_base" "$cloud_dir/$cloud_base.sha256" \
+                "$cloud_dir/$cloud_base.sha256.asc" "$cloud_base" >/dev/null 2>&1; then
+            cloud_state=missing
+        fi
+    fi
+    mark cloud "$cloud_state"
+
+    # Structure AND archive bytes — qd_oci_ensure verifies the sha256
+    # sidecar before podman-load, so the audit does too.
+    if qd_oci_cached "$oci_ref" --verify; then
+        mark oci ok
+    else
+        mark oci missing
+    fi
+    if [ "$quick" -eq 0 ]; then
+        if qd_verify src "$di_sha" >/dev/null 2>&1; then mark meson ok; else mark meson missing; fi
+    elif qd_has src "$di_sha" "$(basename "$di_url")"; then
+        mark meson ok
+    else
+        mark meson missing
+    fi
+
+    # Extra pinned lanes (ubuntu base image, Agama stock ISO, OpenWrt
+    # ImageBuilder, …) land in the same sha-keyed layout — audit every
+    # entry present: each artifact must hash to its directory key.
+    if [ "$quick" -eq 0 ]; then
+        extras=0 bad=0
+        for class in agama openwrt ubuntu; do
+            cdir="$DEPS_ROOT/$class"
+            [ -d "$cdir" ] || continue
+            for kdir in "$cdir"/*/; do
+                [ -d "$kdir" ] || continue
+                key="$(basename "$kdir")"
+                # Lock-file-only residue from an aborted fetch is not an
+                # entry — but a manifest WITHOUT its artifact is a broken
+                # entry and must surface as corrupt, not be skipped.
+                if ! qd_has "$class" "$key"; then
+                    if [ -s "$kdir/manifest.txt" ]; then
+                        echo "  CORRUPT $class/$key (manifest without artifact)"
+                        bad=$((bad + 1))
+                    fi
+                    continue
+                fi
+                extras=$((extras + 1))
+                if ! qd_verify "$class" "$key" >/dev/null 2>&1; then
+                    echo "  CORRUPT $class/$key"
+                    bad=$((bad + 1))
+                fi
+            done
+        done
+        # ubuntu's image lives in the cloud class (qd_fetch cloud …) —
+        # audit every non-substrate cloud entry the same way.
+        for kdir in "$DEPS_ROOT/cloud"/*/; do
+            [ -d "$kdir" ] || continue
+            key="$(basename "$kdir")"
+            [ "$key" = "$QDISTRO_SUBSTRATE_CLOUD_SHA256" ] && continue
+            if ! qd_has cloud "$key"; then
+                if [ -s "$kdir/manifest.txt" ]; then
+                    echo "  CORRUPT cloud/$key (manifest without artifact)"
+                    bad=$((bad + 1))
+                fi
+                continue
+            fi
+            extras=$((extras + 1))
+            qd_verify cloud "$key" >/dev/null 2>&1 || { echo "  CORRUPT cloud/$key"; bad=$((bad + 1)); }
+        done
+        if [ "$bad" -ne 0 ]; then ok=0; fi
+        if [ "$extras" -gt 0 ]; then echo "  (audited $extras extra pinned entries)"; fi
+    fi
+
+    [ "$ok" -eq 1 ] && echo "cache warm: all classes present" || echo "cache cold — run qd-cache-warm (needs network)"
+    exit $((1 - ok))
+fi
+
+if [ "$record" -eq 1 ]; then
+    list="$(qd_repo_list)"
+    qd_repo_cache export-list "$snap" --merge "$list" >"$list.tmp" && mv "$list.tmp" "$list"
+    echo "[qd-cache-warm] $list: $(grep -c . "$list") packages"
+    exit 0
+fi
+
+echo "[qd-cache-warm] warming snapshot $snap into $DEPS_ROOT"
+
+echo "[qd-cache-warm] repo cache: metadata + $(grep -c . "$(qd_repo_list)" 2>/dev/null || echo 0) listed packages"
+qd_repo_cache prefetch "$snap" --list "$(qd_repo_list)"
+
+echo "[qd-cache-warm] cloud image"
+cloud_dest="$(qd_path cloud "$QDISTRO_SUBSTRATE_CLOUD_SHA256" "$cloud_base")"
+download_verified_cloud_image "$QDISTRO_SUBSTRATE_CLOUD_URL" "$cloud_dest" \
+    "$QDISTRO_SUBSTRATE_CLOUD_SHA256"
+
+echo "[qd-cache-warm] podman base image $oci_ref"
+qd_oci_ensure "$oci_ref" >/dev/null
+
+echo "[qd-cache-warm] libdisplay-info meson seed"
+qd_display_info_tarball >/dev/null
+
+echo "[qd-cache-warm] done — QCI_OFFLINE=1 lanes can run from cache"

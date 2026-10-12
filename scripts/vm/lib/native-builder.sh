@@ -57,24 +57,33 @@ qdistro_ensure_native_builder_image() {
     builder_image="localhost/qdistro/native-builder:$builder_key"
 
     if ! podman image exists "$builder_image"; then
-        case "${QCI_OFFLINE:-0}" in
-            1|true|yes|on)
-                echo "ERROR: no cached native builder image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT (QCI_OFFLINE=1)" >&2
-                return 3
-                ;;
-        esac
         image=$(qdistro_native_builder_base_image) || return $?
         rpm_cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}/podman-rpm/$QDISTRO_SUBSTRATE_SNAPSHOT/$QDISTRO_SUBSTRATE_ARCH/packages
         mkdir -p "$rpm_cache"
         work=$(mktemp -d "${TMPDIR:-/tmp}/native-builder.XXXXXXXX")
         mkdir -p "$work/builder-context"
         cp "$here/container-native-deps.sh" "$here/Containerfile.native-builder" "$work/builder-context/"
+        # Route the RUN zypper steps through the repo cache. Must run in
+        # THIS shell — a subshell drops the export.
+        local -a mirror_args=() net_args=()
+        local build_base
+        if qd_repo_wire_container "$QDISTRO_SUBSTRATE_SNAPSHOT" /qdistro-mirror; then
+            # offline: ro cache mount + --network=none; online: the proxy
+            mirror_args=("${QD_REPO_CONTAINER_ARGS[@]}")
+            build_base=$QDISTRO_REPO_BASE
+        elif qd_deps_offline; then
+            rm -rf "$work"
+            echo "ERROR: no cached native builder image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT and no cached repo metadata to build one offline (run qd-cache-warm)" >&2
+            return 3
+        else
+            build_base=${QDISTRO_REPO_BASE:-}  # caller's explicit override
+        fi
         echo "[native-podman] building toolchain image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT" >&2
-        if ! podman build --pull=never --layers \
+        if ! podman build --pull=never --layers "${net_args[@]}" "${mirror_args[@]}" \
             --volume "$rpm_cache:/var/cache/zypp/packages:rw,Z" \
             --build-arg "BASE_IMAGE=$image" \
             --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
-            --build-arg "QDISTRO_REPO_BASE=${QDISTRO_REPO_BASE:-}" \
+            --build-arg "QDISTRO_REPO_BASE=$build_base" \
             --build-arg "QDISTRO_DEPS_OFFLINE=${QDISTRO_DEPS_OFFLINE:-}" \
             --build-arg "QCI_OFFLINE=${QCI_OFFLINE:-}" \
             --file "$work/builder-context/Containerfile.native-builder" \

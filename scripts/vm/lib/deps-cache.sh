@@ -35,8 +35,20 @@ _qdc_die() { echo "ERROR: $*" >&2; return 1; }
 
 # Cache root: explicit override wins, then the established qdistro cache
 # root (shared with the rpm/npm/baseweed caches), then the XDG default.
+# HOME may be unset (kiwi chroot scripts, systemd units) — callers run
+# under set -u, so resolve it from passwd rather than abort.
+# Callers must check the status: `root="$(qd_deps_root)" || return 1`.
 qd_deps_root() {
-    printf '%s\n' "${QDISTRO_DEPS_CACHE_DIR:-${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}}"
+    local root="${QDISTRO_DEPS_CACHE_DIR:-${QDWIN_CACHE_DIR:-}}" home
+    if [ -z "$root" ]; then
+        home="${HOME:-}"
+        if [ -z "$home" ]; then
+            home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)" || home=
+        fi
+        [ -n "$home" ] || { _qdc_die "no deps cache root: HOME unset and no passwd entry — set QDISTRO_DEPS_CACHE_DIR"; return 1; }
+        root="$home/.cache/qdistro"
+    fi
+    printf '%s\n' "$root"
 }
 
 qd_deps_offline() {
@@ -50,49 +62,78 @@ qd_deps_offline() {
 # Write/refresh the root MANIFEST (schema marker; cheap, idempotent).
 qd_deps_init() {
     local root
-    root="$(qd_deps_root)"
+    root="$(qd_deps_root)" || return 1
     install -d "$root" "$root/.locks" "$root/.partial" || return 1
     if [ ! -s "$root/MANIFEST" ]; then
         printf 'schema=1\ncreated=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$root/MANIFEST" || return 1
     fi
 }
 
-# ---- repo mirror ---------------------------------------------------------
+# ---- repo cache (pull-through proxy) -------------------------------------
 
-# The mirrored TW history repos live at <root>/repos/<snapshot>/tumbleweed/
-# repo/{oss,non-oss}/ — upstream's own layout, so a consumer needs only a
+# The TW history repos are cached at <root>/repos/<snapshot>/tumbleweed/
+# repo/{oss,non-oss}/ in upstream's own layout, so a consumer needs only a
 # different BASE for the same <base>/<snapshot>/tumbleweed/repo/<name>/ URL.
-# qd_repo_base prints the base a caller should use: an explicit
-# QDISTRO_REPO_BASE override, else the local mirror (file://) when complete
-# for both repos, else upstream. Offline with no mirror fails closed.
+# NOT a mirror: metadata (repomd + every file it names, ~110 MB) is cached
+# whole and verified; RPMs are fetched on demand by the qd_serve proxy
+# (scripts/vm/qd-repo-cache.py) and verified against primary.xml, so only
+# what a build actually installs is ever downloaded. Online, every lane goes
+# through the proxy (cache-or-fetch); offline, the proxy serves the cache
+# only and a miss is a 404 — the build fails naming the package.
+# QDISTRO_REPO_PROXY=0 bypasses the proxy (online lanes go upstream).
 
 # qd_repo_dir <snapshot> — local repo root for a snapshot.
 qd_repo_dir() {
+    local root
     case "$1" in ''|*[!0-9]*) _qdc_die "qd_repo_dir: bad snapshot '$1'"; return 1 ;; esac
-    printf '%s/repos/%s\n' "$(qd_deps_root)" "$1"
+    root="$(qd_deps_root)" || return 1
+    printf '%s/repos/%s\n' "$root" "$1"
 }
 
-# qd_repo_present <snapshot> <repo> — the mirror COMPLETED for that repo
-# (mirror.json is written only after repodata + every named package
-# verified; a repodata-only tree does not count).
+# qd_repo_present <snapshot> <repo> — that repo's METADATA is cached and was
+# verified against repomd (metadata.json). Packages are cached on demand;
+# whether an offline run has every package it needs is qd-cache-warm
+# --check's job (against the package list), not this predicate's.
 qd_repo_present() {
-    [ -s "$(qd_repo_dir "$1" 2>/dev/null)/tumbleweed/repo/$2/mirror.json" ]
+    [ -s "$(qd_repo_dir "$1" 2>/dev/null)/tumbleweed/repo/$2/metadata.json" ]
 }
 
-# qd_repo_base <snapshot> — print the history-base URL to hand to consumers.
-# The mirror root is <root>/repos (NOT .../repos/<snap>): consumers append
-# /<snap>/tumbleweed/repo/<name>/ just like they do to the upstream base.
+# A base the wiring helpers generated (vs. a caller's deliberate override) —
+# tracked so a later wire call can re-derive it for its own transport and
+# the CURRENT offline mode instead of trusting a stale export.
+_qd_repo_base_is_generated() {
+    [ -n "${QDISTRO_REPO_BASE:-}" ] && [ "$QDISTRO_REPO_BASE" = "${_QD_REPO_BASE_WIRED:-}" ]
+}
+
+_qd_repo_set_base() {
+    QDISTRO_REPO_BASE="$1" _QD_REPO_BASE_WIRED="$1"
+    export QDISTRO_REPO_BASE _QD_REPO_BASE_WIRED
+    echo "[deps-cache] wired QDISTRO_REPO_BASE=$QDISTRO_REPO_BASE" >&2
+}
+
+_qd_repo_proxy_enabled() {
+    case "${QDISTRO_REPO_PROXY:-1}" in 0|false|no|off) return 1 ;; esac
+    return 0
+}
+
+# qd_repo_base <snapshot> — the history base for a HOST-side consumer.
+# Explicit QDISTRO_REPO_BASE wins; online → the proxy on 127.0.0.1;
+# offline → file:// over the cache (metadata required; a missing RPM then
+# fails in the consumer). Offline with no cached metadata fails closed.
 qd_repo_base() {
-    local snap="$1" dir
+    local snap="$1" dir port
     [ -n "${QDISTRO_REPO_BASE:-}" ] && { printf '%s\n' "$QDISTRO_REPO_BASE"; return 0; }
     dir="$(qd_repo_dir "$snap")" || return 1
-    if qd_repo_present "$snap" oss && qd_repo_present "$snap" non-oss; then
-        printf 'file://%s/repos\n' "$(qd_deps_root)"; return 0
-    fi
-    qd_deps_offline && {
-        _qdc_die "offline: no complete repo mirror for snapshot $snap under $dir — warm with qd_repo_mirror"
+    if qd_deps_offline; then
+        if qd_repo_present "$snap" oss && qd_repo_present "$snap" non-oss; then
+            printf 'file://%s/repos\n' "$(qd_deps_root)"; return 0
+        fi
+        _qdc_die "offline: no cached repo metadata for snapshot $snap under $dir — warm with qd-cache-warm"
         return 1
-    }
+    fi
+    if _qd_repo_proxy_enabled && port="$(qd_serve_start)"; then
+        printf 'http://127.0.0.1:%s/repos\n' "$port"; return 0
+    fi
     printf '%s\n' "${QDISTRO_REPO_UPSTREAM:-https://download.opensuse.org/history}"
 }
 
@@ -114,25 +155,22 @@ qd_repo_base_or_upstream() {
     printf '%s\n' "${QDISTRO_REPO_UPSTREAM:-https://download.opensuse.org/history}"
 }
 
-# qd_repo_mirror <snapshot> [oss|non-oss ...] [-- worker flags]
-# Warm the repo mirror: repomd-verified metadata + checksum-verified RPMs
-# via scripts/vm/qd-repo-mirror.py. Refuses under the offline flags.
-# Bare repo names select repos (default both); anything else (--limit N,
-# --verify, --force, --metadata-only, --base U) passes through to the worker.
-qd_repo_mirror() {
-    local snap="$1" script; shift
-    script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/qd-repo-mirror.py"
-    [ -f "$script" ] || { _qdc_die "repo mirror worker missing: $script"; return 1; }
-    local -a repos=() passthru=()
-    local r
-    for r in "$@"; do
-        case "$r" in
-            oss|non-oss) repos+=(--repo "$r") ;;
-            *) passthru+=("$r") ;;
-        esac
-    done
-    [ "${#repos[@]}" -eq 0 ] && repos=(--repo oss --repo non-oss)
-    python3 "$script" --root "$(qd_deps_root)" --snapshot "$snap" "${repos[@]}" "${passthru[@]}"
+# qd_repo_cache <subcommand> <snapshot> [args...] — run scripts/vm/qd-repo-cache.py
+# (metadata | prefetch --list F | audit [--list F] [--deep] | export-list |
+# prune --list F) against this deps root.
+qd_repo_cache() {
+    local cmd="$1" snap="$2" script root; shift 2
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/qd-repo-cache.py"
+    [ -f "$script" ] || { _qdc_die "repo cache worker missing: $script"; return 1; }
+    root="$(qd_deps_root)" || return 1
+    python3 "$script" --root "$root" "$cmd" --snapshot "$snap" "$@"
+}
+
+# qd_repo_list — the committed package list (`<repo> <name>.<arch>`): every
+# package a recorded online build fetched through the proxy. qd-cache-warm
+# prefetches it; --check audits it for offline readiness.
+qd_repo_list() {
+    printf '%s\n' "${QDISTRO_REPO_LIST:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/repo-packages.list}"
 }
 
 # ---- vendored-libweston libdisplay-info seed ------------------------------
@@ -187,20 +225,21 @@ _qd_oci_digest() {
 # _qd_oci_complete <dir> — a cached archive is usable only when ALL of it
 # landed: the tar, its sha256 sidecar, and the manifest written last.
 # An interrupted save can leave image.tar alone — that state is INCOMPLETE,
-# never a warm hit.
+# never a warm hit. Empty files don't count either (-s).
 _qd_oci_complete() {
-    [ -f "$1/image.tar" ] && [ -f "$1/image.tar.sha256" ] \
-        && [ -f "$1/manifest.txt" ]
+    [ -s "$1/image.tar" ] && [ -s "$1/image.tar.sha256" ] \
+        && [ -s "$1/manifest.txt" ]
 }
 
 # _qd_oci_save <ref> <digest> — save the archive under a per-digest lock.
 _qd_oci_save() {
-    local ref="$1" digest="$2" hex dir lock tmp
+    local ref="$1" digest="$2" hex dir lock tmp root
     hex="${digest#sha256:}"
-    dir="$(qd_deps_root)/oci/$hex"
+    root="$(qd_deps_root)" || return 1
+    dir="$root/oci/$hex"
     _qd_oci_complete "$dir" && return 0
-    install -d "$dir" "$(qd_deps_root)/.locks" || return 1
-    lock="$(qd_deps_root)/.locks/oci-$hex.lock"
+    install -d "$dir" "$root/.locks" || return 1
+    lock="$root/.locks/oci-$hex.lock"
     (
         flock -x 9
         _qd_oci_complete "$dir" && exit 0
@@ -219,12 +258,30 @@ _qd_oci_save() {
     ) 9>"$lock"
 }
 
+# qd_oci_cached <ref> [--verify] — is a COMPLETE archive cached for this
+# ref? Pure filesystem audit: ref map resolves, and the digest entry has
+# non-empty tar + sidecar + manifest. Does not touch the podman store.
+# With --verify, also checks archive bytes against the sha256 sidecar —
+# the same proof qd_oci_ensure runs before podman load.
+qd_oci_cached() {
+    local ref="$1" root refmap digest dir
+    root="$(qd_deps_root)" || return 1
+    refmap="$root/oci/refs/$(_qd_oci_ref_key "$ref").digest"
+    [ -s "$refmap" ] || return 1
+    digest="$(cat "$refmap")"
+    dir="$root/oci/${digest#sha256:}"
+    _qd_oci_complete "$dir" || return 1
+    if [ "${2:-}" = --verify ]; then
+        ( cd "$dir" && sha256sum -c image.tar.sha256 ) >/dev/null 2>&1 || return 1
+    fi
+}
+
 qd_oci_ensure() {
     local ref="$1" root refdir refmap digest archive
     [ -n "$ref" ] || { _qdc_die "qd_oci_ensure: empty ref"; return 1; }
     command -v podman >/dev/null || { _qdc_die "qd_oci_ensure: podman required"; return 2; }
     qd_deps_init || return 1
-    root="$(qd_deps_root)"
+    root="$(qd_deps_root)" || return 1
     refdir="$root/oci/refs"
     refmap="$refdir/$(_qd_oci_ref_key "$ref").digest"
 
@@ -290,55 +347,183 @@ qd_oci_ensure() {
 # ---- guest transport (qd-serve) -----------------------------------------
 
 # Guests cannot see the host filesystem: slirp reaches the host at
-# 10.0.2.2, libguestfs/passt at 169.254.2.2. qd_serve_start exports the
+# 10.0.2.2, libguestfs/passt at qd_passt_host_addr. qd_serve_start exports the
 # whole deps root over HTTP on 0.0.0.0 so a guest can use
-# QDISTRO_REPO_BASE=http://<host-addr>:<port>/repos — the same layout as
+# QDISTRO_REPO_BASE=http://<host-addr>:<port>/repos (offline: .../offline/repos,
+# cache-only per request) — the same layout as
 # the file:// host base. State lives in the root: .serve.pid/.serve.port
 # are stale-tolerant (a dead pid is re-checked, not trusted).
 
+# qd_serve_port_default — the proxy's STABLE per-user port. Guest images
+# persist the repo URL they were built with (baked substrates, goldens), so
+# the proxy must come back on the same port in every later run.
+# Only the default cache root (~/.cache/qdistro) owns that port: any other
+# root (tests, scratch caches) gets a kernel-assigned one, so a throwaway
+# server can never squat the real cache's port. QDISTRO_SERVE_PORT
+# overrides either way; 0 = kernel-assigned.
+qd_serve_port_default() {
+    local root home
+    if [ -n "${QDISTRO_SERVE_PORT:-}" ]; then
+        printf '%s\n' "$QDISTRO_SERVE_PORT"; return 0
+    fi
+    root="$(qd_deps_root)" || return 1
+    home="${HOME:-}"
+    [ -n "$home" ] || { home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)" || home=; }
+    if [ -n "$home" ] && [ "$(realpath -m -- "$root")" = "$(realpath -m -- "$home/.cache/qdistro")" ]; then
+        printf '%s\n' "$((20000 + $(id -u) % 10000))"
+    else
+        printf '0\n'
+    fi
+}
+
+# qd_guest_host_addr — the host address EVERY guest transport reaches: the
+# host's primary IPv4 (slirp NATs it to the host, passt forwards it, the
+# libguestfs appliance and the builder VM both reach it — verified). Using
+# one address means a repo URL persisted into an image by one transport
+# (a passt appliance bake) stays valid for another (a slirp clone).
+# QDISTRO_GUEST_HOST_ADDR overrides; empty when the host has no route.
+qd_guest_host_addr() {
+    if [ -n "${QDISTRO_GUEST_HOST_ADDR:-}" ]; then
+        printf '%s\n' "$QDISTRO_GUEST_HOST_ADDR"; return 0
+    fi
+    ip -4 route get 1.1.1.1 2>/dev/null \
+        | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}'
+}
+
 # qd_serve_start — start (or reuse) the server; print the bound port.
-qd_serve_start() {
-    local root pid_file port_file pid
-    qd_deps_init || return 1
-    root="$(qd_deps_root)"
-    pid_file="$root/.serve.pid" port_file="$root/.serve.port"
-    if [ -s "$pid_file" ] && [ -s "$port_file" ]; then
-        pid="$(cat "$pid_file")"
-        if kill -0 "$pid" 2>/dev/null; then
-            cat "$port_file"; return 0
-        fi
-        rm -f "$pid_file" "$port_file"
-    fi
-    rm -f "$port_file.next"
-    # The server binds port 0 and writes the kernel-assigned port itself —
-    # no pick-then-bind race.
-    python3 - "$root" "$port_file.next" >"$root/.serve.log" 2>&1 <<'PY' &
-import functools, http.server, socketserver, sys
-root, portfile = sys.argv[1], sys.argv[2]
-h = functools.partial(http.server.SimpleHTTPRequestHandler, directory=root)
-with socketserver.TCPServer(("0.0.0.0", 0), h) as s:
-    with open(portfile, "w") as f:
-        f.write(str(s.server_address[1]))
-    s.serve_forever()
-PY
-    pid=$!
-    for _ in $(seq 1 50); do
-        kill -0 "$pid" 2>/dev/null || break
-        [ -s "$port_file.next" ] && break
-        sleep 0.1
+# Serialized on .locks/serve.lock: racing starters would otherwise each
+# spawn a server and tear the pid/port files.
+# _qd_serve_is_ours <pid> <root> — <pid> is this root's proxy (by its
+# command line), not a reused pid or one recorded from another pid
+# namespace (a container sharing the cache). Gates every reuse AND kill.
+_qd_serve_is_ours() {
+    local pid="$1" root="$2" i
+    local -a argv
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    mapfile -d '' -t argv <"/proc/$pid/cmdline" 2>/dev/null || return 1
+    # The exact launch shape: <...>/qd-repo-cache.py --root <root> serve
+    for ((i = 0; i + 3 < ${#argv[@]}; i++)); do
+        case "${argv[i]}" in */qd-repo-cache.py|qd-repo-cache.py) ;; *) continue ;; esac
+        [ "${argv[i+1]}" = --root ] && [ "${argv[i+2]}" = "$root" ] \
+            && [ "${argv[i+3]}" = serve ] && return 0
     done
-    if [ ! -s "$port_file.next" ] || ! kill -0 "$pid" 2>/dev/null; then
-        _qdc_die "qd_serve_start: http server failed to start (see $root/.serve.log)"
-        return 1
-    fi
-    mv "$port_file.next" "$port_file"
-    echo "$pid" >"$pid_file"
-    cat "$port_file"
+    return 1
+}
+
+# _qd_serve_pid_offline <pid> — that server was started offline.
+_qd_serve_pid_offline() {
+    local v
+    for v in $(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null \
+            | sed -n 's/^\(QDISTRO_DEPS_OFFLINE\|QCI_OFFLINE\)=//p'); do
+        case "$v" in 1|true|yes|on) return 0 ;; esac
+    done
+    return 1
+}
+
+# _qd_serve_reap <pid> — stop a proxy and wait (3 s) until it is gone, so
+# its stable port is free before a replacement binds it.
+_qd_serve_reap() {
+    kill "$1" 2>/dev/null || return 0
+    for _ in $(seq 1 30); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.1; done
+}
+
+qd_serve_start() {
+    local root pid_file port_file pid mode port launcher launcher_done token
+    qd_deps_init || return 1
+    root="$(qd_deps_root)" || return 1
+    port="$(qd_serve_port_default)" || return 1
+    pid_file="$root/.serve.pid" port_file="$root/.serve.port"
+    (
+        flock -x 9
+        if [ -s "$pid_file" ] && [ -s "$port_file" ]; then
+            pid="$(cat "$pid_file")"
+            # Offline clients carry their policy in the URL (/offline/repos),
+            # so any live server serves them safely and an offline caller
+            # never replaces one (that would break a live online build's
+            # misses). Only an online caller replaces a server started
+            # offline — its offline clients keep their /offline/ URLs.
+            if _qd_serve_is_ours "$pid" "$root" && { qd_deps_offline \
+                    || [ "$(cat "$root/.serve.mode" 2>/dev/null)" = online ]; }; then
+                cat "$port_file"; exit 0
+            fi
+            _qd_serve_is_ours "$pid" "$root" && _qd_serve_reap "$pid"
+            rm -f "$pid_file" "$port_file"
+        fi
+        # This root's proxy may already hold the stable port unrecorded (its
+        # state overwritten or removed): adopt it, or replace it under the
+        # same online/offline rule, rather than failing to bind.
+        if [ "$port" != 0 ] && command -v ss >/dev/null 2>&1; then
+            pid="$(ss -ltnpH "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\),.*/\1/p' | head -1)"
+            if _qd_serve_is_ours "$pid" "$root"; then
+                mode=online; _qd_serve_pid_offline "$pid" && mode=offline
+                if qd_deps_offline || [ "$mode" = online ]; then
+                    printf '%s\n' "$pid" >"$pid_file"
+                    printf '%s' "$port" >"$port_file"
+                    echo "$mode" >"$root/.serve.mode"
+                    cat "$port_file"; exit 0
+                fi
+                _qd_serve_reap "$pid"
+            fi
+        fi
+        rm -f "$port_file.next" "$pid_file.next"
+        # Start token: its ABSENCE means "the starter gave up". A server
+        # past the deadline finds it gone and exits; an accepted server
+        # removes it itself after its post-publish check. Per-start names, so
+        # a late server never mistakes a later start's claim for its own;
+        # leftovers (a server that died mid-check) are swept under the lock.
+        rm -f "$root/.locks"/serve-start.*
+        token="$(mktemp "$root/.locks/serve-start.XXXXXX")" || exit 1
+        # The server binds port 0 and writes the kernel-assigned port
+        # itself — no pick-then-bind race. 9>&- is load-bearing: without
+        # it the server inherits the lock fd and holds flock forever,
+        # hanging every later starter. setsid: the server outlives the
+        # starter's session and process group (a test or CI step that
+        # signals its group must not take the shared proxy down with it).
+        setsid python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/qd-repo-cache.py" \
+            --root "$root" serve --port "$port" --port-file "$port_file.next" --pid-file "$pid_file.next" \
+            --start-token "$token" \
+            >>"$root/.serve.log" 2>&1 9>&- </dev/null &
+        # $! is setsid when it forks (its parent exits 0 at once), so wait on
+        # the server's own files for the whole deadline; bail early only
+        # when the launcher itself failed (python died without forking).
+        launcher=$! launcher_done=
+        for _ in $(seq 1 50); do
+            [ -s "$port_file.next" ] && break
+            if [ -z "$launcher_done" ] && ! kill -0 "$launcher" 2>/dev/null; then
+                launcher_done=1
+                wait "$launcher" 2>/dev/null || break
+            fi
+            sleep 0.1
+        done
+        pid="$(cat "$pid_file.next" 2>/dev/null)"
+        case "$pid" in ''|*[!0-9]*) pid= ;; esac
+        if [ ! -s "$port_file.next" ] || [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+            # Never leave a half-started server behind without a pid file:
+            # withdraw the start token (a later server sees it gone and
+            # exits), then reap whatever published in the meantime.
+            rm -f "$token"
+            [ -n "$pid" ] || pid="$(cat "$pid_file.next" 2>/dev/null)"
+            _qd_serve_is_ours "$pid" "$root" && kill "$pid" 2>/dev/null
+            rm -f "$port_file.next" "$pid_file.next"
+            if [ "$port" != 0 ] && command -v ss >/dev/null 2>&1 \
+                    && ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
+                _qdc_die "qd_serve_start: port $port is held by another process: $(ss -ltnpH "sport = :$port" 2>/dev/null | sed -n 's/.*users:((\(.*\)))/\1/p' | head -1) (set QDISTRO_SERVE_PORT, or stop it)"
+            else
+                _qdc_die "qd_serve_start: http server failed to start (see $root/.serve.log)"
+            fi
+            exit 1
+        fi
+        mv "$port_file.next" "$port_file"
+        mv "$pid_file.next" "$pid_file"
+        if qd_deps_offline; then echo offline; else echo online; fi >"$root/.serve.mode"
+        cat "$port_file"
+    ) 9>"$root/.locks/serve.lock"
 }
 
 qd_serve_port() {
     local root pid_file port_file pid
-    root="$(qd_deps_root)"
+    root="$(qd_deps_root)" || return 1
     pid_file="$root/.serve.pid" port_file="$root/.serve.port"
     [ -s "$pid_file" ] && [ -s "$port_file" ] || return 1
     pid="$(cat "$pid_file")"
@@ -348,28 +533,187 @@ qd_serve_port() {
 
 qd_serve_stop() {
     local root pid_file port_file pid
-    root="$(qd_deps_root)"
+    root="$(qd_deps_root)" || return 1
     pid_file="$root/.serve.pid" port_file="$root/.serve.port"
     [ -s "$pid_file" ] || { rm -f "$port_file"; return 0; }
     pid="$(cat "$pid_file")"
-    kill "$pid" 2>/dev/null || true
-    rm -f "$pid_file" "$port_file"
+    _qd_serve_is_ours "$pid" "$root" && _qd_serve_reap "$pid"
+    rm -f "$pid_file" "$port_file" "$root/.serve.mode"
 }
 
 # qd_serve_guest_base <snapshot> [host-addr] — the QDISTRO_REPO_BASE value
-# for a guest lane: requires the server running and a complete mirror.
-# host-addr defaults to slirp's 10.0.2.2; passt lanes pass 169.254.2.2.
+# for a guest lane: requires the proxy running; offline also requires the
+# snapshot's metadata cached (an online proxy fetches it on first touch).
+# host-addr defaults to slirp's 10.0.2.2; passt lanes pass qd_passt_host_addr.
 qd_serve_guest_base() {
     local snap="$1" host="${2:-10.0.2.2}" port
     port="$(qd_serve_port)" || {
         _qdc_die "qd_serve_guest_base: server not running — qd_serve_start first"
         return 1
     }
-    if ! qd_repo_present "$snap" oss || ! qd_repo_present "$snap" non-oss; then
-        _qdc_die "qd_serve_guest_base: no complete mirror for $snap — qd_repo_mirror first"
+    if qd_deps_offline && { ! qd_repo_present "$snap" oss || ! qd_repo_present "$snap" non-oss; }; then
+        _qdc_die "qd_serve_guest_base: offline and no cached metadata for $snap — qd-cache-warm first"
         return 1
     fi
-    printf 'http://%s:%s/repos\n' "$host" "$port"
+    if qd_deps_offline; then
+        printf 'http://%s:%s/offline/repos\n' "$host" "$port"
+    else
+        printf 'http://%s:%s/repos\n' "$host" "$port"
+    fi
+}
+
+# qd_repo_wire_container <snapshot> <mountpoint>
+# Wire a podman build/run to the repo cache. Returns 0 and sets, in THIS
+# shell (never call it in a subshell — the exports would be lost):
+#   QDISTRO_REPO_BASE       exported base for the container
+#   QD_REPO_CONTAINER_ARGS  podman argv the caller MUST add
+# Offline (either flag): ALWAYS file://<mountpoint> over the cache,
+# read-only, with --network=none — any exported base is ignored, since
+# nothing outside the cache may be reached; works on a partial cache
+# because the metadata is complete, and a package the cache lacks fails the
+# build loudly. Returns 1 offline only when no metadata is cached.
+# Online: the proxy via host.containers.internal (pasta/slirp4netns map it
+# to the host), no extra args. A caller's explicit QDISTRO_REPO_BASE wins
+# online (rc 1); a base an earlier wire call generated (e.g. a guest's
+# 10.0.2.2) is re-derived for the container transport.
+qd_repo_wire_container() {
+    local snap="$1" mnt="$2" port
+    QD_REPO_CONTAINER_ARGS=()
+    if qd_deps_offline; then
+        qd_repo_present "$snap" oss || return 1
+        qd_repo_present "$snap" non-oss || return 1
+        QD_REPO_CONTAINER_ARGS=(--volume "$(qd_deps_root)/repos:$mnt:ro,z" --network=none)
+        _qd_repo_set_base "file://$mnt"
+        return 0
+    fi
+    if [ -n "${QDISTRO_REPO_BASE:-}" ] && ! _qd_repo_base_is_generated; then
+        return 1
+    fi
+    _qd_repo_proxy_enabled || return 1
+    port="$(qd_serve_start)" || return 1
+    _qd_repo_set_base "http://host.containers.internal:$port/repos"
+}
+
+# qd_repo_base_safe <url> — repo bases interpolate into .repo files and
+# appliance --run-command strings; anything beyond a single plain URL token
+# (whitespace, quotes, metacharacters) is injection, not a URL.
+qd_repo_base_safe() {
+    # regex in a variable: bare &/() in an unquoted =~ pattern trips the
+    # [[ ]] parser before the match ever runs. '&' is deliberately NOT in
+    # the charset — a repo base is a plain path prefix (no query), and an
+    # unquoted '&' inside a --run-command string would split commands.
+    local re='^(https?|file)://[A-Za-z0-9._~:/?=%+@-]+$'
+    [[ "$1" =~ $re ]]
+}
+
+# qd_passt_host_addr — the address a passt-networked guest uses to reach
+# the HOST. passt hands the guest the host's own default gateway and, by
+# default (--map-host-loopback), translates traffic to that gateway address
+# to the host's loopback — so the gateway, not passt's 169.254.2.2 recovery
+# address, is what reaches a host service (verified: libguestfs 1.60.1 +
+# passt 20260612, appliance route "default via <host gw>"; 169.254.2.2
+# times out). QDISTRO_PASST_HOST_ADDR overrides.
+qd_passt_host_addr() {
+    local gw
+    if [ -n "${QDISTRO_PASST_HOST_ADDR:-}" ]; then
+        printf '%s\n' "$QDISTRO_PASST_HOST_ADDR"; return 0
+    fi
+    gw="$(ip -4 route show default 2>/dev/null | awk '$1 == "default" && $2 == "via" {print $3; exit}')"
+    [ -n "$gw" ] || { _qdc_die "qd_passt_host_addr: host has no IPv4 default gateway (set QDISTRO_PASST_HOST_ADDR)"; return 1; }
+    printf '%s\n' "$gw"
+}
+
+# qd_guestfs_host_addr — the host address a libguestfs appliance reaches:
+# 1.60+ prefers passt (qd_passt_host_addr) when runnable; older releases and
+# hosts without passt fall back to QEMU slirp (10.0.2.2). Call sites that
+# probe the backend themselves (build-baked-baseweed.sh) should pass the
+# discovered address to qd_repo_wire_guest instead.
+qd_guestfs_host_addr() {
+    local ver major='' minor='' k v
+    ver="$(guestfish version 2>/dev/null || true)"
+    # Current output is multi-line "major: N\nminor: N"; older guests printed
+    # "guestfish X.Y.Z" on one line — accept both. Parse with builtins only:
+    # callers may run this under a stripped PATH.
+    while IFS=': ' read -r k v; do
+        case "$k" in major) major="$v" ;; minor) minor="$v" ;; esac
+    done <<< "$ver"
+    if [ -z "$major" ] && [[ "$ver" =~ ([0-9]+)\.([0-9]+) ]]; then
+        major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}"
+    fi
+    if { [ "${major:-0}" -gt 1 ] 2>/dev/null \
+        || { [ "${major:-0}" -eq 1 ] && [ "${minor:-0}" -ge 60 ]; } 2>/dev/null; } \
+        && command -v passt >/dev/null 2>&1; then
+        qd_passt_host_addr
+    else
+        echo 10.0.2.2
+    fi
+}
+
+# qd_guestfs_probe_backend — launch a diskless libguestfs appliance with
+# debug output and print the backend it ACTUALLY selected: "passt" or
+# "slirp". The libguestfs version/binary heuristics of
+# qd_guestfs_host_addr cannot prove the pick — passt needs to be runnable,
+# which only a real launch shows. rc non-zero when the appliance fails to
+# launch (diagnostics on stderr); callers should treat that as fatal, not
+# fall back to guessing.
+qd_guestfs_probe_backend() {
+    local log
+    log="$(mktemp)" || return 1
+    if ! LIBGUESTFS_DEBUG=1 guestfish >"$log" 2>&1 <<'GUESTFISH'
+set-network true
+run
+GUESTFISH
+    then
+        echo "ERROR: libguestfs backend probe failed to launch" >&2
+        tail -40 "$log" >&2
+        rm -f "$log"
+        return 1
+    fi
+    local backend=slirp
+    if { grep -Fq '<backend type="passt"/>' "$log" \
+         && grep -Fq 'address="169.254.2.15" prefix="16"' "$log"; } \
+        || { grep -Fq 'command: run: passt' "$log" \
+             && grep -Fq -- '--address 169.254.2.15' "$log"; }; then
+        backend=passt
+    fi
+    rm -f "$log"
+    printf '%s\n' "$backend"
+}
+
+# qd_repo_wire_guest <snapshot> [host-addr|passt]
+# Wire a guest lane (VM over slirp/passt, libguestfs appliance) to the
+# proxy: when the caller has not set QDISTRO_REPO_BASE, start qd_serve and
+# export QDISTRO_REPO_BASE for the guest-reachable host address. Online the
+# proxy fills misses from upstream; offline it needs cached metadata and
+# serves the cache only. No-op (rc 0, unset) when the proxy is disabled or,
+# offline, nothing is cached — consumers then go upstream (online) or fail
+# closed in qdistro_substrate_repo_command (offline).
+qd_repo_wire_guest() {
+    local snap="$1" host="${2:-10.0.2.2}" base
+    # A caller's override wins; a base we generated earlier is re-derived
+    # (transport + the proxy's offline mode may both have changed).
+    if [ -n "${QDISTRO_REPO_BASE:-}" ] && ! _qd_repo_base_is_generated; then
+        return 0
+    fi
+    _qd_repo_base_is_generated && unset QDISTRO_REPO_BASE _QD_REPO_BASE_WIRED
+    _qd_repo_proxy_enabled || return 0
+    if qd_deps_offline; then
+        qd_repo_present "$snap" oss || return 0
+        qd_repo_present "$snap" non-oss || return 0
+    fi
+    qd_serve_start >/dev/null || return 1
+    # The host's primary IPv4 reaches the proxy from every transport, so
+    # prefer it; the caller's transport is only the routeless fallback.
+    # "passt" resolves passt's host mapping and fails loudly without one.
+    host="$(qd_guest_host_addr)" || host=
+    if [ -z "$host" ]; then
+        case "${2:-10.0.2.2}" in
+            passt) host="$(qd_passt_host_addr)" || return 1 ;;
+            *) host="${2:-10.0.2.2}" ;;
+        esac
+    fi
+    base="$(qd_serve_guest_base "$snap" "$host")" || return 1
+    _qd_repo_set_base "$base"
 }
 
 # ---- path resolution ----------------------------------------------------
@@ -388,15 +732,16 @@ _qdc_valid_basename() {
 }
 
 qd_path() {
-    local class="$1" key="$2" base="${3:-}"
+    local class="$1" key="$2" base="${3:-}" root
     case "$class" in
         .|..|*/*|*[!a-z0-9._-]*|'') _qdc_die "qd_path: bad class '$class'"; return 1 ;;
     esac
+    root="$(qd_deps_root)" || return 1
     [[ "$key" =~ ^[0-9a-f]{64}$ ]] || { _qdc_die "qd_path: bad sha256 key '$key'"; return 1; }
     case "$base" in
-        '') printf '%s/%s/%s\n' "$(qd_deps_root)" "$class" "$key" ;;
+        '') printf '%s/%s/%s\n' "$root" "$class" "$key" ;;
         *) _qdc_valid_basename "$base" || { _qdc_die "qd_path: bad basename '$base'"; return 1; }
-           printf '%s/%s/%s/%s\n' "$(qd_deps_root)" "$class" "$key" "$base" ;;
+           printf '%s/%s/%s/%s\n' "$root" "$class" "$key" "$base" ;;
     esac
 }
 
