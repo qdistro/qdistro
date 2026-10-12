@@ -1276,3 +1276,67 @@ def test_server_log_dump_runs_as_admin():
     assert 'run_as_admin cat -- "$SERVER_LOG"' in SPAWN
     code = [l for l in SPAWN.splitlines() if not l.lstrip().startswith('#')]
     assert not any(l.strip().startswith('cat "$SERVER_LOG"') for l in code)
+
+
+def _oracle_body(src):
+    return re.search(r"^qemu_pids_for_domain\(\)\s*\{.*?^\}\n",
+                     src, re.S | re.M).group(0)
+
+
+def _run_oracle(src, py_rc, awk_fails=False):
+    # Stub only the plumbing around the verdict logic: admin shell,
+    # ps, /proc comm and the argv verifier's exit status.
+    stubs = (
+        'run_as_admin() { [ "$1" = ps ] && { echo " 4242 qemu -name '
+        'guest=t5-x,debug-threads=on"; return 0; }; "$@"; }\n'
+        'cat() { case "$1" in /proc/*/comm) echo qemu-system-x86_64 ;; '
+        '*) command cat "$@" ;; esac; }\n'
+        f'python3() {{ command cat >/dev/null; return {py_rc}; }}\n'
+    )
+    if awk_fails:
+        stubs += 'awk() { return 1; }\n'
+    script = (stubs + _oracle_body(src)
+              + 'qemu_pids_for_domain t5-x; echo "rc=$?"\n')
+    out = subprocess.run(["bash", "-c", script],
+                         capture_output=True, text=True, check=True)
+    return out.stdout.strip()
+
+
+@pytest.mark.parametrize("src", [SPAWN, CLEANUP], ids=["spawn", "cleanup"])
+def test_oracle_helper_failures_are_unverifiable(src):
+    # ensures: a failing argv verifier (python missing/killed/crashed)
+    #          or a failing name filter can never read as "confirmed
+    #          dead" — the session watch would end a live session and
+    #          the last wrapper would tear down a healthy guest. Only
+    #          the verifier's clean nonmatch (rc 3) means "not ours"
+    #          (astra r43). Runs the real function.
+    assert _run_oracle(src, 0) == "4242rc=0"
+    assert _run_oracle(src, 3) == "rc=1"
+    for rc in (1, 2, 126, 127, 137):
+        assert _run_oracle(src, rc) == "rc=2", rc
+    assert _run_oracle(src, 0, awk_fails=True) == "rc=2"
+
+
+@pytest.mark.parametrize("src", [SPAWN, CLEANUP], ids=["spawn", "cleanup"])
+def test_oracle_argv_verifier_exit_codes(src, tmp_path):
+    # ensures: the real argv verifier reports 0 for a pid whose argv
+    #          carries `-name guest=<vm>,`, 3 (clean nonmatch) for any
+    #          other readable pid and 2 for an unreadable one — the
+    #          codes the oracle's case statement relies on (astra r43)
+    verifier = re.search(r"<<'PY'\n(?P<py>.*?)\nPY\n",
+                         _oracle_body(src), re.S).group("py")
+    proc = subprocess.Popen(
+        ["python3", "-c", "import time; time.sleep(60)",
+         "-name", "guest=t5-x,debug-threads=on"])
+    try:
+        def verdict(name, pid):
+            return subprocess.run(
+                ["python3", "-", str(pid)], input=verifier, text=True,
+                env={**os.environ, "T5NAME": name}).returncode
+        assert verdict("t5-x", proc.pid) == 0
+        assert verdict("t5-y", proc.pid) == 3
+        assert verdict("t5-x", os.getpid()) == 3
+        assert verdict("t5-x", 2 ** 22 + 1) == 2
+    finally:
+        proc.kill()
+        proc.wait()
