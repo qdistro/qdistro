@@ -14,9 +14,17 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          vendoredSrc = builtins.path {
+            path = ./qdwin/libweston-vendored/src;
+            filter =
+              path: type:
+              !(pkgs.lib.hasPrefix "build-" (baseNameOf path) || pkgs.lib.hasSuffix ".lock" path);
+          };
         in
         {
           libweston-vendored = pkgs.callPackage ./nix/libweston-vendored.nix { };
+          weston-qdistro = pkgs.callPackage ./nix/weston-qdistro.nix { inherit vendoredSrc; };
+          qdwin = pkgs.callPackage ./nix/qdwin.nix { westonQdistro = self.packages.${system}.weston-qdistro; };
         }
       );
     };
