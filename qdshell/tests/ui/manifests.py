@@ -19,7 +19,6 @@ from dataclasses import dataclass
 
 from . import fixtures
 
-
 NO_IPC = object()  # sentinel: surface known but no IPC handle yet
 
 
@@ -36,10 +35,10 @@ class Surface:
     # restore is a test error, not a warning; see runner.guest_cleanup_vm).
     setup_guest: tuple = ()
     teardown_guest: tuple = ()
-    # Optional extra described pages: each (x_frac, y_frac) is a real QMP
-    # mouse click at that screen fraction after the panel opens; each click
-    # is captured+described as an additional page so multi-tab panels are
-    # judged over their whole content, not just the default tab.
+    # Optional extra described visual states: each (x_frac, y_frac) is a real
+    # QMP mouse click at that screen fraction after the panel opens; each
+    # resulting view is captured and described. This covers non-default
+    # subtabs and controls whose options are hidden until opened.
     post_open_clicks: tuple = ()
     # Optional pointer hovers (mouse_move, no click) applied before the
     # FIRST capture — used where the golden covers hover/focus affordances
@@ -75,11 +74,11 @@ SETTINGS_TABS = [
 #  - "Vault" (from the original audit) isn't in _settingsTabMap and isn't
 #    IPC-reachable.
 
-# Settings tabs whose golden covers content on a NON-default subtab: each
-# (x_frac, y_frac) is a real click on that subtab button (subtab strip runs
-# along the top of the settings content at y≈124 of 800), captured and
-# described as an additional page so the judge sees the whole tab.
-_SETTINGS_SUBTAB_CLICKS = {
+# Settings tabs whose golden covers an additional state: each fraction pair
+# clicks a real control and captures/describes the resulting view. Most are
+# non-default subtabs (strip at y≈124 of 800); Notifications opens the Toast
+# theme chooser lower in the Appearance subtab to reveal its options.
+_SETTINGS_EXTRA_CLICKS = {
     "audio": ((0.527, 0.155),),                   # Devices
     "connections": ((0.695, 0.155),),             # Bluetooth
     "display": ((0.586, 0.155),),                 # Brightness
@@ -87,11 +86,15 @@ _SETTINGS_SUBTAB_CLICKS = {
     "plugins": ((0.586, 0.155), (0.734, 0.155)),  # Available, Sources
     "systemmonitor": ((0.727, 0.155),),           # Thresholds
     "wallpaper": ((0.578, 0.155),),               # Look (fill mode / transitions)
+    "notifications": ((0.730, 0.450),),           # Toast theme choices
 }
 
 # Settings tabs needing a guest-side state fixture (see fixtures.py for what
 # each seeds and why a restart-seed is required).
 _SETTINGS_GUEST_FIXTURES = {
+    # Exercise a real per-app PipeWire stream in the Volumes tab; the
+    # empty-stream state is still truthful when this fixture is absent.
+    "audio": (fixtures.AUDIO_APP_SEED, fixtures.AUDIO_APP_CLEAN),
     # "changed from default" marker dots + enabled reset buttons only render
     # when a live value differs from its default; seed one.
     "advanced": (fixtures.ADVANCED_SEED, fixtures.ADVANCED_CLEAN),
@@ -111,7 +114,7 @@ SETTINGS_SURFACES = [
                      else (_SETTINGS_GUEST_FIXTURES[tab][0],)),
         teardown_guest=(() if tab not in _SETTINGS_GUEST_FIXTURES
                         else (_SETTINGS_GUEST_FIXTURES[tab][1],)),
-        post_open_clicks=_SETTINGS_SUBTAB_CLICKS.get(tab, ()),
+        post_open_clicks=_SETTINGS_EXTRA_CLICKS.get(tab, ()),
     )
     for tab in SETTINGS_TABS
 ]

@@ -373,6 +373,33 @@ MPRIS_STOP = (
 )
 
 
+# --- Settings audio: real per-application stream ------------------------------
+# A silent raw playback stream gives the Settings Volumes tab an actual
+# PipeWire application node to control. It is bounded to this one surface and
+# stopped in teardown; no fabricated row or screenshot is involved.
+AUDIO_APP_SEED = (
+    'command -v pw-play >/dev/null || { echo "pw-play missing" >&2; exit 64; }\n'
+    'systemd-run --user --collect --property=RuntimeMaxSec=180s '
+    '--unit=qdui-audio-playback '
+    '/usr/bin/pw-play --raw --rate 48000 --channels 2 --format s16 '
+    '/dev/zero >/dev/null '
+    '|| { echo "audio playback fixture start failed" >&2; exit 64; }\n'
+    'ready=\n'
+    'for i in $(seq 1 15); do\n'
+    '  systemctl --user is-active --quiet qdui-audio-playback.service '
+    '&& { ready=1; break; }\n'
+    '  sleep 1\n'
+    'done\n'
+    '[ -n "$ready" ] || { echo "audio playback fixture inactive" >&2; exit 65; }\n'
+    'sleep 2\n'
+)
+
+AUDIO_APP_CLEAN = (
+    'systemctl --user stop qdui-audio-playback.service '
+    '|| { echo "audio playback fixture stop failed" >&2; exit 64; }\n'
+)
+
+
 # --- Degraded audio -----------------------------------------------------------
 # The degraded[audio] golden asserts the coherent no-devices state a panel
 # must show when its backing service is absent. This VM HAS a sound device

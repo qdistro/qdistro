@@ -66,9 +66,13 @@ sleep 3
 qdwin_screenshot /tmp/pres03-step2-prompt-still-dark.png
 ```
 
-**Assert (2.1):** OPEN the frame. The shell bar is now LIGHT, and the SAME
-prompt dialog is still DARK (the trusted prompt reads once and does not
-watch; it never restyles mid-authentication).
+**Assert (2.1):** OPEN the frame. Compare the shell bar across the top of
+Steps 1 and 2, above the desktop: it changes from dark navy with light text
+to pale lavender with dark text/icons. The large desktop below the bar stays
+dark and is not the bar. The SAME prompt dialog in the center is still DARK
+(the trusted prompt reads once and does not watch; it never restyles
+mid-authentication). Judge the bar and prompt separately; the dark prompt
+must not make a visibly light bar count as dark.
 
 ### Step 3 — Cancel exits with rc 1 and empty stdout
 

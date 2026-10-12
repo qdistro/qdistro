@@ -201,9 +201,13 @@ for attempt in 1 2; do
 done
 echo "S4-DIALOG-STATE=$dlg_state"
 
-# Focus the admin window, then select the forever_argv scope via the
-# deterministic keyboard shortcut Ctrl+Shift+6 (index 6 = forever_argv).
+# Focus the admin window, then capture its settled post-modal frame before
+# sending another key. The compositor can report the new focus before Qt has
+# processed the modal's destruction; a key sent in that interval is dropped.
+# The screenshot is also graded so a lingering modal cannot pass as focus.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+qdwin_screenshot "$ART/47-s4-focus-ready.png"
+# Select the forever_argv scope via Ctrl+Shift+6 (index 6 = forever_argv).
 virsh -c qemu:///session send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_LEFTSHIFT KEY_6
 sleep 1
 qdwin_screenshot "$ART/47-s4a-forever-argv-selected.png"
@@ -225,6 +229,8 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 47-qsu; echo "rc=$(bg_rc 4
   the S3b and S4a frames. `probe-error` (the compositor's window list,
   vm-exec or virsh could not observe or drive the windows) is an ERROR, not a PASS: report it
   with the printed `[s4-dismiss ...]` lines and vm-exec stderr.
+- `47-s4-focus-ready.png` shows the admin app's pending request with no
+  `Decision not recorded` modal before the new scope key is sent.
 - `47-s4a-forever-argv-selected.png` shows no `Decision not
   recorded` modal, and shows `forever_argv` radio
   filled.

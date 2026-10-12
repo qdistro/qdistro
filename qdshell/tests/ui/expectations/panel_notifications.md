@@ -3,7 +3,8 @@
 What must be visible when this panel is open:
 
 - Header section showing a bell icon and the title "Notifications" (i18n `common.notifications`).
-- A do-not-disturb toggle in the header row.
+- A do-not-disturb toggle in the header row, shown as a bell/bell-off icon-only
+  button separate from the decorative bell beside the title.
 - A "Clear" / clear-history button in the header row.
 - A close button (✕) in the top-right of the header.
 - A time-range filter (All / Today / Yesterday / Earlier) — may appear as tabs or chips.
