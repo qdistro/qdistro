@@ -145,14 +145,16 @@ assert_gated() {
     # not a gate: every privileged call site consults root.qdistroGate, so an
     # unloaded gate is an absent one. Comments are stripped first so a mere
     # mention of the path does not satisfy this.
-    # NB: captured into a variable rather than piped into `grep -q`. Under
-    # `set -o pipefail`, grep -q exits at the first match, SIGPIPEs sed, and
-    # the pipeline reports failure — which would read as "gate not loaded"
-    # for exactly the large, correct files it is meant to accept.
+    # NB: captured into a variable and matched in-shell, never piped into
+    # `grep -q`. Under `set -o pipefail`, grep -q exits at the first match,
+    # the writer (sed, or printf re-emitting the capture) takes SIGPIPE, and
+    # the pipeline reports failure — which reads as "gate not loaded" for
+    # exactly the large, correct files it is meant to accept (intermittent:
+    # full-20261012T061153Z refused the real chromium extension).
     local wiring
     wiring="$(_uncommented "$src/src/background.js" "$src/manifest.json" \
                            "$src/manifest.chromium.json")"
-    if ! printf '%s' "$wiring" | grep -qF "src/gate.js"; then
+    if [[ "$wiring" != *"src/gate.js"* ]]; then
         echo "[stage-browser-extension] REFUSING to stage $name: src/gate.js is not loaded by" >&2
         echo "[stage-browser-extension] the background wiring or the manifest — it would never run" >&2
         exit 4
