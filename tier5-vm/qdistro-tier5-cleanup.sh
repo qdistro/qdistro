@@ -8,6 +8,11 @@
 set -uo pipefail
 
 VM_NAME="${1:?usage: $0 <vm_name>}"
+# Same shape the spawn enforces: VM_NAME becomes a path component below.
+if ! [[ "$VM_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$ ]]; then
+    echo "[tier5-cleanup] FAIL: invalid vm_name '$VM_NAME'" >&2
+    exit 2
+fi
 ADMIN_USER="${TIER5_ADMIN_USER:-admin}"
 ADMIN_HOME_DEFAULT="$(getent passwd "$ADMIN_USER" 2>/dev/null | cut -d: -f6)"
 DISK_DIR="${TIER5_DISK_DIR:-$ADMIN_HOME_DEFAULT/.local/share/libvirt/images}"

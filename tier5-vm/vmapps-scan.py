@@ -316,7 +316,7 @@ class GuestfsSource:
                         for member in tar.getmembers():
                             if not member.isfile():
                                 continue
-                            rel = member.name.lstrip("./")
+                            rel = member.name.removeprefix("./")
                             if not rel.endswith(".desktop"):
                                 continue
                             fh = tar.extractfile(member)
