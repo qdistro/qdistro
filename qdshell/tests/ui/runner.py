@@ -2039,6 +2039,16 @@ branch. Do not infer that a feature is enabled merely because its conditional
 section is mentioned. Unconditional header, close, and nonblank requirements
 still apply in every branch.
 
+Keep the boundaries of the described UI surface in view. Empty desktop outside
+an open panel does not make that panel's body blank. If the actual describes a
+Battery panel with only its header and no detected battery, use the reference's
+no-battery branch: do not require charge rows or time estimates even if they
+appear earlier in the reference. Still fail if the header or close button is
+absent. A list introduced by "any of which may appear" describes optional card
+types, not a requirement
+that every listed card render; still require the visible card stack to have
+the structure and controls the reference specifies for cards that are present.
+
 Read headings and notes as scope. A "Notes" paragraph that says a banner or
 control is absent under the observed capability is context, not a requirement
 to find that absent item. Do not turn an explicitly absent element into a
