@@ -62,11 +62,25 @@ function body(name) {
 //          content (attach_decoration refuses it, show_popup would
 //          composite an empty view)
 {
-    const attach = body("bool QdwinBinding::attachChrome");
-    assert.ok(attach.indexOf("wl_surface_commit") >= 0
-              && attach.indexOf("wl_surface_commit")
-                     < attach.indexOf("reattachDecoration"),
-        "chrome surface must commit its buffer before attach_decoration");
+    // Sides are painted + committed by setChromeSide; attach_decoration
+    // is issued afterwards, once per frame change (attachFrame batches
+    // all four sides into one request).
+    const side = body("bool QdwinBinding::setChromeSide");
+    assert.ok(side.indexOf("wl_surface_commit") >= 0
+              && side.indexOf("reattachDecoration") < 0,
+        "setChromeSide commits its buffer and leaves the reattach to the caller");
+    for (const caller of ["bool QdwinBinding::attachChrome",
+                          "bool QdwinBinding::attachFrame"]) {
+        const b = body(caller);
+        assert.ok(b.indexOf("setChromeSide") >= 0
+                  && b.lastIndexOf("setChromeSide")
+                         < b.indexOf("reattachDecoration"),
+            caller + " must commit every side before attach_decoration");
+    }
+    assert.strictEqual(
+        (body("bool QdwinBinding::attachFrame").match(/reattachDecoration/g)
+            || []).length, 1,
+        "attachFrame must issue exactly one attach_decoration");
 
     const show = body("bool QdwinBinding::showPopup");
     assert.ok(show.indexOf("wl_surface_commit") >= 0
@@ -148,15 +162,20 @@ function body(name) {
     // The north strip: left press raises + drags on the live serial;
     // right press opens the menu on the same serial.
     const chrome = qml.match(/onChromeButton:[\s\S]*?\n        \}/)[0];
-    assert.ok(/side !== 0 \|\| state !== 1/.test(chrome),
-        "only N-chrome presses act");
     assert.ok(/button === 0x110/.test(chrome)
-              && /requestRaise\(handle\)/.test(chrome)
-              && /beginInteractiveMove\(handle, serial\)/.test(chrome),
-        "BTN_LEFT press must raise + beginInteractiveMove on the serial");
-    assert.ok(/button === 0x111/.test(chrome)
+              && /_onFrameLeft\(row, side, x, y, state, serial\)/.test(chrome),
+        "BTN_LEFT routes to the frame hit-test with the live serial");
+    assert.ok(/button === 0x111 && side === 0 && state === 1/.test(chrome)
               && /_openWindowMenu\(handle, serial, x, y\)/.test(chrome),
-        "BTN_RIGHT press must open the window menu on the serial");
+        "BTN_RIGHT press on the title bar opens the window menu on the serial");
+    const left = qml.match(/function _onFrameLeft[\s\S]*?\n    \}/)[0];
+    assert.ok(/requestRaise\(handle\)[\s\S]*?beginInteractiveMove\(handle, serial\)/
+              .test(left),
+        "a title-bar press must raise + beginInteractiveMove on the serial");
+    assert.ok(/beginInteractiveResize\(handle, serial, edges\)/.test(left),
+        "an edge press must start the edge drag on the serial");
+    assert.ok(/root\._titleButtons\(row\)/.test(left),
+        "button hit-testing must use the same list the binding paints");
 
     const open = qml.match(/function _openWindowMenu[\s\S]*?\n    \}/)[0];
     assert.ok(/showPopup\(handle, serial, x, y, items\)/.test(open),
@@ -186,8 +205,46 @@ function body(name) {
     // Chrome follows geometry and un-follows fullscreen.
     assert.ok(/onToplevelGeometry[\s\S]*?_syncChromeForRow/.test(qml),
         "geometry changes must re-sync the chrome strip");
-    assert.ok(/state & 2[\s\S]*?detachChrome/.test(qml),
-        "fullscreen windows must not keep the chrome strip");
+    const sync = qml.match(/function _syncChromeForRow[\s\S]*?\n    \}/)[0];
+    assert.ok(/row\.decorationMode !== 1 \|\| \(row\.state & 2\) !== 0/.test(sync)
+              && /detachFrame\(row\.handle\)/.test(sync),
+        "self-decorated and fullscreen windows must not keep a frame");
+    assert.ok(/attachFrame\([\s\S]*?root\._titleButtons\(row\)\)/.test(sync),
+        "the frame paints the hit-tested button list");
+    assert.ok(/onToplevelDecoration[\s\S]*?_syncChromeForRow/.test(qml),
+        "a decoration-mode change must re-sync the frame");
+    assert.ok(/decorationMode: 0,/.test(qml),
+        "windows start unframed until qdwin reports server-side");
+    {
+        const vm = require("vm");
+        const ctx = vm.createContext({
+            chromeHeight: 24, chromeBorder: 4, resizeGrip: 4, cornerGrip: 16,
+        });
+        ctx.root = ctx;
+        for (const fn of ["_titleButtons", "_frameBorder", "_frameResizeEdges"])
+            vm.runInContext(qml.match(new RegExp(
+                "^ {4}function " + fn + "\\([^]*?^ {4}}", "m"))[0], ctx);
+        const row = {state: 0, sandboxEngine: "", width: 400, height: 300};
+        assert.deepStrictEqual([...ctx._titleButtons(row)],
+            ["minimize", "maximize", "close"]);
+        assert.deepStrictEqual(
+            [...ctx._titleButtons({state: 1, sandboxEngine: "qdistro.mm"})],
+            ["minimize", "restore"],
+            "maximised shows restore; mm-remote gets no close button");
+        // outer width = 400 + 2*4 = 408
+        assert.strictEqual(ctx._frameResizeEdges(row, 0, 200, 2), 1, "top grip");
+        assert.strictEqual(ctx._frameResizeEdges(row, 0, 200, 10), 0,
+            "the rest of the title bar is not a resize grip");
+        assert.strictEqual(ctx._frameResizeEdges(row, 0, 3, 1), 1 | 4, "top-left");
+        assert.strictEqual(ctx._frameResizeEdges(row, 2, 200, 1), 2, "bottom");
+        assert.strictEqual(ctx._frameResizeEdges(row, 2, 400, 1), 2 | 8,
+            "bottom-right corner");
+        assert.strictEqual(ctx._frameResizeEdges(row, 1, 1, 100), 8, "right");
+        assert.strictEqual(ctx._frameResizeEdges(row, 3, 1, 290), 4 | 2,
+            "bottom-left via the W edge");
+        assert.strictEqual(ctx._frameBorder({state: 1}), 0,
+            "maximised windows have no edges");
+    }
     // Rebind replay: rows persist across a compositor reconnect, but a
     // row whose toplevel closed while unbound must NOT be re-decorated
     // (attach_decoration on its handle killed every rebind — tiered-
