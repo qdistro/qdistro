@@ -6,9 +6,10 @@
 # that bypasses the cache would still succeed and the run would look
 # offline-clean. With no root on the host there is no per-process host
 # firewall, so the block lives in the guest: a qci-owned nftables table
-# that accepts loopback, private, link-local and multicast destinations
-# (the host proxy is reached at the host's private IPv4 or slirp's
-# 10.0.2.2) and REJECTS everything else, on the output hook and on the
+# that accepts loopback, private, shared (100.64/10), link-local and
+# multicast destinations (the host proxy is reached at the host's private
+# IPv4 or slirp's 10.0.2.2; passt hands the guest the host's own nameserver,
+# which may be a 100.64/10 resolver) and REJECTS everything else, on the output hook and on the
 # forward hook (rootful containers, silo netns). Rejects are fast (tcp
 # reset / icmp), so a blocked fetch fails at once instead of timing out.
 # An accept in another table cannot bypass it: every base chain on a hook
@@ -101,9 +102,9 @@ table inet $QD_OFFLINE_EGRESS_TABLE {
     set allow4 {
         type ipv4_addr
         flags interval
-        elements = { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16,
-                     172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4,
-                     255.255.255.255 }
+        elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8,
+                     169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16,
+                     224.0.0.0/4, 255.255.255.255 }
     }
     set allow6 {
         type ipv6_addr
@@ -311,12 +312,7 @@ qd_offline_egress_scan() {
 # one "expected <dst> <attempts>" / "unexpected <dst> <attempts>" line per
 # recorded destination (offline-egress-classify.py has the rules).
 qd_offline_egress_classify() {
-    local h resolved=""
-    for h in $(qd_offline_egress_expected_hosts); do
-        resolved+="$(getent ahosts "$h" 2>/dev/null | awk -v h="$h" '{print "QCI-OFFLINE-EGRESS-RESOLVED " h " " $1}' | sort -u)"$'\n'
-    done
-    { printf '%s' "$resolved"; cat; } \
-        | QCI_OFFLINE_EGRESS_EXPECTED="$QCI_OFFLINE_EGRESS_EXPECTED" \
-          QD_OFFLINE_EGRESS_SET_SIZE="$QD_OFFLINE_EGRESS_SET_SIZE" \
-          python3 "$QD_OFFLINE_EGRESS_LIBDIR/offline-egress-classify.py"
+    QCI_OFFLINE_EGRESS_EXPECTED="$QCI_OFFLINE_EGRESS_EXPECTED" \
+    QD_OFFLINE_EGRESS_SET_SIZE="$QD_OFFLINE_EGRESS_SET_SIZE" \
+        python3 "$QD_OFFLINE_EGRESS_LIBDIR/offline-egress-classify.py"
 }

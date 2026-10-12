@@ -93,6 +93,7 @@ PYX
         nft -f '$BATS_TEST_TMPDIR/r.nft' || exit 8   # idempotent re-apply
         timeout 3 bash -c 'exec 3<>/dev/tcp/192.0.2.1/443' 2>/dev/null; echo pub=\$?
         timeout 1 bash -c 'exec 3<>/dev/tcp/10.9.9.7/80' 2>/dev/null; echo priv=\$?
+        timeout 1 bash -c 'exec 3<>/dev/tcp/100.100.100.100/53' 2>/dev/null; echo cgnat=\$?
         nft list counter inet qci_offline_egress blocked | sed -n 's/.*packets \([0-9]*\).*/blocked=\1/p'
         nft -j list set inet qci_offline_egress out4
         nft -j list set inet qci_offline_egress any4
@@ -103,6 +104,7 @@ PYX
     # The private address has no host behind it: it times out (124), i.e. the
     # table let it through to the (absent) peer instead of rejecting it.
     grep -qx 'priv=124' <<<"$output"
+    grep -qx 'cgnat=124' <<<"$output"    # 100.64/10: passt's host resolver
     grep -qx 'blocked=1' <<<"$output"
     grep -q '"val": {"concat": \["192.0.2.1", "tcp", 443, 0\]}, "counter": {"packets": 1' <<<"$output"
     grep -q '"val": "192.0.2.1", "counter": {"packets": 1' <<<"$output"
@@ -242,21 +244,19 @@ EOF
     grep -qx 'expected 127.0.0.1 \[tcp/443@1000\]' <<<"$output"
     # A PTR name that does not resolve back must not count.
     synth_scan 'any4=["192.0.2.55"]' 'out4=[{"concat": ["192.0.2.55", "tcp", 443, 1000]}]' > "$BATS_TEST_TMPDIR/scan"
-    mkdir -p "$BATS_TEST_TMPDIR/bin"
-    cat > "$BATS_TEST_TMPDIR/bin/getent" <<'EOF'
-#!/bin/bash
-case "$1 $2" in
-    "hosts 192.0.2.55") echo "192.0.2.55 lb-1.github.com" ;;
-    "ahosts lb-1.github.com") echo "140.82.121.3 STREAM lb-1.github.com" ;;
-esac
-EOF
-    chmod +x "$BATS_TEST_TMPDIR/bin/getent"
-    PATH="$BATS_TEST_TMPDIR/bin:$PATH" QCI_OFFLINE_EGRESS_EXPECTED="github.com@1000" run qd_offline_egress_classify < "$BATS_TEST_TMPDIR/scan"
+    printf '{"ptr": {"192.0.2.55": "lb-1.github.com"}, "fwd": {"lb-1.github.com": ["140.82.121.3"]}}' > "$BATS_TEST_TMPDIR/dns.json"
+    QD_OFFLINE_EGRESS_FAKE_DNS="$BATS_TEST_TMPDIR/dns.json" QCI_OFFLINE_EGRESS_EXPECTED="github.com@1000" run qd_offline_egress_classify < "$BATS_TEST_TMPDIR/scan"
     grep -qx 'unexpected 192.0.2.55 \[tcp/443@1000\]' <<<"$output"
     # ... and one that does, does.
-    sed -i 's/140.82.121.3 STREAM/192.0.2.55 STREAM/' "$BATS_TEST_TMPDIR/bin/getent"
-    PATH="$BATS_TEST_TMPDIR/bin:$PATH" QCI_OFFLINE_EGRESS_EXPECTED="github.com@1000" run qd_offline_egress_classify < "$BATS_TEST_TMPDIR/scan"
+    printf '{"ptr": {"192.0.2.55": "lb-1.github.com"}, "fwd": {"lb-1.github.com": ["192.0.2.55"]}}' > "$BATS_TEST_TMPDIR/dns.json"
+    QD_OFFLINE_EGRESS_FAKE_DNS="$BATS_TEST_TMPDIR/dns.json" QCI_OFFLINE_EGRESS_EXPECTED="github.com@1000" run qd_offline_egress_classify < "$BATS_TEST_TMPDIR/scan"
     grep -qx 'expected 192.0.2.55 \[tcp/443@1000\]' <<<"$output"
+    # Host-side forward resolution includes IPv6 (no AI_ADDRCONFIG), in the
+    # canonical form, so a dual-stack guest's v6 attempt matches the host.
+    synth_scan 'any6=["2001:db8::9"]' 'out6=[{"concat": ["2001:0db8::0009", "tcp", 443, 1000]}]' > "$BATS_TEST_TMPDIR/scan"
+    printf '{"fwd": {"weather.invalid": ["198.51.100.1", "2001:db8:0:0::9"]}}' > "$BATS_TEST_TMPDIR/dns.json"
+    QD_OFFLINE_EGRESS_FAKE_DNS="$BATS_TEST_TMPDIR/dns.json" QCI_OFFLINE_EGRESS_EXPECTED="weather.invalid@1000" run qd_offline_egress_classify < "$BATS_TEST_TMPDIR/scan"
+    grep -qx 'expected 2001:db8::9 \[tcp/443@1000\]' <<<"$output"
 }
 
 @test "classify: attempts saved in the history before a reload or reboot still count" {

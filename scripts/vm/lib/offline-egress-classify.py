@@ -24,9 +24,11 @@ import ipaddress
 import json
 import os
 import re
-import subprocess
+import socket
+from concurrent.futures import ThreadPoolExecutor
 import sys
 
+POOL = ThreadPoolExecutor(max_workers=4)
 RECORD_SETS = ("any4", "any6", "out4", "out6", "fwd4", "fwd6")
 PROTO_NUMS = {"1": "icmp", "6": "tcp", "17": "udp", "58": "ipv6-icmp"}
 
@@ -177,26 +179,44 @@ def main():
         rules.append((what, uid))
 
     ptr_cache = {}
+    fake = None
+    if os.environ.get("QD_OFFLINE_EGRESS_FAKE_DNS"):
+        # Tests: {"ptr": {addr: name}, "fwd": {name: [addr, ...]}}.
+        with open(os.environ["QD_OFFLINE_EGRESS_FAKE_DNS"]) as f:
+            fake = json.load(f)
 
-    def getent(*args):
+    def lookup(fn, arg, *rest):
+        """A resolver call that fails empty, bounded to 5 s."""
+        if fake is not None:
+            if fn is socket.gethostbyaddr:
+                n = fake.get("ptr", {}).get(arg)
+                return (n, [], [arg]) if n else None
+            return [(0, 0, 0, "", (a, 0)) for a in fake.get("fwd", {}).get(arg, [])]
         try:
-            return subprocess.run(["getent", *args], capture_output=True,
-                                  text=True, timeout=3).stdout
+            return POOL.submit(fn, arg, *rest).result(timeout=5)
         except Exception:
-            return ""
+            return [] if fn is socket.getaddrinfo else None
+
+    def forward(name):
+        # Every address, v4 and v6: getaddrinfo without AI_ADDRCONFIG, which
+        # `getent ahosts` applies (an IPv4-only host would drop the AAAA
+        # records a dual-stack guest used).
+        return {canon(a[4][0]) for a in lookup(socket.getaddrinfo, name, None)}
 
     def ptr(dst):
         # Forward-confirmed reverse name: the PTR name must resolve back to
         # dst, so an address owner cannot claim a name by PTR alone.
         if dst not in ptr_cache:
-            out = getent("hosts", dst).split()
-            name = out[1].rstrip(".").lower() if len(out) > 1 else ""
-            if name:
-                fwd = {canon(l.split()[0]) for l in getent("ahosts", name).splitlines() if l.split()}
-                if dst not in fwd:
-                    name = ""
+            r = lookup(socket.gethostbyaddr, dst)
+            name = r[0].rstrip(".").lower() if r else ""
+            if name and dst not in forward(name):
+                name = ""
             ptr_cache[dst] = name
         return ptr_cache[dst]
+
+    for what, _ in rules:
+        if "/" not in what:
+            addrs.setdefault(what, set()).update(forward(what))
 
     def expected(dst, proto, port, uid):
         for what, ruid in rules:
@@ -224,3 +244,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+    POOL.shutdown(wait=False, cancel_futures=True)
+    sys.stdout.flush()
+    os._exit(0)   # do not wait for a resolver call that is still hanging
