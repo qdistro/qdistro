@@ -109,7 +109,8 @@ in
     alive=0; kill -0 "$apid" 2>/dev/null && alive=1
     kill "$apid" 2>/dev/null || true; kill "$wpid" 2>/dev/null || true
     wait 2>/dev/null || true
-    if [ "$alive" != 1 ]; then
+    if [ "$alive" != 1 ] || ! grep -q 'qdwin: mapped handle=.*(normal)' weston.log \
+        || ! grep -q 'qdwin: toplevel_added .*title="QFileMan"' weston.log; then
       echo "--- app.log"; cat app.log; echo "--- weston.log"; cat weston.log; exit 1
     fi
     { echo "--- app.log"; cat app.log; echo "--- weston.log"; cat weston.log; } > $out
