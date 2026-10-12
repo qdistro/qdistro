@@ -117,12 +117,13 @@ command -v runuser                       >/dev/null 2>&1 || skip "runuser not av
 
 # qs ipc helper — `qs ipc` filters by display connection by default, and the
 # bats VM's runuser session has no wayland of its own. --any-display bypasses
-# the filter; -p selects the qdshell instance.
+# the filter; -p selects the qdshell instance. LANG=C.UTF-8: under the C
+# locale Quickshell >= 0.3.2 prints a locale warning on stderr that
+# `2>&1 | head -1` would return instead of the IPC answer.
 QS_IPC_ARGS=(-p /usr/share/quickshell/qdshell ipc --any-display)
 qs_ipc() {
-    runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" LC_ALL=C.UTF-8 \
-        qs "${QS_IPC_ARGS[@]}" "$@" 2>&1 \
-        | grep -avE $'^(\e\\[[0-9;]*m)? *(DEBUG|INFO|WARN)(\e\\[[0-9;]*m)?:? ' | head -1
+    runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" LANG=C.UTF-8 \
+        qs "${QS_IPC_ARGS[@]}" "$@" 2>&1 | head -1
 }
 
 # --- 2. tier3 install ran --------------------------------------------

@@ -11,11 +11,14 @@ the session keeps working.
 otherwise.** S2 (stream) has a real oracle and is the one already proven
 non-vacuous by fault injection. S3 (popup) has an EVENT-only oracle:
 `dismissed` firing is necessary but not sufficient for the parent pointer
-having been released, and it has never run against a pointer. S1 (move) has no
-oracle at all for grab release — it is a crash/liveness check. S4 is what
-proves only that KEYBOARD input still reaches an ordinary client afterwards —
-it does not exercise the pointer, so it does not detect a leftover pointer
-grab. Each section says which it is; do not summarise this scenario as "proves
+having been released, and it has never run against a pointer. S1 (move)
+pairs its crash/liveness checks with S1.5: journal evidence that the move
+grab was released by the destroy path rather than the probe's own
+disconnect, plus a client-visible pointer receipt — the first click after
+the teardown must still focus an ordinary window. S4 is what proves only
+that KEYBOARD input still reaches an ordinary client afterwards — it does
+not exercise the pointer, so it does not detect a leftover pointer grab.
+Each section says which it is; do not summarise this scenario as "proves
 the dependents are released".
 
 **Why**: `qdwin_toplevel` is pointed at by three things that outlive an ordinary
@@ -185,15 +188,14 @@ The mild sibling: `qdwin_move_grab_end_for` was never called on the proxy path,
 so motion looked up the handle and no-op'd while the pointer grab stayed
 installed until button-release.
 
-**What this step actually proves is narrow.** The probe checks that the request
-round-tripped, the proxy was removed, and the connection survived. It does NOT
-observe the grab. Codex confirmed the gap (`todo/reviews/proxy-lane-review-r1.md`
-finding 2): removing `qdwin_move_grab_end_for` leaves every one of those checks
-green. A leftover grab is only visible as *input not reaching other windows*,
-and NOTHING in this scenario observes that: S4 proves keyboard delivery only,
-and the bystander focuses the keyboard on `toplevel_added`, so a stale pointer
-grab would swallow pointer events while typing keeps working. Treat S1 as a
-crash/liveness check; the missing oracle is `todo/open-followups.md` item 2.
+**What the probe half proves is still narrow.** The probe checks that the
+request round-tripped, the proxy was removed, and the connection survived. It
+does NOT observe the grab. Codex confirmed the gap
+(`todo/reviews/proxy-lane-review-r1.md` finding 2): removing
+`qdwin_move_grab_end_for` leaves every one of those checks green. A leftover
+grab is only visible as *input not reaching other windows* — which is what
+S1.5 below now observes: the grab's journal lifecycle plus the first
+post-teardown pointer click.
 
 run.sh takes a journal cursor and runs `qdwin-nested-probe --destroy-with-move`
 as admin in the session.
@@ -203,6 +205,116 @@ move-drag; compositor alive`.
 **Assert (1.2):** `qdwin_compositor_pid` still equals `$COMP_PID_BEFORE`.
 **Assert (1.3):** the journal after `$CURSOR` shows no line containing
 `SIGSEGV`, `use-after-free`, `double free` or `Assertion`.
+
+### S1.5 — move-grab release ordering + pointer receipt
+
+Two oracles S1 cannot provide on its own, run immediately after S1 and before
+S2 so no later grab can mask the defect.
+
+*Ordering (asserts 1.4-1.5).* The journal carries the grab's whole lifecycle:
+`begin_interactive_move handle=H anchor=(...)` when it starts,
+`cancelling move-drag handle=H (toplevel/shell gone)` whenever
+`qdwin_move_grab_end_for` runs, `end_interactive_move handle=H` when a button
+release ends it, and `shell unbound` when the probe's connection dies. The
+probe is BOTH the advertiser and the bound shell on one `wl_client`, so a grab
+the destroy path failed to release is still ended when the probe's own
+disconnect tears down the shell resource — but `qdwin_shell_resource_destroy`
+clears it **inline and silently**, without `end_for`. `cancelling` can only
+come from `end_for`, and for this proxy the only caller in play is
+`qdwin_toplevel_release_dependents` at the destroy (the others — ordinary
+desktop-surface removal, output-boundary teardown — do not run here). The
+line's presence is therefore the evidence: it means the release ran at the
+destroy; its absence once `shell unbound` has been seen means nothing released
+it at teardown and the disconnect's silent clear ended it (which is exactly
+the signature a missing `release_dependents → end_for` call would leave).
+
+*Receipt (asserts 1.6-1.9).* A leaked grab is client-visible: while installed,
+`qdwin_move_grab_button` eats every press AND release before they reach the
+default grab's click-focus pick. Two failure shapes exist: a grab leaked
+with `move_grab_active=1` ends on the first eaten release and logs
+`end_interactive_move`; a grab left installed *after* `move_grab_active`
+was already cleared ends nothing — its press+release are silently consumed
+forever. qdwin.c now logs that exact state as `qdwin: move-grab swallowed
+button <n> while move_grab_active=0 (grab still installed)`. Every
+legitimate clear of the flag is paired with an `end_grab`: the release
+handler, `qdwin_move_grab_end_for`, the shell-unbind path — and the grab's
+`cancel` callback, which previously cleared the flag while leaving the
+grab installed (weston's `weston_pointer_cancel_grab` does NOT reset
+`pointer->grab`, so a seat focus-out during a drag left a dead grab eating
+all later input) and now ends the grab itself, so the line cannot appear
+on a correct compositor.
+
+run.sh launches two ordinary `qdistro-test-window`s **serialised**: window A
+must be fully mapped (handle + placed rect resolved) before B launches,
+because autofocus retargets the keyboard to each new toplevel — B mapping
+last is what makes `focus handle=<B>` the stable end state. The settle
+check then requires the LAST `focus handle=` line to be B's. The click on
+A is aimed at a point inside A's rect and outside B's — both geometries
+read from the compositor's own `mapped handle=... pos=` lines, because the
+probe's unbind resets WM placement to cascade and a cascading B can cover
+A's centre (the uncovered candidate farthest from B's centre wins; B is
+smaller than A in both dims, so at least one corner is always uncovered).
+
+run.sh then injects ONE click at the aim point through
+`qd22_click_checked`, which validates each event's QMP reply (the
+`qdwin_mouse_move*` helpers discard it, and virsh exits 0 on a QMP
+`{"error":...}` — the same reply-body check `qd22_type` uses), so a failed
+injection is an ERROR, never a consumer verdict. The journal after the
+click is graded once:
+
+* `move-grab swallowed button` — FAIL: a stale installed grab with
+  `move_grab_active=0` ate the click (the instrumented signature).
+* `end_interactive_move` — FAIL: a live leaked grab ate the click and
+  ended on the eaten release.
+* no `click-focus pick` line — FAIL: the press never reached the default
+  grab (pointer transit itself was proven at 0.2).
+* the pick resolves to anything but A — FAIL: mispick.
+* pick→A with no `focus handle=<A>` after it — FAIL.
+* pick→A followed by `focus handle=<A>` — PASS.
+
+qdwin logs the pick and sets focus synchronously within one press
+dispatch, so no finer ordering is graded. An earlier multi-click
+classifier (retry, control click at B's centre, per-press attribution)
+was cut: its later review rounds chased orderings qdwin cannot emit —
+see `todo/reviews/qd22-s15-loop/`.
+
+Journal reads are guarded everywhere a read feeds a verdict: a window
+whose resolution ends without a successful final journal read, an
+autofocus/last-focus check whose final read fails, and the
+click's grading read itself all record ERROR — unreadable evidence is
+never graded as absent evidence (`journalctl --after-cursor` returns
+the whole window retroactively, so the final read is authoritative
+regardless of poll-time failures; verdicts never rest on a snapshot
+last read long ago).
+
+The receipt windows are then killed (TERM, KILL a second later —
+`qdistro-test-window`'s TERM handler only clears its run flag while the
+main loop stays blocked in `wl_display_dispatch`) and their
+`toplevel_removed` lines waited on, because a leftover floating window
+could occlude S3's frame.
+
+**Assert (1.4):** `begin_interactive_move ... anchor=` is in the journal —
+the drag really started. An `ignored —` variant or no line at all is ERROR:
+the probe's `rc=0` cannot see a refused drag, so the step would have
+exercised nothing.
+**Assert (1.5):** `cancelling move-drag` is in the journal once `shell
+unbound` has been seen — the release ran at the destroy, since only
+`end_for` logs it and the disconnect clears the grab silently. No
+`cancelling` line is FAIL.
+**Assert (1.6):** both receipt windows mapped and their handles resolved —
+an ordinary toplevel must still be admitted after the teardown. No process
+is ERROR (client never started); a running client with no `toplevel_added`
+is FAIL, and an admitted toplevel that never produces a `mapped ... pos=`
+line is FAIL too — it was never placed.
+**Assert (1.7):** the second window took focus on map AND holds the last
+focus line — the precondition that makes the click on the first window a
+real transition. A mapped ordinary toplevel that autofocus never reaches
+is a product failure: FAIL.
+**Assert (1.8) — the receipt:** one post-teardown click on A picks A and
+then focuses it (`click-focus pick ... -> handle=<A>` followed by
+`qdwin: focus handle=<A>`), with no grab signature. Classified as above.
+**Assert (1.9):** both receipt windows are gone (`toplevel_removed`) before
+S2 — nothing left to occlude S3's frame.
 
 `rc=77` here means the seat advertises no pointer: a headless backend, or a
 libweston-16 seat whose pointer devices have sent no event yet (assert 0.2
@@ -451,19 +563,20 @@ entirely and the same characters still appear. Worse, a stale pointer grab can
 swallow pointer events while keyboard events keep flowing to the focused
 window, which is exactly the defect that would go unseen.
 
-So: no click here, no pointer claim. **Pointer recovery after a proxy teardown
-has no oracle anywhere in this lane** — see `todo/open-followups.md` item 2.
+So: no click here, no pointer claim. Pointer recovery after a proxy teardown
+is S1.5's job, not this step's.
 
 Uses the repo's keyboard-delivery idiom (`tests/apps/12-keystroke-roundtrip.md`):
-type into a terminal, read the characters off the framebuffer. `foot` is part of
-the opt-in `QDWIN_APP_DEPS` matrix, so its absence is a SKIP — but then S4
-asserts nothing and the scenario proves nothing about input surviving; say so
-in the report.
+type into a terminal, read the characters off the framebuffer. `foot` is a
+CORE test client, always baked into the golden by `fresh-vm-bootstrap.sh`
+("Core test clients (ALWAYS)": it lands in `_core_missing`, not the opt-in
+app-deps set), so its absence is an image/bake regression — run.sh records
+S4 as ERROR, and the scenario then proves nothing about input surviving.
 
 The probe released the shell role when its last mode exited, so run.sh takes
 the role with the bystander (its cleanup trap covers it).
 
-run.sh: if `foot` is absent, record S4 as SKIP. Otherwise take a journal
+run.sh: if `foot` is absent, record S4 as ERROR. Otherwise take a journal
 cursor, `qdwin_apps_become_shell` + `qdwin_apps_session_up`, launch
 `foot --title qd22-after-$QD22_RUN`, find THIS run's terminal by its pid
 (`pgrep -f` on the per-run title, with the bracket trick against matching the
@@ -507,7 +620,9 @@ The same check backs 1.3, 2.5 and 3.6.
 
 The terminal is cleaned up by run.sh's `qd22_cleanup`, which kills it by the
 per-run title -- deliberately not inline in the step, where an early stop would
-skip it.
+skip it. S1.5's receipt windows are killed by the same handler (and inline,
+right after the receipt, so an intact run does not leave them to occlude S3's
+frame).
 
 ## Teardown
 
@@ -518,9 +633,10 @@ scenario-failure line -- `proxy-lane-review-r4.md` finding 2). It also runs
 when run.sh stops early on an ERROR, and when it receives TERM/INT/HUP.
 
 In order, it: reaps S3's probe group (setting the cancel flag first, so a
-launcher that has not yet published cannot start one), kills S4's terminal by
-its per-run title, restores `qdshell.service`, and compares the compositor pid
-against `$COMP_PID_BEFORE`.
+launcher that has not yet published cannot start one), kills S1.5's receipt
+windows and S4's terminal by their per-run titles, restores
+`qdshell.service`, and compares the compositor pid against
+`$COMP_PID_BEFORE`.
 
 **Assert (T.1):** the compositor pid is unchanged -- the final handoff is
 itself part of what this lane exercises, so a compositor that died during the
@@ -535,7 +651,8 @@ desktop is not left headless, but it means cleanup ran without establishing
 that the probe was gone -- recovery, not a pass.
 
 Leftovers this scenario owns: the probe's proxies (destroyed by the probe
-itself), the probe group and S4's terminal (both reaped by `qd22_cleanup`), and
+itself), the probe group, S1.5's receipt windows and S4's terminal (all
+reaped by `qd22_cleanup`), and
 `$QD22_LOG`, `$QD22_LAUNCH_LOG` and `$QD22_LAUNCHER` in the VM's /tmp -- per-run and
 deliberately kept, since they hold the popup step's verdict and its launcher's
 diagnostics. If run.sh is SIGKILLed (no trap runs), qdshell stays stopped and

@@ -39,7 +39,7 @@ def main() -> int:
     required = (
         "qdwin_shell_require_bound", "QDWIN_SHELL_V1_ERROR_LOCKED",
         "nested_proxy_pending_decision", "QDWIN_TS_MAXIMIZED",
-        "QDWIN_TS_FULLSCREEN", "QDWIN_TILE_NONE", "move_grab_active",
+        "QDWIN_TS_FULLSCREEN", "QDWIN_TILE_NONE", "qdwin_move_grab_live",
         "wl_list_for_each(o, &qdwin->compositor->output_list, link)",
         "weston_view_set_position", "cx + tl->inset_w",
         "cy + tl->inset_n", "weston_view_update_transform",

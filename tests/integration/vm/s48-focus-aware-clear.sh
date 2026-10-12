@@ -99,7 +99,9 @@ command -v runuser                       >/dev/null 2>&1 || skip "runuser not av
 # qs ipc helper — `qs ipc` filters by display connection by default,
 # and the bats VM's runuser session has no wayland of its own. Use
 # `--any-display` to bypass the filter; -p selects the qdshell
-# instance.
+# instance. LANG=C.UTF-8 on each call: under the C locale Quickshell
+# >= 0.3.2 prints a locale warning on stderr that `2>&1 | head -1` would
+# return instead of the IPC answer.
 QS_IPC_ARGS=(-p /usr/share/quickshell/qdshell ipc --any-display)
 
 # --- 2. tier3 install ran --------------------------------------------
@@ -261,7 +263,7 @@ fi
 # --- 8. ctrl selection-state via IPC ---------------------------------
 # `qs ipc call` returns the function's return value on stdout. Also
 # logs a "Tier3FocusIPC selectionState ..." line we can grep.
-STATE_PRE=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+STATE_PRE=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" LANG=C.UTF-8 \
     qs "${QS_IPC_ARGS[@]}" call tier3focus selectionState 2>&1 | head -1)
 # Tighter assertion: not just non-empty, but the expected key=val shape
 # (after the M4 fix that removed the dead _last* writes).
@@ -273,7 +275,7 @@ else
 fi
 
 # --- 9. find silo handle via IPC -------------------------------------
-SILO_HANDLE_REPLY=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+SILO_HANDLE_REPLY=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" LANG=C.UTF-8 \
     qs "${QS_IPC_ARGS[@]}" call tier3focus findSiloHandle user1 2>&1 | head -1)
 SILO_HANDLE=$(echo "$SILO_HANDLE_REPLY" | grep -oE 'HANDLE=-?[0-9]+' | head -1 | cut -d= -f2)
 if [ -z "$SILO_HANDLE" ] || [ "$SILO_HANDLE" = "-1" ]; then
@@ -287,7 +289,7 @@ INJECT_CURSOR=$(journalctl --since=now -n0 --show-cursor 2>/dev/null \
     | awk -F': ' '/-- cursor:/ {print $2}')
 
 if [ -n "$SILO_HANDLE" ]; then
-    INJECT_REPLY=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+    INJECT_REPLY=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" LANG=C.UTF-8 \
         qs "${QS_IPC_ARGS[@]}" call tier3focus injectFocus "$SILO_HANDLE" default 2>&1 | head -1)
     note "(IPC injectFocus reply: $INJECT_REPLY)"
     sleep 2
@@ -356,7 +358,7 @@ else
 fi
 
 # --- 12. selection-state post-inject ---------------------------------
-STATE_POST=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+STATE_POST=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" LANG=C.UTF-8 \
     qs "${QS_IPC_ARGS[@]}" call tier3focus selectionState 2>&1 | head -1)
 # Same shape check as the STATE_PRE assertion above: a NON-EMPTY error
 # string (e.g. `qs ipc`'s "No running instances for ..." when qdshell
