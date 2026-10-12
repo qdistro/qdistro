@@ -31,11 +31,17 @@ QD_OFFLINE_EGRESS_CURSOR=/var/lib/qci-offline-egress/cursor
 
 # Product runtime chatter that is EXPECTED to be blocked offline and is not a
 # dependency fetch (it still is blocked; the gate only does not fail on it).
-# Space-separated host names, resolved on the host at scan time. Keep it to
-# hosts whose addresses are not shared with a package/registry host:
-# NetworkManager's conncheck.opensuse.org shares mirrors.opensuse.org's
-# address, so its check is switched off in the guest instead.
-QCI_OFFLINE_EGRESS_EXPECTED="${QCI_OFFLINE_EGRESS_EXPECTED-api.open-meteo.com geocoding-api.open-meteo.com}"
+# Space-separated tokens, each optionally suffixed @<uid> to match only
+# packets that uid sent (the log carries UID=):
+#   <host>         its addresses, resolved on the host and in the guest at
+#                  scan time (weather/geocoding addresses rotate)
+#   <proto>/<port> any destination on that port (NTP: chrony's pool)
+# github.com is qdshell's plugin-registry fetch, so it is scoped to the
+# session user (uid 1000): a root build fetching a meson wrap from github is
+# still a failure. Keep hosts whose addresses are shared with a package or
+# registry host out: NetworkManager's conncheck.opensuse.org shares
+# mirrors.opensuse.org's address, so its check is switched off instead.
+QCI_OFFLINE_EGRESS_EXPECTED="${QCI_OFFLINE_EGRESS_EXPECTED-api.open-meteo.com@1000 geocoding-api.open-meteo.com@1000 github.com@1000 udp/123}"
 
 # qd_offline_egress_enabled — QCI_OFFLINE or QDISTRO_DEPS_OFFLINE truthy.
 qd_offline_egress_enabled() {
@@ -70,7 +76,7 @@ table inet $QD_OFFLINE_EGRESS_TABLE {
     chain egress {
         ip daddr @allow4 return
         ip6 daddr @allow6 return
-        limit rate 10/second burst 20 packets log prefix "$QD_OFFLINE_EGRESS_PREFIX" level warn
+        limit rate 10/second burst 20 packets log prefix "$QD_OFFLINE_EGRESS_PREFIX" level warn flags skuid
         counter name "blocked"
         meta l4proto tcp reject with tcp reset
         reject
@@ -142,33 +148,99 @@ qd_offline_egress_install() {
 }
 
 # qd_offline_egress_scan <vm> [vm-exec] — print the guest's blocked-attempt
-# log lines since the install cursor (empty = none). rc 2 when the guest
-# cannot be asked or the table is not armed: the caller must not read that
-# as clean.
+# log lines since the install cursor (empty = none), followed by one
+# "QCI-OFFLINE-EGRESS-RESOLVED <host> <addr>" line per address the guest
+# resolves an expected host to. rc 2 when the guest cannot be asked or the
+# table is not armed: the caller must not read that as clean.
 qd_offline_egress_scan() {
-    local vm="$1" vmx="${2:-${VM_TOOLS:-$(dirname "${BASH_SOURCE[0]}")/..}/vm-exec}" out
-    out="$("$vmx" "$vm" "c=\$(cat $QD_OFFLINE_EGRESS_CURSOR 2>/dev/null) || { echo QCI_EGRESS_UNARMED; exit 0; }; echo QCI_EGRESS_ARMED; journalctl -k --no-pager -o short-iso --after-cursor=\"\$c\" -g '^$QD_OFFLINE_EGRESS_PREFIX' 2>/dev/null || true")" || return 2
+    local vm="$1" vmx="${2:-${VM_TOOLS:-$(dirname "${BASH_SOURCE[0]}")/..}/vm-exec}" out hosts
+    hosts="$(qd_offline_egress_expected_hosts | tr '\n' ' ')"
+    out="$("$vmx" "$vm" "c=\$(cat $QD_OFFLINE_EGRESS_CURSOR 2>/dev/null) || { echo QCI_EGRESS_UNARMED; exit 0; }; echo QCI_EGRESS_ARMED; journalctl -k --no-pager -o short-iso --after-cursor=\"\$c\" -g '^$QD_OFFLINE_EGRESS_PREFIX' 2>/dev/null || true; for h in $hosts; do getent ahosts \$h 2>/dev/null | awk -v h=\$h '{print \"QCI-OFFLINE-EGRESS-RESOLVED \" h \" \" \$1}' | sort -u; done")" || return 2
     case "$out" in
-        QCI_EGRESS_ARMED*) printf '%s\n' "$out" | sed '1d' | grep -F "$QD_OFFLINE_EGRESS_PREFIX" || true ;;
+        QCI_EGRESS_ARMED*) printf '%s\n' "$out" | sed '1d' | grep -E "^QCI-OFFLINE-EGRESS-RESOLVED |$QD_OFFLINE_EGRESS_PREFIX" || true ;;
         *) return 2 ;;
     esac
 }
 
-# qd_offline_egress_classify — stdin: scan lines. Prints "unexpected <dst>"
-# and "expected <dst>" lines (one per distinct destination). A destination is
-# expected only when it is an address of a QCI_OFFLINE_EGRESS_EXPECTED host
-# (resolved on the host now).
+# qd_offline_egress_expected_hosts — the host names in QCI_OFFLINE_EGRESS_EXPECTED.
+qd_offline_egress_expected_hosts() {
+    local t
+    for t in $QCI_OFFLINE_EGRESS_EXPECTED; do
+        t="${t%@*}"
+        case "$t" in */*) ;; *) printf '%s\n' "$t" ;; esac
+    done
+}
+
+# qd_offline_egress_classify — stdin: scan output. Prints "unexpected <dst>"
+# and "expected <dst>" lines (one per distinct destination, addresses in
+# canonical form; a destination is unexpected if ANY attempt to it is). An
+# attempt is expected when it matches a QCI_OFFLINE_EGRESS_EXPECTED token: a
+# host whose addresses (resolved on the host now, plus the guest's RESOLVED
+# lines) include the destination or that the destination's reverse name is or
+# is under (rotating CDN/load-balancer addresses), or a proto/port; and, with
+# @<uid>, only when the log line carries that UID.
 qd_offline_egress_classify() {
-    local h ip expected=" " dst
-    for h in $QCI_OFFLINE_EGRESS_EXPECTED; do
-        for ip in $(getent ahosts "$h" 2>/dev/null | awk '{print $1}' | sort -u); do
-            expected+="$ip "
-        done
+    local h resolved=""
+    for h in $(qd_offline_egress_expected_hosts); do
+        resolved+="$(getent ahosts "$h" 2>/dev/null | awk -v h="$h" '{print "QCI-OFFLINE-EGRESS-RESOLVED " h " " $1}' | sort -u)"$'\n'
     done
-    sed -n 's/.* DST=\([^ ]*\) .*/\1/p' | sort -u | while read -r dst; do
-        case "$expected" in
-            *" $dst "*) echo "expected $dst" ;;
-            *) echo "unexpected $dst" ;;
-        esac
-    done
+    { printf '%s' "$resolved"; cat; } | QCI_OFFLINE_EGRESS_EXPECTED="$QCI_OFFLINE_EGRESS_EXPECTED" python3 -c '
+import ipaddress, os, re, subprocess, sys
+
+def canon(a):
+    try:
+        return ipaddress.ip_address(a).compressed
+    except ValueError:
+        return a
+
+addrs = {}      # host -> set of canonical addresses
+attempts = []   # (dst, proto, port, uid)
+for line in sys.stdin:
+    if line.startswith("QCI-OFFLINE-EGRESS-RESOLVED "):
+        _, host, addr = line.split()[:3]
+        addrs.setdefault(host, set()).add(canon(addr))
+        continue
+    m = re.search(r" DST=(\S+) ", line)
+    if not m:
+        continue
+    f = dict(re.findall(r"\b(PROTO|DPT|UID)=(\S+)", line))
+    attempts.append((canon(m.group(1)), f.get("PROTO", "").lower(), f.get("DPT", ""), f.get("UID", "")))
+
+rules = []
+for tok in os.environ.get("QCI_OFFLINE_EGRESS_EXPECTED", "").split():
+    what, _, uid = tok.partition("@")
+    rules.append((what, uid))
+
+ptr_cache = {}
+def ptr(dst):
+    # Reverse name, best effort (empty when it does not resolve in 3 s).
+    if dst not in ptr_cache:
+        try:
+            out = subprocess.run(["getent", "hosts", dst], capture_output=True,
+                                 text=True, timeout=3).stdout.split()
+        except Exception:
+            out = []
+        ptr_cache[dst] = out[1].rstrip(".").lower() if len(out) > 1 else ""
+    return ptr_cache[dst]
+
+def expected(dst, proto, port, uid):
+    for what, ruid in rules:
+        if ruid and ruid != uid:
+            continue
+        if "/" in what:
+            if what == proto + "/" + port:
+                return True
+        elif dst in addrs.get(what, ()):
+            return True
+        elif what in (ptr(dst), ) or ptr(dst).endswith("." + what):
+            return True
+    return False
+
+verdict = {}
+for a in attempts:
+    ok = expected(*a)
+    verdict[a[0]] = verdict.get(a[0], True) and ok
+for dst in sorted(verdict):
+    print(("expected " if verdict[dst] else "unexpected ") + dst)
+'
 }

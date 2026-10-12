@@ -351,6 +351,7 @@ qci_offline_egress_check() {
     fi
     [ -s "$log" ] || return 0
     cls="$(qd_offline_egress_classify < "$log")"
+    [ -n "$cls" ] || return 0
     printf '%s\n' "$cls" > "$dir/$vm.classified"
     unexpected="$(printf '%s\n' "$cls" | sed -n 's/^unexpected //p' | tr '\n' ' ')"
     expected="$(printf '%s\n' "$cls" | sed -n 's/^expected //p' | tr '\n' ' ')"

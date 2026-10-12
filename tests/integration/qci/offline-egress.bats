@@ -100,6 +100,31 @@ EOF
     [ "$(grep -c . <<<"$output")" -eq 2 ]
 }
 
+@test "classify: uid scope, proto/port, IPv6 canonical form and guest-resolved addresses" {
+    QCI_OFFLINE_EGRESS_EXPECTED="weather.invalid@1000 udp/123"
+    run qd_offline_egress_classify <<'EOF'
+QCI-OFFLINE-EGRESS-RESOLVED weather.invalid 2001:db8::7
+QCI-OFFLINE-EGRESS-RESOLVED weather.invalid 198.51.100.9
+k: QCI-OFFLINE-EGRESS: OUT=ens2 SRC=fe80::1 DST=2001:0db8:0000:0000:0000:0000:0000:0007 LEN=80 PROTO=TCP SPT=1 DPT=443 UID=1000 GID=1000
+k: QCI-OFFLINE-EGRESS: OUT=ens2 SRC=10.0.2.15 DST=198.51.100.9 LEN=60 PROTO=TCP SPT=1 DPT=443 UID=0 GID=0
+k: QCI-OFFLINE-EGRESS: OUT=ens2 SRC=10.0.2.15 DST=203.0.113.5 LEN=76 PROTO=UDP SPT=1 DPT=123
+k: QCI-OFFLINE-EGRESS: OUT=ens2 SRC=10.0.2.15 DST=203.0.113.6 LEN=60 PROTO=TCP SPT=1 DPT=123 UID=0 GID=0
+EOF
+    [ "$status" -eq 0 ]
+    grep -qx 'expected 2001:db8::7' <<<"$output"         # expanded kernel form matched, uid 1000
+    grep -qx 'unexpected 198.51.100.9' <<<"$output"      # same host, but sent by root
+    grep -qx 'expected 203.0.113.5' <<<"$output"         # NTP
+    grep -qx 'unexpected 203.0.113.6' <<<"$output"       # tcp/123 is not udp/123
+    [ "$(grep -c . <<<"$output")" -eq 4 ]
+}
+
+@test "ruleset logs the sending uid; the default expected list scopes web hosts to the session user" {
+    grep -q 'log prefix "QCI-OFFLINE-EGRESS: " level warn flags skuid' <<<"$(qd_offline_egress_ruleset)"
+    for t in $QCI_OFFLINE_EGRESS_EXPECTED; do
+        case "$t" in */*|*@1000) ;; *) echo "unscoped expected host: $t" >&2; false ;; esac
+    done
+}
+
 # The gate side: source the real vm.sh / run.sh functions with the runner's
 # primitives stubbed, against a fake guest.
 gate_env() {
@@ -161,4 +186,18 @@ EOF
     grep -q 'could not install the guest egress block"; exit 3' "$REPO_ROOT/scripts/vm/spin-test-vm.sh"
     [ "$(grep -c '^ *qci_offline_egress_check "\$g\?vm"$' "$REPO_ROOT/ci/lib/vm.sh")" -eq 2 ]
     grep -q '^ *rc=\$(offline_egress_rc "\$rc")$' "$REPO_ROOT/ci/lib/run.sh"
+}
+
+@test "registry: suites that fetch past the host cache are skipped offline, others are not" {
+    # templates-browser/-promotion build silo images in-guest with zypper
+    # against registry.opensuse.org (no cache proxy in the container build):
+    # under the egress block they can only fail, so offline runs skip them.
+    # shellcheck source=/dev/null
+    . "$REPO_ROOT/ci/lib/affected.sh"
+    REGISTRY_TSV="$REPO_ROOT/tests/registry.tsv"
+    for t in templates-browser templates-promotion; do
+        QCI_OFFLINE=1 offline_should_skip_external "tests/integration/vm/$t.bats"
+        ! QCI_OFFLINE=0 offline_should_skip_external "tests/integration/vm/$t.bats"
+    done
+    ! QCI_OFFLINE=1 offline_should_skip_external tests/integration/vm/templates-state-snapshot.bats
 }
