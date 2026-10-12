@@ -163,26 +163,48 @@ Do not treat the broker pilot as evidence for those other domains.
   and btmp. This was observed in the CI corpus (`FAILED LOGIN 1 FROM tty1`)
   before the qdwin test lane was fixed.
   What prevents it in production is that seatd holds the compositor VT's
-  console keyboard in `K_OFF`, so the keymap is never consulted. Verified live
-  on a production-path VM (2026-07-25): tty3 is `K_OFF` across greeter, active
-  session and locked session, and injecting the chord at the locked screen left
-  the active VT at tty3 with no `FAILED LOGIN` and an empty btmp — while the
-  same injection path demonstrably reached the locker ("Authentication
-  failed"). The one thing that can revert `K_OFF` is a getty's start-time TTY
-  reset, so `getty@tty3`/`autovt@tty3` are masked at install time
-  (`scripts/install/harden-compositor-vt.sh`); masking, not disabling, because
-  logind starts `autovt@ttyN` by unit name on demand. Guarded at runtime by
-  `tests/integration/vm/probes/vt-escape-lockdown.sh`, run from
-  `tests/integration/vm/vt-escape-lockdown.bats`, which converts its
-  disposable VM to the production greetd path and waits for a real qdwin
-  session before measuring. The static installer invariants are in
-  `bootstrap-hardening.bats`.
+  console keyboard in `K_OFF`, so the keymap's console-switch actions are never
+  reached. The distro keymap is deliberately left as shipped (no
+  `Decr_Console`/`Incr_Console` neutering): `K_OFF` is the control, not the
+  keymap. Three things can revert `K_OFF`, and each is closed separately:
+  - a getty's start-time TTY reset — `getty@tty3`/`autovt@tty3` are masked at
+    install time (`scripts/install/harden-compositor-vt.sh`); masking, not
+    disabling, because logind starts `autovt@ttyN` by unit name on demand;
+  - SysRq unRaw (`r`) and SAK (`k`) — SysRq is an input handler upstream of
+    the console keyboard, so `K_OFF` does not gate it; only the
+    `kernel.sysrq` mask does. The shipped openSUSE value (`184`, from
+    `aaa_base`) excludes bit 4 (unRaw/SAK) and bit 64 (term/kill all);
+  - a keymap-bound `SAK` key, which the kernel honours even under `K_OFF` and
+    independent of the SysRq mask. No shipped console keymap binds it; only a
+    root `loadkeys` could.
+  Guarded at runtime by `tests/integration/vm/vt-escape-lockdown.bats`, which
+  converts its disposable VM to the production greetd path and waits for a
+  real qdwin session before measuring:
+  `probes/vt-escape-lockdown.sh` checks `K_OFF` and the masks on the session;
+  `probes/vt-escape-locked.sh` locks it through qdlocker, asserts the SysRq
+  mask and the absence of a SAK binding, injects the console-switch chords, a
+  typed "password" and SysRq `r`/`k` as real kernel keyboard input, and
+  asserts the VT, `K_OFF` and the lock all held, the typing reached the locker
+  (a failed unlock), the kernel refused both SysRq keys, and no `FAILED LOGIN`
+  or btmp entry appeared; after a `chvt` round trip through tty1 it re-checks
+  the VT, `K_OFF`, the lock and the absence of a login leak (no further keys
+  are injected after the round trip). The static installer invariants are in `bootstrap-hardening.bats`.
   **Accepted residual:** tty1's `agetty` remains a deliberate emergency console
   (`doc/recovery.md`) and is therefore a real password-authenticated local
   surface; removing VT *destinations* is explicitly not the security boundary.
-  Privileged local actors can still change VT (`chvt`, `VT_ACTIVATE`), and
-  kernel SysRq is a separate local-keyboard control plane that this entry does
-  not cover.
+  Privileged local actors can still change VT (`chvt`, `VT_ACTIVATE`).
+  The SysRq functions the shipped mask does allow — sync, remount-ro,
+  reboot/poweroff, debug dumps (including the crash trigger) — are accepted
+  local-keyboard denial of service: reboot is already allowed, and dumps go to
+  kmsg/journal, not to the graphical VT. Side effect worth knowing: remount-ro
+  stops journal/btmp logging of later failed unlocks (faillock, on tmpfs,
+  still counts). `VT_LOCKSWITCH` is deliberately not used: every v1 switch
+  destination is an agetty that demands a password when nobody is logged in
+  there (a console session left logged in on tty1 is NOT locked by the
+  screen lock — an accepted local residual), and the primitive is a
+  global flag that outlives its setter (a crashed owner would strand the tty1
+  emergency console). Revisit before tty5+ or game TTY sessions ship — then by
+  locking all sessions on lock, not by denying switches.
 - **qdwin output-manager pre-shell mutation:** before qdshell binds,
   `zwlr_output_manager_v1` apply/test mutation is admitted for
   `allowed_uid`, and for the explicit test posture `allowed_uid == -1`;
