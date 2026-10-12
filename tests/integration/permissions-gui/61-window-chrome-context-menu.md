@@ -43,8 +43,12 @@ it is exempt from the AGENTS.md "avoid raw coordinate clicks" default.
 For EVERY click/drag, first take a `qdwin_screenshot`, compute the
 point from the frame, and verify the point with
 `vm-gui click-preview x y` (it parks the pointer + rings the target,
-no button event). Only then issue `vm-gui click` / `rightclick` /
-`doubleclick` / `drag` at the SAME coordinates. Grade every step's
+no button event). A left click is then `vm-gui click-confirm
+<preview-manifest>` — confirm IS the click; never follow it with a raw
+`vm-gui click` at the same point (that is a second press: in S7 it
+landed on the just-minimised window's old title bar). Other gestures
+(`rightclick` / `doubleclick` / `drag`) go at the SAME coordinates
+after the preview. Grade every step's
 RESULT from the journal oracles named below plus a fresh
 `qdwin_screenshot` — never from a click's post frame alone.
 
@@ -110,6 +114,7 @@ await_qdwin_line() {
     qdwin_journal | tail -30 >&2
     return 1
 }
+count_qdwin_line() { qdwin_journal | grep -cE "$1"; }
 "$@"
 EOF
     chmod +x /tmp/61-driver.sh'
@@ -225,7 +230,7 @@ double-click the (now full-width) title bar left of the buttons →
 ```bash
 # Runner: maximize-button centre (BX,BY) from s4-menu-gone.png
 $VMGUI "$VM" click-preview BX BY maximize-button
-$VMGUI "$VM" click BX BY
+$VMGUI "$VM" click-confirm <preview-manifest>
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
     bash /tmp/61-driver.sh await_qdwin_line "set_maximized handle=$H max=1 outer="' \
     || { echo "FAIL(S5): maximize button did not maximise"; exit 1; }
@@ -291,7 +296,7 @@ qdwin_screenshot "$ART/s7-menu.png"
 # Runner: compute the Minimize row centre (MX,MY) from s7-menu.png;
 # confirm with click-preview, then click.
 $VMGUI "$VM" click-preview MX MY minimize-row
-$VMGUI "$VM" click MX MY
+$VMGUI "$VM" click-confirm <preview-manifest>
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
     bash /tmp/61-driver.sh await_qdwin_line "set_minimized handle=$H \(state="' \
     || { echo "FAIL(S7): Minimize row did not minimise the window"; exit 1; }
@@ -309,6 +314,32 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
     qdwin_windows | grep -q "^$H"' \
     || { echo "FAIL(S7): handle vanished instead of minimising"; exit 1; }
 ```
+
+Then click the empty desktop where the minimised window's title bar
+WAS (the S7 menu point (X5,Y5) — nothing is drawn there now). The press
+must reach the compositor's click-focus pick and resolve to NO toplevel
+(`-> handle=4294967295`); it must NOT unminimise the hidden window
+(qdwin used to hit-test a minimised window's stale chrome rect and
+raise it — the 2026-10-12 gate failure).
+
+```bash
+CNT='H=$(cat /tmp/61-app.handle); bash /tmp/61-driver.sh count_qdwin_line'
+U0=$($VMEXEC "$VM" "$CNT \"request_raise handle=\$H unminimised\"")
+P0=$($VMEXEC "$VM" "$CNT \"click-focus pick pos=.* -> handle=4294967295\"")
+$VMGUI "$VM" click-preview X5 Y5 former-title-bar
+$VMGUI "$VM" click-confirm <preview-manifest>
+sleep 1
+U1=$($VMEXEC "$VM" "$CNT \"request_raise handle=\$H unminimised\"")
+P1=$($VMEXEC "$VM" "$CNT \"click-focus pick pos=.* -> handle=4294967295\"")
+[ "$P1" -gt "$P0" ] \
+    || { echo "ERROR(S7): the empty-desktop press never reached click-focus"; exit 2; }
+[ "$U1" = "$U0" ] \
+    || { echo "FAIL(S7): a click on the minimised window's old title bar unminimised it"; exit 1; }
+qdwin_screenshot "$ART/s7-still-minimized.png"
+```
+
+**Assert** (hard, agent-visual): `s7-still-minimized.png` still shows
+no admin window and no frame.
 
 ### S8 — a self-decorated client gets no shell frame and drags itself
 
@@ -384,7 +415,7 @@ qdwin_screenshot "$ART/s9-qterm.png"
 # Runner: close-button centre (CX,CY) — rightmost 24x24 cell of
 # qterminator's shell title bar (NOT any tab/strip inside the window).
 $VMGUI "$VM" click-preview CX CY close-button
-$VMGUI "$VM" click CX CY
+$VMGUI "$VM" click-confirm <preview-manifest>
 $VMEXEC "$VM" 'H3=$(cat /tmp/61-qterm.handle)
     bash /tmp/61-driver.sh await_qdwin_line "request_close handle=$H3 dispatched" &&
     bash /tmp/61-driver.sh await_qdwin_line "toplevel_removed handle=$H3\$"' \

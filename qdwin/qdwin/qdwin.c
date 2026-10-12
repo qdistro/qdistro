@@ -5134,6 +5134,17 @@ qdwin_chrome_at_pos(struct qdwin *qdwin, struct weston_coord_global pos,
 	wl_list_for_each(tl, &qdwin->toplevels, link) {
 		if (tl->nested_proxy_pending_decision)
 			continue;
+		/* Chrome travels with its content view (move_to_layer), so a
+		 * minimised, off-workspace or held window's chrome sits on an
+		 * unmapped layer: invisible, and it must not take clicks. Without
+		 * this a press on empty desktop where a minimised window's title
+		 * bar used to be hit the stale chrome rect and click-to-focus
+		 * unminimised it (gui61 S7, 2026-10-12). */
+		if (tl->view &&
+		    (tl->view->layer_link.layer == &qdwin->minimized_layer ||
+		     tl->view->layer_link.layer == &qdwin->workspace_hidden_layer ||
+		     tl->view->layer_link.layer == &qdwin->held_layer))
+			continue;
 		for (int s = 0; s < QDWIN_SIDES; s++) {
 			struct weston_view *cv = tl->chrome[s].view;
 			struct weston_surface *cs = tl->chrome[s].surface;
