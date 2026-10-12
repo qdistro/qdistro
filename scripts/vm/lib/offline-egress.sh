@@ -6,10 +6,11 @@
 # that bypasses the cache would still succeed and the run would look
 # offline-clean. With no root on the host there is no per-process host
 # firewall, so the block lives in the guest: a qci-owned nftables table
-# that accepts loopback, private, shared (100.64/10), link-local and
-# multicast destinations (the host proxy is reached at the host's private
-# IPv4 or slirp's 10.0.2.2; passt hands the guest the host's own nameserver,
-# which may be a 100.64/10 resolver) and REJECTS everything else, on the output hook and on the
+# that accepts loopback, private, link-local and multicast destinations
+# (the host proxy is reached at the host's private IPv4 or slirp's
+# 10.0.2.2), plus DNS (port 53) to the host's own nameservers — passt hands
+# the guest those, e.g. a tailnet 100.100.100.100 — and REJECTS everything
+# else, on the output hook and on the
 # forward hook (rootful containers, silo netns). Rejects are fast (tcp
 # reset / icmp), so a blocked fetch fails at once instead of timing out.
 # An accept in another table cannot bypass it: every base chain on a hook
@@ -89,10 +90,29 @@ qd_offline_egress_arm_requested() {
     [ "${QD_OFFLINE_EGRESS_ARM:-0}" = 1 ] && qd_offline_egress_enabled
 }
 
+# qd_offline_egress_dns_rules — accept rules for DNS (udp/tcp 53) to the
+# host's nameservers that the allow sets do not already cover (passt gives
+# the guest the host's resolv.conf servers). Only port 53, only those
+# addresses: the rest of e.g. a tailnet range stays blocked and recorded.
+qd_offline_egress_dns_rules() {
+    local f=${QD_OFFLINE_EGRESS_RESOLV_CONF:-/etc/resolv.conf} a v4="" v6=""
+    for a in $(awk '$1 == "nameserver" { print $2 }' "$f" 2>/dev/null); do
+        case "$a" in
+            10.*|127.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|169.254.*) ;;
+            *:*) case "$a" in ::1|fe80:*|f[cd]*) ;; *) v6+="${v6:+, }$a" ;; esac ;;
+            *.*.*.*) v4+="${v4:+, }$a" ;;
+        esac
+    done
+    [ -n "$v4" ] && printf '        ip daddr { %s } meta l4proto { udp, tcp } th dport 53 accept\n' "$v4"
+    [ -n "$v6" ] && printf '        ip6 daddr { %s } meta l4proto { udp, tcp } th dport 53 accept\n' "$v6"
+    return 0
+}
+
 # qd_offline_egress_ruleset — the guest nft ruleset (idempotent to re-apply:
 # the add/delete pair drops any earlier copy of the table first).
 qd_offline_egress_ruleset() {
-    local n=$QD_OFFLINE_EGRESS_SET_SIZE
+    local n=$QD_OFFLINE_EGRESS_SET_SIZE dns
+    dns="$(qd_offline_egress_dns_rules)"
     cat <<EOF
 table inet $QD_OFFLINE_EGRESS_TABLE
 delete table inet $QD_OFFLINE_EGRESS_TABLE
@@ -102,9 +122,9 @@ table inet $QD_OFFLINE_EGRESS_TABLE {
     set allow4 {
         type ipv4_addr
         flags interval
-        elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8,
-                     169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16,
-                     224.0.0.0/4, 255.255.255.255 }
+        elements = { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16,
+                     172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4,
+                     255.255.255.255 }
     }
     set allow6 {
         type ipv6_addr
@@ -128,7 +148,8 @@ table inet $QD_OFFLINE_EGRESS_TABLE {
         oifname "lo" accept
         ip daddr @allow4 accept
         ip6 daddr @allow6 accept
-        update @any4 { ip daddr }
+${dns:+$dns
+}        update @any4 { ip daddr }
         update @any6 { ip6 daddr }
         update @out4 { ip daddr . meta l4proto . th dport . meta skuid }
         update @out6 { ip6 daddr . meta l4proto . th dport . meta skuid }

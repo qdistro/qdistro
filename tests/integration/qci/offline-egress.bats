@@ -84,7 +84,8 @@ PYX
 
 @test "ruleset: public traffic is refused at once and recorded with proto, port and uid; private passes" {
     userns_net_ok || skip "needs unprivileged user+net namespaces and /usr/sbin/nft"
-    qd_offline_egress_ruleset > "$BATS_TEST_TMPDIR/r.nft"
+    printf 'nameserver 100.100.100.100\nnameserver 10.0.2.3\nnameserver fd7a::53\n' > "$BATS_TEST_TMPDIR/resolv.conf"
+    QD_OFFLINE_EGRESS_RESOLV_CONF="$BATS_TEST_TMPDIR/resolv.conf" qd_offline_egress_ruleset > "$BATS_TEST_TMPDIR/r.nft"
     run unshare -rn bash -c "
         PATH=/usr/sbin:\$PATH
         ip link set lo up; ip link add d0 type dummy; ip link set d0 up
@@ -93,7 +94,9 @@ PYX
         nft -f '$BATS_TEST_TMPDIR/r.nft' || exit 8   # idempotent re-apply
         timeout 3 bash -c 'exec 3<>/dev/tcp/192.0.2.1/443' 2>/dev/null; echo pub=\$?
         timeout 1 bash -c 'exec 3<>/dev/tcp/10.9.9.7/80' 2>/dev/null; echo priv=\$?
-        timeout 1 bash -c 'exec 3<>/dev/tcp/100.100.100.100/53' 2>/dev/null; echo cgnat=\$?
+        timeout 1 bash -c 'exec 3<>/dev/tcp/100.100.100.100/53' 2>/dev/null; echo dns=\$?
+        timeout 3 bash -c 'exec 3<>/dev/tcp/100.100.100.100/443' 2>/dev/null; echo dnshost443=\$?
+        timeout 3 bash -c 'exec 3<>/dev/tcp/100.64.0.5/53' 2>/dev/null; echo tailnetpeer=\$?
         nft list counter inet qci_offline_egress blocked | sed -n 's/.*packets \([0-9]*\).*/blocked=\1/p'
         nft -j list set inet qci_offline_egress out4
         nft -j list set inet qci_offline_egress any4
@@ -104,12 +107,28 @@ PYX
     # The private address has no host behind it: it times out (124), i.e. the
     # table let it through to the (absent) peer instead of rejecting it.
     grep -qx 'priv=124' <<<"$output"
-    grep -qx 'cgnat=124' <<<"$output"    # 100.64/10: passt's host resolver
-    grep -qx 'blocked=1' <<<"$output"
+    # DNS to the host's own (tailnet) nameserver passes; any other port to it,
+    # and any other 100.64/10 address, is refused and recorded.
+    grep -qx 'dns=124' <<<"$output"
+    grep -qx 'dnshost443=1' <<<"$output"
+    grep -qx 'tailnetpeer=1' <<<"$output"
+    grep -qx 'blocked=3' <<<"$output"
     grep -q '"val": {"concat": \["192.0.2.1", "tcp", 443, 0\]}, "counter": {"packets": 1' <<<"$output"
     grep -q '"val": "192.0.2.1", "counter": {"packets": 1' <<<"$output"
     ! grep -q '10.9.9.7' <<<"$output"
     [ "$(tail -1 <<<"$output")" = 1 ]
+}
+
+@test "DNS allowance: only the host's non-private nameservers, only port 53" {
+    printf 'nameserver 100.100.100.100\nnameserver 192.168.1.1\nnameserver 2001:db8::53\nnameserver fd7a::53\nnameserver 127.0.0.53\n' > "$BATS_TEST_TMPDIR/resolv.conf"
+    run env QD_OFFLINE_EGRESS_RESOLV_CONF="$BATS_TEST_TMPDIR/resolv.conf" bash -c '. "$1"; qd_offline_egress_dns_rules' _ "$LIB"
+    [ "$output" = "        ip daddr { 100.100.100.100 } meta l4proto { udp, tcp } th dport 53 accept
+        ip6 daddr { 2001:db8::53 } meta l4proto { udp, tcp } th dport 53 accept" ]
+    printf 'nameserver 10.0.2.3\n' > "$BATS_TEST_TMPDIR/resolv.conf"
+    run env QD_OFFLINE_EGRESS_RESOLV_CONF="$BATS_TEST_TMPDIR/resolv.conf" bash -c '. "$1"; qd_offline_egress_dns_rules' _ "$LIB"
+    [ -z "$output" ]
+    # No blanket shared-range (100.64/10) allowance.
+    ! qd_offline_egress_ruleset | grep -q '100.64.0.0/10'
 }
 
 @test "classify on a real table: recorded attempts classified; NTP expected (IPv6 forms: synthetic test below)" {
