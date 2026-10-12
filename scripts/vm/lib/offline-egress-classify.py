@@ -67,10 +67,13 @@ def comparable(objs):
 
 
 def elem_values(elems):
+    """(value, packets) per element; packets is None without a counter."""
     for e in elems or []:
+        packets = None
         if isinstance(e, dict) and "elem" in e:
+            packets = (e["elem"].get("counter") or {}).get("packets")
             e = e["elem"].get("val", e["elem"])
-        yield e
+        yield e, packets
 
 
 def proto_name(p):
@@ -80,11 +83,14 @@ def proto_name(p):
 
 def main():
     live_raw = ref_raw = None
+    hist_raw = []
     addrs = {}
     for line in sys.stdin:
         line = line.rstrip("\n")
         if line.startswith("QCI-EGRESS-LIVE "):
             live_raw = line[len("QCI-EGRESS-LIVE "):]
+        elif line.startswith("QCI-EGRESS-HIST "):
+            hist_raw.append(line[len("QCI-EGRESS-HIST "):])
         elif line.startswith("QCI-EGRESS-REF "):
             ref_raw = line[len("QCI-EGRESS-REF "):]
         elif line.startswith("QCI-OFFLINE-EGRESS-RESOLVED "):
@@ -114,28 +120,49 @@ def main():
               "(rules, chains or allow sets changed)")
         return
 
-    size = int(os.environ.get("QD_OFFLINE_EGRESS_SET_SIZE", "65535"))
-    sets = {o["set"]["name"]: list(elem_values(o["set"].get("elem")))
-            for o in live if "set" in o}
-    for name in RECORD_SETS:
-        if len(sets.get(name, [])) >= size:
-            print(f"broken set {name} is full ({size}); attempts may be unrecorded")
+    # What was recorded: the live table plus every dump the guest saved
+    # before a reload or reboot (a dump that does not parse is an error, not
+    # an empty history).
+    snapshots = [live]
+    for raw in hist_raw:
+        try:
+            snapshots.append(table_objects(raw))
+        except ValueError as e:
+            print(f"broken a saved history dump is not JSON ({e})")
             return
 
+    size = int(os.environ.get("QD_OFFLINE_EGRESS_SET_SIZE", "65535"))
     dests = set()          # every blocked destination
     attempts = {}          # dst -> set of (proto, port, uid or "")
-    for name in ("any4", "any6"):
-        for v in sets.get(name, []):
-            dests.add(canon(v))
-    for name in ("out4", "out6", "fwd4", "fwd6"):
-        for v in sets.get(name, []):
-            c = v.get("concat") if isinstance(v, dict) else None
-            if not c or len(c) < 3:
-                continue
-            uid = str(c[3]) if len(c) > 3 else ""
-            dst = canon(c[0])
-            dests.add(dst)
-            attempts.setdefault(dst, set()).add((proto_name(c[1]), str(c[2]), uid))
+    undetailed = set()     # dsts blocked more often than detailed
+    for snap in snapshots:
+        sets = {o["set"]["name"]: list(elem_values(o["set"].get("elem")))
+                for o in snap if "set" in o}
+        for name in RECORD_SETS:
+            if len(sets.get(name, [])) >= size:
+                print(f"broken set {name} is full ({size}); attempts may be unrecorded")
+                return
+        blocked = {}       # dst -> packets, from the any sets
+        detailed = {}      # dst -> packets, from the detail sets
+        for name in ("any4", "any6"):
+            for v, n in sets.get(name, []):
+                dst = canon(v)
+                dests.add(dst)
+                blocked[dst] = blocked.get(dst, 0) + (n or 0)
+        for name in ("out4", "out6", "fwd4", "fwd6"):
+            for v, n in sets.get(name, []):
+                c = v.get("concat") if isinstance(v, dict) else None
+                if not c or len(c) < 3:
+                    continue
+                uid = str(c[3]) if len(c) > 3 else ""
+                dst = canon(c[0])
+                dests.add(dst)
+                attempts.setdefault(dst, set()).add((proto_name(c[1]), str(c[2]), uid))
+                detailed[dst] = detailed.get(dst, 0) + (n or 0)
+        # A packet whose port or uid could not be read is in the any set only.
+        for dst, n in blocked.items():
+            if n > detailed.get(dst, 0):
+                undetailed.add(dst)
 
     rules = []
     for tok in os.environ.get("QCI_OFFLINE_EGRESS_EXPECTED", "").split():
@@ -181,8 +208,10 @@ def main():
 
     for dst in sorted(dests):
         tries = sorted(attempts.get(dst, ()))
-        ok = bool(tries) and all(expected(dst, *a) for a in tries)
-        detail = ",".join(f"{p}/{port}" + (f"@{u}" if u else "@fwd") for p, port, u in tries) or "no-detail"
+        ok = bool(tries) and dst not in undetailed and all(expected(dst, *a) for a in tries)
+        detail = ",".join(f"{p}/{port}" + (f"@{u}" if u else "@fwd") for p, port, u in tries)
+        if dst in undetailed or not tries:
+            detail = ",".join(filter(None, [detail, "no-detail"]))
         print(f"{'expected' if ok else 'unexpected'} {dst} [{detail}]")
 
 

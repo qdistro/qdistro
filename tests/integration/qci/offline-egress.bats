@@ -36,10 +36,16 @@ userns_net_ok() {
 real_scan() {
     local tamper="$1"; shift
     qd_offline_egress_ruleset > "$BATS_TEST_TMPDIR/r.nft"
-    local tries="" a
+    local tries="$BATS_TEST_TMPDIR/tries.sh" a
+    : > "$tries"
     for a in "$@"; do
         set -- $a
-        tries+="timeout 2 bash -c 'echo x > /dev/$1/$2/$3' 2>/dev/null;"
+        case "$1" in
+            # An IP packet with no transport header (protocol 253).
+            raw) printf 'import socket, sys\nsocket.socket(socket.AF_INET, socket.SOCK_RAW, 253).sendto(b"", (sys.argv[1], 0))\n' > "$BATS_TEST_TMPDIR/raw.py"
+                 printf 'python3 %q %q 2>/dev/null\n' "$BATS_TEST_TMPDIR/raw.py" "$2" >> "$tries" ;;
+            *) printf "timeout 2 bash -c 'echo x > /dev/%s/%s/%s' 2>/dev/null\n" "$1" "$2" "$3" >> "$tries" ;;
+        esac
     done
     unshare -rn bash -c "
         PATH=/usr/sbin:\$PATH
@@ -47,7 +53,7 @@ real_scan() {
         ip addr add 10.9.9.2/24 dev d0; ip route add default via 10.9.9.1
         nft -f '$BATS_TEST_TMPDIR/r.nft' || exit 9
         nft -f '$BATS_TEST_TMPDIR/r.nft' || exit 8
-        $tries
+        bash '$BATS_TEST_TMPDIR/tries.sh'
         $tamper
         echo \"QCI-EGRESS-LIVE \$(nft -j list table inet qci_offline_egress)\""
     unshare -rn bash -c "PATH=/usr/sbin:\$PATH; nft -f '$BATS_TEST_TMPDIR/r.nft' && echo \"QCI-EGRESS-REF \$(nft -j list table inet qci_offline_egress)\""
@@ -98,8 +104,8 @@ PYX
     # table let it through to the (absent) peer instead of rejecting it.
     grep -qx 'priv=124' <<<"$output"
     grep -qx 'blocked=1' <<<"$output"
-    grep -q '"concat": \["192.0.2.1", "tcp", 443, 0\]' <<<"$output"
-    grep -q '"elem": \["192.0.2.1"\]' <<<"$output"
+    grep -q '"val": {"concat": \["192.0.2.1", "tcp", 443, 0\]}, "counter": {"packets": 1' <<<"$output"
+    grep -q '"val": "192.0.2.1", "counter": {"packets": 1' <<<"$output"
     ! grep -q '10.9.9.7' <<<"$output"
     [ "$(tail -1 <<<"$output")" = 1 ]
 }
@@ -112,6 +118,14 @@ PYX
     grep -qx 'unexpected 192.0.2.1 \[tcp/443@0\]' <<<"$output"
     grep -qx 'expected 198.51.100.4 \[udp/123@0\]' <<<"$output"
     [ "$(grep -c . <<<"$output")" -eq 2 ]
+}
+
+@test "classify on a real table: a packet with no port is counted, so its destination is never expected" {
+    userns_net_ok || skip "needs unprivileged user+net namespaces and /usr/sbin/nft"
+    real_scan "" "udp 198.51.100.4 123" "raw 198.51.100.4" > "$BATS_TEST_TMPDIR/scan"
+    QCI_OFFLINE_EGRESS_EXPECTED="udp/123" run qd_offline_egress_classify < "$BATS_TEST_TMPDIR/scan"
+    [ "$status" -eq 0 ]
+    grep -qx 'unexpected 198.51.100.4 \[udp/123@0,no-detail\]' <<<"$output"
 }
 
 @test "classify on a real table: a tampered live table is broken, never clean" {
@@ -144,14 +158,16 @@ EOF
     grep -q 'nft not installed' <<<"$output"
 }
 
-@test "boot guard: start paused, links down and verified, then resume; refuses when a link stays up" {
+@test "boot guard: start paused, links down and verified, then resume; refuses when a link stays up or NICs cannot be listed" {
     mkdir -p "$BATS_TEST_TMPDIR/bin"
     cat > "$BATS_TEST_TMPDIR/bin/virsh" <<'EOF'
 #!/bin/bash
 shift 2   # -c qemu:///session
 echo "$*" >> "$VIRSH_LOG"
 case "$1" in
-    domiflist) printf ' Interface   Type   Source   Model    MAC\n------\n -   user   -   virtio   52:54:00:aa:bb:01\n -   udp   -   virtio   52:54:00:aa:bb:02\n' ;;
+    domiflist) [ -n "${LIST_FAILS:-}" ] && exit 1
+               [ -n "${NO_NICS:-}" ] && { printf ' Interface   Type   Source   Model    MAC\n------\n'; exit 0; }
+               printf ' Interface   Type   Source   Model    MAC\n------\n -   user   -   virtio   52:54:00:aa:bb:01\n -   udp   -   virtio   52:54:00:aa:bb:02\n' ;;
     domif-getlink) [ -n "${STUCK_UP:-}" ] && echo "$3 up" || echo "$3 ${LINK:-down}" ;;
 esac
 EOF
@@ -166,11 +182,12 @@ domif-getlink vm1 52:54:00:aa:bb:01
 domif-setlink vm1 52:54:00:aa:bb:02 down
 domif-getlink vm1 52:54:00:aa:bb:02
 resume vm1" ]
-    : > "$VIRSH_LOG"
-    STUCK_UP=1 run qd_offline_egress_start_dark vm1
-    [ "$status" -ne 0 ]
-    grep -qx 'destroy vm1' "$VIRSH_LOG"
-    ! grep -q '^resume' "$VIRSH_LOG"
+    for fault in STUCK_UP NO_NICS LIST_FAILS; do
+        : > "$VIRSH_LOG"
+        env "$fault=1" bash -c '. "$1"; qd_offline_egress_start_dark vm1' _ "$LIB" && { echo "$fault: started" >&2; false; }
+        grep -qx 'destroy vm1' "$VIRSH_LOG" || { echo "$fault: not destroyed" >&2; false; }
+        ! grep -q '^resume' "$VIRSH_LOG"
+    done
 }
 
 @test "scan: unarmed guest and unreachable guest are errors, not clean" {
@@ -240,6 +257,33 @@ EOF
     sed -i 's/140.82.121.3 STREAM/192.0.2.55 STREAM/' "$BATS_TEST_TMPDIR/bin/getent"
     PATH="$BATS_TEST_TMPDIR/bin:$PATH" QCI_OFFLINE_EGRESS_EXPECTED="github.com@1000" run qd_offline_egress_classify < "$BATS_TEST_TMPDIR/scan"
     grep -qx 'expected 192.0.2.55 \[tcp/443@1000\]' <<<"$output"
+}
+
+@test "classify: attempts saved in the history before a reload or reboot still count" {
+    synth_scan > "$BATS_TEST_TMPDIR/scan"
+    synth_scan 'any4=["192.0.2.77"]' 'out4=[{"concat": ["192.0.2.77", "tcp", 443, 0]}]' \
+        | sed -n 's/^QCI-EGRESS-LIVE /QCI-EGRESS-HIST /p' >> "$BATS_TEST_TMPDIR/scan"
+    run qd_offline_egress_classify < "$BATS_TEST_TMPDIR/scan"
+    [ "$status" -eq 0 ]
+    [ "$output" = 'unexpected 192.0.2.77 [tcp/443@0]' ]
+    echo 'QCI-EGRESS-HIST {torn' >> "$BATS_TEST_TMPDIR/scan"
+    run qd_offline_egress_classify < "$BATS_TEST_TMPDIR/scan"
+    grep -q '^broken a saved history dump is not JSON' <<<"$output"
+}
+
+@test "every reload path saves the live table first; a golden is sealed after its scan" {
+    unit="$(qd_offline_egress_unit)"
+    grep -qx 'Conflicts=shutdown.target' <<<"$unit"
+    grep -q '^Before=.*shutdown.target' <<<"$unit"
+    grep -q '^ExecStop=.*sealed ] || {.*nft -j list table inet qci_offline_egress > ' <<<"$unit"
+    grep -q 'date +%%s%%N' <<<"$unit"                     # % escaped for systemd
+    grep -qx 'ExecStartPre=-/bin/rm -f /var/lib/qci-offline-egress/sealed' <<<"$unit"
+    script="$(qd_offline_egress_guest_script)"
+    # The installer dumps, then always loads (whatever the live table was).
+    [ "$(grep -n 'nft -j list table' <<<"$script" | cut -d: -f1)" -lt "$(grep -n '^nft -f' <<<"$script" | cut -d: -f1)" ]
+    ! grep -q 'cmp -s' <<<"$script"
+    n=$(grep -n 'qci_offline_egress_check "\$gvm"' "$REPO_ROOT/ci/lib/vm.sh" | cut -d: -f1)
+    sed -n "$n,$((n + 4))p" "$REPO_ROOT/ci/lib/vm.sh" | grep -q 'qd_offline_egress_seal "\$gvm"'
 }
 
 @test "classify: missing, unparsable or overflowing tables are broken" {

@@ -15,12 +15,20 @@
 # sees the packet.
 #
 # Every blocked attempt is RECORDED in dynamic sets inside the table
-# (destination, protocol, port and, for local sockets, the sending uid):
-# lossless, unlike a rate-limited log, and independent of the journal. The
-# log line stays for humans and is rate-limited. The table is reloaded at
-# every boot by a sysinit unit, so a VM cloned from an armed golden records
-# from its own boot; installing again with an unchanged ruleset keeps the
-# live table (and what it recorded).
+# (destination, protocol, port and, for local sockets, the sending uid),
+# each element with a packet counter: lossless, unlike a rate-limited log,
+# and independent of the journal. A packet whose port or uid cannot be read
+# still counts against its destination, so "blocked more often than
+# detailed" is visible. The log line stays for humans and is rate-limited.
+#
+# The table is reloaded at every boot by a sysinit unit, so a VM cloned
+# from an armed golden records from its own boot. Every reload path first
+# dumps the live table into $QD_OFFLINE_EGRESS_STATE/history (the unit's
+# ExecStop, which also runs on restart and before a reboot, and the
+# installer), and the scan merges that history: a reload or reboot never
+# erases what was recorded. A golden is SEALED after its own scan (history
+# cleared, ExecStop dumps suppressed until the next boot), so its clones
+# start with no history of the golden's.
 #
 # Boot window: a VM first armed after boot could reach the internet before
 # the table exists. qd_offline_egress_start_dark starts it with every NIC
@@ -44,6 +52,7 @@ QD_OFFLINE_EGRESS_PREFIX='QCI-OFFLINE-EGRESS: '
 QD_OFFLINE_EGRESS_NFT=/etc/qdistro/qci-offline-egress.nft
 QD_OFFLINE_EGRESS_UNIT=qci-offline-egress.service
 QD_OFFLINE_EGRESS_SET_SIZE=65535
+QD_OFFLINE_EGRESS_STATE=/var/lib/qci-offline-egress
 QD_OFFLINE_EGRESS_LIBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Product runtime chatter that is EXPECTED to be blocked offline and is not a
@@ -101,12 +110,12 @@ table inet $QD_OFFLINE_EGRESS_TABLE {
         flags interval
         elements = { ::1, fc00::/7, fe80::/10, fec0::/10, ff00::/8 }
     }
-    set any4 { typeof ip daddr; size $n; flags dynamic; }
-    set any6 { typeof ip6 daddr; size $n; flags dynamic; }
-    set out4 { typeof ip daddr . meta l4proto . th dport . meta skuid; size $n; flags dynamic; }
-    set out6 { typeof ip6 daddr . meta l4proto . th dport . meta skuid; size $n; flags dynamic; }
-    set fwd4 { typeof ip daddr . meta l4proto . th dport; size $n; flags dynamic; }
-    set fwd6 { typeof ip6 daddr . meta l4proto . th dport; size $n; flags dynamic; }
+    set any4 { typeof ip daddr; size $n; flags dynamic; counter; }
+    set any6 { typeof ip6 daddr; size $n; flags dynamic; counter; }
+    set out4 { typeof ip daddr . meta l4proto . th dport . meta skuid; size $n; flags dynamic; counter; }
+    set out6 { typeof ip6 daddr . meta l4proto . th dport . meta skuid; size $n; flags dynamic; counter; }
+    set fwd4 { typeof ip daddr . meta l4proto . th dport; size $n; flags dynamic; counter; }
+    set fwd6 { typeof ip6 daddr . meta l4proto . th dport; size $n; flags dynamic; counter; }
     chain block {
         limit rate 10/second burst 20 packets log prefix "$QD_OFFLINE_EGRESS_PREFIX" level warn flags skuid
         counter name "blocked"
@@ -138,21 +147,33 @@ table inet $QD_OFFLINE_EGRESS_TABLE {
 EOF
 }
 
-# qd_offline_egress_unit — the oneshot that re-applies the table on every
-# boot, before any network comes up.
+# qd_offline_egress_dump_cmd — sh that saves the live table (if any) into
+# the history, named <boot_id>-<ns>.json. In a unit file, % is doubled.
+qd_offline_egress_dump_cmd() {
+    printf '%s' "mkdir -p $QD_OFFLINE_EGRESS_STATE/history && f=$QD_OFFLINE_EGRESS_STATE/history/\$(cat /proc/sys/kernel/random/boot_id)-\$(date +%s%N).json && { nft -j list table inet $QD_OFFLINE_EGRESS_TABLE > \$f 2>/dev/null || rm -f \$f; }"
+}
+
+# qd_offline_egress_unit — the oneshot that loads the table on every boot,
+# before any network comes up, and dumps it to the history when stopped
+# (restart, reboot, shutdown) unless the guest is a sealed golden.
 qd_offline_egress_unit() {
+    local dump
+    dump="$(qd_offline_egress_dump_cmd | sed 's/%/%%/g')"
     cat <<EOF
 [Unit]
 Description=qci offline mode: block guest egress outside the host cache
 DefaultDependencies=no
-Before=network-pre.target
+Before=network-pre.target shutdown.target
 Wants=network-pre.target
+Conflicts=shutdown.target
 After=local-fs.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+ExecStartPre=-/bin/rm -f $QD_OFFLINE_EGRESS_STATE/sealed
 ExecStart=/usr/sbin/nft -f $QD_OFFLINE_EGRESS_NFT
+ExecStop=/bin/sh -c '[ -e $QD_OFFLINE_EGRESS_STATE/sealed ] || { $dump; }'
 
 [Install]
 WantedBy=sysinit.target
@@ -160,8 +181,9 @@ EOF
 }
 
 # qd_offline_egress_guest_script — the root shell script that installs the
-# table, its unit and the NetworkManager conncheck drop-in. An unchanged
-# ruleset over a live table is left loaded (its recorded attempts are kept).
+# table, its unit and the NetworkManager conncheck drop-in, and (re)loads the
+# table — after dumping a live one into the history, so its recorded attempts
+# are kept and whatever the live table was, the loaded one is the ruleset.
 # Fails (nonzero) when nft is missing or the table is not live afterwards:
 # offline enforcement fails closed.
 qd_offline_egress_guest_script() {
@@ -171,22 +193,17 @@ qd_offline_egress_guest_script() {
     cat <<EOF
 set -eu
 command -v nft >/dev/null 2>&1 || { echo "offline-egress: nft not installed in the guest" >&2; exit 3; }
-mkdir -p "$(dirname "$QD_OFFLINE_EGRESS_NFT")" /etc/NetworkManager/conf.d
-new="\$(mktemp)"
-printf '%s' '$rules' | base64 -d > "\$new"
+mkdir -p "$(dirname "$QD_OFFLINE_EGRESS_NFT")" "$QD_OFFLINE_EGRESS_STATE" /etc/NetworkManager/conf.d
+printf '%s' '$rules' | base64 -d > "$QD_OFFLINE_EGRESS_NFT"
 printf '%s' '$unit' | base64 -d > /etc/systemd/system/$QD_OFFLINE_EGRESS_UNIT
 printf '[connectivity]\nenabled=false\n' > /etc/NetworkManager/conf.d/90-qci-offline-no-conncheck.conf
 systemctl daemon-reload
 systemctl enable $QD_OFFLINE_EGRESS_UNIT >/dev/null 2>&1
-if nft list table inet $QD_OFFLINE_EGRESS_TABLE >/dev/null 2>&1 && cmp -s "\$new" "$QD_OFFLINE_EGRESS_NFT"; then
-    rm -f "\$new"
-    echo "offline-egress: table $QD_OFFLINE_EGRESS_TABLE already live"
-else
-    mv "\$new" "$QD_OFFLINE_EGRESS_NFT"
-    nft -f "$QD_OFFLINE_EGRESS_NFT"
-    nft list table inet $QD_OFFLINE_EGRESS_TABLE >/dev/null
-    echo "offline-egress: table $QD_OFFLINE_EGRESS_TABLE live"
-fi
+rm -f "$QD_OFFLINE_EGRESS_STATE/sealed"
+$(qd_offline_egress_dump_cmd)
+nft -f "$QD_OFFLINE_EGRESS_NFT"
+nft list table inet $QD_OFFLINE_EGRESS_TABLE >/dev/null
+echo "offline-egress: table $QD_OFFLINE_EGRESS_TABLE live"
 nmcli general reload conf >/dev/null 2>&1 || true
 EOF
 }
@@ -198,17 +215,22 @@ qd_offline_egress_install() {
     "$vmx" "$vm" "printf '%s' '$b64' | base64 -d | bash"
 }
 
-# qd_offline_egress_macs <vm> — the MACs of the domain's interfaces.
+# qd_offline_egress_macs <vm> — the MACs of the domain's interfaces. Fails
+# when the listing fails or finds none: no NIC verified down is not "dark".
 qd_offline_egress_macs() {
-    virsh -c qemu:///session domiflist "$1" 2>/dev/null \
-        | awk 'NR > 2 && $NF ~ /^([0-9a-f][0-9a-f]:){5}[0-9a-f][0-9a-f]$/ { print $NF }'
+    local list macs
+    list="$(virsh -c qemu:///session domiflist "$1")" || return 1
+    macs="$(printf '%s\n' "$list" | awk 'NR > 2 && $NF ~ /^([0-9a-f][0-9a-f]:){5}[0-9a-f][0-9a-f]$/ { print $NF }')"
+    [ -n "$macs" ] || return 1
+    printf '%s\n' "$macs"
 }
 
 # qd_offline_egress_set_links <vm> up|down — set every NIC's link state and
 # verify it took.
 qd_offline_egress_set_links() {
-    local vm="$1" state="$2" mac
-    for mac in $(qd_offline_egress_macs "$vm"); do
+    local vm="$1" state="$2" mac macs
+    macs="$(qd_offline_egress_macs "$vm")" || return 1
+    for mac in $macs; do
         virsh -c qemu:///session domif-setlink "$vm" "$mac" "$state" >/dev/null || return 1
         virsh -c qemu:///session domif-getlink "$vm" "$mac" 2>/dev/null | grep -qw "$state" || return 1
     done
@@ -236,6 +258,14 @@ qd_offline_egress_links_up() {
     "$vmx" "$vm" 'for i in $(seq 90); do ip route show default | grep -q . && exit 0; sleep 1; done; exit 1' >/dev/null
 }
 
+# qd_offline_egress_seal <vm> [vm-exec] — after a golden's scan: clear its
+# history and suppress the shutdown dump, so clones start without the
+# golden's history. The next boot (a clone's) unseals.
+qd_offline_egress_seal() {
+    local vm="$1" vmx="${2:-${VM_TOOLS:-$QD_OFFLINE_EGRESS_LIBDIR/..}/vm-exec}"
+    "$vmx" "$vm" "mkdir -p $QD_OFFLINE_EGRESS_STATE && touch $QD_OFFLINE_EGRESS_STATE/sealed && rm -rf $QD_OFFLINE_EGRESS_STATE/history" >/dev/null
+}
+
 # qd_offline_egress_expected_hosts — the host names in QCI_OFFLINE_EGRESS_EXPECTED.
 qd_offline_egress_expected_hosts() {
     local t
@@ -246,7 +276,8 @@ qd_offline_egress_expected_hosts() {
 }
 
 # qd_offline_egress_scan <vm> [vm-exec] — print the live table as JSON
-# ("QCI-EGRESS-LIVE <json>"), the reference ruleset loaded into a throwaway
+# ("QCI-EGRESS-LIVE <json>"), each history dump ("QCI-EGRESS-HIST <json>"),
+# the reference ruleset loaded into a throwaway
 # netns in the guest ("QCI-EGRESS-REF <json>") and one
 # "QCI-OFFLINE-EGRESS-RESOLVED <host> <addr>" line per address the guest
 # resolves an expected host to. rc 2 when the guest cannot be asked or the
@@ -255,13 +286,13 @@ qd_offline_egress_scan() {
     local vm="$1" vmx="${2:-${VM_TOOLS:-$QD_OFFLINE_EGRESS_LIBDIR/..}/vm-exec}" out hosts rules rc t=$QD_OFFLINE_EGRESS_TABLE
     hosts="$(qd_offline_egress_expected_hosts | tr '\n' ' ')"
     rules="$(qd_offline_egress_ruleset | base64 -w0)"
-    out="$("$vmx" "$vm" "live=\$(nft -j list table inet $t 2>/dev/null) || { echo QCI_EGRESS_UNARMED; exit 0; }; echo QCI_EGRESS_ARMED; echo \"QCI-EGRESS-LIVE \$live\"; echo \"QCI-EGRESS-REF \$(printf '%s' '$rules' | base64 -d | unshare -n sh -c 'nft -f - && nft -j list table inet $t' 2>&1 | tr '\n' ' ')\"; for h in $hosts; do getent ahosts \$h 2>/dev/null | awk -v h=\$h '{print \"QCI-OFFLINE-EGRESS-RESOLVED \" h \" \" \$1}' | sort -u; done")" || {
+    out="$("$vmx" "$vm" "live=\$(nft -j list table inet $t 2>&1) || { echo \"QCI_EGRESS_UNARMED nft: \$live; tables: \$(nft list tables 2>&1 | tr '\n' ' '); unit: \$(systemctl is-active $QD_OFFLINE_EGRESS_UNIT 2>&1); context: \$(id -Z 2>&1)\"; exit 0; }; echo QCI_EGRESS_ARMED; echo \"QCI-EGRESS-LIVE \$live\"; for f in $QD_OFFLINE_EGRESS_STATE/history/*.json; do [ -s \"\$f\" ] && echo \"QCI-EGRESS-HIST \$(tr -d '\n' < \"\$f\")\"; done; echo \"QCI-EGRESS-REF \$(printf '%s' '$rules' | base64 -d | unshare -n sh -c 'nft -f - && nft -j list table inet $t' 2>&1 | tr '\n' ' ')\"; for h in $hosts; do getent ahosts \$h 2>/dev/null | awk -v h=\$h '{print \"QCI-OFFLINE-EGRESS-RESOLVED \" h \" \" \$1}' | sort -u; done")" || {
         rc=$?
         printf 'offline-egress: asking %s failed (rc %s): %s\n' "$vm" "$rc" "$(printf '%s' "$out" | head -c 2000)" >&2
         return 2
     }
     case "$out" in
-        QCI_EGRESS_ARMED*) printf '%s\n' "$out" | sed '1d' | grep -E '^(QCI-EGRESS-LIVE|QCI-EGRESS-REF|QCI-OFFLINE-EGRESS-RESOLVED) ' || true ;;
+        QCI_EGRESS_ARMED*) printf '%s\n' "$out" | sed '1d' | grep -E '^(QCI-EGRESS-LIVE|QCI-EGRESS-HIST|QCI-EGRESS-REF|QCI-OFFLINE-EGRESS-RESOLVED) ' || true ;;
         *) printf 'offline-egress: %s is not armed: %s\n' "$vm" "$(printf '%s' "$out" | head -c 2000)" >&2
            return 2 ;;
     esac

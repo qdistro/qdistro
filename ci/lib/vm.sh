@@ -697,8 +697,13 @@ ensure_run_golden() {
         record_result "$profile" "golden-build" fail "$EXIT_VM_PROVISION" vm_provision vm "$log" "could not resolve golden disk path"
         return "$EXIT_VM_PROVISION"
     fi
-    # Offline: the golden build is where most guest fetches happen.
+    # Offline: the golden build is where most guest fetches happen. Then seal
+    # it, so its clones do not inherit (and re-report) the golden's history.
     qci_offline_egress_check "$gvm"
+    if qd_offline_egress_enabled; then
+        qd_offline_egress_seal "$gvm" "$VM_TOOLS/vm-exec" \
+            || log "offline-egress: could not seal golden $gvm; its clones will re-report its history"
+    fi
     # Quiesce: sync in-guest, clean shutdown, wait for shut off.
     "$VM_TOOLS/vm-exec" "$gvm" "sync" >/dev/null 2>&1 || true
     "${VIRSH[@]}" shutdown "$gvm" >/dev/null 2>&1 || true
