@@ -440,12 +440,12 @@ run_logged() {
     (
         cd "$workdir" || exit 2
         # Run host steps headless: offscreen Qt platform (as before) so Qt
-        # widget/print tests need no real display. NOTE: host-printer coupling
-        # (a QPrinter(HighResolution) that probes the host's default printer and
-        # blocks — the qterminator test_print_terminal hang) is NOT solved here:
-        # Qt ignores CUPS_SERVER for that path. Those tests are excluded from the
-        # host gate and belong in a VM lane (no printer => no hang). The
-        # per-step timeout below is the universal backstop for any other wedge.
+        # widget/print tests need no real display. (The old qterminator
+        # test_print_terminal hang was mostly a modal QMessageBox from an
+        # incomplete test fake. QPrinter still probes the default printer, but
+        # host steps run in a container with no CUPS socket, so the probe
+        # returns at once; the suite runs in full.)
+        # The per-step timeout below is the universal backstop for any wedge.
         export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
         if [ "$step_to" -gt 0 ]; then
             timeout -k 15 "$step_to" bash -lc "$(qci_login_cmd "$cmd")"

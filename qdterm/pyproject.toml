@@ -11,7 +11,16 @@ requires-python = ">=3.10"
 dependencies = [
     "PyQt6>=6.5",
     "qdistro-presentation[qt]>=1,<2",
+    # plugins/tmux_web_share.py verifies Ed25519 client keys at import.
+    "cryptography",
 ]
+
+[project.optional-dependencies]
+# qterminator-mcp (mcp_server.py) imports mcp.server.fastmcp.
+mcp = ["mcp"]
+# Instant replay is disabled without pyte; the shadow screen (agent screen
+# reads) imports it on first use.
+replay = ["pyte"]
 
 [project.scripts]
 qterminator = "qterminator.__main__:main"

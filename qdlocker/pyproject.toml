@@ -20,6 +20,10 @@ dependencies = [
     # scanner output we ship under qdlocker/protocol/ targets the
     # 0.4.x API.
     "pywayland>=0.4.18,<0.5",
+    # presentation.py loads the managed theme snapshot through it; the
+    # import is guarded, so without it the locker silently keeps its
+    # built-in defaults.
+    "qdistro-presentation>=1,<2",
 ]
 
 [project.scripts]

@@ -145,8 +145,10 @@ def _apply_geometry(window, geometry):
                     x = int(m.group(1))
                     y = int(m.group(2))
                 break
-        w, h = size_part.split("x")
-        window.resize(int(w), int(h))
+        w, h = (int(v) for v in size_part.split("x"))
+        if w <= 0 or h <= 0:
+            return
+        window.resize(w, h)
         if x is not None and y is not None:
             window.move(x, y)
     except (ValueError, IndexError):

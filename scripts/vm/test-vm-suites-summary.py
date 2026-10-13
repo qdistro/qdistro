@@ -209,8 +209,7 @@ lines = [
     "guest agent. All bats files share one guest in order (qci gives each its",
     "own VM); restarts the harness made between files are listed below.", "",
     f"Phases: {phases or 'unknown'}." + (f" bats limited to: {bats_filter}." if bats_filter else ""),
-    "Not in this pytest selection: qdbrowser (QtWebEngine; no browser in the image)",
-    "and qdterm's `tests/test_print_terminal.py` (the host gate excludes it too).", "",
+    "Not in this pytest selection: qdbrowser (QtWebEngine; no browser in the image).", "",
 ]
 # The failure-triage headline is inserted here once the counts are known.
 triage_at = len(lines)
