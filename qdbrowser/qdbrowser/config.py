@@ -6,12 +6,7 @@ pattern (so tests can `Config._instance = None` to reset between cases).
 
 import copy
 import os
-
-try:
-    import tomllib
-except ImportError:  # Python <3.11
-    import tomli as tomllib
-
+import tomllib
 
 CONFIG_DIR = os.path.expanduser("~/.config/qdbrowser")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.toml")
