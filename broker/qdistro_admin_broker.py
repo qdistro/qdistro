@@ -1681,7 +1681,7 @@ class Broker(dbus.service.Object):
         if now is None:
             now = time.time()
         removed = 0
-        expired: list[tuple[int, list]] = []
+        expired: list[tuple[int, list, _Request]] = []
         with self._lock:
             for rid, req in list(self._pending.items()):
                 if req.decision is None:
