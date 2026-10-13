@@ -55,7 +55,7 @@ Singleton {
     const urgency = (typeof notification.urgency === "number") ? notification.urgency : 1;
 
     _auditProc.command = [
-      "busctl", "--system", "--no-pager", "call",
+      "busctl", "--system", "--no-pager", "--", "call",
       brokerBus, brokerPath, brokerIface,
       "RecordNotification", "sssi",
       app, summary, body, String(urgency),

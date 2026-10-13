@@ -205,7 +205,7 @@ Singleton {
         root._bindQueue = queue;
         const req = root._bindCurrent;
         _bindProc.command = [
-            "/usr/bin/busctl", "--user", "--no-pager", "--json=short", "call",
+            "/usr/bin/busctl", "--user", "--no-pager", "--json=short", "--", "call",
             root.brokerBus, root.brokerPath, root.brokerIface,
             "BindHandleIdentity", "sssst",
             req.origin, "", "", req.secctxAppId, String(req.handle)
@@ -278,7 +278,7 @@ Singleton {
         // Closed. Fire-and-forget — the user-visible teardown is driven by the
         // source Closed, not this call's reply (same shape as Tier4VM close).
         root._queueBrokerRequest([
-            "/usr/bin/busctl", "--user", "--no-pager", "call",
+            "/usr/bin/busctl", "--user", "--no-pager", "--", "call",
             root.brokerBus, root.brokerPath, root.brokerIface,
             "RequestClose", "t", String(handle)
         ]);
@@ -290,7 +290,7 @@ Singleton {
             "[mm] shell-requested handle=" + handle + " operation=" + operation
             + " x=" + x + " y=" + y + " -> broker");
         root._queueBrokerRequest([
-            "/usr/bin/busctl", "--user", "--no-pager", "call",
+            "/usr/bin/busctl", "--user", "--no-pager", "--", "call",
             root.brokerBus, root.brokerPath, root.brokerIface,
             "RequestShellOperation", "tsii", String(handle), operation,
             String(x), String(y)

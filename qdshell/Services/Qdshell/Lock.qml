@@ -119,7 +119,7 @@ Singleton {
       "callback": callback,
     };
 
-    let cmd = ["busctl", "--system", "--no-pager", "call",
+    let cmd = ["busctl", "--system", "--no-pager", "--", "call",
                root.pwdBus, root.pwdPath, root.pwdIface, method];
     if (sig && sig.length > 0) {
       cmd.push(sig);

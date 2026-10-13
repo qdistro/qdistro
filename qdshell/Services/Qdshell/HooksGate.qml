@@ -66,7 +66,7 @@ Singleton {
       return;
     _active = _queue.shift();
     _checkProcess.command = [
-      "busctl", "--system", "--no-pager", "--timeout=2s", "call",
+      "busctl", "--system", "--no-pager", "--timeout=2s", "--", "call",
       brokerBus, brokerPath, brokerIface,
       _active.phase === "check" ? "CheckPermission" : "RequestPermission", "sa{sv}",
       "hook.allowed:" + _active.event,

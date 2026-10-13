@@ -296,7 +296,7 @@ Singleton {
             "command": ["gdbus", "call", "--system",
                         "--dest", root.sessionBus,
                         "--object-path", root.sessionPath,
-                        "--method", root.sessionIface + ".LaunchPodApp",
+                        "--method", root.sessionIface + ".LaunchPodApp", "--",
                         row.container,
                         row.workload || "weston-terminal",
                         JSON.stringify(argv)],

@@ -768,7 +768,7 @@ Item {
     qdSnapshotProc.command = ["gdbus", "call", "--system",
                               "--dest", "org.qdistro.AdminBroker1",
                               "--object-path", "/org/qdistro/AdminBroker1",
-                              "--method", "org.qdistro.AdminBroker1.SnapshotBefore",
+                              "--method", "org.qdistro.AdminBroker1.SnapshotBefore", "--",
                               config, "qdistro: manual snapshot from taskbar"];
     qdSnapshotProc.running = true;
   }
@@ -834,7 +834,7 @@ Item {
     qdDisposeProc.command = ["gdbus", "call", "--system",
                              "--dest", "org.qdistro.SessionManager1",
                              "--object-path", "/org/qdistro/SessionManager1",
-                             "--method", "org.qdistro.SessionManager1.DisposeByToken",
+                             "--method", "org.qdistro.SessionManager1.DisposeByToken", "--",
                              plan.token];
     qdDisposeProc.running = true;
   }
@@ -883,7 +883,7 @@ Item {
       "secctxAppId": win.secctxAppId || "",
       "sandboxEngine": win.sandboxEngine || ""
     };
-    qdPermProc.command = ["busctl", "--system", "--json=short", "call",
+    qdPermProc.command = ["busctl", "--system", "--json=short", "--", "call",
                           "org.qdistro.AdminBroker1",
                           "/org/qdistro/AdminBroker1",
                           "org.qdistro.AdminBroker1", "ListRules"];

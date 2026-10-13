@@ -140,6 +140,11 @@ constexpr uint32_t kDrmXrgb8888 = fourcc('X', 'R', '2', '4');
 // policy desync. Reject such strings FAIL-CLOSED before they reach a security
 // decision; do NOT strip, because stripping rewrites identity and can manufacture
 // collisions.
+//
+// F9: busctl permutes argv, so an option-shaped value ("--machine=x") is parsed
+// as an option wherever it sits, and busctl opens its transport before checking
+// the parameter count. Every busctl argv below puts "--" before the "call" verb
+// (pinned by tests/test_dbus_cli_argv.py).
 inline bool hasControlChars(const QString &s) {
     for (const QChar c : s) {
         const ushort u = c.unicode();
@@ -2909,6 +2914,7 @@ QVariantMap QdwinBinding::checkPermission(const QString &action,
         QStringLiteral("--system"),
         QStringLiteral("--no-pager"),
         QString::fromLatin1(kBrokerGateBusctlTimeout),
+        QStringLiteral("--"),
         QStringLiteral("call"),
         QStringLiteral("org.qdistro.AdminBroker1"),
         QStringLiteral("/org/qdistro/AdminBroker1"),
@@ -2969,6 +2975,7 @@ bool QdwinBinding::verifyClientIdentity(
         QStringLiteral("--system"),
         QStringLiteral("--no-pager"),
         QString::fromLatin1(kBrokerGateBusctlTimeout),
+        QStringLiteral("--"),
         QStringLiteral("call"),
         QStringLiteral("org.qdistro.AdminBroker1"),
         QStringLiteral("/org/qdistro/AdminBroker1"),
@@ -3019,6 +3026,7 @@ QVariantMap QdwinBinding::checkHandoffActivation(
         QStringLiteral("--system"),
         QStringLiteral("--no-pager"),
         QString::fromLatin1(kBrokerGateBusctlTimeout),
+        QStringLiteral("--"),
         QStringLiteral("call"),
         QStringLiteral("org.qdistro.AdminBroker1"),
         QStringLiteral("/org/qdistro/AdminBroker1"),
@@ -3090,6 +3098,7 @@ QVariantMap QdwinBinding::checkClipboardTransfer(
         QStringLiteral("--system"),
         QStringLiteral("--no-pager"),
         QString::fromLatin1(kBrokerDefaultBusctlTimeout),
+        QStringLiteral("--"),
         QStringLiteral("call"),
         QStringLiteral("org.qdistro.AdminBroker1"),
         QStringLiteral("/org/qdistro/AdminBroker1"),
@@ -3163,6 +3172,7 @@ QVariantMap QdwinBinding::checkClipboardReceive(
         QStringLiteral("--system"),
         QStringLiteral("--no-pager"),
         QString::fromLatin1(kBrokerDefaultBusctlTimeout),
+        QStringLiteral("--"),
         QStringLiteral("call"),
         QStringLiteral("org.qdistro.AdminBroker1"),
         QStringLiteral("/org/qdistro/AdminBroker1"),
@@ -3236,6 +3246,7 @@ QStringList clipboardTransferArgs(const char *busctlTimeout,
         QStringLiteral("--system"),
         QStringLiteral("--no-pager"),
         QString::fromLatin1(busctlTimeout),
+        QStringLiteral("--"),
         QStringLiteral("call"),
         QStringLiteral("org.qdistro.AdminBroker1"),
         QStringLiteral("/org/qdistro/AdminBroker1"),
@@ -3274,6 +3285,7 @@ QStringList clipboardReceiveArgs(const char *busctlTimeout,
         QStringLiteral("--system"),
         QStringLiteral("--no-pager"),
         QString::fromLatin1(busctlTimeout),
+        QStringLiteral("--"),
         QStringLiteral("call"),
         QStringLiteral("org.qdistro.AdminBroker1"),
         QStringLiteral("/org/qdistro/AdminBroker1"),

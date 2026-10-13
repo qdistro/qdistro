@@ -27,7 +27,7 @@ Singleton {
     property bool _inputDrainPending: false
 
     function _claimCommand() {
-        return ["busctl", "--user", "--timeout=2s", "call",
+        return ["busctl", "--user", "--timeout=2s", "--", "call",
                 bus, path, iface, "ClaimLayout"];
     }
 
@@ -35,7 +35,7 @@ Singleton {
         if (!_pending || _ackBusy) return;
         _ackBusy = true;
         _ackProc.command = [
-            "busctl", "--user", "--timeout=2s", "call",
+            "busctl", "--user", "--timeout=2s", "--", "call",
             bus, path, iface, "AcknowledgeLayout", "sts",
             _pending.request_id, String(_pending.generation), result
         ];
@@ -43,7 +43,7 @@ Singleton {
     }
 
     function _inputClaimCommand() {
-        return ["busctl", "--user", "--timeout=2s", "call",
+        return ["busctl", "--user", "--timeout=2s", "--", "call",
                 bus, path, iface, "ClaimInput"];
     }
 
@@ -51,7 +51,7 @@ Singleton {
         if (!_inputPending || _inputAckBusy) return;
         _inputAckBusy = true;
         _inputAckProc.command = [
-            "busctl", "--user", "--timeout=2s", "call",
+            "busctl", "--user", "--timeout=2s", "--", "call",
             bus, path, iface, "AcknowledgeInput", "sts",
             _inputPending.request_id, String(_inputPending.generation), result
         ];
