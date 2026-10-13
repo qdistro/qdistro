@@ -669,6 +669,49 @@ def test_layer_popup_nested_grab_routed(display_name):
     return False
 
 
+def test_popup_double_construct_refused(display_name):
+    """D9 (sol r3): a second get_popup on the same xdg_surface is refused
+    with xdg_surface.already_constructed. The vendored libweston links each
+    popup into its parent's child list; a re-construction would re-link it
+    into a second list and corrupt both."""
+    label = "popup_double_construct_refused"
+    if not _vendored_libweston_active():
+        print(f"  SKIP [{label}] NULL-parent popups need the vendored "
+              f"libweston; set QDWIN_USE_VENDORED_LIBWESTON=1")
+        return True
+    d, st = with_globals(display_name)
+    if not (st["xdg"] and st["compositor"]):
+        print(f"  SKIP [{label}] missing globals")
+        try: d.disconnect()
+        except: pass
+        return True
+    def positioner():
+        pos = st["xdg"].create_positioner()
+        pos.set_size(40, 40)
+        pos.set_anchor_rect(0, 0, 1, 1)
+        return pos
+    surf = st["compositor"].create_surface()
+    xs = st["xdg"].get_xdg_surface(surf)
+    xs.get_popup(None, positioner())
+    start = _stderr_size()
+    xs.get_popup(None, positioner())
+    try:
+        d.roundtrip(); d.roundtrip()
+    except Exception:
+        pass
+    captured = _read_captured_stderr_since(start)
+    refused = any(m.group(1) == "xdg_surface" and int(m.group(3)) == 2
+                  for m in _WL_ERR_RE.finditer(captured))
+    try: d.disconnect()
+    except: pass
+    if refused:
+        print(f"  PASS [{label}] second get_popup refused already_constructed")
+        return True
+    print(f"  FAIL [{label}] expected xdg_surface error 2 "
+          f"(already_constructed); got: {captured.strip()[:200]}")
+    return False
+
+
 def test_layer_popup_grab_handler_registered(display_name):
     """plan3 post-review: positive discriminator for H1.
 
@@ -848,6 +891,7 @@ def main():
         ("layer_popup_grab_stale_serial", test_layer_popup_grab_stale_serial),
         ("layer_popup_grab_handler_registered", test_layer_popup_grab_handler_registered),
         ("layer_popup_nested_grab_routed", test_layer_popup_nested_grab_routed),
+        ("popup_double_construct_refused", test_popup_double_construct_refused),
         ("layer_popup_reposition",      test_layer_popup_reposition),
         ("v19_register_hotkey_live",    test_v19_register_hotkey_live),
     ]

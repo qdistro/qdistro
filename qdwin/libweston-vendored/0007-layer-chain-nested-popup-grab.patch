@@ -17,7 +17,8 @@ live joined child posts xdg_wm_base.not_the_topmost_popup, as the desktop
 seat grab does, and severs the child's parent pointer. Every xdg_surface
 also tracks its popup children (popup_children/parent_link) and nulls
 their parent pointer when it is destroyed, so a surviving ungrabbed or
-pending child never reads a freed parent. Applies after 0001.
+pending child never reads a freed parent; a second get_popup on one
+xdg_surface is refused (already_constructed). Applies after 0001.
 
 Regression gates: qdwin test_zwlr_layer_shell.py
 (test_layer_popup_nested_grab_routed) and the live lane
@@ -43,7 +44,7 @@ index d2e46401..bf232d64 100644
  	struct wl_resource *popup_resource,
  	struct weston_surface *popup_surface,
 diff --git a/libweston/desktop/xdg-shell.c b/libweston/desktop/xdg-shell.c
-index 2c56c741..de6e5edf 100644
+index 2c56c741..24967e12 100644
 --- a/libweston/desktop/xdg-shell.c
 +++ b/libweston/desktop/xdg-shell.c
 @@ -80,6 +80,11 @@ struct weston_desktop_xdg_surface {
@@ -171,7 +172,24 @@ index 2c56c741..de6e5edf 100644
  	if (!weston_desktop_surface_get_grab(popup->base.desktop_surface))
  		return;
  
-@@ -2071,6 +2161,10 @@ weston_desktop_xdg_surface_protocol_get_popup(struct wl_client *wl_client,
+@@ -2036,6 +2126,16 @@ weston_desktop_xdg_surface_protocol_get_popup(struct wl_client *wl_client,
+ 	wsurface = weston_desktop_surface_get_surface(dsurface);
+ 	popup = weston_desktop_surface_get_implementation_data(dsurface);
+ 
++	/* qdistro patch (D9): one role object per xdg_surface. A second
++	 * get_popup would re-link parent_link into another parent's
++	 * popup_children and corrupt both lists. */
++	if (popup->base.role != WESTON_DESKTOP_XDG_SURFACE_ROLE_NONE) {
++		wl_resource_post_error(resource,
++				       XDG_SURFACE_ERROR_ALREADY_CONSTRUCTED,
++				       "xdg_surface already has a role object");
++		return;
++	}
++
+ 	/* qdistro patch: per the xdg-shell spec, parent may be NULL provided
+ 	 * the parent is set 'using some other protocol' before commit. We
+ 	 * accept NULL here, mark the popup as parentless, and enforce the
+@@ -2071,6 +2171,10 @@ weston_desktop_xdg_surface_protocol_get_popup(struct wl_client *wl_client,
  
  	popup->base.role = WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP;
  	popup->parent = parent;
@@ -182,7 +200,7 @@ index 2c56c741..de6e5edf 100644
  
  	if (parent_surface) {
  		popup->geometry =
-@@ -2320,6 +2414,15 @@ weston_desktop_xdg_surface_destroy(struct weston_desktop_surface *dsurface,
+@@ -2320,6 +2424,15 @@ weston_desktop_xdg_surface_destroy(struct weston_desktop_surface *dsurface,
  		break;
  	}
  
@@ -198,7 +216,7 @@ index 2c56c741..de6e5edf 100644
  	if (surface->configure_idle != NULL)
  		wl_event_source_remove(surface->configure_idle);
  
-@@ -2445,6 +2548,7 @@ weston_desktop_xdg_shell_protocol_get_xdg_surface(struct wl_client *wl_client,
+@@ -2445,6 +2558,7 @@ weston_desktop_xdg_shell_protocol_get_xdg_surface(struct wl_client *wl_client,
  	surface->desktop = weston_desktop_client_get_desktop(client);
  	surface->surface = wsurface;
  	wl_list_init(&surface->configure_list);

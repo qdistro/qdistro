@@ -2126,6 +2126,16 @@ weston_desktop_xdg_surface_protocol_get_popup(struct wl_client *wl_client,
 	wsurface = weston_desktop_surface_get_surface(dsurface);
 	popup = weston_desktop_surface_get_implementation_data(dsurface);
 
+	/* qdistro patch (D9): one role object per xdg_surface. A second
+	 * get_popup would re-link parent_link into another parent's
+	 * popup_children and corrupt both lists. */
+	if (popup->base.role != WESTON_DESKTOP_XDG_SURFACE_ROLE_NONE) {
+		wl_resource_post_error(resource,
+				       XDG_SURFACE_ERROR_ALREADY_CONSTRUCTED,
+				       "xdg_surface already has a role object");
+		return;
+	}
+
 	/* qdistro patch: per the xdg-shell spec, parent may be NULL provided
 	 * the parent is set 'using some other protocol' before commit. We
 	 * accept NULL here, mark the popup as parentless, and enforce the
