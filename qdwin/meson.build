@@ -1038,6 +1038,29 @@ executable('qdwin-popup-probe',
   install_dir: get_option('bindir'),
 )
 
+# D9 live lane: a layer-shell client with a grabbed layer popup, an optional
+# nested (submenu) popup and a same-client sibling toplevel; logs which
+# surface receives pointer input. Driven by
+# tests/gui/agent-layer-popup-nested-grab-smoke.sh.
+wlr_layer_shell_client_header = custom_target(
+  'wlr-layer-shell-unstable-v1-client-header',
+  input: wlr_layer_shell_xml,
+  output: 'wlr-layer-shell-unstable-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+executable('qdwin-nested-grab-probe',
+  sources: [
+    'test-client/qdwin-nested-grab-probe.c',
+    xdg_shell_client_header,
+    xdg_shell_protocol_code_test,
+    wlr_layer_shell_client_header,
+    wlr_layer_shell_protocol_code,
+  ],
+  dependencies: [dep_wayland_client],
+  install: true,
+  install_dir: get_option('bindir'),
+)
+
 # Clipboard set_selection helper that bypasses wl-clipboard's
 # focus-wait. Used by spec/10 e2e bats; see the binary's leading
 # comment for why wl-copy doesn't work headlessly.
