@@ -190,6 +190,15 @@ cp -r /root/qdistro-src/tier5-vm /tmp/qdistro-tier5/tier5-vm
 cp -r /root/qdistro-src/lib /tmp/qdistro-tier5/lib
 chmod -R a+rX /tmp/qdistro-tier5
 find /tmp/qdistro-tier5 -name '*.sh' -exec chmod a+rx {} +
+# spawn-tier5.sh runs as admin; its one root step is pkexec of the tier-5
+# bridge (org.qdistro.tier5.bridge, auth_admin_keep). This scenario checks the
+# window/teardown path, not authentication, so a temporary polkit rule grants
+# the action to admin.
+install -d -m 0755 /etc/polkit-1/rules.d
+printf '%s\n' 'polkit.addRule(function(a, s) {' \
+    '  if (a.id == "org.qdistro.tier5.bridge" && s.user == "admin") return polkit.Result.YES;' \
+    '});' >/etc/polkit-1/rules.d/10-qdistro-tier5-bridge-test.rules
+sleep 1
 # TIER5_MEM_KIB=2097152 (2 GiB): the former 512 MiB CI accommodation was too
 # tight for the guest kernel + compositor + app stack and could kill the guest
 # mid-boot. Keep the scenario explicit so CI and the bats probes use one budget.
@@ -198,7 +207,8 @@ find /tmp/qdistro-tier5 -name '*.sh' -exec chmod a+rx {} +
 # — independent of whether the test base image carries the guest power-button
 # wiring that graceful (the default) needs. The graceful ACPI path + per-app
 # policy are covered by tests/integration/vm/s49-tier5-graceful-shutdown.sh.
-TIER5_MEM_KIB=2097152 TIER5_SHUTDOWN_METHOD=force setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --vm "$VM5" \
+setsid runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin PATH=/usr/local/bin:/usr/bin:/bin \
+    TIER5_MEM_KIB=2097152 TIER5_SHUTDOWN_METHOD=force bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --vm "$VM5" \
     -- weston-terminal </dev/null >/tmp/s21-spawn.log 2>&1 &
 disown
 EOF
@@ -432,12 +442,14 @@ $VMEXEC "$VM" 'ls -lh /var/lib/libvirt/images/qdistro-tier5-base.qcow2'
 ### S6 — cleanup (defensive)
 
 ```bash
-$VMEXEC "$VM" "pkill -u root -f \"[s]pawn-tier5.sh.*$VM5\" 2>/dev/null || true; \
+$VMEXEC "$VM" "pkill -f \"[s]pawn-tier5.sh.*$VM5\" 2>/dev/null || true; \
                runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin \
                  LIBVIRT_DEFAULT_URI=qemu:///session virsh destroy $VM5 2>/dev/null || true; \
                runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin \
                  LIBVIRT_DEFAULT_URI=qemu:///session virsh undefine $VM5 2>/dev/null || true; \
-               rm -f /home/admin/.local/share/libvirt/images/$VM5.qcow2"
+               rm -f /home/admin/.local/share/libvirt/images/$VM5.qcow2 \
+                 /home/admin/.local/share/libvirt/images/$VM5.qcow2.appid; \
+               rm -f /etc/polkit-1/rules.d/10-qdistro-tier5-bridge-test.rules"
 ```
 
 ## Known caveats

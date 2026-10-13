@@ -35,7 +35,7 @@ $VMEXEC "$VM" 'test -d /root/qdistro-src/tier5-vm'
 
 # Drain any leftover tier-5 spawn from a prior run. ([s]pawn bracket trick so
 # the pkill pattern can't match the guest shell running this very command.)
-$VMEXEC "$VM" 'pkill -u root -f "[s]pawn-tier5.sh" 2>/dev/null || true; \
+$VMEXEC "$VM" 'pkill -f "[s]pawn-tier5.sh" 2>/dev/null || true; \
                pkill -u admin -f "[w]aypipe.*vsock.*1:" 2>/dev/null || true; \
                sleep 1'
 ```
@@ -48,8 +48,9 @@ $VMEXEC "$VM" 'pkill -u root -f "[s]pawn-tier5.sh" 2>/dev/null || true; \
 so `lib/` must be staged as a **sibling** of `tier5-vm/` and the script run
 from inside the copied `tier5-vm/`. (Mirrors `21-tier5-close-cleanup.md`'s
 staging; a flat copy of `tier5-vm` alone leaves `../lib` unresolved, so
-`gen_launch_token`/`qd_register_secctx_launch_record` go undefined and the
-launch token + lineage registration are silently skipped.)
+`gen_launch_token` goes undefined and the launch token is silently
+skipped.) The wrapper runs as admin; the tier-5 bridge it pkexecs starts the
+tagged, registered waypipe client.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
@@ -59,7 +60,19 @@ cp -r /root/qdistro-src/tier5-vm /tmp/qdistro-tier5/tier5-vm
 cp -r /root/qdistro-src/lib /tmp/qdistro-tier5/lib
 chmod -R a+rX /tmp/qdistro-tier5
 find /tmp/qdistro-tier5 -name '*.sh' -exec chmod a+rx {} +
-setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --loopback -p 7791 \
+# vsock_loopback is provisioned by setup (loading it is privileged)
+modprobe vsock_loopback 2>/dev/null || true
+# spawn-tier5.sh runs as admin; its one root step is pkexec of the tier-5
+# bridge (org.qdistro.tier5.bridge, auth_admin_keep). This scenario checks the
+# window/teardown path, not authentication, so a temporary polkit rule grants
+# the action to admin.
+install -d -m 0755 /etc/polkit-1/rules.d
+printf '%s\n' 'polkit.addRule(function(a, s) {' \
+    '  if (a.id == "org.qdistro.tier5.bridge" && s.user == "admin") return polkit.Result.YES;' \
+    '});' >/etc/polkit-1/rules.d/10-qdistro-tier5-bridge-test.rules
+sleep 1
+setsid runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin PATH=/usr/local/bin:/usr/bin:/bin \
+    bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --loopback -p 7791 \
     -- weston-terminal </dev/null >/tmp/s19-spawn.log 2>&1 &
 disown
 sleep 3
@@ -178,9 +191,9 @@ deterministic ground-truth here.
 ### S5 — cleanup
 
 ```bash
-$VMEXEC "$VM" 'pkill -u root -f "[s]pawn-tier5.sh.*loopback" 2>/dev/null || true; \
+$VMEXEC "$VM" 'pkill -f "[s]pawn-tier5.sh.*loopback" 2>/dev/null || true; \
                sleep 1; \
-               pkill -u root -f "[s]pawn-tier5.sh.*loopback" 2>/dev/null || true'
+               pkill -f "[s]pawn-tier5.sh.*loopback" 2>/dev/null || true'
 ```
 
 ## Known caveats

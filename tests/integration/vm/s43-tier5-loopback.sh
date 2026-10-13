@@ -40,8 +40,8 @@ SPAWN="$TIER5_DIR/tier5-vm/spawn-tier5.sh"
 command -v waypipe >/dev/null 2>&1 || skip "waypipe not installed in this VM"
 command -v wayland-info >/dev/null 2>&1 || skip "wayland-info (wayland-utils) not installed in this VM"
 
-# vsock_loopback module — spawn-tier5.sh tries to modprobe; do it first
-# so the failure mode is a clear SKIP instead of a spawn FAIL.
+# vsock_loopback module — loading it is privileged, so test setup provisions
+# it (spawn-tier5.sh, running as admin, only checks for it).
 if ! lsmod | grep -q '^vsock_loopback'; then
     if ! modprobe vsock_loopback 2>/dev/null; then
         skip "vsock_loopback module not available in this kernel"
@@ -60,11 +60,38 @@ pass "outer admin compositor up"
 CURSOR=$(journalctl --since=now -n0 --show-cursor 2>/dev/null \
     | awk -F': ' '/-- cursor:/ {print $2}')
 
+# --- tier-5 runs as admin; its one root step is the pkexec'd bridge --------
+# spawn-tier5.sh refuses root. Its waypipe client starts through
+# `pkexec /usr/libexec/qdistro/qdistro-tier5-bridge` (org.qdistro.tier5.bridge,
+# auth_admin_keep). No polkit agent serves this headless driver, so it grants
+# the action to admin through a temporary rules file for its own duration —
+# a test-only route; authenticated launches are the GUI scenarios' business.
+T5_POLKIT_RULE=/etc/polkit-1/rules.d/10-qdistro-tier5-bridge-test.rules
+t5_grant_bridge() {
+    install -d -m 0755 /etc/polkit-1/rules.d
+    cat >"$T5_POLKIT_RULE" <<'RULE'
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.qdistro.tier5.bridge" && subject.user == "admin") {
+        return polkit.Result.YES;
+    }
+});
+RULE
+    sleep 1  # polkitd reloads rules.d on change
+}
+t5_revoke_bridge() { rm -f "$T5_POLKIT_RULE"; }
+# t5_as_admin [VAR=VAL...] cmd... — admin's uid with its session paths.
+t5_as_admin() {
+    runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin \
+        PATH=/usr/local/bin:/usr/bin:/bin "$@"
+}
+t5_grant_bridge
+trap t5_revoke_bridge EXIT
+
 SPAWN_LOG=/tmp/s43-spawn.log
 : >"$SPAWN_LOG"
 PORT=7791
 
-bash "$SPAWN" --loopback -p "$PORT" \
+t5_as_admin bash "$SPAWN" --loopback -p "$PORT" \
     -- wayland-info >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
 

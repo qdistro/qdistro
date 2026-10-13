@@ -46,6 +46,33 @@ if ! runuser -u admin -- test -S "/run/user/$ADMIN_UID/wayland-1"; then
     skip "outer admin compositor not up"
 fi
 
+# --- tier-5 runs as admin; its one root step is the pkexec'd bridge --------
+# spawn-tier5.sh refuses root. Its waypipe client starts through
+# `pkexec /usr/libexec/qdistro/qdistro-tier5-bridge` (org.qdistro.tier5.bridge,
+# auth_admin_keep). No polkit agent serves this headless driver, so it grants
+# the action to admin through a temporary rules file for its own duration —
+# a test-only route; authenticated launches are the GUI scenarios' business.
+T5_POLKIT_RULE=/etc/polkit-1/rules.d/10-qdistro-tier5-bridge-test.rules
+t5_grant_bridge() {
+    install -d -m 0755 /etc/polkit-1/rules.d
+    cat >"$T5_POLKIT_RULE" <<'RULE'
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.qdistro.tier5.bridge" && subject.user == "admin") {
+        return polkit.Result.YES;
+    }
+});
+RULE
+    sleep 1  # polkitd reloads rules.d on change
+}
+t5_revoke_bridge() { rm -f "$T5_POLKIT_RULE"; }
+# t5_as_admin [VAR=VAL...] cmd... — admin's uid with its session paths.
+t5_as_admin() {
+    runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin \
+        PATH=/usr/local/bin:/usr/bin:/bin "$@"
+}
+t5_grant_bridge
+trap t5_revoke_bridge EXIT
+
 VM_NAME="qdistro-tier5-cleanup-$$"
 OVERLAY="/home/admin/.local/share/libvirt/images/$VM_NAME.qcow2"
 SPAWN_LOG=/tmp/s48-spawn.log
@@ -60,7 +87,7 @@ WAYPIPE_BASELINE="$(waypipe_pids)"
 # 2 GiB guest (TIER5_MEM_KIB): the former 512 MiB CI accommodation was too tight
 # for the guest kernel + compositor + app stack and could kill the nested guest
 # mid-boot. Keep this aligned with s45 and the GUI tier-5 scenarios.
-TIER5_MEM_KIB=2097152 \
+t5_as_admin TIER5_MEM_KIB=2097152 \
     bash "$SPAWN" --vm "$VM_NAME" \
     -- weston-terminal >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
@@ -106,9 +133,10 @@ else
     exit 1
 fi
 
-# Trigger teardown: SIGTERM the wrapper. The trap inside spawn-tier5.sh
-# should: kill waypipe halves, virsh destroy, virsh undefine, rm overlay
-# (because TIER5_KEEP_DOMAIN is unset).
+# Trigger teardown: SIGTERM the wrapper (runuser forwards it). The trap
+# inside spawn-tier5.sh closes the bridge's stdin — the root bridge then
+# tears its waypipe client down — and runs virsh destroy, virsh undefine,
+# rm overlay (because TIER5_KEEP_DOMAIN is unset).
 kill -TERM "$SPAWN_PID" 2>/dev/null || true
 wait "$SPAWN_PID" 2>/dev/null || true
 

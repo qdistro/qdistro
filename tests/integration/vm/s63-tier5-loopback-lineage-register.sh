@@ -2,10 +2,11 @@
 # In-VM driver: spawn-tier5.sh --loopback auto-registers a launch record
 # (02/S3e — the tier-5 half of permission-lineage rollout).
 #
-# Proves the lineage wiring just added to spawn-tier5.sh: when a tier-5 silo is
-# bridged over AF_VSOCK, the qdistro-secctx-exec wrapping waypipe-client
-# publishes the inner waypipe-client pid, spawn-tier5 calls the shared
-# qd_register_secctx_launch_record helper, and the broker persists a
+# Proves the tier-5 lineage wiring: spawn-tier5.sh (admin) starts the root
+# qdistro-tier5-bridge, which runs waypipe-client under qdistro-secctx-exec,
+# learns its pid over a private pipe once it has exec'd, verifies it, and
+# registers it (RegisterLaunch via the root dbus-send helper path) as silo
+# vm-<name> before reporting READY; the broker persists a
 # qdistro.lineage.register:<silo> audit row. A later cross-silo gate resolves the
 # source pid qdwin reports (this same waypipe-client) to that record so enforce
 # mode can ALLOW an admin cross-silo rule instead of failing closed.
@@ -16,7 +17,8 @@
 # spawn gate, so (unlike s61/s62) no allow rule is authored.
 #
 # Load-bearing assertions:
-#   1. spawn-tier5 emitted "[tier5] lineage: registered pid=<n> as silo=<silo>".
+#   1. spawn-tier5 emitted "[tier5] bridge ready: waypipe client pid=<n>
+#      silo=<silo>" (the bridge reports READY only after registration).
 #   2. the broker wrote a qdistro.lineage.register:<silo> audit row.
 
 set -u
@@ -27,8 +29,42 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
+# --- tier-5 runs as admin; its one root step is the pkexec'd bridge --------
+# spawn-tier5.sh refuses root. Its waypipe client starts through
+# `pkexec /usr/libexec/qdistro/qdistro-tier5-bridge` (org.qdistro.tier5.bridge,
+# auth_admin_keep). No polkit agent serves this headless driver, so it grants
+# the action to admin through a temporary rules file for its own duration —
+# a test-only route; authenticated launches are the GUI scenarios' business.
+T5_POLKIT_RULE=/etc/polkit-1/rules.d/10-qdistro-tier5-bridge-test.rules
+t5_grant_bridge() {
+    install -d -m 0755 /etc/polkit-1/rules.d
+    cat >"$T5_POLKIT_RULE" <<'RULE'
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.qdistro.tier5.bridge" && subject.user == "admin") {
+        return polkit.Result.YES;
+    }
+});
+RULE
+    sleep 1  # polkitd reloads rules.d on change
+}
+t5_revoke_bridge() { rm -f "$T5_POLKIT_RULE"; }
+# t5_as_admin [VAR=VAL...] cmd... — admin's uid with its session paths.
+t5_as_admin() {
+    runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin \
+        PATH=/usr/local/bin:/usr/bin:/bin "$@"
+}
+
 SRC=/root/qdistro-src
-TIER5_DIR="$SRC/tier5-vm"
+STAGE=/tmp/qdistro-tier5-s63
+TIER5_DIR="$STAGE/tier5-vm"
+# spawn-tier5.sh runs as admin, who cannot read /root: stage tier5-vm and lib
+# as siblings (the wrapper sources ../lib/spawn-common.sh).
+if [ -d "$SRC/tier5-vm" ]; then
+    rm -rf "$STAGE" 2>/dev/null || true
+    mkdir -p "$STAGE"
+    cp -r "$SRC/tier5-vm" "$SRC/lib" "$STAGE/"
+    chmod -R a+rX "$STAGE"
+fi
 ADMIN=admin
 ADMIN_UID=1000
 RUNTIME_DIR="/run/user/$ADMIN_UID"
@@ -44,7 +80,8 @@ cleanup() {
     [ -n "$SPAWN_PID" ] && wait    "$SPAWN_PID" 2>/dev/null || true
     rm -f /tmp/s63-spawn.log 2>/dev/null || true
     rm -f "$RUNTIME_DIR"/tier5-loopback-*-wayland-info-*.log 2>/dev/null || true
-    rm -f "$RUNTIME_DIR"/qdistro-tier5-launchrec-*.pid 2>/dev/null || true
+    rm -rf "$STAGE" 2>/dev/null || true
+    t5_revoke_bridge
 }
 trap cleanup EXIT INT TERM
 
@@ -63,8 +100,10 @@ fi
 if ! runuser -u "$ADMIN" -- test -S "$OUTER_SOCK"; then
     skip "outer admin compositor not up ($OUTER_SOCK missing)"
 fi
+[ -x /usr/libexec/qdistro/qdistro-tier5-bridge ] || skip "tier-5 bridge not installed"
 systemctl start qdistro-admin-broker.service 2>/dev/null || true
 pass "tier5 loopback prerequisites present"
+t5_grant_bridge
 
 # --- 2. spawn a tier-5 silo over vsock loopback ----------------------
 # The lineage register fires when the secctx-exec-wrapped waypipe-client starts
@@ -73,23 +112,31 @@ pass "tier5 loopback prerequisites present"
 PORT=$(( (RANDOM % 20000) + 20000 ))
 SPAWN_LOG=/tmp/s63-spawn.log
 : >"$SPAWN_LOG"
-bash "$TIER5_DIR/spawn-tier5.sh" --loopback -p "$PORT" -- wayland-info >"$SPAWN_LOG" 2>&1 &
+t5_as_admin bash "$TIER5_DIR/spawn-tier5.sh" --loopback -p "$PORT" -- wayland-info >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
+# SPAWN_PID is runuser; its single child execs into spawn-tier5.sh, whose
+# own pid names the loopback silo.
+INNER_PID=""
+for _ in $(seq 1 50); do
+    INNER_PID=$(pgrep -P "$SPAWN_PID" 2>/dev/null | head -1)
+    [ -n "$INNER_PID" ] && break
+    sleep 0.1
+done
 
 # --- 3. wait for the lineage registration line -----------------------
 REG_SILO=""
 for _ in $(seq 1 60); do
-    line=$(grep -m1 "lineage: registered pid=[0-9]\+ as silo=" "$SPAWN_LOG" 2>/dev/null || true)
+    line=$(grep -m1 "bridge ready: waypipe client pid=[0-9]\+ silo=" "$SPAWN_LOG" 2>/dev/null || true)
     if [ -n "$line" ]; then
-        REG_SILO=$(echo "$line" | sed -n 's/.*as silo=\([^ ]*\).*/\1/p')
+        REG_SILO=$(echo "$line" | sed -n 's/.* silo=\([^ ]*\).*/\1/p')
         break
     fi
-    if grep -q "WARN lineage:" "$SPAWN_LOG" 2>/dev/null; then
+    if grep -q "bridge did not start the waypipe client" "$SPAWN_LOG" 2>/dev/null; then
         cat "$SPAWN_LOG" >&2
-        fail "spawn-tier5 emitted a WARN lineage line (launch record not registered)"
+        fail "the tier-5 bridge refused or failed the launch (no launch record)"
         break
     fi
-    if ! kill -0 "$SPAWN_PID" 2>/dev/null && ! grep -q "lineage: registered" "$SPAWN_LOG" 2>/dev/null; then
+    if ! kill -0 "$SPAWN_PID" 2>/dev/null && ! grep -q "bridge ready:" "$SPAWN_LOG" 2>/dev/null; then
         cat "$SPAWN_LOG" >&2
         fail "spawn-tier5 exited before registering a launch record"
         break
@@ -100,15 +147,16 @@ done
 LINEAGE_ACTION=""
 if [ -n "$REG_SILO" ]; then
     pass "spawn-tier5 (loopback) logged the launch-record registration for silo=$REG_SILO"
-    # tier-5 loopback derives the silo identity as loopback-<pid>, where <pid>
-    # is spawn-tier5.sh's own pid ($$) — which is exactly the process we
-    # backgrounded as SPAWN_PID. Asserting that equality makes the audit-row
-    # proof below mathematically stale-proof (the silo carries THIS launch's
-    # unique pid, so no prior run's row can satisfy it even under PID reuse).
-    if [ "$REG_SILO" = "loopback-$SPAWN_PID" ]; then
-        pass "tier-5 loopback silo identity is this spawn's pid (loopback-$SPAWN_PID)"
+    # tier-5 loopback names its silo vm-loopback-<pid>, where <pid> is
+    # spawn-tier5.sh's own pid ($$) — the runuser child captured as INNER_PID.
+    # Asserting that equality makes the audit-row proof below stale-proof (the
+    # silo carries THIS launch's unique pid, so no prior run's row can satisfy
+    # it even under PID reuse). The vm- prefix is the key qdshell's
+    # ClipboardSilo derives from app-id qdistro.tier5.<name>.
+    if [ -n "$INNER_PID" ] && [ "$REG_SILO" = "vm-loopback-$INNER_PID" ]; then
+        pass "tier-5 loopback silo identity is this spawn's pid (vm-loopback-$INNER_PID)"
     else
-        fail "registered silo '$REG_SILO' != loopback-$SPAWN_PID (spawn-tier5's own pid)"
+        fail "registered silo '$REG_SILO' != vm-loopback-${INNER_PID:-?} (spawn-tier5's own pid)"
     fi
     LINEAGE_ACTION="qdistro.lineage.register:${REG_SILO}"
 else
