@@ -57,6 +57,15 @@ python314Packages.buildPythonApplication {
     nodejs
   ];
 
+  # The admin CA bundle must sit under a root-owned ancestor chain up to "/".
+  # Under rootless podman the build sandbox's "/" is owned by the overflow
+  # uid, so the resolver correctly rejects it; the test runs wherever the
+  # sandbox root is root-owned (a normal nix daemon).
+  preCheck = ''
+    if [ "$(stat -c %u /)" != 0 ]; then
+      QD_PYTEST_EXTRA="--deselect tests/test_ca_bundle.py::test_resolve_admin_used_when_no_user"
+    fi
+  '';
   checkPhase = qtPytestCheck { perFile = "tests/test_*.py"; };
 
   meta = {

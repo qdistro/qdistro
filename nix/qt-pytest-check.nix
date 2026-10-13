@@ -12,6 +12,9 @@
 #     QMessageBox nobody can click offscreen) dumps its stack into the build
 #     log and FAILS the build instead of hanging it forever
 #   - QML import path for components whose tests load QML
+# $QD_PYTEST_EXTRA (set in a package's preCheck, word-split) adds runtime
+# arguments — e.g. a --deselect that only applies when the build environment
+# lacks something, so the test still runs where the environment has it.
 # perFile = glob: one pytest process per matching file (qci's mode for
 # qdbrowser, bounding QtWebEngine residue); fails if the glob is empty.
 { dbus, qt6 }:
@@ -20,7 +23,7 @@
   perFile ? null,
 }:
 let
-  pytest = "python -m pytest --basetemp=\"$QD_PYTEST_TMP/bt\" -o faulthandler_timeout=120 -o faulthandler_exit_on_timeout=true";
+  pytest = "python -m pytest --basetemp=\"$QD_PYTEST_TMP/bt\" -o faulthandler_timeout=120 -o faulthandler_exit_on_timeout=true $QD_PYTEST_EXTRA";
 in
 ''
   runHook preCheck
@@ -29,6 +32,7 @@ in
     QD_PYTEST_TMP=$(mktemp -d /tmp/qdpt.XXXXXX)
   fi
   export QD_PYTEST_TMP
+  QD_PYTEST_EXTRA=''${QD_PYTEST_EXTRA:-}
   export QT_QPA_PLATFORM=offscreen
   export HOME="$TMPDIR/home"
   mkdir -p "$HOME"

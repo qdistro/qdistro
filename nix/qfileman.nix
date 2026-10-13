@@ -113,6 +113,10 @@ python314Packages.buildPythonApplication {
   # the test's walk-up expects (an env override would leak into every test).
   preCheck = ''
     cp -r ${sessionManager} "$NIX_BUILD_TOP/session_manager"
+    # lsblk needs sysfs (/sys/dev/block), which the build sandbox lacks.
+    if [ ! -d /sys/dev/block ]; then
+      QD_PYTEST_EXTRA="--deselect tests/test_integration_tools.py::test_lsblk_json_parses"
+    fi
   '';
   checkPhase = qtPytestCheck { };
 
