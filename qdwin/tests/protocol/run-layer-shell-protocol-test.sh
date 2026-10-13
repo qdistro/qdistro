@@ -186,6 +186,8 @@ require-input=false
 idle-time=0
 EOF
 
+# --fake-seat: the popup-grab tests need a wl_seat to name in xdg_popup.grab
+# (no input is ever injected, so every grab serial stays stale).
 # allowed_uid defaults to the weston process uid (== us), so qdwin_shell_v1
 # is advertised to our client and the v19 register_hotkey test can run.
 # Build LD_LIBRARY_PATH WITHOUT a trailing colon: an empty component makes
@@ -197,7 +199,7 @@ else
 fi
 XDG_RUNTIME_DIR="$RUNDIR" \
 LD_LIBRARY_PATH="$WESTON_LD" \
-    weston --backend=headless-backend.so --renderer=pixman \
+    weston --backend=headless-backend.so --renderer=pixman --fake-seat \
            --config="$STAGE/weston.ini" --socket="$WLD" \
            >"$WLOG" 2>&1 &
 WPID=$!

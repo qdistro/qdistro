@@ -371,6 +371,14 @@ struct qdwin_layer_popup {
 	int grab_active;
 	struct wl_listener seat_destroy_listener;
 	struct weston_seat *grab_seat;
+	struct wl_list nested;
+};
+struct qdwin_layer_popup_nested {
+	struct qdwin_layer_popup *root;
+	struct wl_resource *resource;
+	struct weston_surface *surface;
+	struct wl_listener destroy_listener;
+	struct wl_list link;
 };
 enum qdwin_ext_ws_pending_kind { QDWIN_EXT_WS_PENDING_ACTIVATE };
 struct qdwin_ext_ws_pending_op {
@@ -792,6 +800,8 @@ SPLICED = [
     "qdwin_activation_tokens_destroy_all",
     "qdwin_primary_seat_seat_destroyed",
     "qdwin_primary_seats_destroy_all",
+    "qdwin_layer_popup_nested_free",
+    "qdwin_layer_popup_dismiss_chain",
     "qdwin_layer_popup_grab_cancel",
     "qdwin_layer_popup_destroy",
     "qdwin_layer_surface_resource_destroy",
@@ -1265,6 +1275,7 @@ static int case_listener_families(void)
 	wl_list_init(&lp->surface_destroy_listener.link);
 	wl_list_init(&lp->popup_resource_destroy_listener.link);
 	wl_list_init(&lp->seat_destroy_listener.link);
+	wl_list_init(&lp->nested);
 	wl_list_insert(&ls->popups, &lp->link);
 	wl_list_insert(&q->layer_surfaces, &ls->link);
 
@@ -1557,7 +1568,51 @@ static struct qdwin_layer_popup *layer_popup_new(int install)
 	wl_list_init(&lp->surface_destroy_listener.link);
 	wl_list_init(&lp->popup_resource_destroy_listener.link);
 	wl_list_init(&lp->seat_destroy_listener.link);
+	wl_list_init(&lp->nested);
 	return lp;
+}
+
+/* D9: a nested submenu record joined to lp's grab, topmost first. */
+static struct qdwin_layer_popup_nested *
+layer_popup_nest(struct qdwin_layer_popup *lp)
+{
+	struct qdwin_layer_popup_nested *n = calloc(1, sizeof *n);
+	assert(n);
+	n->root = lp;
+	wl_list_init(&n->destroy_listener.link);
+	wl_list_insert(&lp->nested, &n->link);
+	return n;
+}
+
+/* D9: cancel dismisses the whole chain (nested first, then the root) and
+ * drops the records; destroy frees records still joined. Under ASan a
+ * leaked or double-freed record aborts the probe. */
+static int case_layer_popup_nested_chain(void)
+{
+	reset_counters();
+	layer_popup_done_calls = 0;
+	struct wl_resource *popup_res = calloc(1, 64);
+	assert(popup_res);
+	struct qdwin_layer_popup *lp = layer_popup_new(1);
+	lp->popup_resource = popup_res;
+	layer_popup_nest(lp);
+	layer_popup_nest(lp);
+	qdwin_layer_popup_grab_cancel(&lp->grab);
+	CHECK(layer_popup_done_calls == 3,
+	      "chain cancel did not send popup_done to both nested popups "
+	      "and the root");
+	CHECK(wl_list_empty(&lp->nested),
+	      "chain cancel kept nested records");
+	qdwin_layer_popup_destroy(lp);
+	free(popup_res);
+
+	reset_counters();
+	lp = layer_popup_new(1);
+	layer_popup_nest(lp);
+	qdwin_layer_popup_destroy(lp);
+	CHECK(main_pointer.grab == &main_pointer.default_grab,
+	      "destroy with a nested record left the grab installed");
+	return 0;
 }
 
 static int case_layer_popup_grab_cancel(void)
@@ -2079,6 +2134,7 @@ int main(void)
 	if ((r = case_xdg_decorations_released())) return r;
 	if ((r = case_lock_attach_promote())) return r;
 	if ((r = case_layer_popup_grab_cancel())) return r;
+	if ((r = case_layer_popup_nested_chain())) return r;
 	if ((r = case_switcher_grab_cancel())) return r;
 	if ((r = case_overlay_grab_cancel())) return r;
 	printf("destroy-drain behaviour: 18 cases OK\n");

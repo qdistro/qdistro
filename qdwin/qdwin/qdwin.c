@@ -15655,6 +15655,20 @@ struct qdwin_layer_popup {
 	 * grab on it during destroy/dismiss. */
 	struct wl_listener seat_destroy_listener;
 	struct weston_seat *grab_seat;
+	/* D9: nested submenu popups that joined this popup's grab
+	 * (qdwin_layer_popup_nested::link), topmost first. libweston routes a
+	 * nested xdg_popup.grab whose chain ends here to the layer-grab
+	 * handler instead of its desktop seat grab, so this popup's grab stays
+	 * the installed one for the whole chain. */
+	struct wl_list nested;
+};
+
+struct qdwin_layer_popup_nested {
+	struct qdwin_layer_popup *root;
+	struct wl_resource *resource;          /* xdg_popup */
+	struct weston_surface *surface;
+	struct wl_listener destroy_listener;   /* on resource */
+	struct wl_list link;                   /* qdwin_layer_popup::nested */
 };
 
 static void qdwin_layer_popup_destroy(struct qdwin_layer_popup *lp);
@@ -16269,10 +16283,33 @@ qdwin_layer_popup_update_position(struct qdwin_layer_popup *lp)
 }
 
 static void
+qdwin_layer_popup_nested_free(struct qdwin_layer_popup_nested *n)
+{
+	wl_list_remove(&n->destroy_listener.link);
+	wl_list_remove(&n->link);
+	free(n);
+}
+
+/* D9: a nested popup that joined the chain was destroyed (the client closed
+ * the submenu, or answered popup_done). The root grab carries on. */
+static void
+qdwin_layer_popup_nested_on_destroyed(struct wl_listener *listener, void *data)
+{
+	struct qdwin_layer_popup_nested *n =
+		wl_container_of(listener, n, destroy_listener);
+	(void)data;
+	qdwin_layer_popup_nested_free(n);
+}
+
+static void
 qdwin_layer_popup_destroy(struct qdwin_layer_popup *lp)
 {
 	if (!lp)
 		return;
+
+	struct qdwin_layer_popup_nested *n, *ntmp;
+	wl_list_for_each_safe(n, ntmp, &lp->nested, link)
+		qdwin_layer_popup_nested_free(n);
 
 	/* plan3 NEW-H1 + deep-review H3/H5: end any active pointer grab so
 	 * libweston rebinds the default grab before we free the
@@ -16472,6 +16509,50 @@ qdwin_layer_popup_grab_focus(struct weston_pointer_grab *grab)
 	qdwin_layer_popup_grab_refilter_focus(lp, grab->pointer);
 }
 
+/* D9: is the press inside the grabbed chain — the root popup's box or a
+ * nested submenu that joined its grab? A press on anything else, the layer
+ * parent included, dismisses the chain (xdg_popup grab semantics). */
+static bool
+qdwin_layer_popup_chain_contains(struct qdwin_layer_popup *lp,
+				 struct weston_pointer *pointer)
+{
+	if (qdwin_layer_popup_bbox_contains(lp, pointer->pos))
+		return true;
+	if (wl_list_empty(&lp->nested))
+		return false;
+	struct weston_view *view = weston_compositor_pick_view(
+		pointer->seat->compositor, pointer->pos);
+	if (!view || !view->surface)
+		return false;
+	struct weston_surface *main_s =
+		weston_surface_get_main_surface(view->surface);
+	struct qdwin_layer_popup_nested *n;
+	wl_list_for_each(n, &lp->nested, link) {
+		if (main_s == n->surface)
+			return true;
+	}
+	return false;
+}
+
+/* D9: send popup_done down the chain, topmost first (the order a client
+ * must destroy them in), then to the root. The nested records are dropped
+ * here; the client destroys the popups in answer. */
+static void
+qdwin_layer_popup_dismiss_chain(struct qdwin_layer_popup *lp,
+				struct wl_resource *root_resource)
+{
+	qdwin_xdg_popup_dismiss_layer_grab_fn dismiss =
+		qdwin_xdg_popup_dismiss_layer_grab_sym();
+	struct qdwin_layer_popup_nested *n, *tmp;
+	wl_list_for_each_safe(n, tmp, &lp->nested, link) {
+		if (dismiss)
+			dismiss(n->resource);
+		qdwin_layer_popup_nested_free(n);
+	}
+	if (root_resource && dismiss)
+		dismiss(root_resource);
+}
+
 static void
 qdwin_layer_popup_grab_motion(struct weston_pointer_grab *grab,
 			      const struct weston_pointer_motion_event *event)
@@ -16495,7 +16576,7 @@ qdwin_layer_popup_grab_button(struct weston_pointer_grab *grab,
 	struct weston_pointer *pointer = grab->pointer;
 
 	if (state == WL_POINTER_BUTTON_STATE_PRESSED &&
-	    !qdwin_layer_popup_bbox_contains(lp, pointer->pos)) {
+	    !qdwin_layer_popup_chain_contains(lp, pointer)) {
 		weston_log("qdwin: layer-popup dismissed by outside click "
 			   "at (%.0f,%.0f)\n",
 			   pointer->pos.c.x, pointer->pos.c.y);
@@ -16511,12 +16592,7 @@ qdwin_layer_popup_grab_button(struct weston_pointer_grab *grab,
 		 * a no-op. Then send the one dismiss, then end the grab. */
 		struct wl_resource *r = lp->popup_resource;
 		lp->popup_resource = NULL;
-		if (r) {
-			qdwin_xdg_popup_dismiss_layer_grab_fn dismiss =
-				qdwin_xdg_popup_dismiss_layer_grab_sym();
-			if (dismiss)
-				dismiss(r);
-		}
+		qdwin_layer_popup_dismiss_chain(lp, r);
 		if (lp->grab_active) {
 			lp->grab_active = 0;
 			weston_pointer_end_grab(pointer);
@@ -16580,12 +16656,7 @@ qdwin_layer_popup_grab_cancel(struct weston_pointer_grab *grab)
 	if (grab->pointer && grab->pointer->grab == grab)
 		weston_pointer_end_grab(grab->pointer);
 	grab->pointer = NULL;
-	if (lp->popup_resource) {
-		qdwin_xdg_popup_dismiss_layer_grab_fn dismiss =
-			qdwin_xdg_popup_dismiss_layer_grab_sym();
-		if (dismiss)
-			dismiss(lp->popup_resource);
-	}
+	qdwin_layer_popup_dismiss_chain(lp, lp->popup_resource);
 }
 
 static const struct weston_pointer_grab_interface
@@ -16605,6 +16676,64 @@ static struct qdwin_layer_popup *
 qdwin_layer_popup_for_resource(struct qdwin *qdwin,
 			       struct wl_resource *popup_resource);
 
+/* D9: a nested xdg_popup.grab whose chain ends at a layer popup. Its parent
+ * must be the topmost popup of a chain whose root grab is live on this seat
+ * (xdg_wm_base not_the_topmost_popup / the explicit-grab parent rule); it
+ * then joins that grab rather than replacing it. */
+static bool
+qdwin_layer_popup_nested_grab(struct qdwin *qdwin,
+			      struct wl_resource *popup_resource,
+			      struct weston_surface *popup_surface,
+			      struct weston_surface *parent_surface,
+			      struct weston_seat *wseat)
+{
+	struct qdwin_layer_popup *root = NULL;
+	struct qdwin_layer_surface *ls;
+	wl_list_for_each(ls, &qdwin->layer_surfaces, link) {
+		struct qdwin_layer_popup *lp;
+		wl_list_for_each(lp, &ls->popups, link) {
+			struct weston_surface *top_s = lp->surface;
+			if (!wl_list_empty(&lp->nested)) {
+				struct qdwin_layer_popup_nested *top =
+					wl_container_of(lp->nested.next, top, link);
+				top_s = top->surface;
+			}
+			if (top_s == parent_surface) {
+				root = lp;
+				break;
+			}
+		}
+		if (root)
+			break;
+	}
+	if (!root) {
+		weston_log("qdwin: layer-popup nested grab refused: parent is "
+			   "not the topmost popup of a layer chain\n");
+		return false;
+	}
+	if (!root->grab_active || root->grab_seat != wseat ||
+	    !root->grab.pointer || root->grab.pointer->grab != &root->grab) {
+		weston_log("qdwin: layer-popup nested grab refused: root "
+			   "popup=%p holds no live grab on this seat\n",
+			   (void *)root->popup_resource);
+		return false;
+	}
+	struct qdwin_layer_popup_nested *n = calloc(1, sizeof *n);
+	if (!n) {
+		wl_client_post_no_memory(wl_resource_get_client(popup_resource));
+		return true;
+	}
+	n->root = root;
+	n->resource = popup_resource;
+	n->surface = popup_surface;
+	n->destroy_listener.notify = qdwin_layer_popup_nested_on_destroyed;
+	wl_resource_add_destroy_listener(popup_resource, &n->destroy_listener);
+	wl_list_insert(&root->nested, &n->link);
+	weston_log("qdwin: layer-popup nested grab joined popup=%p root=%p\n",
+		   (void *)popup_resource, (void *)root->popup_resource);
+	return true;
+}
+
 /* plan3 H1: layer-popup grab handler called from vendored libweston's
  * weston_desktop_xdg_popup_protocol_grab when the popup is layer-
  * parented and qdwin has registered this handler. Returning false makes
@@ -16618,8 +16747,6 @@ qdwin_layer_popup_layer_grab_handler(struct wl_resource *popup_resource,
 				     void *user_data)
 {
 	struct qdwin *qdwin = user_data;
-	(void)popup_surface;
-	(void)layer_parent_surface;
 	if (!qdwin || !wseat || !popup_resource)
 		return false;
 
@@ -16642,9 +16769,12 @@ qdwin_layer_popup_layer_grab_handler(struct wl_resource *popup_resource,
 	struct qdwin_layer_popup *lp =
 		qdwin_layer_popup_for_resource(qdwin, popup_resource);
 	if (!lp) {
-		weston_log("qdwin: layer-popup grab refused: popup not "
-			   "tracked\n");
-		return false;
+		/* D9: not a layer popup itself — libweston calls us for a
+		 * nested popup in a layer chain, with the immediate parent
+		 * popup's surface as layer_parent_surface. */
+		return qdwin_layer_popup_nested_grab(qdwin, popup_resource,
+						     popup_surface,
+						     layer_parent_surface, wseat);
 	}
 
 	if (!pointer) {
@@ -16722,6 +16852,7 @@ qdwin_layer_surface_get_popup(struct wl_client *client,
 
 	lp->parent = ls;
 	lp->popup_resource = popup;
+	wl_list_init(&lp->nested);
 	lp->desktop_surface = dsurf;
 	lp->surface = weston_desktop_surface_get_surface(dsurf);
 	lp->view = weston_desktop_surface_create_view(dsurf);

@@ -385,6 +385,46 @@ def check_d9_layer_popup_scope(source):
     return 0
 
 
+def check_d9_nested_chain(source):
+    """A nested submenu joins the root layer popup's grab: a press on it is
+    inside, and a dismissal reaches every popup in the chain."""
+    code = _strip_comments(source)
+    body, err = _function_body(
+        code, r"qdwin_layer_popup_grab_button\s*\(",
+        "qdwin_layer_popup_grab_button")
+    if err:
+        return fail(err)
+    if "qdwin_layer_popup_chain_contains" not in body:
+        return fail("D9: outside-click test ignores the nested chain (a press "
+                    "on a submenu would dismiss the menu)")
+    if "qdwin_layer_popup_dismiss_chain" not in body:
+        return fail("D9: outside click does not dismiss the nested chain")
+    body, err = _function_body(
+        code, r"qdwin_layer_popup_grab_cancel\s*\(",
+        "qdwin_layer_popup_grab_cancel")
+    if err:
+        return fail(err)
+    if "qdwin_layer_popup_dismiss_chain" not in body:
+        return fail("D9: grab cancel does not dismiss the nested chain")
+    body, err = _function_body(
+        code, r"qdwin_layer_popup_layer_grab_handler\s*\(",
+        "qdwin_layer_popup_layer_grab_handler")
+    if err:
+        return fail(err)
+    if "qdwin_layer_popup_nested_grab" not in body:
+        return fail("D9: layer-grab handler does not accept a nested popup")
+    body, err = _function_body(
+        code, r"qdwin_layer_popup_nested_grab\s*\(",
+        "qdwin_layer_popup_nested_grab")
+    if err:
+        return fail(err)
+    if "weston_pointer_start_grab" in body:
+        return fail("D9: a nested popup must join the root grab, not replace it")
+    if "root->grab.pointer->grab != &root->grab" not in body:
+        return fail("D9: nested grab does not require the root grab to be live")
+    return 0
+
+
 def main():
     if len(sys.argv) != 3:
         return fail("usage: test_popup_grab_hardening.py <qdwin.c> "
@@ -396,7 +436,8 @@ def main():
             (check_d6_locked_gate, source),
             (check_d7_show_popup_serial_source, source),
             (check_d7_show_popup_serial_protocol, xml),
-            (check_d9_layer_popup_scope, source)):
+            (check_d9_layer_popup_scope, source),
+            (check_d9_nested_chain, source)):
         rc = check(arg)
         if rc:
             return rc

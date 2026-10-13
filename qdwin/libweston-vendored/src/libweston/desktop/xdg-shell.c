@@ -1434,6 +1434,24 @@ static struct {
 	void *user_data;
 } weston_desktop_xdg_popup_layer_grab;
 
+/* qdistro patch (D9): the layer-parented popup at the root of popup's
+ * parent chain, or NULL when the chain ends at a toplevel (or popup is
+ * itself the root: callers handle parent == NULL separately). */
+static struct weston_desktop_xdg_popup *
+weston_desktop_xdg_popup_layer_root(struct weston_desktop_xdg_popup *popup)
+{
+	struct weston_desktop_xdg_popup *p = popup;
+
+	while (p->parent != NULL) {
+		if (p->parent->role != WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP)
+			return NULL;
+		p = wl_container_of(p->parent, p, base);
+	}
+	if (p == popup || p->layer_parent_surface == NULL)
+		return NULL;
+	return p;
+}
+
 static void
 weston_desktop_xdg_popup_protocol_grab(struct wl_client *wl_client,
 				       struct wl_resource *resource,
@@ -1490,6 +1508,32 @@ weston_desktop_xdg_popup_protocol_grab(struct wl_client *wl_client,
 		wl_resource_post_error(popup->resource,
 				       XDG_POPUP_ERROR_INVALID_GRAB,
 				       "xdg_popup already is mapped");
+		return;
+	}
+
+	/* qdistro patch (D9): a nested popup whose parent chain ends at a
+	 * layer-parented popup belongs to the compositor's layer-popup grab,
+	 * not to the desktop seat machinery. The stock path would install
+	 * an owner-events grab over the compositor's (handing the popup
+	 * client's other surfaces input) and leave the root popup with no
+	 * grab once it ends. Hand it to the layer-grab handler with the
+	 * immediate parent popup's surface as the parent argument; the
+	 * handler validates the serial and the chain. */
+	if (weston_desktop_xdg_popup_layer_grab.func != NULL &&
+	    weston_desktop_xdg_popup_layer_root(popup) != NULL) {
+		bool ok = weston_desktop_xdg_popup_layer_grab.func(
+			popup->resource,
+			weston_desktop_surface_get_surface(popup->base.desktop_surface),
+			weston_desktop_surface_get_surface(popup->parent->desktop_surface),
+			wseat,
+			serial,
+			weston_desktop_xdg_popup_layer_grab.user_data);
+		if (!ok) {
+			wl_resource_post_error(popup->resource,
+				XDG_POPUP_ERROR_INVALID_GRAB,
+				"xdg_popup nested layer-chain grab refused (serial=%u)",
+				serial);
+		}
 		return;
 	}
 

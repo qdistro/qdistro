@@ -569,6 +569,106 @@ def test_layer_popup_grab_stale_serial(display_name):
     return False
 
 
+def test_layer_popup_nested_grab_routed(display_name):
+    """D9: a nested xdg_popup.grab whose parent chain ends at a layer popup
+    is routed to qdwin's layer-grab handler, never to libweston's desktop
+    seat grab (an owner-events grab that would hand the popup client's
+    other surfaces input and orphan the root popup's grab).
+
+    Discriminator: with serial=0 the stock path posts no error (the seat
+    grab start fails and the popup is simply dismissed); the routed path
+    is refused by qdwin and libweston posts INVALID_GRAB with the
+    "nested layer-chain grab refused" message. The live lane
+    qdwin/tests/gui/agent-layer-popup-nested-grab-smoke.sh drives a real
+    serial through the chain.
+    """
+    label = "layer_popup_nested_grab_routed"
+    if not _vendored_libweston_active():
+        print(f"  SKIP [{label}] stock libweston-16 has no layer-chain "
+              f"routing; set QDWIN_USE_VENDORED_LIBWESTON=1")
+        return True
+    d, st = with_globals(display_name)
+    if not (st["xdg"] and st["shell"] and st["compositor"]):
+        print(f"  SKIP [{label}] missing globals")
+        try: d.disconnect()
+        except: pass
+        return True
+
+    parent_surf = st["compositor"].create_surface()
+    ls = st["shell"].get_layer_surface(
+        parent_surf, None,
+        ZwlrLayerShellV1.layer.top.value, "test-nested-grab-parent")
+    ls.set_size(80, 80)
+    ls.set_anchor(ZwlrLayerSurfaceV1.anchor.top.value
+                  | ZwlrLayerSurfaceV1.anchor.left.value)
+    ls.dispatcher["configure"] = lambda _ls, s, w, h: _ls.ack_configure(s)
+    parent_surf.commit()
+    d.roundtrip()
+    if not hasattr(ls, "get_popup"):
+        print(f"  SKIP [{label}] zwlr_layer_surface_v1 < v3 (no get_popup)")
+        try: d.disconnect()
+        except: pass
+        return True
+
+    def positioner():
+        pos = st["xdg"].create_positioner()
+        pos.set_size(40, 40)
+        pos.set_anchor_rect(0, 0, 1, 1)
+        return pos
+
+    # P1: layer-parented root popup. P2: nested submenu on P1.
+    p1_surf = st["compositor"].create_surface()
+    p1_xs = st["xdg"].get_xdg_surface(p1_surf)
+    p1 = p1_xs.get_popup(None, positioner())
+    ls.get_popup(p1)
+    p2_surf = st["compositor"].create_surface()
+    p2_xs = st["xdg"].get_xdg_surface(p2_surf)
+    p2 = p2_xs.get_popup(p1_xs, positioner())
+
+    seat = None
+    reg = d.get_registry()
+    def on_g(_r, name, iface, ver):
+        nonlocal seat
+        if iface == "wl_seat":
+            from pywayland.protocol.wayland import WlSeat
+            seat = _r.bind(name, WlSeat, min(ver, 4))
+    reg.dispatcher["global"] = on_g
+    reg.dispatcher["global_remove"] = lambda r, n: None
+    d.roundtrip()
+    if not seat:
+        print(f"  SKIP [{label}] no wl_seat global")
+        try: d.disconnect()
+        except: pass
+        return True
+
+    start = _stderr_size()
+    p2.grab(seat, 0)
+    try:
+        d.roundtrip(); d.roundtrip()
+    except Exception:
+        pass
+    captured = _read_captured_stderr_since(start)
+    routed = False
+    for m in _WL_ERR_RE.finditer(captured):
+        iface, code, msg = m.group(1), int(m.group(3)), m.group(4)
+        if (iface == "xdg_popup" and code == 0
+                and "nested layer-chain grab refused" in msg):
+            routed = True
+            break
+    del p1
+
+    try: d.disconnect()
+    except: pass
+
+    if routed:
+        print(f"  PASS [{label}] nested grab reached the layer-grab handler")
+        return True
+    print(f"  FAIL [{label}] expected xdg_popup INVALID_GRAB \"nested "
+          f"layer-chain grab refused\" for a nested popup in a layer "
+          f"chain; got: {captured.strip()[:200]}")
+    return False
+
+
 def test_layer_popup_grab_handler_registered(display_name):
     """plan3 post-review: positive discriminator for H1.
 
@@ -747,6 +847,7 @@ def main():
         ("null_parent_popup",           test_null_parent_popup),
         ("layer_popup_grab_stale_serial", test_layer_popup_grab_stale_serial),
         ("layer_popup_grab_handler_registered", test_layer_popup_grab_handler_registered),
+        ("layer_popup_nested_grab_routed", test_layer_popup_nested_grab_routed),
         ("layer_popup_reposition",      test_layer_popup_reposition),
         ("v19_register_hotkey_live",    test_v19_register_hotkey_live),
     ]
