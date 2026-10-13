@@ -6,10 +6,20 @@ that stays open and accepts requests asynchronously.
 
 Authority is not granted to every process running as uid 1000. The broker
 accepts approval and rule/cache control methods only from trusted admin
-control-plane peers: the installed Qt admin app, the installed admin TUI,
-qdshell where applicable, or the root maintenance helper. The system-bus
-policy makes these methods reachable to the admin account, but the server-side
-peer identity check is the authority boundary.
+control-plane peers: the installed Qt admin app, the installed admin TUI, or
+the root maintenance helper (qdshell reads the queue but exercises no
+authority). The system-bus policy makes these methods reachable to the admin
+account; the server-side peer identity check narrows that, but a same-uid
+process can imitate the app's identity, so the **boundary is the admin's
+password**: an admin-uid approval, rule change or revocation also needs the
+polkit action `org.qdistro.broker.approve`. The first approval in the app or
+TUI therefore shows the polkit agent's "Authentication Required" password
+dialog; once the password is accepted, further approvals from that same app
+process go through without a prompt for polkit's retention window
+(`auth_admin_keep`, a few minutes). Cancelling leaves the request pending
+("not authorized"); a bulk approve stops at the cancelled prompt. Details
+and the residual risk: [permissions.md](permissions.md) (authority methods)
+and [password-manager.md § Polkit agent](password-manager.md#polkit-agent).
 
 ## Approving without the graphical app
 
@@ -22,7 +32,7 @@ same files.
 | Command | Run as | What it is |
 |---|---|---|
 | `qdistro-approvals` (`/usr/local/sbin`) | root | CLI: `pending`, `approve`, `deny`, plus the cache and audit commands (`list`, `revoke`, `audit`, `gc`, `audit-gc`) |
-| `qdistro-admin-tui` (`/usr/local/bin`) | the admin user (uid 1000) | Textual approval queue for any terminal (a VT, SSH, a serial console); same scopes and keys as the Qt app, see `tui/SHORTCUTS.md` |
+| `qdistro-admin-tui` (`/usr/local/bin`) | the admin user (uid 1000) | Textual approval queue for any terminal; same scopes and keys as the Qt app, see `tui/SHORTCUTS.md`. Approving asks for the admin password in the polkit agent's dialog on the admin desktop, so from a terminal with no desktop behind it (a bare VT, SSH, a serial console) it can read the queue but not approve — use `qdistro-approvals` as root there |
 
 As root, for example over SSH while the admin's session is down:
 

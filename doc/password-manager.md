@@ -241,6 +241,30 @@ The method is picked per polkit action via fnmatch globs in
 config maps `org.qdistro.pwd.*` to `pam` so vault unlocks require a fresh
 admin password unless admin changes that policy.
 
+Some actions are **forced** onto PAM (`FORCED_PAM_ACTIONS` in
+`polkit/qdistro_polkit_agent.py`): `org.qdistro.broker.approve` (authority
+over the broker's approval queue and rules — its broker route would file the
+authentication into the very queue it unlocks) and
+`org.qdistro.tier5.bridge`. For these the agent picks PAM ahead of the
+`QDISTRO_POLKIT_METHOD` test override and any system or user config line,
+the `QDISTRO_POLKIT_NONINTERACTIVE=allow` seam does not apply, an empty
+password is refused before PAM, and the password is checked for the fixed
+`admin` account (not `QDISTRO_POLKIT_USER`). The config lines naming them
+document the route; they are not what enforces it.
+
+How the PAM route prompts: the agent (a system service running as admin,
+`WAYLAND_DISPLAY=wayland-1`, `XDG_RUNTIME_DIR=/run/user/1000`) spawns
+`/usr/local/bin/qdistro-polkit-prompt` — a small modal Qt dialog titled
+"Authentication Required" showing polkit's message and the action id, with a
+password field — on the admin's qdwin compositor, verifies the typed password
+with python-pam (service `login`), and relays the verdict through the
+broker. The dialog is always graphical, whoever asked: an approval from the
+admin TUI running in a terminal (qterminal) on the admin desktop gets the
+same dialog on the compositor. A TUI with no compositor behind it (a bare
+VT, SSH) has no way to show it, so its authentication fails ("not
+authorized") and the request stays pending; approve with the root CLI
+`qdistro-approvals` there. The prompt times out after 120 s.
+
 ### Status (2026-10-07) — the broker is the privileged responder
 
 polkitd accepts `AuthenticationAgentResponse2` **only from uid 0**, and

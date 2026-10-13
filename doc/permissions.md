@@ -26,32 +26,36 @@
  caller acts on response
 ```
 
-**The relationship to polkit runs the other way round.** The broker contains no
-polkit code and never escalates to a polkit prompt; step 4 is the broker's own
-approval queue. It is `qdistro-polkit-agent` that faces polkit: it registers as
-a polkit `AuthenticationAgent`, receives *upstream* polkit actions (mostly
+**The relationship to polkit runs the other way round.** The broker never
+escalates a *permission request* to a polkit prompt; step 4 is the broker's own
+approval queue. (It does ask polkit one thing — whether an admin-uid caller of
+its *authority* methods holds `org.qdistro.broker.approve`, see the authority
+methods under "Security context (secctx) identity contract" — and it relays
+the agent's verdicts to polkitd as root.) It is `qdistro-polkit-agent` that
+faces polkit: it registers as a polkit `AuthenticationAgent`, receives *upstream* polkit actions (mostly
 `org.freedesktop.*`), maps each action ID into a qdistro-namespaced string
 (`org.freedesktop.X` → `qdistro.X`; anything else → `qdistro.external.<id>`),
 and then calls the broker's `RequestPermission` to get a decision.
 
 A real `org.qdistro.*` polkit namespace does exist, but it is **narrow and
 per-subsystem**, and it does not cover the cross-silo verbs this page used to
-advertise. Twenty action IDs exist in the tree:
+advertise. Twenty-one action IDs exist in the tree:
 
 | Source | Actions |
 |---|---|
+| `broker/org.qdistro.broker.policy` | 1 — `org.qdistro.broker.approve` (installed by `install-broker-for-qdwin.sh`) |
 | `pwd/org.qdistro.pwd.policy` | 1 — `org.qdistro.pwd.unlock` |
 | `print/org.qdistro.print.policy` | 5 — `print.{access,attach-usb,detach-usb,cancel-job,purge-jobs}` |
 | generated inline by `install-tier3-for-vm.sh` | 2 — `tier3.{spawn,cleanup}` |
 | generated inline by `install-tier5-for-vm.sh` | 2 — `tier5.{spawn,cleanup}` |
 | `qdbrowser/polkit/org.qdistro.qdbrowser.policy` | 10 — tabs/downloads/cookies/history/bookmarks/page-extract. **Present in the repo but installed by nothing**: no script copies it to `/usr/share/polkit-1/actions`, and `qdbrowser`'s `pyproject.toml` packages only the Python package. |
 
-So **ten actions ship and ten do not**. Each is scoped to a single subsystem;
+So **eleven actions ship and ten do not**. Each is scoped to a single subsystem;
 none is a cross-silo policy verb. They are not all the same shape:
 only the tier-3 and tier-5 actions carry an
 `org.freedesktop.policykit.exec.path` annotation, i.e. are true `pkexec` helper
-gates. `pwd.unlock` and the five print actions define an authorization ID with
-no exec path, checked by the owning daemon; qdbrowser's ten (uninstalled) are
+gates. `broker.approve`, `pwd.unlock` and the five print actions define an
+authorization ID with no exec path, checked by the owning daemon; qdbrowser's ten (uninstalled) are
 checked from application code via `pkcheck`.
 
 **These actions do reach the qdistro agent**, and that follows from their
@@ -61,14 +65,17 @@ authentication agent is registered whenever its applicable default is
 
 | Action | `allow_any` | `allow_active` |
 |---|---|---|
+| `broker.approve` | `no` | `auth_admin_keep` |
 | `pwd.unlock` | `auth_admin` | `auth_admin_keep` |
 | `print.{attach-usb,detach-usb,cancel-job,purge-jobs}` | `auth_admin` | `auth_admin_keep` |
 | `print.access` | `auth_admin` | `yes` |
 | `tier3.{spawn,cleanup}` | `auth_admin_keep` | `auth_admin_keep` |
 | `tier5.{spawn,cleanup}` | `auth_admin_keep` | `yes` |
 
-So for an active admin session, seven of the ten prompt through the agent and
-therefore land in the broker's queue; `print.access` and the two tier5 actions
+So for an active admin session, seven of the other ten prompt through the
+agent and therefore land in the broker's queue (`broker.approve` prompts too,
+but the agent forces it onto its PAM route: a typed password, never the
+queue); `print.access` and the two tier5 actions
 are allowed outright for the active session and only prompt for a non-active or
 other-uid caller.
 
@@ -247,8 +254,14 @@ resources on the strength of the row listen for this and tear down immediately.
 > [password-manager.md § Polkit agent → Status](password-manager.md#status-2026-10-07--the-broker-is-the-privileged-responder)
 > for the responder's invariants.
 
-Runs in admin's desktop session. The UI is **not a modal dialog stack** but
-a persistent queue-based app (see [admin-approval](admin-approval.md)).
+The agent's routes are described in
+[password-manager.md § Polkit agent](password-manager.md#polkit-agent),
+including the actions forced onto its PAM route
+(`org.qdistro.broker.approve`, the admin's own approval authority).
+
+The approval app runs in admin's desktop session. The UI is **not a modal
+dialog stack** but a persistent queue-based app (see
+[admin-approval](admin-approval.md)).
 Briefly:
 
 - Permission requests land in a queue; admin triages at their own pace.
@@ -692,12 +705,39 @@ authority method and is not admitted to one. Root keeps its maintenance paths (r
 process, and accepting it let that process approve its own `qsu` root request
 with no prompt (fixed 2026-10-13). The read-only methods (`GetPending`,
 `ListRules`, `ListHistory`, `GetRuleSource`) still accept those admin-uid
-clients. Same-uid process identity remains defence in depth (a same-uid
-process can ptrace the real app, or start it against a display it drives);
-requiring an authenticated human for
-approvals of root actions is the follow-up. Root-only lineage, launch,
-portal, and qsu bridge methods require uid 0 plus the expected broker-owned
-helper identity.
+clients.
+
+That /proc identity is **defence in depth, not the boundary**: any
+admin-session process can rewrite its own argv memory (no privilege, no
+ptrace) to read exactly like the installed app. The boundary is an
+**authenticated human**. An admin-uid peer that passes the identity checks
+must also hold the polkit action `org.qdistro.broker.approve`
+(`broker/org.qdistro.broker.policy`: `allow_any` and `allow_inactive` `no`,
+`allow_active` `auth_admin_keep`). The broker asks polkitd
+`CheckAuthorization` for the calling bus name **without** user interaction
+(it never waits on a human) and, if polkit says no, refuses with
+`org.qdistro.AdminBroker1.AuthRequired`; a polkit failure or absent polkitd
+refuses with `AccessDenied` (fail closed). The installed app and TUI react to
+`AuthRequired` by asking polkitd for the action for **their own process**
+(unix-process subject: pid, start time, uid) with AllowUserInteraction;
+polkitd hands that to `qdistro-polkit-agent`, which for this action always
+takes its PAM route (`FORCED_PAM_ACTIONS`: never the broker's own yes/no
+queue, which would be circular, never a user config line or test seam) and
+shows its "Authentication Required" password dialog on the admin's
+compositor. On a verified admin password the app/TUI retry the call once;
+on Cancel they report "not authorized" and the request stays pending.
+`auth_admin_keep` keeps the grant for that process for polkit's retention
+window (a few minutes), and the broker's bus-name check resolves to the same
+process, so a run of approvals prompts once. Root's maintenance paths and
+the in-process workflow engine are not polkit subjects and are not asked.
+
+Residual risk, stated plainly: a same-uid process can still `ptrace` the
+genuine app (the admin uid is not protected from itself), and within the
+`auth_admin_keep` window a process that does so acts with the app's kept
+authorization. It cannot obtain a grant for its own process without the
+password, and the dialog is the agent's, not the caller's. Root-only
+lineage, launch, portal, and qsu bridge methods require uid 0 plus the
+expected broker-owned helper identity.
 
 Doc-only / not yet wired:
 
