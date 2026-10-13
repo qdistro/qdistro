@@ -205,6 +205,7 @@ struct weston_keyboard_modifiers {
 	uint32_t mods_depressed, mods_latched, mods_locked, group;
 };
 struct weston_keyboard {
+	struct weston_surface *focus;
 	struct weston_keyboard_grab *grab;
 	struct weston_keyboard_grab default_grab;
 	struct weston_seat *seat;
@@ -371,6 +372,17 @@ struct qdwin_layer_popup {
 	int grab_active;
 	struct wl_listener seat_destroy_listener;
 	struct weston_seat *grab_seat;
+	struct wl_list nested;
+	struct weston_surface *kbd_restore;
+	struct wl_listener kbd_restore_destroy_listener;
+};
+struct qdwin_layer_popup_nested {
+	struct qdwin_layer_popup *root;
+	struct wl_resource *resource;
+	struct weston_surface *surface;
+	struct wl_listener destroy_listener;
+	struct wl_listener surface_destroy_listener;
+	struct wl_list link;
 };
 enum qdwin_ext_ws_pending_kind { QDWIN_EXT_WS_PENDING_ACTIVATE };
 struct qdwin_ext_ws_pending_op {
@@ -749,6 +761,15 @@ static qdwin_xdg_popup_dismiss_layer_grab_fn
 qdwin_xdg_popup_dismiss_layer_grab_sym(void)
 { return probe_layer_popup_done; }
 
+/* D9 chain keyboard focus. */
+static struct weston_keyboard *
+weston_seat_get_keyboard(struct weston_seat *seat)
+{ return seat ? seat->keyboard_state : NULL; }
+static void
+weston_keyboard_set_focus(struct weston_keyboard *kb,
+			  struct weston_surface *surface)
+{ kb->focus = surface; }
+
 static int switcher_commit_calls;
 static void qdwin_shell_v1_send_switcher_commit(struct wl_resource *r)
 { (void)r; switcher_commit_calls++; }
@@ -792,6 +813,11 @@ SPLICED = [
     "qdwin_activation_tokens_destroy_all",
     "qdwin_primary_seat_seat_destroyed",
     "qdwin_primary_seats_destroy_all",
+    "qdwin_layer_popup_nested_free",
+    "qdwin_layer_popup_kbd_restore_set",
+    "qdwin_layer_popup_chain_keyboard",
+    "qdwin_layer_popup_chain_refocus",
+    "qdwin_layer_popup_dismiss_chain",
     "qdwin_layer_popup_grab_cancel",
     "qdwin_layer_popup_destroy",
     "qdwin_layer_surface_resource_destroy",
@@ -1265,6 +1291,8 @@ static int case_listener_families(void)
 	wl_list_init(&lp->surface_destroy_listener.link);
 	wl_list_init(&lp->popup_resource_destroy_listener.link);
 	wl_list_init(&lp->seat_destroy_listener.link);
+	wl_list_init(&lp->nested);
+	wl_list_init(&lp->kbd_restore_destroy_listener.link);
 	wl_list_insert(&ls->popups, &lp->link);
 	wl_list_insert(&q->layer_surfaces, &ls->link);
 
@@ -1557,7 +1585,81 @@ static struct qdwin_layer_popup *layer_popup_new(int install)
 	wl_list_init(&lp->surface_destroy_listener.link);
 	wl_list_init(&lp->popup_resource_destroy_listener.link);
 	wl_list_init(&lp->seat_destroy_listener.link);
+	wl_list_init(&lp->nested);
+	wl_list_init(&lp->kbd_restore_destroy_listener.link);
 	return lp;
+}
+
+/* D9: a nested submenu record joined to lp's grab, topmost first. */
+static struct qdwin_layer_popup_nested *
+layer_popup_nest(struct qdwin_layer_popup *lp)
+{
+	struct qdwin_layer_popup_nested *n = calloc(1, sizeof *n);
+	assert(n);
+	n->root = lp;
+	wl_list_init(&n->destroy_listener.link);
+	wl_list_init(&n->surface_destroy_listener.link);
+	wl_list_insert(&lp->nested, &n->link);
+	return n;
+}
+
+/* D9: cancel dismisses the whole chain (nested first, then the root) and
+ * drops the records; destroy frees records still joined. Under ASan a
+ * leaked or double-freed record aborts the probe. */
+static int case_layer_popup_nested_chain(void)
+{
+	reset_counters();
+	layer_popup_done_calls = 0;
+	struct wl_resource *popup_res = calloc(1, 64);
+	assert(popup_res);
+	struct qdwin_layer_popup *lp = layer_popup_new(1);
+	lp->popup_resource = popup_res;
+	layer_popup_nest(lp);
+	layer_popup_nest(lp);
+	qdwin_layer_popup_grab_cancel(&lp->grab);
+	CHECK(layer_popup_done_calls == 3,
+	      "chain cancel did not send popup_done to both nested popups "
+	      "and the root");
+	CHECK(wl_list_empty(&lp->nested),
+	      "chain cancel kept nested records");
+	qdwin_layer_popup_destroy(lp);
+	free(popup_res);
+
+	reset_counters();
+	lp = layer_popup_new(1);
+	layer_popup_nest(lp);
+	qdwin_layer_popup_destroy(lp);
+	CHECK(main_pointer.grab == &main_pointer.default_grab,
+	      "destroy with a nested record left the grab installed");
+
+	/* Keyboard focus held by the topmost submenu goes back to the
+	 * pre-chain focus when the chain is dismissed. */
+	reset_counters();
+	static struct qdwin kq;
+	static struct qdwin_layer_surface kls;
+	struct weston_keyboard kb = { 0 };
+	struct weston_surface before = { 0 }, sub = { 0 };
+	wl_signal_init(&before.destroy_signal);
+	kls.qdwin = &kq;
+	kq.locked = 0;
+	struct weston_keyboard *saved_kb = main_seat.keyboard_state;
+	main_seat.keyboard_state = &kb;
+	lp = layer_popup_new(1);
+	lp->parent = &kls;
+	qdwin_layer_popup_kbd_restore_set(lp, &before);
+	struct qdwin_layer_popup_nested *top = layer_popup_nest(lp);
+	top->surface = &sub;
+	kb.focus = &sub;
+	qdwin_layer_popup_dismiss_chain(lp, NULL);
+	CHECK(kb.focus == &before,
+	      "chain dismissal did not hand keyboard focus back");
+	CHECK(lp->kbd_restore == NULL &&
+	      wl_list_empty(&before.destroy_signal.listener_list),
+	      "chain dismissal kept the restore-focus listener");
+	lp->parent = NULL;
+	qdwin_layer_popup_destroy(lp);
+	main_seat.keyboard_state = saved_kb;
+	return 0;
 }
 
 static int case_layer_popup_grab_cancel(void)
@@ -2079,6 +2181,7 @@ int main(void)
 	if ((r = case_xdg_decorations_released())) return r;
 	if ((r = case_lock_attach_promote())) return r;
 	if ((r = case_layer_popup_grab_cancel())) return r;
+	if ((r = case_layer_popup_nested_chain())) return r;
 	if ((r = case_switcher_grab_cancel())) return r;
 	if ((r = case_overlay_grab_cancel())) return r;
 	printf("destroy-drain behaviour: 18 cases OK\n");
@@ -2104,6 +2207,7 @@ def main():
     return_types = {
         "qdwin_neutralize_binding_resource": "enum wl_iterator_result",
         "qdwin_overlay_grab_keyboard": "struct weston_keyboard *",
+        "qdwin_layer_popup_chain_keyboard": "struct weston_keyboard *",
     }
     for name in SPLICED:
         body = extract(qdwin_c, name)

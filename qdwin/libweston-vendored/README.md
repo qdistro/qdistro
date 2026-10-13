@@ -24,6 +24,7 @@ VERSION                              # "16.0.0" (must match Tumbleweed package)
 0001-allow-null-parent-xdg-popup.patch
 0005-inert-relative-pointer.patch     # inert relptr/tablet-seat objects for a released seat
 0006-rdp-disable-extsecurity-freerdp-3.32.patch  # pin HYBRID_EX off: backend has no credssp-capable auth
+0007-layer-chain-nested-popup-grab.patch  # D9: a submenu of a layer popup joins the layer grab
 src/                                 # weston @ tag 16.0.0 with desktop/xdg-shell.c patched in-place
 build-libweston.sh                   # one-shot build wrapper
 README.md                            # this file

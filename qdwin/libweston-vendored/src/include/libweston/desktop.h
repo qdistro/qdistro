@@ -245,7 +245,13 @@ weston_desktop_xdg_popup_get_geometry(struct wl_resource *popup_resource,
  * error. The handler is responsible for installing whatever pointer /
  * keyboard grab semantics it needs (e.g. dismiss-on-outside-click) and
  * returning true. Returning false makes libweston post the usual
- * INVALID_GRAB error. */
+ * INVALID_GRAB error.
+ *
+ * D9: libweston also calls it for a *nested* popup whose parent chain ends
+ * at a layer-parented popup (a submenu of a layer menu). Then
+ * `layer_parent_surface` is the immediate parent popup's surface, not a
+ * layer surface; the handler tells the two apart by whether it tracks
+ * `popup_resource` as a layer popup. */
 typedef bool (*weston_desktop_xdg_popup_layer_grab_handler_t)(
 	struct wl_resource *popup_resource,
 	struct weston_surface *popup_surface,

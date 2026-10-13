@@ -31,6 +31,8 @@
 #       be installed (see QDWIN_VENDORED_LIBWESTON_PREFIX).
 #   QDWIN_VENDORED_LIBWESTON_PREFIX  (default /usr/libexec/qdistro/qdwin-libweston)
 #       prefix whose lib64/ holds the vendored libweston-16.so.
+#   QDWIN_VENDORED_LIBWESTON_LIBDIR  (default $PREFIX/lib64)
+#       directory holding it, when the prefix uses lib/ or a multiarch dir.
 #
 # Phase 1.6 / fable-testing p2-qdwin-compiled-tests.md item 2.
 
@@ -139,9 +141,12 @@ QDWIN_USE_VENDORED_LIBWESTON="${QDWIN_USE_VENDORED_LIBWESTON:-0}"
 QDWIN_VENDORED_LIBWESTON_PREFIX="${QDWIN_VENDORED_LIBWESTON_PREFIX:-/usr/libexec/qdistro/qdwin-libweston}"
 VENDORED_LD=""
 if [ "$QDWIN_USE_VENDORED_LIBWESTON" = "1" ]; then
-    vso="$QDWIN_VENDORED_LIBWESTON_PREFIX/lib64/$LIBWESTON_SONAME.so.$LIBWESTON_LIBVER"
+    # LIBDIR: the vendored builder installs to lib64, lib or a multiarch
+    # dir; meson passes the dependency's own libdir.
+    vlibdir="${QDWIN_VENDORED_LIBWESTON_LIBDIR:-$QDWIN_VENDORED_LIBWESTON_PREFIX/lib64}"
+    vso="$vlibdir/$LIBWESTON_SONAME.so.$LIBWESTON_LIBVER"
     [ -f "$vso" ] || die "QDWIN_USE_VENDORED_LIBWESTON=1 but no vendored .so at $vso"
-    VENDORED_LD="$QDWIN_VENDORED_LIBWESTON_PREFIX/lib64"
+    VENDORED_LD="$vlibdir"
     echo "protocol-suite: using vendored libweston at $QDWIN_VENDORED_LIBWESTON_PREFIX" >&2
 fi
 
@@ -186,6 +191,8 @@ require-input=false
 idle-time=0
 EOF
 
+# --fake-seat: the popup-grab tests need a wl_seat to name in xdg_popup.grab
+# (no input is ever injected, so every grab serial stays stale).
 # allowed_uid defaults to the weston process uid (== us), so qdwin_shell_v1
 # is advertised to our client and the v19 register_hotkey test can run.
 # Build LD_LIBRARY_PATH WITHOUT a trailing colon: an empty component makes
@@ -197,7 +204,7 @@ else
 fi
 XDG_RUNTIME_DIR="$RUNDIR" \
 LD_LIBRARY_PATH="$WESTON_LD" \
-    weston --backend=headless-backend.so --renderer=pixman \
+    weston --backend=headless-backend.so --renderer=pixman --fake-seat \
            --config="$STAGE/weston.ini" --socket="$WLD" \
            >"$WLOG" 2>&1 &
 WPID=$!
