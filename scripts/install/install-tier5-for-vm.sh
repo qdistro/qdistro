@@ -16,11 +16,17 @@
 #   - /etc/systemd/system/qdistro-tier5-vmapps-scan.{service,path,timer}
 #     — boot + path-triggered + periodic reconcile of the dynamic
 #     VM-app catalogue (vmapps-dynamic)
-#   - /usr/share/polkit-1/actions/org.qdistro.tier5.policy — polkit
-#     rule that lets the *active* admin session pkexec the spawn
-#     helper without re-authenticating. qdshell's VMApps.launch
-#     invokes via pkexec so the launcher (admin uid) can drive the
-#     spawn helper (which needs root for libvirt/virsh).
+#   - /usr/libexec/qdistro/qdistro-tier5-bridge — a root-owned COPY of
+#     tier5-vm/qdistro_tier5_bridge.py (never a wrapper into the source
+#     tree: pkexec runs it as root, so every byte it executes must be
+#     root-owned).
+#   - /usr/share/polkit-1/actions/org.qdistro.tier5.policy — the
+#     org.qdistro.tier5.bridge action, pinned to that path. The VM
+#     lifecycle itself (qdistro-tier5-spawn / -cleanup) runs as admin
+#     with no polkit action at all; only the bridge — the uid-0 launcher
+#     parent of the tagged waypipe client and its RegisterLaunch —
+#     escalates, and it requires the admin's password
+#     (auth_admin_keep; the qdistro polkit agent forces PAM for it).
 #
 # Usage:
 #   bash install-tier5-for-vm.sh <qdistro-src-root>
@@ -82,11 +88,20 @@ install -d /usr/share/qdistro/tier5
 install -m 0644 "$TIER5_DIR/domain-template.xml" \
     /usr/share/qdistro/tier5/domain-template.xml
 
+# --- the root launch bridge ---
+BRIDGE=/usr/libexec/qdistro/qdistro-tier5-bridge
+[ -f "$TIER5_DIR/qdistro_tier5_bridge.py" ] \
+    || { echo "[install-tier5] FATAL: $TIER5_DIR/qdistro_tier5_bridge.py missing" >&2; exit 1; }
+install -d -o root -g root -m 0755 /usr/libexec/qdistro
+install -o root -g root -m 0755 "$TIER5_DIR/qdistro_tier5_bridge.py" "$BRIDGE"
+echo "[install-tier5] installed $BRIDGE"
+
 # --- polkit policy ---
-# Allow the active admin session to pkexec qdistro-tier5-spawn without
-# password. allow_active=yes is the qdistro single-tenant convention —
-# the admin user is trusted on their own login session. allow_any
-# requires admin-auth in case some other uid (cron, ssh-user) tries.
+# One action, for the bridge only. auth_admin_keep: an admin-session
+# process cannot start a root launcher parent or mint a launch record
+# without the admin's password (retained for polkit's keep window — a
+# fresh prompt per launch is not promised). Inactive sessions are refused;
+# a caller outside a session must authenticate as admin every time.
 POLKIT_DIR=/usr/share/polkit-1/actions
 install -d "$POLKIT_DIR"
 cat > "$POLKIT_DIR/org.qdistro.tier5.policy" <<'EOF'
@@ -98,34 +113,38 @@ cat > "$POLKIT_DIR/org.qdistro.tier5.policy" <<'EOF'
   <vendor>qdistro</vendor>
   <vendor_url>https://qdistro.org/</vendor_url>
 
-  <action id="org.qdistro.tier5.spawn">
-    <description>Spawn a tier-5 per-app VM</description>
-    <message>Authentication required to spawn an isolated VM</message>
+  <action id="org.qdistro.tier5.bridge">
+    <description>Start the display bridge of an isolated VM app</description>
+    <message>Authentication required to show an isolated VM app on your desktop</message>
     <icon_name>application-x-executable</icon_name>
     <defaults>
-      <allow_any>auth_admin_keep</allow_any>
+      <allow_any>auth_admin</allow_any>
       <allow_inactive>no</allow_inactive>
-      <allow_active>yes</allow_active>
+      <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/qdistro-tier5-spawn</annotate>
-    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
-  </action>
-
-  <action id="org.qdistro.tier5.cleanup">
-    <description>Tear down a tier-5 per-app VM</description>
-    <message>Authentication required to tear down an isolated VM</message>
-    <icon_name>application-x-executable</icon_name>
-    <defaults>
-      <allow_any>auth_admin_keep</allow_any>
-      <allow_inactive>no</allow_inactive>
-      <allow_active>yes</allow_active>
-    </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/qdistro-tier5-cleanup</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/qdistro/qdistro-tier5-bridge</annotate>
   </action>
 </policyconfig>
 EOF
 chmod 0644 "$POLKIT_DIR/org.qdistro.tier5.policy"
 echo "[install-tier5] installed polkit policy at $POLKIT_DIR/org.qdistro.tier5.policy"
+
+# --- upgrade: retire the root-run lifecycle's state ---
+# Before the bridge split the lifecycle ran as root and kept a root
+# ownership registry plus bind-mounted boot disks. Neither is read any
+# more; a still-running guest keeps its open disk across the lazy unmount
+# and is re-adopted by its app, whose next define points at the overlay.
+rm -rf /var/lib/qdistro/tier5-owned
+_retire_tier5_runtime() {
+    local m
+    for m in /run/qdistro-tier5-boot/*.qcow2; do
+        [ -e "$m" ] || continue
+        umount -l "$m" 2>/dev/null || true
+    done
+    rm -rf /run/qdistro-tier5-boot /run/qdistro-tier5
+}
+live_only "retire /run/qdistro-tier5-boot mounts and /run/qdistro-tier5 locks" \
+    _retire_tier5_runtime
 
 # --- dynamic VM-app catalogue reconcile units (vmapps-dynamic) -------
 #

@@ -838,6 +838,15 @@ check_req "[tier5] cleanup wrapper"       /usr/local/bin/qdistro-tier5-cleanup
 check_req "[tier5] guest-image build wrapper" /usr/local/bin/qdistro-tier5-build-guest-image
 check_req "[tier5] domain template"       /usr/share/qdistro/tier5/domain-template.xml
 check_req "[tier5] polkit action"         /usr/share/polkit-1/actions/org.qdistro.tier5.policy
+# The lifecycle runs as admin; the only root step is the launch bridge, a
+# root-owned copy whose polkit action requires the admin's password and is
+# pinned to its path. The root ownership registry of the old root-run
+# lifecycle must not survive an upgrade.
+check_req "[tier5] launch bridge"         /usr/libexec/qdistro/qdistro-tier5-bridge
+check_line "[tier5] bridge action"        /usr/share/polkit-1/actions/org.qdistro.tier5.policy '<action id="org\.qdistro\.tier5\.bridge">'
+check_line "[tier5] bridge needs the admin password" /usr/share/polkit-1/actions/org.qdistro.tier5.policy '<allow_active>auth_admin_keep</allow_active>'
+check_line "[tier5] bridge exec.path pinned" /usr/share/polkit-1/actions/org.qdistro.tier5.policy 'policykit\.exec\.path">/usr/libexec/qdistro/qdistro-tier5-bridge<'
+check_absent "[tier5] root ownership registry retired" /var/lib/qdistro/tier5-owned
 # vmapps-dynamic: the guest-base .desktop scanner, the reconcile service
 # run, and its boot/path/timer units keep the launcher's VM catalogue in
 # sync with whatever the tier-5 base actually ships.
