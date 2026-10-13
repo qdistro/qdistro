@@ -221,7 +221,11 @@ def test_signal_no_permission():
         pytest.skip("running as root, can signal init")
     # In a PID namespace (nix build sandbox, some containers) pid 1 can be
     # our own process tree — signalling it would kill the test run itself.
-    if os.stat("/proc/1").st_uid == os.geteuid():
+    try:
+        pid1_uid = os.stat("/proc/1").st_uid
+    except OSError:
+        pid1_uid = None
+    if pid1_uid == os.geteuid():
         pytest.skip("pid 1 belongs to this user (PID namespace)")
     with pytest.raises(PermissionError):
         os.kill(1, signal.SIGTERM)

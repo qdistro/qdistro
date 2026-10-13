@@ -441,8 +441,10 @@ run_logged() {
         cd "$workdir" || exit 2
         # Run host steps headless: offscreen Qt platform (as before) so Qt
         # widget/print tests need no real display. (The old qterminator
-        # test_print_terminal "printer hang" was a modal QMessageBox from an
-        # incomplete test fake, not the host printer; the suite runs in full.)
+        # test_print_terminal hang was mostly a modal QMessageBox from an
+        # incomplete test fake. QPrinter still probes the default printer, but
+        # host steps run in a container with no CUPS socket, so the probe
+        # returns at once; the suite runs in full.)
         # The per-step timeout below is the universal backstop for any wedge.
         export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
         if [ "$step_to" -gt 0 ]; then

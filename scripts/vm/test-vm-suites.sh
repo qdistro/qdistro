@@ -105,7 +105,7 @@ SUITES=(
     "qdlocker|qdlocker|tests/unit"
     "qdfileman|qdfileman|"
     "qnotebook|qnotebook|"
-    "qdterm|qdterm|--ignore=tests/test_print_terminal.py"
+    "qdterm|qdterm|"
 )
 [[ $PHASES == *" pytest "* ]] || SUITES=()
 BATS_FILES=()
