@@ -30,7 +30,8 @@
 #   receiver's GetLastReceived probe.
 # - As uid 2000, call RelayMessage(target_uid=3000, ...) — cross-silo
 #   path, prove admin approval is required (request enqueued, then
-#   admin Decides, then audit row records approver).
+#   root Decides — admin-uid busctl may not exercise authority — then
+#   the audit row records it).
 # - For qsu: spawn `qsu -u root id` and assert it returns uid=0.
 
 set -u
@@ -256,10 +257,11 @@ fi
 # ---------------------------------------------------------------------------
 # We don't need a second live receiver for the assertion — the request
 # is enqueued in the broker's pending table and audited regardless of
-# whether the forward later succeeds. Auto-approve via admin's
-# DecideRequest (broker.GetPending → first id → DecideRequest allow
+# whether the forward later succeeds. Auto-decide via a root
+# DecideRequest (broker.GetPending → first id → DecideRequest deny
 # once) so the request closes out and the audit row carries
-# source="prompt" + approver_uid=1000.
+# source="prompt" (approver_uid=0: the broker refuses authority
+# methods from an admin-uid busctl).
 
 CROSS_TARGET_UID=3000
 CROSS_PAYLOAD="cross-silo-$$"
@@ -289,7 +291,8 @@ if echo "$PENDING" | grep -q "app.send-to:$CROSS_TARGET_UID"; then
     note "cross-silo RelayMessage enqueued — admin approval required"
 fi
 
-# Approve from admin (DecideRequest enforces uid 1000 as approver).
+# Decide as root: the broker refuses DecideRequest from an admin-uid
+# busctl (only the installed admin app/TUI/qdshell may approve as admin).
 # busctl serialises GetPending's aa{sv} as `"id" i <N>` (space-
 # separated, not "id":N), so the RID extractor matches "id" + the
 # variant type tag + the integer.
@@ -298,7 +301,7 @@ RID=$(echo "$PENDING" \
     | head -1 \
     | grep -oE '[0-9]+$')
 if [ -n "$RID" ]; then
-    runuser -u admin -- busctl --system call \
+    busctl --system call \
         org.qdistro.AdminBroker1 \
         /org/qdistro/AdminBroker1 \
         org.qdistro.AdminBroker1 \
@@ -359,7 +362,8 @@ cat >/etc/qdistro/rules.d/s102-qsu-id.yaml <<'YAMLEOF'
 YAMLEOF
 # Reload the broker rules without bouncing the daemon (avoids
 # tearing down the pending receivers / silo state we just set up).
-runuser -u admin -- busctl --system call \
+# Root: ReloadRules is an authority method admin-uid busctl may not call.
+busctl --system call \
     org.qdistro.AdminBroker1 \
     /org/qdistro/AdminBroker1 \
     org.qdistro.AdminBroker1 \

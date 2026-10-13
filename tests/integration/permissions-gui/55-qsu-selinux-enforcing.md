@@ -3,8 +3,8 @@
 <!-- qci:visual: none -->
 
 **What**: flip SELinux into Enforcing mode, run `qsu /bin/id` as
-`work` (uid 2000), drive admin's approve via D-Bus (no GUI; the
-admin app stays headless for this scenario), let the privileged
+`work` (uid 2000), drive the approve via D-Bus (no GUI; the
+admin app stays headless for this scenario; root decides), let the privileged
 exec stream `id`'s output back, and assert that no new AVC
 denials touching the qdistro-tier1 / qdistro-broker / qdistro-pwd
 domains were logged in `audit.log` against the baseline cursor.
@@ -131,11 +131,16 @@ vm_ssh '
 '
 ```
 
-### S3 — admin approves via D-Bus (no GUI)
+### S3 — admin finds the request, root approves via D-Bus (no GUI)
+
+The admin uid reads the pending row (GetPending is read-only); the
+DecideRequest itself runs as root: the broker refuses authority methods
+from admin-uid inline Python (only the installed admin app/TUI/qdshell
+may approve as admin).
 
 ```bash
 vm_ssh '
-  runuser -u admin -- python3 - <<PYEOF
+  rid=$(runuser -u admin -- python3 - <<PYEOF
 import dbus
 bus = dbus.SystemBus()
 obj = bus.get_object("org.qdistro.AdminBroker1",
@@ -143,7 +148,16 @@ obj = bus.get_object("org.qdistro.AdminBroker1",
 iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
 rows = [r for r in iface.GetPending() if str(r.get("action", "")).startswith("qsu.exec:")]
 assert rows, "no qsu pending row found"
-rid = int(rows[0]["id"])
+print(int(rows[0]["id"]))
+PYEOF
+  ) || { echo "admin GetPending failed: $rid"; exit 1; }
+  python3 - "$rid" <<PYEOF
+import dbus, sys
+bus = dbus.SystemBus()
+obj = bus.get_object("org.qdistro.AdminBroker1",
+                     "/org/qdistro/AdminBroker1")
+iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
+rid = int(sys.argv[1])
 iface.DecideRequest(rid, "allow", "forever_argv")
 print("decided rid=", rid)
 PYEOF
@@ -155,7 +169,7 @@ vm_ssh 'source /tmp/qci-gui-waiters.sh; bg_log 55-qsu 3; echo "rc=$(bg_rc 55-qsu
 ```
 
 **Assert**:
-- The admin-side python prints `decided rid= <some int>` (no
+- The root-side python prints `decided rid= <some int>` (no
   ScopeNotPermitted, no AccessDenied — confirms broker's own
   enforcing-domain reachability + the qdistro-broker SELinux
   module's allow rules cover its workload).

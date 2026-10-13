@@ -672,12 +672,23 @@ is not authority. The broker accepts them only from the expected qdshell
 process identity (installed executable/profile path, plus SELinux type when
 the policy supplies one).
 
-Privileged control-plane methods (`DecideRequest`, cache revocation/listing,
-and rule save/reload surfaces) likewise do not trust uid 1000 alone. The
-broker requires the authenticated peer to match the installed admin GUI,
-admin TUI, qdshell, or root maintenance helper identity. Root-only lineage,
-launch, portal, and qsu bridge methods require uid 0 plus the expected
-broker-owned helper identity.
+Privileged control-plane methods likewise do not trust uid 1000 alone. The
+**authority** methods — `DecideRequest`, `SaveRule`, `DeleteRule`,
+`ReloadRules`, `RevokeApproval`, `RevokeAllForUid` — accept an admin-uid
+peer only when it is the installed admin GUI/TUI (`/usr/local/bin/qdistro-
+admin-approval-app`, `/usr/local/bin/qdistro-admin-tui`, started as the
+interpreter's script argument, no loader/interpreter injection in its
+environment) or qdshell; root keeps its maintenance paths (root
+`busctl`/`dbus-send`/`gdbus` naming the method, `qdistro-approvals`, inline
+`python3 -c`). An admin-uid D-Bus CLI or inline Python is any admin-session
+process, and accepting it let that process approve its own `qsu` root request
+with no prompt (fixed 2026-10-13). The read-only methods (`GetPending`,
+`ListRules`, `ListHistory`, `GetRuleSource`) still accept those admin-uid
+clients. Same-uid process identity remains defence in depth (a same-uid
+process can ptrace the real app); requiring an authenticated human for
+approvals of root actions is the follow-up. Root-only lineage, launch,
+portal, and qsu bridge methods require uid 0 plus the expected broker-owned
+helper identity.
 
 Doc-only / not yet wired:
 

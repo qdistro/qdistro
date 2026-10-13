@@ -35,9 +35,12 @@
 #   2  ERROR — preconditions not met (VM_SSH_PORT unset, ssh unreachable)
 #   3  SKIP  — VM is config-pinned permissive (cannot reach Enforcing)
 #
-# This runner is intentionally headless: it drives admin's approve via
-# the broker D-Bus API (runuser -u admin -- python3) rather than the GUI,
-# because scenario 55 is about the SELinux transitions, not the Qt UI.
+# This runner is intentionally headless: it drives the approve via the
+# broker D-Bus API rather than the GUI, because scenario 55 is about the
+# SELinux transitions, not the Qt UI. The admin uid finds the pending row
+# (runuser -u admin -- python3, read-only GetPending); root approves it,
+# because the broker refuses DecideRequest from admin-uid inline Python
+# (only the installed admin app/TUI/qdshell may exercise authority).
 #
 # LIVE-RUN STATUS: this runner is COMPLETE and `bash -n`-clean, but the
 # end-to-end PASS requires a live enforcing VM with SSH transport
@@ -160,12 +163,14 @@ vm_ssh '
 '
 
 # ---------------------------------------------------------------------------
-# S3 — admin approves via D-Bus (no GUI), then collect qsu output
+# S3 — admin finds the request, root approves via D-Bus (no GUI), then
+#      collect qsu output
 # ---------------------------------------------------------------------------
 
-echo "=== S3: admin approve over D-Bus ==="
+echo "=== S3: admin finds, root approves over D-Bus ==="
+# shellcheck disable=SC2016  # $rid expands in the guest shell, not here
 DECIDE=$(vm_ssh '
-  runuser -u admin -- python3 - <<PYEOF
+  rid=$(runuser -u admin -- python3 - <<PYEOF
 import dbus
 bus = dbus.SystemBus()
 obj = bus.get_object("org.qdistro.AdminBroker1",
@@ -174,14 +179,23 @@ iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
 rows = [r for r in iface.GetPending()
         if str(r.get("action", "")).startswith("qsu.exec:")]
 assert rows, "no qsu pending row found"
-rid = int(rows[0]["id"])
+print(int(rows[0]["id"]))
+PYEOF
+  ) || { echo "admin GetPending failed: $rid"; exit 1; }
+  python3 - "$rid" <<PYEOF
+import dbus, sys
+bus = dbus.SystemBus()
+obj = bus.get_object("org.qdistro.AdminBroker1",
+                     "/org/qdistro/AdminBroker1")
+iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
+rid = int(sys.argv[1])
 iface.DecideRequest(rid, "allow", "forever_argv")
 print("decided rid=", rid)
 PYEOF
 ')
 echo "$DECIDE"
 if ! grep -q "decided rid=" <<<"$DECIDE"; then
-    fail "admin D-Bus approve did not report a decision (broker reachability" \
+    fail "D-Bus approve (admin GetPending, root DecideRequest) did not report a decision (broker reachability" \
          "/ qdistro_broker AVC?): $DECIDE"
 fi
 

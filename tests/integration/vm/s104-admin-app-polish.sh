@@ -6,8 +6,12 @@
 # Runs INSIDE the test VM (staged at /tmp/s104.sh by admin-app-polish.bats).
 #
 # HONESTY NOTE: this driver never starts the admin app and sends no key or
-# click. It calls the broker methods the app calls, as the admin uid, and
-# checks the broker's answers. Its PASS strings therefore name broker
+# click. It calls the broker methods the app calls and checks the broker's
+# answers. Requests are filed as the admin uid; the authority methods
+# (DecideRequest, SaveRule, ReloadRules) are called as ROOT, because the
+# broker refuses them from an admin-uid inline Python/busctl peer (only the
+# installed admin app/TUI/qdshell may exercise authority as admin) — Step 5
+# asserts that refusal. Its PASS strings therefore name broker
 # behaviour only. (They used to read "Ctrl+Y approves pending request",
 # "tray badge shows pending count", "ScopeNotPermitted shows modal error":
 # UI claims this driver never checked.) The real UI paths are proved by the
@@ -16,11 +20,12 @@
 #
 # PASS contract (asserted by admin-app-polish.bats):
 #   PASS: broker ListRules returns an on-disk YAML rule
-#   PASS: broker SaveRule (as admin) writes a rule that ListRules returns
+#   PASS: broker SaveRule (as root) writes a rule that ListRules returns
 #   PASS: broker ListHistory(100) returns the audit row of a decided request
 #   PASS: broker GetPending counts a newly queued request
-#   PASS: broker DecideRequest(allow) as admin removes the request from GetPending
-#   PASS: broker DecideRequest(deny) as admin removes the request from GetPending
+#   PASS: broker DecideRequest(allow) as root removes the request from GetPending
+#   PASS: broker refuses DecideRequest from admin-uid inline Python (AccessDenied)
+#   PASS: broker DecideRequest(deny) as root removes the request from GetPending
 #   PASS: broker SaveRule of a rule-from-request YAML is returned by ListRules
 #   PASS: broker DecideRequest rejects an unknown scope with a D-Bus error
 #
@@ -33,9 +38,9 @@
 # - Step 5 drives the broker calls the app's approve/deny/rule-editor
 #   actions end in (not the actions themselves):
 #     - Enqueue a pending request via RequestPermission.
-#     - Call DecideRequest(allow) as the admin uid; assert the rid left
-#       GetPending.
-#     - Repeat with decision=deny.
+#     - Call DecideRequest(allow) as root; assert the rid left GetPending.
+#     - Assert an admin-uid inline-Python DecideRequest is AccessDenied,
+#       then deny as root.
 #     - SaveRule a rule-from-request shaped YAML; assert ListRules has it.
 # - Step 6 deliberately calls DecideRequest with a syntactically valid
 #   but unknown scope to provoke a BadArgument; for the proper
@@ -76,17 +81,23 @@ if [ -z "$ADMIN_USER" ]; then
 fi
 note "admin user: $ADMIN_USER (uid=$ADMIN_UID)"
 
-# Helper: run a Python snippet as the admin user. Used for every
-# DecideRequest/RequestPermission so peer-uid auth on the broker side
-# sees the right caller. dbus-python is the only stable busctl-of-
+# Helper: run a Python snippet as the admin user. Used for
+# RequestPermission and the read-only GetPending so the broker sees the
+# admin uid as the caller. dbus-python is the only stable busctl-of-
 # python-objects path that supports a{sv} dicts cleanly.
 admin_py() {
     runuser -u "$ADMIN_USER" -- python3 - "$@"
 }
 
+# Helper: the same, as root. Used for the authority methods
+# (DecideRequest, SaveRule): the broker refuses them from admin-uid
+# inline Python and accepts root `python3 -`.
+root_py() {
+    python3 -
+}
+
 # Helper: enqueue a pending request via RequestPermission (called as
-# admin so peer-uid is the admin uid; the broker's peer-uid recheck on
-# DecideRequest then succeeds for the same admin uid). Returns the rid
+# admin so the request's peer uid is the admin uid). Returns the rid
 # on stdout. We tag each request with a unique correlation id in
 # details so retrieval is unambiguous.
 enqueue() {
@@ -102,11 +113,11 @@ print(int(rid))
 PYEOF
 }
 
-# Helper: decide a request. Echoes "ok" on success, the DBus error
-# name on failure.
+# Helper: decide a request (as root). Echoes "ok" on success, the DBus
+# error name on failure.
 decide() {
     local rid="$1" decision="$2" scope="$3"
-    admin_py <<PYEOF
+    root_py <<PYEOF
 import sys, dbus
 bus = dbus.SystemBus()
 obj = bus.get_object("$BUS", "$OBJ")
@@ -149,7 +160,7 @@ PYEOF
 }
 
 # Clean any stale pending state from a prior run.
-admin_py <<'PYEOF' >/dev/null 2>&1 || true
+root_py <<'PYEOF' >/dev/null 2>&1 || true
 import dbus
 bus = dbus.SystemBus()
 obj = bus.get_object("org.qdistro.AdminBroker1", "/org/qdistro/AdminBroker1")
@@ -198,8 +209,8 @@ note "Step 2: SaveRule writes a new YAML and ListRules picks it up"
 
 yaml_body=$'- name: "P07 SaveRule test rule"\n  decision: allow\n  match:\n    action: "test.p07.saverule"\n    uid: 2001\n  scope: "once"\n  rationale: "Created via SaveRule"\n'
 
-# SaveRule requires admin uid — call from the admin user.
-admin_py <<PYEOF >/dev/null
+# SaveRule is an authority method — call it as root.
+root_py <<PYEOF >/dev/null
 import dbus
 bus = dbus.SystemBus()
 obj = bus.get_object("$BUS", "$OBJ")
@@ -212,7 +223,7 @@ sleep 1
 
 if busctl call "$BUS" "$OBJ" "$BUS" ListRules \
     | grep -q "P07 SaveRule test rule"; then
-    echo "PASS: broker SaveRule (as admin) writes a rule that ListRules returns"
+    echo "PASS: broker SaveRule (as root) writes a rule that ListRules returns"
 else
     err "SaveRule did not result in a visible rule"
 fi
@@ -284,7 +295,7 @@ result=$(decide "$APPROVE_RID" allow once)
 [ "$result" = "ok" ] || err "DecideRequest(allow) failed for rid=$APPROVE_RID"
 sleep 0.3
 if [ "$(has_rid "$APPROVE_RID")" = "no" ]; then
-    echo "PASS: broker DecideRequest(allow) as admin removes the request from GetPending"
+    echo "PASS: broker DecideRequest(allow) as root removes the request from GetPending"
 else
     err "rid=$APPROVE_RID still pending after DecideRequest(allow)"
 fi
@@ -293,19 +304,37 @@ fi
 DENY_RID=$(enqueue "test.p07.ctrl_n" "p07-ctrl-n-$$")
 [ "$DENY_RID" -ge 0 ] 2>/dev/null \
     || err "RequestPermission(test.p07.ctrl_n) failed"
+# An admin-uid inline-Python peer is any admin-session process: the broker
+# must refuse it an authority method (no self-approval without the app).
+self_err=$(admin_py <<PYEOF
+import dbus
+bus = dbus.SystemBus()
+iface = dbus.Interface(bus.get_object("$BUS", "$OBJ"), "$BUS")
+try:
+    iface.DecideRequest(int("$DENY_RID"), "allow", "once")
+    print("__no_exception__")
+except dbus.DBusException as e:
+    print(e.get_dbus_name() or "")
+PYEOF
+)
+if [ "$self_err" = "$BUS.AccessDenied" ] && [ "$(has_rid "$DENY_RID")" = "yes" ]; then
+    echo "PASS: broker refuses DecideRequest from admin-uid inline Python (AccessDenied)"
+else
+    err "admin-uid inline-Python DecideRequest was not refused: [$self_err]"
+fi
 result=$(decide "$DENY_RID" deny once)
 [ "$result" = "ok" ] || err "DecideRequest(deny) failed for rid=$DENY_RID"
 sleep 0.3
 if [ "$(has_rid "$DENY_RID")" = "no" ]; then
-    echo "PASS: broker DecideRequest(deny) as admin removes the request from GetPending"
+    echo "PASS: broker DecideRequest(deny) as root removes the request from GetPending"
 else
     err "rid=$DENY_RID still pending after DecideRequest(deny)"
 fi
 
-# Rule from request: SaveRule as admin with the YAML shape the app's
+# Rule from request: SaveRule (as root) with the YAML shape the app's
 # RuleEditorDialog sends (broker.save_rule).
 ctrl_r_yaml=$'- name: "P07 Ctrl+R test rule"\n  decision: allow\n  match:\n    action: "test.p07.ctrl_r"\n    uid: 2002\n  scope: "once"\n  rationale: "Created via Ctrl+R workflow"\n'
-admin_py <<PYEOF >/dev/null
+root_py <<PYEOF >/dev/null
 import dbus
 bus = dbus.SystemBus()
 obj = bus.get_object("$BUS", "$OBJ")
@@ -338,7 +367,7 @@ SCOPE_RID=$(enqueue "test.p07.scopenotpermitted" "p07-scope-$$")
 [ "$SCOPE_RID" -ge 0 ] 2>/dev/null \
     || err "RequestPermission for scope test failed"
 
-scope_err=$(admin_py <<PYEOF
+scope_err=$(root_py <<PYEOF
 import sys, dbus
 bus = dbus.SystemBus()
 obj = bus.get_object("$BUS", "$OBJ")

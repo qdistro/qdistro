@@ -190,7 +190,8 @@ _ARGV_REQUIRED_SCOPES = frozenset((
 ))
 
 _PYTHON_EXE_BASENAMES = frozenset((
-    "python", "python3", "python3.11", "python3.12", "python3.14",
+    "python", "python3", "python3.11", "python3.12", "python3.13",
+    "python3.14",
 ))
 
 _ADMIN_CONTROL_DIRECT_EXES = frozenset((
@@ -205,6 +206,33 @@ _ADMIN_CONTROL_SCRIPT_PATHS = frozenset((
     "/usr/local/bin/qdistro-admin-approval-app",
     "/usr/local/bin/qdistro-admin-tui",
 ))
+
+# Control-plane methods that grant, remove or reshape authority (an
+# approval, a rule, a revocation). An admin-uid peer may call these only as
+# an installed admin control program: a generic D-Bus CLI or inline Python
+# run as admin is any admin-session process — approving its own qsu root
+# request that way was an unauthenticated admin->root path (fable
+# 2026-10-13). Root keeps its maintenance paths.
+_ADMIN_CONTROL_AUTHORITY_METHODS = frozenset((
+    "DecideRequest",
+    "DeleteRule",
+    "ReloadRules",
+    "RevokeAllForUid",
+    "RevokeApproval",
+    "SaveRule",
+))
+
+# Installed (root-owned) admin control scripts. The /home/admin copies in
+# _ADMIN_CONTROL_SCRIPT_PATHS are admin-writable dev installs: they may read
+# control-plane state but never exercise authority.
+_ADMIN_CONTROL_INSTALLED_SCRIPT_PATHS = frozenset((
+    "/usr/local/bin/qdistro-admin-approval-app",
+    "/usr/local/bin/qdistro-admin-tui",
+))
+
+# Interpreter flags an installed admin script may be started with before its
+# path; anything else (-c, -m, -, a different script) is not that program.
+_ADMIN_CONTROL_PYTHON_FLAGS = frozenset(("-I", "-s", "-E", "-B", "-u"))
 
 _ADMIN_CONTROL_STDIN_METHODS = frozenset((
     "DecideRequest",
@@ -1858,6 +1886,11 @@ class Broker(dbus.service.Object):
             if base in _PYTHON_EXE_BASENAMES:
                 if set(argv) & _ROOT_ADMIN_CONTROL_EXES:
                     return True, "trusted root admin-control Python helper"
+                # Root is the TCB: root maintenance and test harnesses use
+                # inline Python for the control methods.
+                if (method in _ADMIN_CONTROL_STDIN_METHODS
+                        and argv[1:2] in (["-"], ["-c"])):
+                    return True, "trusted root inline Python control script"
             return False, f"root admin-control helper exe {exe_s!r} is not trusted"
         if int(uid) != ADMIN_UID:
             return False, f"uid {uid} is not admin uid {ADMIN_UID}"
@@ -1871,6 +1904,8 @@ class Broker(dbus.service.Object):
             return True, "trusted direct admin-control exe"
 
         argv = self._peer_cmdline(pid)
+        if method in _ADMIN_CONTROL_AUTHORITY_METHODS:
+            return self._peer_is_installed_admin_script(pid, exe_s, argv)
         if (exe_s in _ROOT_DBUS_CLIENT_EXES
                 and _argv_names_broker_call(argv, method)):
             return True, "trusted admin-control D-Bus helper"
@@ -1895,6 +1930,38 @@ class Broker(dbus.service.Object):
         if label:
             return False, f"untrusted admin-control exe={exe_s!r} type={typ!r}"
         return False, f"untrusted admin-control exe={exe_s!r}"
+
+    def _peer_is_installed_admin_script(self, pid: int, exe_s: str,
+                                        argv: list[str]
+                                        ) -> tuple[bool, str]:
+        """An admin-uid peer exercising authority must BE an installed
+        admin control script: a python interpreter whose script argument
+        (after plain interpreter flags) is the root-owned installed path,
+        with no loader/interpreter injection in its environment. A path
+        merely present somewhere in argv (`python3 -c CODE <path>`) or an
+        admin-writable dev copy does not qualify.
+
+        Same-uid identity stays defence-in-depth (a same-uid process can
+        ptrace the real app); approvals of root actions still need an
+        authenticated human — tracked as the structural follow-up."""
+        if os.path.basename(exe_s) not in _PYTHON_EXE_BASENAMES:
+            return False, (f"untrusted admin-control exe={exe_s!r} for an "
+                           f"authority method")
+        i = 1
+        while i < len(argv) and argv[i] in _ADMIN_CONTROL_PYTHON_FLAGS:
+            i += 1
+        script = argv[i] if i < len(argv) else ""
+        if script not in _ADMIN_CONTROL_INSTALLED_SCRIPT_PATHS:
+            return False, ("Python peer is not an installed admin control "
+                           "script")
+        env_names = self._peer_environ_names(pid)
+        if env_names is None:
+            return False, "admin control script environment unreadable"
+        bad = env_names & _POLKIT_AGENT_DANGEROUS_ENV
+        if bad:
+            return False, (f"admin control script carries injection "
+                           f"environment {sorted(bad)}")
+        return True, "trusted installed admin control script"
 
     def _require_admin_control_peer(self, sender, conn, method: str
                                     ) -> tuple[int, int, str, int]:

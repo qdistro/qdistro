@@ -70,6 +70,7 @@ def test_installed_admin_app_can_read_and_decide_pending(
     broker.set_peer(uid=ADMIN_UID, pid=1234, exe=argv[0])
     monkeypatch.setattr(B, "_read_proc_cmdline", lambda _pid: argv)
     monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
+    monkeypatch.setattr(B, "_read_proc_environ_names", lambda _pid: set())
 
     pending = broker.GetPending()
     assert [int(row["id"]) for row in pending] == [rid]
@@ -134,12 +135,32 @@ def test_arbitrary_uid_1000_cannot_save_rule(broker):
 
 
 @pytest.mark.parametrize("python_flag", ["-", "-c"])
-def test_live_admin_python_can_save_rule(broker, monkeypatch, python_flag):
+def test_live_admin_python_cannot_save_rule(broker, monkeypatch, python_flag):
+    """Inline admin Python is any admin-session process: it may not write
+    an allow rule (authority method)."""
     broker.set_peer(uid=ADMIN_UID, pid=1234, exe="/usr/bin/python3")
     monkeypatch.setattr(B, "_read_proc_cmdline",
                         lambda _pid: ["python3", python_flag])
     monkeypatch.setattr(B, "_read_proc_identity",
                         lambda _pid: ("/usr/bin/python3", 1))
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
+
+    with pytest.raises(dbus.DBusException) as ei:
+        broker.SaveRule(
+            "good.yaml",
+            "- name: good\n"
+            "  decision: allow\n"
+            "  match:\n"
+            "    action: 'qdistro.test.identity'\n",
+        )
+    assert ei.value.get_dbus_name() == B.BUS_NAME + ".AccessDenied"
+
+
+@pytest.mark.parametrize("python_flag", ["-", "-c"])
+def test_root_inline_python_can_save_rule(broker, monkeypatch, python_flag):
+    broker.set_peer(uid=0, pid=1234, exe="/usr/bin/python3")
+    monkeypatch.setattr(B, "_read_proc_cmdline",
+                        lambda _pid: ["python3", python_flag])
 
     path = broker.SaveRule(
         "good.yaml",
@@ -190,9 +211,12 @@ def test_root_dbus_client_wrong_method_is_denied(broker, monkeypatch):
     assert ei.value.get_dbus_name() == B.BUS_NAME + ".AccessDenied"
 
 
-def test_admin_dbus_client_can_reload_rules_when_method_named(
+def test_admin_dbus_client_cannot_reload_rules_even_when_method_named(
         broker, monkeypatch):
+    """ReloadRules is an authority method: an admin-uid busctl is any
+    admin-session process (fable 2026-10-13)."""
     broker.set_peer(uid=ADMIN_UID, pid=1234, exe="/usr/bin/busctl")
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
     monkeypatch.setattr(
         B,
         "_read_proc_cmdline",
@@ -207,7 +231,9 @@ def test_admin_dbus_client_can_reload_rules_when_method_named(
         ],
     )
 
-    assert broker.ReloadRules()[0] >= 0
+    with pytest.raises(dbus.DBusException) as ei:
+        broker.ReloadRules()
+    assert ei.value.get_dbus_name() == B.BUS_NAME + ".AccessDenied"
 
 
 def test_admin_dbus_client_control_wrong_method_is_denied(
@@ -409,11 +435,9 @@ def test_pytest_env_does_not_trust_synthetic_admin_exes(broker, monkeypatch):
     assert "untrusted" in reason or "not an installed" in reason or "not trusted" in reason
 
 
-def test_admin_python_c_can_revoke_all_for_uid(broker, monkeypatch):
-    """RevokeAllForUid is an admin-control method the s57 probe drives
-    via `python3 -c`. It must be in _ADMIN_CONTROL_STDIN_METHODS so a
-    live admin interpreter is trusted the same way as DecideRequest.
-    """
+def test_admin_python_c_cannot_revoke_all_for_uid(broker, monkeypatch):
+    """RevokeAllForUid is an authority method: inline admin Python is
+    refused (root inline Python keeps the s57 probe path)."""
     broker.set_peer(uid=ADMIN_UID, pid=1234, exe="/usr/bin/python3")
     monkeypatch.setattr(B, "_read_proc_identity",
                         lambda _pid: ("/usr/bin/python3", 1))
@@ -425,5 +449,91 @@ def test_admin_python_c_can_revoke_all_for_uid(broker, monkeypatch):
         uid=ADMIN_UID, pid=1234, exe="/usr/bin/python3",
         method="RevokeAllForUid",
     )
+    assert not ok, reason
+    ok, reason = broker._peer_matches_admin_control(
+        uid=0, pid=1234, exe="/usr/bin/python3", method="RevokeAllForUid")
     assert ok, reason
-    assert "RevokeAllForUid" in B._ADMIN_CONTROL_STDIN_METHODS
+
+
+def _bus_argv(method):
+    return ["busctl", "--system", "call", B.BUS_NAME, B.OBJ_PATH,
+            B.BUS_NAME, method]
+
+
+@pytest.mark.cheat_aware(
+    protects="An admin-session process cannot approve its own qsu root request",
+    severity="critical",
+    cheats=["trust admin-uid busctl naming the method",
+            "trust inline admin python for authority methods"],
+    consequence="any admin-uid process gets root with no prompt: qsu id; "
+                "busctl GetPending; busctl DecideRequest <id> allow once",
+)
+@pytest.mark.parametrize("exe,argv", [
+    ("/usr/bin/busctl", _bus_argv("DecideRequest")),
+    ("/usr/bin/dbus-send", ["dbus-send", "--system", f"--dest={B.BUS_NAME}",
+                            B.OBJ_PATH, f"{B.BUS_NAME}.DecideRequest"]),
+    ("/usr/bin/gdbus", ["gdbus", "call", "--system", "--dest", B.BUS_NAME,
+                        "--object-path", B.OBJ_PATH, "--method",
+                        f"{B.BUS_NAME}.DecideRequest"]),
+    ("/usr/bin/python3", ["python3", "-c", "o.DecideRequest(1,'allow','once')"]),
+    ("/usr/bin/python3", ["python3", "-"]),
+    # An installed path merely present in argv is not that program.
+    ("/usr/bin/python3", ["python3", "-c", "CODE",
+                          "/usr/local/bin/qdistro-admin-approval-app"]),
+    # An admin-writable dev copy never exercises authority.
+    ("/usr/bin/python3", ["python3",
+                          "/home/admin/qdistro/admin_app/qdistro_admin_app.py"]),
+])
+def test_admin_session_process_cannot_self_approve(broker, monkeypatch, exe,
+                                                    argv):
+    rid = broker._enqueue(ADMIN_UID, 0, PEER_EXE, 0, "qsu.exec:root", {},
+                          delegated=True)
+    broker.set_peer(uid=ADMIN_UID, pid=1234, exe=exe)
+    monkeypatch.setattr(B, "_read_proc_cmdline", lambda _pid: argv)
+    monkeypatch.setattr(B, "_read_proc_identity", lambda _pid: (exe, 1))
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
+    monkeypatch.setattr(B, "_read_proc_environ_names", lambda _pid: set())
+
+    with pytest.raises(dbus.DBusException) as ei:
+        broker.DecideRequest(rid, "allow", "once")
+    assert ei.value.get_dbus_name() == B.BUS_NAME + ".AccessDenied"
+    assert broker._pending[rid].decision is None
+
+
+def test_admin_busctl_may_still_read_pending(broker, monkeypatch):
+    """Read-only control methods keep the admin-uid D-Bus CLI path."""
+    broker.set_peer(uid=ADMIN_UID, pid=1234, exe="/usr/bin/busctl")
+    monkeypatch.setattr(B, "_read_proc_cmdline",
+                        lambda _pid: _bus_argv("GetPending"))
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
+    assert broker.GetPending() == []
+
+
+@pytest.mark.parametrize("env", [{"LD_PRELOAD"}, {"PYTHONPATH"},
+                                 {"PYTHONSTARTUP"}])
+def test_installed_admin_app_with_injection_env_cannot_decide(
+        broker, monkeypatch, env):
+    argv = _installed_admin_app_argv()
+    rid = broker._enqueue(NON_ADMIN_UID, 0, PEER_EXE, 0,
+                          "qdistro.test.installed-admin-app", {},
+                          delegated=False, one_shot=True)
+    broker.set_peer(uid=ADMIN_UID, pid=1234, exe=argv[0])
+    monkeypatch.setattr(B, "_read_proc_cmdline", lambda _pid: argv)
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
+    monkeypatch.setattr(B, "_read_proc_environ_names", lambda _pid: env)
+    with pytest.raises(dbus.DBusException):
+        broker.DecideRequest(rid, "allow", "once")
+    assert broker._pending[rid].decision is None
+
+
+def test_installed_admin_app_with_isolated_flag_can_decide(broker,
+                                                            monkeypatch):
+    rid = broker._enqueue(NON_ADMIN_UID, 0, PEER_EXE, 0,
+                          "qdistro.test.installed-admin-app", {},
+                          delegated=False, one_shot=True)
+    argv = ["/usr/bin/python3", "-I", "/usr/local/bin/qdistro-admin-tui"]
+    broker.set_peer(uid=ADMIN_UID, pid=1234, exe="/usr/bin/python3")
+    monkeypatch.setattr(B, "_read_proc_cmdline", lambda _pid: argv)
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
+    monkeypatch.setattr(B, "_read_proc_environ_names", lambda _pid: set())
+    assert broker.DecideRequest(rid, "allow", "once") == "applied"
