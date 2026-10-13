@@ -678,8 +678,14 @@ Privileged control-plane methods likewise do not trust uid 1000 alone. The
 `RunAuditGc` — accept an admin-uid peer only when it is the installed admin
 GUI/TUI (`/usr/local/bin/qdistro-admin-approval-app`,
 `/usr/local/bin/qdistro-admin-tui`) run isolated (`python3 -I`, so no
-admin-writable user-site code loads) as the interpreter's script argument,
-with no loader/interpreter injection in its environment. qdshell calls no
+admin-writable user-site code loads) as the interpreter's script argument
+with no further arguments (Qt parses `-platformpluginpath` from argv), and
+with an environment inside an allowlist (`_ADMIN_CONTROL_ENV_ALLOW`: session,
+locale, display and terminal names; `QT_QPA_PLATFORM` only `wayland` or
+`offscreen`). Toolkit loaders honour their own variables (`QT_PLUGIN_PATH`,
+`GTK_MODULES`, `GCONV_PATH`, …), so any other name refuses. The installed app
+and TUI re-exec themselves into that shape before loading a toolkit, so every
+legitimate launch conforms whatever its launcher passed. qdshell calls no
 authority method and is not admitted to one. Root keeps its maintenance paths (root
 `busctl`/`dbus-send`/`gdbus` naming the method, `qdistro-approvals`, inline
 `python3 -c`). An admin-uid D-Bus CLI or inline Python is any admin-session
@@ -687,7 +693,8 @@ process, and accepting it let that process approve its own `qsu` root request
 with no prompt (fixed 2026-10-13). The read-only methods (`GetPending`,
 `ListRules`, `ListHistory`, `GetRuleSource`) still accept those admin-uid
 clients. Same-uid process identity remains defence in depth (a same-uid
-process can ptrace the real app); requiring an authenticated human for
+process can ptrace the real app, or start it against a display it drives);
+requiring an authenticated human for
 approvals of root actions is the follow-up. Root-only lineage, launch,
 portal, and qsu bridge methods require uid 0 plus the expected broker-owned
 helper identity.

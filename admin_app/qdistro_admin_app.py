@@ -20,6 +20,50 @@ import sys
 import time as _time
 from datetime import datetime
 
+# Re-exec the installed approval app into the broker's authority environment
+# before any toolkit loads. The broker lets an admin-uid peer approve only
+# as this installed script, run `python3 -I` with no arguments and an
+# environment inside its allowlist (_ADMIN_CONTROL_ENV_ALLOW in
+# broker/qdistro_admin_broker.py; a unit test keeps the two aligned):
+# libraries below honour their own plugin/module variables (QT_PLUGIN_PATH,
+# GTK_MODULES, GIO_EXTRA_MODULES, GCONV_PATH, …), and Qt parses
+# -platformpluginpath from argv. Every launcher's environment is session
+# noise; this makes each legitimate launch conform. Dev copies are not
+# trusted with authority and run as started.
+_INSTALLED_PATH = "/usr/local/bin/qdistro-admin-approval-app"
+_AUTHORITY_ENV_ALLOW = frozenset((
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ",
+    "TERM", "COLORTERM", "NO_COLOR", "COLUMNS", "LINES",
+    "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_SESSION_ID", "XDG_SESSION_TYPE", "XDG_SESSION_CLASS", "XDG_SEAT",
+    "XDG_VTNR", "QT_QPA_PLATFORM", "QDISTRO_ADMIN_APP_READY_FILE",
+))
+_AUTHORITY_QPA_VALUES = frozenset(("wayland", "offscreen"))
+
+
+def _authority_env(environ) -> dict:
+    env = {k: v for k, v in environ.items()
+           if k in _AUTHORITY_ENV_ALLOW or k.startswith("LC_")}
+    if env.get("QT_QPA_PLATFORM", "wayland") not in _AUTHORITY_QPA_VALUES:
+        del env["QT_QPA_PLATFORM"]
+    env["PATH"] = "/usr/bin:/bin"
+    return env
+
+
+def _reexec_for_authority() -> None:
+    if sys.argv[0] != _INSTALLED_PATH:
+        return
+    env = _authority_env(os.environ)
+    if (sys.flags.isolated and len(sys.argv) == 1
+            and env == dict(os.environ)):
+        return
+    os.execve("/usr/bin/python3",
+              ["/usr/bin/python3", "-I", _INSTALLED_PATH], env)
+
+
+if __name__ == "__main__":
+    _reexec_for_authority()
+
 import dbus
 import dbus.mainloop.glib
 import dbus.service
@@ -4149,7 +4193,8 @@ def main():
         format="[admin_app] %(levelname)s: %(message)s",
         stream=sys.stderr,
     )
-    app = QApplication(sys.argv)
+    # Qt never sees caller arguments (-platformpluginpath loads code).
+    app = QApplication(sys.argv[:1])
     attach_presentation(app)
     broker = BrokerBridge()
     session = _maybe_session_bridge()

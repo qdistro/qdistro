@@ -238,6 +238,26 @@ _ADMIN_CONTROL_INSTALLED_SCRIPT_PATHS = frozenset((
 # (.pth, usercustomize) inside the trusted app before it says a word.
 _ADMIN_CONTROL_PYTHON_FLAGS = frozenset(("-I", "-s", "-E", "-B", "-u"))
 
+# The ONLY environment an authority-exercising admin script may carry. -I
+# shuts out Python's own injection, but the libraries under the app honour
+# their own (QT_PLUGIN_PATH, QML2_IMPORT_PATH, GTK_MODULES, GIO_EXTRA_MODULES,
+# GCONV_PATH, OPENSSL_CONF, LD_*, …) and that list has no end — so this is
+# an allowlist, not a denylist (sol bsa r2). The installed app and TUI
+# re-exec themselves into exactly this environment before importing any
+# toolkit (_AUTHORITY_ENV_ALLOW in each; a unit test keeps the three
+# aligned), so every legitimate launch conforms whatever its launcher passed.
+_ADMIN_CONTROL_ENV_ALLOW = frozenset((
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ",
+    "TERM", "COLORTERM", "NO_COLOR", "COLUMNS", "LINES",
+    "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_SESSION_ID", "XDG_SESSION_TYPE", "XDG_SESSION_CLASS", "XDG_SEAT",
+    "XDG_VTNR", "QT_QPA_PLATFORM", "QDISTRO_ADMIN_APP_READY_FILE",
+))
+_ADMIN_CONTROL_ENV_ALLOW_PREFIX = "LC_"
+# QT_QPA_PLATFORM names a platform plugin from Qt's root-owned plugin dir;
+# the value may also carry platform options, so it is pinned outright.
+_ADMIN_CONTROL_QPA_VALUES = frozenset(("wayland", "offscreen"))
+
 _ADMIN_CONTROL_STDIN_METHODS = frozenset((
     "DecideRequest",
     "DeleteRule",
@@ -817,6 +837,23 @@ def _read_proc_cmdline(pid: int) -> list[str]:
         if part:
             out.append(part.decode("utf-8", "replace"))
     return out
+
+
+def _read_proc_environ(pid: int) -> dict[str, str] | None:
+    """/proc/<pid>/environ as a dict, or None when unreadable (fail
+    closed). Only the authority predicate uses it, and it compares values
+    of allowlisted names only; nothing is logged."""
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    env: dict[str, str] = {}
+    for part in raw.split(b"\x00"):
+        if part:
+            k, _, v = part.partition(b"=")
+            env[k.decode("utf-8", "replace")] = v.decode("utf-8", "replace")
+    return env
 
 
 def _read_proc_environ_names(pid: int) -> set[str] | None:
@@ -1795,6 +1832,9 @@ class Broker(dbus.service.Object):
     def _peer_environ_names(self, pid: int) -> set[str] | None:
         return _read_proc_environ_names(pid)
 
+    def _peer_environ(self, pid: int) -> dict[str, str] | None:
+        return _read_proc_environ(pid)
+
     def _peer_ppid(self, pid: int) -> int | None:
         return _read_proc_ppid(pid)
 
@@ -1943,8 +1983,9 @@ class Broker(dbus.service.Object):
         """An admin-uid peer exercising authority must BE an installed
         admin control script: a python interpreter started isolated (-I)
         whose script argument (after plain interpreter flags) is the
-        root-owned installed path, with no loader/interpreter injection in
-        its environment. A path
+        root-owned installed path and its LAST argument (trailing args
+        reach Qt's own -platformpluginpath parsing), with an environment
+        inside _ADMIN_CONTROL_ENV_ALLOW. A path
         merely present somewhere in argv (`python3 -c CODE <path>`) or an
         admin-writable dev copy does not qualify.
 
@@ -1964,13 +2005,21 @@ class Broker(dbus.service.Object):
         if "-I" not in argv[1:i]:
             return False, ("installed admin control script not run isolated "
                            "(python3 -I)")
-        env_names = self._peer_environ_names(pid)
-        if env_names is None:
+        if len(argv) != i + 1:
+            return False, ("installed admin control script started with "
+                           "arguments")
+        env = self._peer_environ(pid)
+        if env is None:
             return False, "admin control script environment unreadable"
-        bad = env_names & _POLKIT_AGENT_DANGEROUS_ENV
+        bad = sorted(k for k in env
+                     if k not in _ADMIN_CONTROL_ENV_ALLOW
+                     and not k.startswith(_ADMIN_CONTROL_ENV_ALLOW_PREFIX))
         if bad:
-            return False, (f"admin control script carries injection "
-                           f"environment {sorted(bad)}")
+            return False, (f"admin control script environment outside the "
+                           f"allowlist {bad}")
+        if ("QT_QPA_PLATFORM" in env
+                and env["QT_QPA_PLATFORM"] not in _ADMIN_CONTROL_QPA_VALUES):
+            return False, "admin control script QT_QPA_PLATFORM not allowed"
         return True, "trusted installed admin control script"
 
     def _require_admin_control_peer(self, sender, conn, method: str

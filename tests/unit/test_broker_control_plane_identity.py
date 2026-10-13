@@ -71,7 +71,7 @@ def test_installed_admin_app_can_read_and_decide_pending(
     broker.set_peer(uid=ADMIN_UID, pid=1234, exe=argv[0])
     monkeypatch.setattr(B, "_read_proc_cmdline", lambda _pid: argv)
     monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
-    monkeypatch.setattr(B, "_read_proc_environ_names", lambda _pid: set())
+    monkeypatch.setattr(B, "_read_proc_environ", lambda _pid: {})
 
     pending = broker.GetPending()
     assert [int(row["id"]) for row in pending] == [rid]
@@ -496,7 +496,7 @@ def test_admin_session_process_cannot_self_approve(broker, monkeypatch, exe,
     monkeypatch.setattr(B, "_read_proc_cmdline", lambda _pid: argv)
     monkeypatch.setattr(B, "_read_proc_identity", lambda _pid: (exe, 1))
     monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
-    monkeypatch.setattr(B, "_read_proc_environ_names", lambda _pid: set())
+    monkeypatch.setattr(B, "_read_proc_environ", lambda _pid: {})
 
     with pytest.raises(dbus.DBusException) as ei:
         broker.DecideRequest(rid, "allow", "once")
@@ -513,8 +513,20 @@ def test_admin_busctl_may_still_read_pending(broker, monkeypatch):
     assert broker.GetPending() == []
 
 
-@pytest.mark.parametrize("env", [{"LD_PRELOAD"}, {"PYTHONPATH"},
-                                 {"PYTHONSTARTUP"}])
+@pytest.mark.parametrize("env", [
+    {"LD_PRELOAD": "/home/admin/x.so"}, {"PYTHONPATH": "/home/admin"},
+    {"PYTHONSTARTUP": "/home/admin/s.py"},
+    # Toolkit loaders -I does not cover (sol bsa r2): an allowlist, so any
+    # unlisted name refuses, not only these.
+    {"QT_PLUGIN_PATH": "/home/admin/plugins"},
+    {"QT_QPA_PLATFORM_PLUGIN_PATH": "/home/admin/plugins"},
+    {"QML2_IMPORT_PATH": "/home/admin/qml"},
+    {"GTK_MODULES": "evil"}, {"GIO_EXTRA_MODULES": "/home/admin/gio"},
+    {"GCONV_PATH": "/home/admin/gconv"}, {"OPENSSL_CONF": "/home/admin/c"},
+    {"SOME_FUTURE_LOADER_PATH": "/home/admin"},
+    {"QT_QPA_PLATFORM": "xcb"},
+    {"QT_QPA_PLATFORM": "wayland:/home/admin"},
+])
 def test_installed_admin_app_with_injection_env_cannot_decide(
         broker, monkeypatch, env):
     argv = _installed_admin_app_argv()
@@ -524,7 +536,7 @@ def test_installed_admin_app_with_injection_env_cannot_decide(
     broker.set_peer(uid=ADMIN_UID, pid=1234, exe=argv[0])
     monkeypatch.setattr(B, "_read_proc_cmdline", lambda _pid: argv)
     monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
-    monkeypatch.setattr(B, "_read_proc_environ_names", lambda _pid: env)
+    monkeypatch.setattr(B, "_read_proc_environ", lambda _pid: env)
     with pytest.raises(dbus.DBusException):
         broker.DecideRequest(rid, "allow", "once")
     assert broker._pending[rid].decision is None
@@ -539,7 +551,7 @@ def test_installed_admin_app_with_isolated_flag_can_decide(broker,
     broker.set_peer(uid=ADMIN_UID, pid=1234, exe="/usr/bin/python3")
     monkeypatch.setattr(B, "_read_proc_cmdline", lambda _pid: argv)
     monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
-    monkeypatch.setattr(B, "_read_proc_environ_names", lambda _pid: set())
+    monkeypatch.setattr(B, "_read_proc_environ", lambda _pid: {})
     assert broker.DecideRequest(rid, "allow", "once") == "applied"
 
 
@@ -568,3 +580,109 @@ def test_qdshell_is_not_an_authority_caller(broker, monkeypatch):
     ok, _ = broker._peer_matches_admin_control(
         uid=ADMIN_UID, pid=1234, exe="/usr/bin/qs", method="DecideRequest")
     assert not ok
+
+
+@pytest.mark.parametrize("extra", [
+    ["-platformpluginpath", "/home/admin/plugins", "-platform", "evil"],
+    ["anything"],
+])
+def test_installed_admin_app_with_arguments_cannot_decide(broker, monkeypatch,
+                                                          extra):
+    """Qt parses -platformpluginpath from argv; the trusted shape takes no
+    arguments at all (sol bsa r2)."""
+    rid = broker._enqueue(NON_ADMIN_UID, 0, PEER_EXE, 0,
+                          "qdistro.test.installed-admin-app", {},
+                          delegated=False, one_shot=True)
+    argv = _installed_admin_app_argv() + extra
+    broker.set_peer(uid=ADMIN_UID, pid=1234, exe=argv[0])
+    monkeypatch.setattr(B, "_read_proc_cmdline", lambda _pid: argv)
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
+    monkeypatch.setattr(B, "_read_proc_environ", lambda _pid: {})
+    with pytest.raises(dbus.DBusException):
+        broker.DecideRequest(rid, "allow", "once")
+    assert broker._pending[rid].decision is None
+
+
+_ROOT = Path(__file__).resolve().parents[2]
+_AUTHORITY_SCRIPTS = {
+    "/usr/local/bin/qdistro-admin-approval-app":
+        _ROOT / "admin_app/qdistro_admin_app.py",
+    "/usr/local/bin/qdistro-admin-tui": _ROOT / "tui/qdistro_admin_tui.py",
+}
+_REEXEC_NAMES = {"_INSTALLED_PATH", "_AUTHORITY_ENV_ALLOW",
+                 "_AUTHORITY_QPA_VALUES", "_authority_env",
+                 "_reexec_for_authority"}
+
+
+def _load_reexec(src: Path, argv, environ, isolated):
+    """Run the script's re-exec helper alone (the module imports
+    Qt/Textual) against a fake os/sys; returns (namespace, execve calls)."""
+    import ast
+    import types
+    tree = ast.parse(src.read_text())
+    keep = []
+    for node in tree.body:
+        names = ({t.id for t in node.targets if isinstance(t, ast.Name)}
+                 if isinstance(node, ast.Assign)
+                 else {getattr(node, "name", None)})
+        if names & _REEXEC_NAMES:
+            keep.append(node)
+    assert {getattr(n, "name", None) or n.targets[0].id
+            for n in keep} == _REEXEC_NAMES, src
+    calls = []
+    fake_os = types.SimpleNamespace(
+        environ=dict(environ),
+        execve=lambda path, args, env: calls.append((path, args, env)))
+    fake_sys = types.SimpleNamespace(
+        argv=list(argv), flags=types.SimpleNamespace(isolated=isolated))
+    ns = {"os": fake_os, "sys": fake_sys}
+    exec(compile(ast.Module(body=keep, type_ignores=[]), str(src),  # noqa: S102
+                 "exec"), ns)
+    ns["_reexec_for_authority"]()
+    return ns, calls
+
+
+@pytest.mark.parametrize("installed", sorted(_AUTHORITY_SCRIPTS))
+def test_authority_scripts_share_the_broker_env_allowlist(installed):
+    ns, _ = _load_reexec(_AUTHORITY_SCRIPTS[installed], [installed], {}, 1)
+    assert ns["_INSTALLED_PATH"] == installed
+    assert installed in B._ADMIN_CONTROL_INSTALLED_SCRIPT_PATHS
+    assert ns["_AUTHORITY_ENV_ALLOW"] == B._ADMIN_CONTROL_ENV_ALLOW
+    assert ns["_AUTHORITY_QPA_VALUES"] == B._ADMIN_CONTROL_QPA_VALUES
+
+
+@pytest.mark.parametrize("installed", sorted(_AUTHORITY_SCRIPTS))
+def test_installed_script_reexecs_into_a_trusted_shape(broker, monkeypatch,
+                                                       installed):
+    """A launch with session noise, plugin paths and Qt arguments re-execs
+    into exactly the shape the broker grants authority to."""
+    dirty = {"HOME": "/home/admin", "WAYLAND_DISPLAY": "wayland-1",
+             "XDG_RUNTIME_DIR": "/run/user/1000", "LC_ALL": "C.UTF-8",
+             "QT_PLUGIN_PATH": "/home/admin/plugins", "GTK_MODULES": "evil",
+             "QT_QPA_PLATFORM": "xcb", "PATH": "/home/admin/bin:/usr/bin"}
+    _, calls = _load_reexec(
+        _AUTHORITY_SCRIPTS[installed],
+        [installed, "-platformpluginpath", "/home/admin/plugins"], dirty, 0)
+    assert len(calls) == 1
+    path, argv, env = calls[0]
+    assert path == argv[0] == "/usr/bin/python3"
+    assert argv == ["/usr/bin/python3", "-I", installed]
+    assert env == {"HOME": "/home/admin", "WAYLAND_DISPLAY": "wayland-1",
+                   "XDG_RUNTIME_DIR": "/run/user/1000", "LC_ALL": "C.UTF-8",
+                   "PATH": "/usr/bin:/bin"}
+    # The re-exec'd process is a fixed point (no loop) ...
+    _, again = _load_reexec(_AUTHORITY_SCRIPTS[installed], [installed],
+                            env, 1)
+    assert again == []
+    # ... and the broker grants it authority.
+    broker.set_peer(uid=ADMIN_UID, pid=1234, exe="/usr/bin/python3")
+    monkeypatch.setattr(B, "_read_proc_environ", lambda _pid: env)
+    ok, reason = broker._peer_is_installed_admin_script(
+        1234, "/usr/bin/python3", argv)
+    assert ok, reason
+
+
+def test_dev_copy_is_not_reexecd():
+    src = _AUTHORITY_SCRIPTS["/usr/local/bin/qdistro-admin-approval-app"]
+    _, calls = _load_reexec(src, [str(src)], {"QT_PLUGIN_PATH": "/x"}, 0)
+    assert calls == []

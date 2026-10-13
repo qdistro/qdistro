@@ -680,7 +680,7 @@ check_line "[admin-app] desktop entry launches installed UI" \
 check_line "[admin-app] launcher uses native Wayland" \
     /usr/local/bin/qdistro-start-admin-app '^export QT_QPA_PLATFORM=wayland$'
 check_line "[admin-app] launcher runs installed script" \
-    /usr/local/bin/qdistro-start-admin-app '^exec /usr/bin/python3 /usr/local/bin/qdistro-admin-approval-app "\$@"$'
+    /usr/local/bin/qdistro-start-admin-app '^exec /usr/bin/python3 -I /usr/local/bin/qdistro-admin-approval-app "\$@"$'
 # The non-graphical approval path (install-admin-cli-for-vm.sh, run by the
 # admin-app step). Both paths are the broker's trusted control-plane paths;
 # the broker binds a Python peer through its argv, so the files must sit at
