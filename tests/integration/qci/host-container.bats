@@ -133,7 +133,8 @@ SH
         run_logged() {
             printf "%s %s %s\n" "$1" "$2" "$4"
             if [ "$2" = qdterm-pytest ]; then
-                [[ $6 = *"--ignore=tests/test_print_terminal.py"* ]] || return 30
+                # The whole qdterm suite runs, print tests included.
+                [[ $6 != *"--ignore="* ]] || return 30
             fi
         }
         record_skip() { printf "%s %s %s\n" "$1" "$2" "$3"; }
@@ -158,7 +159,6 @@ host qdlocker-pytest pytest
 host qdfileman-pytest pytest
 host qnotebook-pytest pytest
 host qdterm-pytest pytest
-host qdterm-print-tests pytest
 host qdchrome-extension npm
 host qdchrome-extension-coverage npm
 host qdchrome-extension-coverage-floor coverage
