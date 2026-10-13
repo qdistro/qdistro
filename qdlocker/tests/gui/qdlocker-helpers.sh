@@ -52,7 +52,23 @@ qdlocker_ctrl() {
     local inner b64
     inner="printf '%s\n' '${cmd}' | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock"
     b64=$(printf '%s' "$inner" | base64 -w0)
-    "$QDWIN_VM_EXEC" "$VMNAME" "echo $b64 | base64 -d | runuser -u admin -- bash"
+    local out rc=0
+    out=$("$QDWIN_VM_EXEC" "$VMNAME" "echo $b64 | base64 -d | runuser -u admin -- bash") || rc=$?
+    [ -n "$out" ] && printf '%s\n' "$out"
+    # A production-gated socket answers the introspection commands with
+    # `error: command unavailable`. That is a harness precondition failure
+    # (Setup skipped qdlocker_session_healthy, which installs the marker and
+    # restarts the locker), never a product result: say so and return 3 so
+    # the waiters below stop at once instead of timing out into a FAIL
+    # (presentation-gui/04, full-20261012T155315Z-2626707).
+    case "$out" in
+        *"error: command unavailable"*)
+            echo "qdlocker_ctrl: ERROR(harness): ctrl introspection is off; Setup must run" \
+                 "qdlocker_session_healthy (qdwin_session_healthy does not enable it)." \
+                 "Grade the scenario ERROR, not FAIL." >&2
+            return 3 ;;
+    esac
+    return "$rc"
 }
 
 # NOTE on `systemctl --user` for admin from a root vm-exec: it needs the user
@@ -66,8 +82,17 @@ qdlocker_ctrl() {
 qdlocker_wait_for_lock() {
     local timeout="${1:-5}"
     local end=$(( SECONDS + timeout ))
+    local reply rc
     while [ $SECONDS -lt $end ]; do
-        case "$(qdlocker_ctrl status 2>/dev/null)" in
+        rc=0
+        reply=$(qdlocker_ctrl status 2>/dev/null) || rc=$?
+        # 3 = introspection off: a harness ERROR, not a lock timeout.
+        if [ "$rc" -eq 3 ]; then
+            echo "qdlocker_wait_for_lock: ERROR(harness): ctrl introspection is off" \
+                 "(Setup must run qdlocker_session_healthy)" >&2
+            return 3
+        fi
+        case "$reply" in
             *locked=True*) return 0 ;;
         esac
         sleep 0.2
@@ -79,8 +104,17 @@ qdlocker_wait_for_lock() {
 qdlocker_wait_for_unlock() {
     local timeout="${1:-5}"
     local end=$(( SECONDS + timeout ))
+    local reply rc
     while [ $SECONDS -lt $end ]; do
-        case "$(qdlocker_ctrl unlock-result 2>/dev/null)" in
+        rc=0
+        reply=$(qdlocker_ctrl unlock-result 2>/dev/null) || rc=$?
+        # 3 = introspection off: a harness ERROR, not a lock timeout.
+        if [ "$rc" -eq 3 ]; then
+            echo "qdlocker_wait_for_unlock: ERROR(harness): ctrl introspection is off" \
+                 "(Setup must run qdlocker_session_healthy)" >&2
+            return 3
+        fi
+        case "$reply" in
             *last=success*) return 0 ;;
         esac
         sleep 0.2
@@ -92,8 +126,9 @@ qdlocker_wait_for_unlock() {
 # Convenience: assert the locker prompt has N characters (after typing).
 qdlocker_assert_prompt_len() {
     local want="$1"
-    local got
-    got=$(qdlocker_ctrl status | sed -n 's/.*prompt-len=\([0-9]*\).*/\1/p')
+    local st got
+    st=$(qdlocker_ctrl status) || return $?
+    got=$(printf '%s\n' "$st" | sed -n 's/.*prompt-len=\([0-9]*\).*/\1/p')
     if [ "$got" != "$want" ]; then
         echo "qdlocker_assert_prompt_len: want=$want got=$got" >&2
         return 1
@@ -148,9 +183,11 @@ qdlocker_type_password_chars() {
     for attempt in 1 2 3; do
         _qdlocker_type_password_chars_once "$password" || return $?
         sleep 0.2
-        if qdlocker_assert_prompt_len "$want" 2>/dev/null; then
-            return 0
-        fi
+        local rc=0
+        qdlocker_assert_prompt_len "$want" 2>/dev/null || rc=$?
+        [ "$rc" -eq 0 ] && return 0
+        # rc 3: introspection is off — a harness ERROR, not a typing miss.
+        [ "$rc" -eq 3 ] && { qdlocker_ctrl status >/dev/null; return 3; }
         echo "qdlocker_type_password_chars: attempt $attempt prompt-len mismatch (want $want); clearing + retrying" >&2
         # Clear the field: send a generous number of backspaces, then confirm the
         # field is actually empty before retyping — otherwise residual chars make

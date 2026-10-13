@@ -11,19 +11,26 @@ WHAT THIS MODULE DOES (read this before calling anything "pinning"):
     the hook calls ``rejectCertificate()`` so the load is hard-denied
     and the journal records it.
 
-WHAT IT DOES NOT DO — KNOWN LIMITATION (iso2 `13` E2):
+THE SUCCESS PATH IS NOT CHECKED HERE (iso2 `13` E2):
 
   ``certificateError`` fires only for chains the system trust store has
   already refused. A pinned host presenting a CA-valid certificate with
   the *wrong* key (public MITM CA, enterprise TLS interception, a
-  mis-issued cert) never raises the signal, so ``PinStore.evaluate`` is
-  never consulted and the connection succeeds. QtWebEngine 6.x exposes
-  the peer chain ONLY via ``QWebEngineCertificateError`` (error path);
+  mis-issued cert) never raises the signal. QtWebEngine 6.x exposes the
+  peer chain ONLY via ``QWebEngineCertificateError`` (error path);
   ``QWebEngineUrlRequestInterceptor``/``QWebEngineUrlRequestInfo``,
   ``QWebEngineLoadingInfo`` and ``QWebEngineProfile`` carry no
-  certificate. Until an API exposes the chain on successful handshakes
-  this is NOT HPKP / SPKI pinning and must not be described as such.
-  Tracked in qdistro ``todo/iso2/13-qdbrowser.md`` E2.
+  certificate. This hook alone is therefore NOT HPKP / SPKI pinning.
+
+  ``pin_proxy`` adds a BEST-EFFORT success-path check: ``__main__``
+  routes https through a loopback CONNECT proxy that, for pinned hosts,
+  TLS-probes the server, matches the verified chain against this store
+  (``PinStore.evaluate``) and only then opens the tunnel. The probe is a
+  separate handshake from Chromium's, so an attacker who can tell the
+  two apart defeats it; it catches interception applied to every
+  connection, not a targeted one. ``[security] success_path_pinning =
+  false`` turns it off, leaving only this hook. Residuals:
+  ``pin_proxy``'s docstring.
 
 Historical defect: this module used to connect the signal on a
 ``QWebEngineProfile``. No Qt release has ever had
@@ -69,6 +76,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -102,21 +110,116 @@ class PinDecision:
                 f"detail={self.detail!r})")
 
 
+def canonical_host(host) -> str:
+    """One spelling per host for pin keys and every lookup.
+
+    The goal is Chromium's spelling, since that is what reaches the pin
+    proxy's ``CONNECT`` line: lowercase, no surrounding ``[]`` or trailing
+    dot, IPv6 compressed, IPv4 in dotted-quad form after the URL
+    standard's IPv4 parser (``127.1``, ``0x7f.1``, octal ``017.1``,
+    ``0x7f.0x.0x.1`` are addresses, as in a browser URL), IDNs as UTS #46 *nontransitional* punycode
+    (``faß.de`` -> ``xn--fa-hia.de``, not Python's IDNA 2003 ``fass.de``;
+    ``QUrl.toAce`` implements the same processing as Chromium).
+    ``QUrl.host()`` returns Unicode, so the error-path hook needs this
+    too. Returns ``""`` for anything that cannot be a host, which matches
+    no pin.
+    """
+    if not isinstance(host, str):
+        return ""
+    h = host.strip().lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    h = h.rstrip(".")
+    if not h:
+        return ""
+    try:
+        return ipaddress.ip_address(h).compressed
+    except ValueError:
+        pass
+    if not h.isascii():
+        try:
+            from PyQt6.QtCore import QUrl
+            h = bytes(QUrl.toAce(h)).decode("ascii").lower()
+        except Exception as exc:  # noqa: BLE001 - no Qt: refuse, don't guess
+            log.error("qdbrowser.cert cannot canonicalize host %r: %s",
+                      host, exc)
+            return ""
+        # toAce maps U+3002 and friends to "."; strip the trailing one
+        # that only exists after mapping ("pinned.test。").
+        h = h.rstrip(".")
+        if not h:
+            return ""
+    if _ends_in_number(h):
+        # WHATWG/Chromium: a numeric last label makes the host an IPv4
+        # address, or invalid.
+        v4 = _whatwg_ipv4(h)
+        return "" if v4 is None else v4
+    return h
+
+
+def _ipv4_number(part: str) -> int | None:
+    """WHATWG "IPv4 number parser": 0x hex, leading-0 octal, decimal; an
+    empty remainder after the prefix is 0."""
+    radix = 10
+    if part[:2] in ("0x", "0X"):
+        part, radix = part[2:], 16
+    elif len(part) >= 2 and part[0] == "0":
+        part, radix = part[1:], 8
+    if part == "":
+        return 0
+    digits = {10: "0123456789", 8: "01234567", 16: "0123456789abcdef"}[radix]
+    if any(c not in digits for c in part.lower()):
+        return None
+    return int(part, radix)
+
+
+def _ends_in_number(host: str) -> bool:
+    """WHATWG "ends in a number" (trailing dot already stripped)."""
+    last = host.split(".")[-1]
+    if last and all(c in "0123456789" for c in last):
+        return True
+    return last[:2] in ("0x", "0X") and all(
+        c in "0123456789abcdefABCDEF" for c in last[2:])
+
+
+def _whatwg_ipv4(host: str) -> str | None:
+    """WHATWG "IPv4 parser": dotted-quad string, or None on failure."""
+    parts = host.split(".")
+    if len(parts) > 4 or any(p == "" for p in parts):
+        return None
+    nums = [_ipv4_number(p) for p in parts]
+    if any(n is None for n in nums):
+        return None
+    if any(n > 255 for n in nums[:-1]):
+        return None
+    if nums[-1] >= 256 ** (5 - len(nums)):
+        return None
+    value = nums[-1]
+    for i, n in enumerate(nums[:-1]):
+        value += n * 256 ** (3 - i)
+    return str(ipaddress.IPv4Address(value))
+
+
 class PinStore:
     """In-memory pin map + override set."""
 
     def __init__(self,
                  pins: dict | None = None,
                  overrides: Iterable[str] | None = None):
-        # Normalize: lowercase host keys, strip any non-canonical pins.
+        # Normalize: canonical host keys, strip any non-canonical pins.
         self._pins: dict = {}
         for host, raw in (pins or {}).items():
             cleaned = [p for p in (raw or [])
                        if isinstance(p, str) and p.startswith(PIN_PREFIX)]
+            key = canonical_host(host)
+            if not key:
+                log.error("qdbrowser.cert pin entry %r is not a host name; "
+                          "ignored", host)
+                continue
             if cleaned:
-                self._pins[host.lower()] = cleaned
-        self._overrides: set = {h.lower() for h in (overrides or [])
-                                if isinstance(h, str)}
+                self._pins[key] = cleaned
+        self._overrides: set = {canonical_host(h) for h in (overrides or [])
+                                if isinstance(h, str)} - {""}
 
     @property
     def pinned_hosts(self) -> list:
@@ -127,13 +230,13 @@ class PinStore:
         return sorted(self._overrides)
 
     def pins_for(self, host: str) -> list:
-        return list(self._pins.get((host or "").lower(), []))
+        return list(self._pins.get(canonical_host(host), []))
 
     def is_pinned(self, host: str) -> bool:
-        return (host or "").lower() in self._pins
+        return canonical_host(host) in self._pins
 
     def is_overridden(self, host: str) -> bool:
-        return (host or "").lower() in self._overrides
+        return canonical_host(host) in self._overrides
 
     def evaluate(self, host: str, der_certs: Iterable[bytes]) -> PinDecision:
         """Decide whether to accept a TLS chain for ``host``.
@@ -321,9 +424,9 @@ def install_cert_policy(profile, store: PinStore) -> None:
     window can call this from its profile-created listener and so a
     future Qt that does add a profile-level signal gets wired too.
 
-    Scope reminder: even the page hook only runs on the certificate
-    *error* path. It cannot see a CA-valid wrong-key certificate. See the
-    module docstring.
+    Scope reminder: the page hook only runs on the certificate *error*
+    path. CA-valid wrong-key certificates are ``pin_proxy``'s (best
+    effort), not this hook's. See the module docstring.
     """
     set_active_pin_store(store)
     signal = getattr(profile, "certificateError", None)
