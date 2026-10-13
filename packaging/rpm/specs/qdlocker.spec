@@ -15,6 +15,7 @@ Requires:       python314-PyQt6
 Requires:       python314-dbus_next
 Requires:       python314-python-pam
 Requires:       python314-pywayland
+Requires:       qdistro-presentation
 Requires:       qt6-declarative-imports
 Provides:        qt6qmlimport(shim)
 Requires:       qdwin

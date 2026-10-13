@@ -12,6 +12,10 @@ BuildRequires:  python314-pip
 BuildRequires:  python314-wheel
 Requires:       python314-PyQt6
 Requires:       qdistro-presentation
+Requires:       python314-cryptography
+# Optional: qterminator-mcp needs mcp; instant replay / shadow screen need pyte.
+Recommends:     python314-mcp
+Recommends:     python314-pyte
 BuildArch:      noarch
 
 %description
