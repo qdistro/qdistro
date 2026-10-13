@@ -3,8 +3,9 @@
 Most tests are pure-Python. The hook tests (``TestErrorPathHook``) use
 fake page/error objects so they assert the decision table without
 Chromium; ``TestRuntimeProbe`` checks the real PyQt6 API shape (skipped
-when PyQt6 is unavailable). No integration scenario exercises the hook
-end to end yet — see iso2 `13` E2.
+when PyQt6 is unavailable). End to end: ``tests/integration/vm/
+qdbrowser-cert-pin.bats``. The success-path check (CA-valid chains) is
+``pin_proxy``, tested in ``test_pin_proxy.py`` — iso2 `13` E2.
 """
 
 import base64

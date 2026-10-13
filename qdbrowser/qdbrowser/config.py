@@ -173,6 +173,9 @@ DEFAULTS = {
         "cert_pins_user_path": os.path.expanduser(
             "~/.config/qdbrowser/cert-pins.json"),
         "cert_overrides_path": "/etc/qdistro/cert-overrides.json",
+        # Check pinned hosts on SUCCESSFUL handshakes too, via the
+        # loopback pin proxy (qdbrowser/pin_proxy.py). Read at startup.
+        "success_path_pinning": True,
         # Per-profile CA bundles. EXPERIMENTAL / UNVERIFIED. When true,
         # qdbrowser resolves a bundle named ``<profile>-ca.pem`` for the
         # profile selected at launch (``--profile``) and exports
