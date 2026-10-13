@@ -44,11 +44,18 @@ def rules_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def broker(tmp_path: Path, rules_dir: Path) -> _StubBroker:
-    return _StubBroker(
+    b = _StubBroker(
         str(tmp_path / "approvals.sqlite"),
         str(tmp_path / "audit.sqlite"),
         str(rules_dir),
     )
+    # The admin-uid caller here stands for the installed admin app; that
+    # identity (python3 -I + installed path, no injection env) is pinned in
+    # test_broker_control_plane_identity.py. These tests cover rule/scope
+    # logic, so trust is injected at the predicate, not via the env.
+    b._peer_is_installed_admin_script = (
+        lambda _pid, _exe, _argv: (True, "test: installed admin app"))
+    return b
 
 
 def _is_refused(exc_info) -> bool:

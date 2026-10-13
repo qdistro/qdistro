@@ -674,11 +674,13 @@ the policy supplies one).
 
 Privileged control-plane methods likewise do not trust uid 1000 alone. The
 **authority** methods — `DecideRequest`, `SaveRule`, `DeleteRule`,
-`ReloadRules`, `RevokeApproval`, `RevokeAllForUid` — accept an admin-uid
-peer only when it is the installed admin GUI/TUI (`/usr/local/bin/qdistro-
-admin-approval-app`, `/usr/local/bin/qdistro-admin-tui`, started as the
-interpreter's script argument, no loader/interpreter injection in its
-environment) or qdshell; root keeps its maintenance paths (root
+`ReloadRules`, `RevokeApproval`, `RevokeAllForUid`, `ApproveWorkflowRun`,
+`RunAuditGc` — accept an admin-uid peer only when it is the installed admin
+GUI/TUI (`/usr/local/bin/qdistro-admin-approval-app`,
+`/usr/local/bin/qdistro-admin-tui`) run isolated (`python3 -I`, so no
+admin-writable user-site code loads) as the interpreter's script argument,
+with no loader/interpreter injection in its environment. qdshell calls no
+authority method and is not admitted to one. Root keeps its maintenance paths (root
 `busctl`/`dbus-send`/`gdbus` naming the method, `qdistro-approvals`, inline
 `python3 -c`). An admin-uid D-Bus CLI or inline Python is any admin-session
 process, and accepting it let that process approve its own `qsu` root request

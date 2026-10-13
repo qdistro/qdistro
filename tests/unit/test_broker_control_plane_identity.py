@@ -54,10 +54,11 @@ def _installed_admin_app_argv() -> list[str]:
              if line.startswith("exec /usr/bin/python3 ")]
     assert len(lines) == 1, f"expected one Python exec in {launcher}: {lines}"
     argv = shlex.split(lines[0])
-    assert len(argv) == 4 and argv[0] == "exec" and argv[-1] == "$@", argv
-    assert f'"$DESTDIR{argv[2]}"' in installer.read_text(), (
-        f"installer does not install the launched script {argv[2]}")
-    return argv[1:3]
+    assert len(argv) == 5 and argv[0] == "exec" and argv[-1] == "$@", argv
+    assert argv[2] == "-I", f"admin app must run isolated: {argv}"
+    assert f'"$DESTDIR{argv[3]}"' in installer.read_text(), (
+        f"installer does not install the launched script {argv[3]}")
+    return argv[1:4]
 
 
 @pytest.mark.parametrize("decision,allowed", [("allow", True), ("deny", False)])
@@ -480,6 +481,9 @@ def _bus_argv(method):
     # An installed path merely present in argv is not that program.
     ("/usr/bin/python3", ["python3", "-c", "CODE",
                           "/usr/local/bin/qdistro-admin-approval-app"]),
+    # Not isolated: user-site .pth/usercustomize run inside the app.
+    ("/usr/bin/python3", ["python3", "/usr/local/bin/qdistro-admin-approval-app"]),
+    ("/usr/bin/python3", ["python3", "-s", "/usr/local/bin/qdistro-admin-tui"]),
     # An admin-writable dev copy never exercises authority.
     ("/usr/bin/python3", ["python3",
                           "/home/admin/qdistro/admin_app/qdistro_admin_app.py"]),
@@ -537,3 +541,30 @@ def test_installed_admin_app_with_isolated_flag_can_decide(broker,
     monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
     monkeypatch.setattr(B, "_read_proc_environ_names", lambda _pid: set())
     assert broker.DecideRequest(rid, "allow", "once") == "applied"
+
+
+@pytest.mark.parametrize("method,args", [
+    ("ApproveWorkflowRun", ("run-1", "0" * 64)),
+    ("RunAuditGc", (30,)),
+])
+def test_admin_cli_cannot_call_other_authority_methods(broker, monkeypatch,
+                                                       method, args):
+    broker.set_peer(uid=ADMIN_UID, pid=1234, exe="/usr/bin/busctl")
+    monkeypatch.setattr(B, "_read_proc_cmdline",
+                        lambda _pid: _bus_argv(method))
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
+    ok, reason = broker._peer_matches_admin_control(
+        uid=ADMIN_UID, pid=1234, exe="/usr/bin/busctl", method=method)
+    assert not ok, reason
+
+
+def test_qdshell_is_not_an_authority_caller(broker, monkeypatch):
+    """qdshell (qs -p profile) reads control-plane state but calls no
+    authority method; it is not admitted to one."""
+    broker.set_peer(uid=ADMIN_UID, pid=1234, exe="/usr/bin/qs")
+    monkeypatch.setattr(B, "_read_proc_cmdline",
+                        lambda _pid: ["/usr/bin/qs", "-p", B._QDSHELL_PROFILE])
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
+    ok, _ = broker._peer_matches_admin_control(
+        uid=ADMIN_UID, pid=1234, exe="/usr/bin/qs", method="DecideRequest")
+    assert not ok

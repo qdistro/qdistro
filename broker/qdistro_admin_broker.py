@@ -214,11 +214,13 @@ _ADMIN_CONTROL_SCRIPT_PATHS = frozenset((
 # request that way was an unauthenticated admin->root path (fable
 # 2026-10-13). Root keeps its maintenance paths.
 _ADMIN_CONTROL_AUTHORITY_METHODS = frozenset((
+    "ApproveWorkflowRun",
     "DecideRequest",
     "DeleteRule",
     "ReloadRules",
     "RevokeAllForUid",
     "RevokeApproval",
+    "RunAuditGc",
     "SaveRule",
 ))
 
@@ -232,6 +234,8 @@ _ADMIN_CONTROL_INSTALLED_SCRIPT_PATHS = frozenset((
 
 # Interpreter flags an installed admin script may be started with before its
 # path; anything else (-c, -m, -, a different script) is not that program.
+# -I is REQUIRED: without it python runs admin-writable user-site code
+# (.pth, usercustomize) inside the trusted app before it says a word.
 _ADMIN_CONTROL_PYTHON_FLAGS = frozenset(("-I", "-s", "-E", "-B", "-u"))
 
 _ADMIN_CONTROL_STDIN_METHODS = frozenset((
@@ -1900,12 +1904,14 @@ class Broker(dbus.service.Object):
             return False, f"SELinux type {typ!r} is not an admin peer"
 
         exe_s = str(exe or "")
-        if exe_s in _ADMIN_CONTROL_DIRECT_EXES:
-            return True, "trusted direct admin-control exe"
-
         argv = self._peer_cmdline(pid)
+        # Authority is checked before any other admin-uid identity: only an
+        # isolated installed admin script exercises it (qdshell calls no
+        # authority method).
         if method in _ADMIN_CONTROL_AUTHORITY_METHODS:
             return self._peer_is_installed_admin_script(pid, exe_s, argv)
+        if exe_s in _ADMIN_CONTROL_DIRECT_EXES:
+            return True, "trusted direct admin-control exe"
         if (exe_s in _ROOT_DBUS_CLIENT_EXES
                 and _argv_names_broker_call(argv, method)):
             return True, "trusted admin-control D-Bus helper"
@@ -1935,9 +1941,10 @@ class Broker(dbus.service.Object):
                                         argv: list[str]
                                         ) -> tuple[bool, str]:
         """An admin-uid peer exercising authority must BE an installed
-        admin control script: a python interpreter whose script argument
-        (after plain interpreter flags) is the root-owned installed path,
-        with no loader/interpreter injection in its environment. A path
+        admin control script: a python interpreter started isolated (-I)
+        whose script argument (after plain interpreter flags) is the
+        root-owned installed path, with no loader/interpreter injection in
+        its environment. A path
         merely present somewhere in argv (`python3 -c CODE <path>`) or an
         admin-writable dev copy does not qualify.
 
@@ -1954,6 +1961,9 @@ class Broker(dbus.service.Object):
         if script not in _ADMIN_CONTROL_INSTALLED_SCRIPT_PATHS:
             return False, ("Python peer is not an installed admin control "
                            "script")
+        if "-I" not in argv[1:i]:
+            return False, ("installed admin control script not run isolated "
+                           "(python3 -I)")
         env_names = self._peer_environ_names(pid)
         if env_names is None:
             return False, "admin control script environment unreadable"
