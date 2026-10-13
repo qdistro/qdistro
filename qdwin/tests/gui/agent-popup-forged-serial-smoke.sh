@@ -46,13 +46,17 @@ restore() {
         js_qs_ipc capabilities | grep -q 'bound=true' && return 0
         sleep 1
     done
-    echo "WARN: qdshell did not rebind within 30s after the smoke" >&2
+    echo "SETUP: qdshell did not rebind within 30s after the smoke; later scenarios on this VM will fail setup" >&2
 }
 trap restore EXIT
 
 js_require_session
 js_guest 'test -x /usr/bin/qdwin-probe && echo PROBE-OK' | grep -qx PROBE-OK \
     || js_setup_fail "/usr/bin/qdwin-probe missing from the golden (qdwin install regressed)"
+# An older probe ignores unknown flags and exits 0 hello-only, which would
+# read as "no refusal" (a product FAIL) — require the forged-serial mode.
+js_guest 'grep -qa -- --show-popup-serial /usr/bin/qdwin-probe && echo MODE-OK' | grep -qx MODE-OK \
+    || js_setup_fail "/usr/bin/qdwin-probe lacks --show-popup-serial (stale golden; rebuild from this tree)"
 caps=""
 for _ in $(seq 1 20); do
     caps=$(js_qs_ipc capabilities)

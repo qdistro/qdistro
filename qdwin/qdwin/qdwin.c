@@ -5571,8 +5571,9 @@ static const struct weston_pointer_grab_interface qdwin_popup_grab_iface = {
 static bool
 qdwin_seat_grab_serial_matches(struct weston_seat *wseat, uint32_t serial)
 {
-	/* 0 is never a real input serial (wl_display_next_serial
-	 * pre-increments), but it IS the grab_serial of every device that
+	/* 0 is not a real input serial (wl_display_next_serial
+	 * pre-increments; it recurs only on a 2^32 wrap, where refusing
+	 * costs one spurious invalid_grab), but it IS the grab_serial of every device that
 	 * has not produced input yet (libweston zero-allocates them) — a
 	 * never-pressed keyboard, an untouched touchscreen. Without this a
 	 * literal-0 serial matched and installed the grab. */

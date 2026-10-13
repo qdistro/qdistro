@@ -50,7 +50,7 @@ restore() {
         js_qs_ipc capabilities | grep -q 'bound=true' && return 0
         sleep 1
     done
-    echo "WARN: qdshell did not rebind within 30s after the smoke" >&2
+    echo "SETUP: qdshell did not rebind within 30s after the smoke; later scenarios on this VM will fail setup" >&2
 }
 trap restore EXIT
 
@@ -116,8 +116,12 @@ run_phase() {
     target=P1; [ "$phase" = nested ] && target=P2
     read -r tx ty <<<"$(centre "$(rect_of "$target")")"
     qdwin_mouse_move "$tx" "$ty"
-    wait_log "^EV ENTER $target\$" 5 >/dev/null \
-        || js_setup_fail "$phase: pointer over $target ($tx,$ty) never entered it: $(probe_log | tr '\n' ' ')"
+    if ! wait_log "^EV ENTER $target\$" 5 >/dev/null; then
+        # Nested phase: delivery to the submenu IS the D9 assertion.
+        [ "$phase" = nested ] \
+            && js_fail "nested: pointer over the submenu P2 ($tx,$ty) never entered it under the grab: $(probe_log | tr '\n' ' ')"
+        js_setup_fail "$phase: pointer over $target ($tx,$ty) never entered it: $(probe_log | tr '\n' ' ')"
+    fi
     if [ "$phase" = nested ]; then
         qdwin_click "$tx" "$ty"
         wait_log '^EV BUTTON P2 pressed$' 5 >/dev/null \
