@@ -167,9 +167,11 @@ language pays for itself.
 > the pointer over and off the frame (`chrome_motion` / `chrome_leave`), so
 > qdshell highlights the button under it and sets the cursor through
 > `set_chrome_cursor`: resize arrows on the edges and corners, the default
-> arrow elsewhere. Edge drags also resize nested-proxy windows (the curtain
-> follows the pointer; the publishing nested compositor gets the final size
-> as `configured`). The frame carries the silo
+> arrow elsewhere. Edge drags also resize a nested-proxy window while it
+> still shows its placeholder curtain (the curtain follows the pointer; the
+> publishing nested compositor gets the final size as `configured`); once
+> the live feed is bound its edges do not resize it, and a drag in progress
+> ends. The frame carries the silo
 > colour qdshell records with `setBorderColor`. Clients that never negotiate
 > (GTK4, weston-terminal) and XWayland windows (framed by the XWM) keep their
 > own decorations and get no shell frame; their own title bars move and

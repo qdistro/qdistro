@@ -10,19 +10,22 @@ shell pick the frame cursor. The load-bearing pieces pinned here:
    set_chrome_cursor request are since=37, appended after the v36
    opcodes; the global advertises v37.
 2. Hover uses the same hit-test as chrome_button (qdwin_chrome_at_pos),
-   so a hidden window's chrome never hovers, plus a front-to-back
-   stacking check so a frame under another window never hovers; events are gated on a v37
+   so a hidden window's chrome never hovers; that hit-test walks
+   normal_layer front-to-back, so a frame under another window neither
+   hovers nor takes presses; events are gated on a v37
    binding; the update runs from the default grab's motion AFTER the
    focus change, and the locked branch ends the hover without touching
    the lock surface's cursor.
 3. set_chrome_cursor never kills the shell for a routine race: only the
    version gate posts an error; locked, stale-handle, unknown-shape and
    mid-drag requests are ignored. It installs a registered sprite.
-4. Hover state cannot outlive its toplevel or the shell binding.
+4. Hover state cannot outlive its toplevel or the shell binding, and a
+   frame cursor left installed is reset to the default when it does.
 5. Nested proxies are resizable: an approved curtain is sized directly
    (left/top edges move the view so the opposite edges stay put), a
-   held proxy is refused, and the publisher learns the final size once,
-   via qdwin_nested_v1 `configured`, when the drag ends.
+   held proxy is refused, a drag whose curtain is swapped for the live
+   feed ends, and the publisher learns the final size once, via
+   qdwin_nested_v1 `configured`, when the drag ends or is cancelled.
 """
 import re
 import sys
@@ -95,12 +98,15 @@ def main():
         return fail("hover must use the chrome_button hit-test (hidden-layer aware)")
     if "< 37" not in upd:
         return fail("hover events must be gated on a v37 binding")
-    if "qdwin_chrome_hover_on_top(" not in upd:
-        return fail("hover must be stacking-aware (no frame hover under another window)")
-    top = body(src, "qdwin_chrome_hover_on_top")
-    if not top or "normal_layer.view_list" not in top \
-            or "t->view == v" not in top:
-        return fail("the stacking check must walk normal_layer front-to-back")
+    hit = body(src, "qdwin_chrome_at_pos")
+    if not hit or "normal_layer.view_list" not in hit:
+        return fail("the chrome hit-test must walk normal_layer front-to-back")
+    i_walk = hit.find("normal_layer.view_list")
+    i_tls = hit.find("&qdwin->toplevels")
+    if i_tls < i_walk:
+        return fail("the chrome hit-test must walk layer views, not tracking order")
+    if not re.search(r"tl->view == v\)\s*return NULL;", hit):
+        return fail("a content view on top must cover lower frames")
     if "qdwin_shell_v1_send_chrome_motion" not in upd:
         return fail("hover must send chrome_motion")
     clr = body(src, "qdwin_chrome_hover_clear")
@@ -142,10 +148,16 @@ def main():
 
     # 4. lifetime
     deps = body(src, "qdwin_toplevel_release_dependents")
-    if not deps or "qdwin->chrome_hover_handle == tl->handle" not in deps:
-        return fail("toplevel teardown must forget its hover")
-    if not re.search(r"qdwin->shell_bound = 0;\s*qdwin->chrome_hover_handle = 0;", src):
-        return fail("shell unbind must forget the hover")
+    if not deps or "qdwin->chrome_hover_handle == tl->handle" not in deps \
+            or "qdwin_chrome_cursor_reset(qdwin)" not in deps:
+        return fail("toplevel teardown must forget its hover and frame cursor")
+    if not re.search(r"qdwin->shell_bound = 0;\s*qdwin->chrome_hover_handle = 0;"
+                     r"\s*qdwin_chrome_cursor_reset\(qdwin\);", src):
+        return fail("shell unbind must forget the hover and frame cursor")
+    rst = body(src, "qdwin_chrome_cursor_reset")
+    if not rst or "qdwin_install_default_cursor_on_pointer" not in rst \
+            or "qdwin_singleton == qdwin" not in rst:
+        return fail("the frame-cursor reset restores the default, never in teardown")
 
     # 5. nested-proxy edge drag
     start = body(src, "qdwin_resize_grab_start")
@@ -175,6 +187,13 @@ def main():
     if motion.find("qdwin_resize_grab_motion_proxy") > motion.find(
             "weston_desktop_surface_get_min_size"):
         return fail("proxies must leave before any desktop-surface call")
+    i_gone = motion.find('"curtain gone"')
+    if i_gone < 0 or i_gone > motion.find("qdwin_resize_grab_motion_proxy"):
+        return fail("a proxy drag must end once its curtain is gone")
+    endf = body(src, "qdwin_resize_grab_end_for")
+    if not endf or "qdwin_nested_proxy_send_configured(tl)" not in endf \
+            or "!tl->proxy_destroying" not in endf:
+        return fail("a cancelled live proxy drag must tell the publisher")
     fin = body(src, "qdwin_resize_grab_finish")
     if not fin or "qdwin_nested_proxy_send_configured(tl)" not in fin:
         return fail("the drag end must tell the publisher the new size")

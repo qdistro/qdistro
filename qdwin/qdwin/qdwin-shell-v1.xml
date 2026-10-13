@@ -2052,10 +2052,13 @@
     <event name="chrome_leave" since="37">
       <description summary="pointer left a toplevel's chrome">
         The pointer is no longer over any chrome side of `handle`: it
-        moved onto content, the desktop, another toplevel's chrome (a
-        `chrome_motion` for that one follows), or the window was hidden.
-        Not sent during a move/resize/popup grab; the next ordinary
-        motion settles the hover state.
+        moved onto content, the desktop, or another toplevel's chrome (a
+        `chrome_motion` for that one follows). Sent from pointer motion
+        only: a window hidden (minimised, moved off-workspace) under a
+        resting pointer gets its chrome_leave on the next motion, and a
+        removed window gets none (toplevel_removed says it). Not sent
+        during a move/resize/popup grab; the next ordinary motion
+        settles the hover state.
       </description>
       <arg name="handle" type="uint"/>
     </event>

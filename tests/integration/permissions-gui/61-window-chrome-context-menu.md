@@ -169,7 +169,7 @@ qdwin v37 the compositor reports it (`chrome_motion`/`chrome_leave`)
 and the shell answers with `set_chrome_cursor`. `click-preview` moves
 the pointer with no button event, which is exactly a hover. qdwin logs
 `chrome_hover handle=H side=N` when the pointer enters a window's
-frame, `chrome_cursor handle=H shape=<name>` when the shell's cursor
+frame, `qdwin: chrome_cursor handle=H shape=<name>` when the shell's cursor
 for it changes, and `chrome_leave handle=H` when it leaves.
 
 ```bash
@@ -178,7 +178,7 @@ CNT='H=$(cat /tmp/61-app.handle); bash /tmp/61-driver.sh count_qdwin_line'
 $VMGUI "$VM" click-preview TX TY title-bar
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
     bash /tmp/61-driver.sh await_qdwin_line "chrome_hover handle=$H side=0" &&
-    bash /tmp/61-driver.sh await_qdwin_line "chrome_cursor handle=$H shape=default"' \
+    bash /tmp/61-driver.sh await_qdwin_line "qdwin: chrome_cursor handle=$H shape=default"' \
     || { echo "FAIL(S1b): hovering the title bar gave no hover / default cursor"; exit 1; }
 # Runner: close-button centre (HX,HY) — rightmost 24x24 cell of the bar
 $VMGUI "$VM" click-preview HX HY close-button
@@ -187,7 +187,7 @@ qdwin_screenshot "$ART/s1b-hover-close.png"
 # bottom edge, at the 4 px edge's vertical middle
 $VMGUI "$VM" click-preview KX KY bottom-right-corner
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
-    bash /tmp/61-driver.sh await_qdwin_line "chrome_cursor handle=$H shape=se-resize"' \
+    bash /tmp/61-driver.sh await_qdwin_line "qdwin: chrome_cursor handle=$H shape=se-resize"' \
     || { echo "FAIL(S1b): the corner did not get the se-resize cursor"; exit 1; }
 L0=$($VMEXEC "$VM" "$CNT \"chrome_leave handle=\$H\$\"")
 # Runner: a point well inside the window's content (WX,WY)

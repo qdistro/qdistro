@@ -4526,6 +4526,16 @@ qdwin_resize_grab_motion(struct weston_pointer_grab *grab,
 		oh -= (int)dy;
 
 	if (tl->is_nested_proxy) {
+		/* Only the placeholder curtain is resizable here: once the live
+		 * feed binds (bind_proxy_pixels swaps the curtain out) sizing
+		 * and moving the pixel view would slide the window without
+		 * resizing it. End the drag as the state-change path does. */
+		if (!tl->proxy_curtain) {
+			qdwin_resize_grab_finish(qd, "curtain gone");
+			qd->resize_anchor_handle = 0;
+			weston_pointer_end_grab(pointer);
+			return;
+		}
 		qdwin_resize_grab_motion_proxy(qd, tl, ow, oh);
 		return;
 	}
@@ -4680,6 +4690,11 @@ qdwin_resize_grab_end_for(struct qdwin *qdwin, uint32_t handle)
 	weston_log("qdwin: cancelling resize-drag handle=%u "
 		   "(toplevel/shell gone)\n", handle);
 	qdwin->resize_grab_active = 0;
+	/* A live proxy keeps the dragged curtain size: tell the publisher,
+	 * as qdwin_resize_grab_finish does (output-boundary cancel path). */
+	struct qdwin_toplevel *tl = qdwin_toplevel_from_handle(qdwin, handle);
+	if (tl && tl->is_nested_proxy && !tl->proxy_destroying)
+		qdwin_nested_proxy_send_configured(tl);
 	struct weston_pointer *pointer = qdwin->resize_grab.pointer;
 	if (pointer && pointer->grab == &qdwin->resize_grab)
 		weston_pointer_end_grab(pointer);
@@ -5280,39 +5295,47 @@ qdwin_chrome_at_pos(struct qdwin *qdwin, struct weston_coord_global pos,
 {
 	if (!qdwin)
 		return NULL;
-	struct qdwin_toplevel *tl;
-	wl_list_for_each(tl, &qdwin->toplevels, link) {
-		if (tl->nested_proxy_pending_decision)
+	/* Stacking-aware: walk normal_layer FRONT-TO-BACK (head = topmost)
+	 * and stop at the first toplevel view containing `pos`. A chrome
+	 * view there is the hit; a content view there covers any lower
+	 * frame, so nothing is hit (qdwin_toplevel_at_pos then resolves the
+	 * content). `qdwin->toplevels` is tracking order, so walking it let
+	 * a lower window's frame take presses and hover under an upper
+	 * window. Chrome travels with its content view (move_to_layer), so
+	 * minimised, off-workspace and held windows' chrome sits on an
+	 * unmapped layer and is never reached here — a press where a
+	 * minimised window's title bar used to be must not unminimise it
+	 * (gui61 S7, 2026-10-12). */
+	struct weston_view *v;
+	wl_list_for_each(v, &qdwin->normal_layer.view_list.link,
+			 layer_link.link) {
+		struct weston_surface *vs = v->surface;
+		if (!vs || vs->width <= 0 || vs->height <= 0)
 			continue;
-		/* Chrome travels with its content view (move_to_layer), so a
-		 * minimised, off-workspace or held window's chrome sits on an
-		 * unmapped layer: invisible, and it must not take clicks. Without
-		 * this a press on empty desktop where a minimised window's title
-		 * bar used to be hit the stale chrome rect and click-to-focus
-		 * unminimised it (gui61 S7, 2026-10-12). */
-		if (tl->view &&
-		    (tl->view->layer_link.layer == &qdwin->minimized_layer ||
-		     tl->view->layer_link.layer == &qdwin->workspace_hidden_layer ||
-		     tl->view->layer_link.layer == &qdwin->held_layer))
+		weston_view_update_transform(v);
+		struct weston_coord_global vp =
+			weston_view_get_pos_offset_global(v);
+		double x0 = vp.c.x, y0 = vp.c.y;
+		if (pos.c.x < x0 || pos.c.x >= x0 + vs->width ||
+		    pos.c.y < y0 || pos.c.y >= y0 + vs->height)
 			continue;
-		for (int s = 0; s < QDWIN_SIDES; s++) {
-			struct weston_view *cv = tl->chrome[s].view;
-			struct weston_surface *cs = tl->chrome[s].surface;
-			if (!cv || !cs || cs->width <= 0 || cs->height <= 0)
+		struct qdwin_toplevel *tl;
+		wl_list_for_each(tl, &qdwin->toplevels, link) {
+			if (tl->nested_proxy_pending_decision)
 				continue;
-			weston_view_update_transform(cv);
-			struct weston_coord_global vp =
-				weston_view_get_pos_offset_global(cv);
-			double x0 = vp.c.x, y0 = vp.c.y;
-			double x1 = x0 + cs->width, y1 = y0 + cs->height;
-			if (pos.c.x < x0 || pos.c.x >= x1 ||
-			    pos.c.y < y0 || pos.c.y >= y1)
-				continue;
-			if (side_out) *side_out = s;
-			if (sx_out) *sx_out = pos.c.x - x0;
-			if (sy_out) *sy_out = pos.c.y - y0;
-			return tl;
+			if (tl->view == v)
+				return NULL;    /* content on top */
+			for (int s = 0; s < QDWIN_SIDES; s++) {
+				if (tl->chrome[s].view != v ||
+				    !tl->chrome[s].surface)
+					continue;
+				if (side_out) *side_out = s;
+				if (sx_out) *sx_out = pos.c.x - x0;
+				if (sy_out) *sy_out = pos.c.y - y0;
+				return tl;
+			}
 		}
+		/* Not a toplevel's view: look further down. */
 	}
 	return NULL;
 }
@@ -5362,6 +5385,22 @@ qdwin_toplevel_at_pos(struct qdwin *qdwin, struct weston_coord_global pos)
 	return NULL;
 }
 
+/* A frame cursor is installed while the pointer rests on that frame; when
+ * its window or the shell goes away without a further motion over it,
+ * restore the default so a resize arrow does not stick over whatever is
+ * under the pointer now. Not during compositor teardown (stage 1 clears
+ * qdwin_singleton first). */
+static void
+qdwin_chrome_cursor_reset(struct qdwin *qdwin)
+{
+	if (!qdwin || qdwin->chrome_cursor_shape == 0)
+		return;
+	qdwin->chrome_cursor_shape = 0;
+	if (qdwin_singleton == qdwin)
+		qdwin_install_default_cursor_on_pointer(
+			qdwin, qdwin_first_pointer(qdwin));
+}
+
 /* v37 chrome hover. The shell cannot see wl_pointer enter/motion on its
  * own chrome surfaces (same-client suppression, see chrome_button), so
  * qdwin reports which chrome side the pointer is over, as it does for
@@ -5386,43 +5425,6 @@ qdwin_chrome_hover_clear(struct qdwin *qdwin, struct weston_pointer *pointer,
 	}
 }
 
-/* qdwin_chrome_at_pos walks tracking order, not z-order. For hover that
- * matters: where an upper window's content overlaps a lower window's
- * frame, the lower frame must not hover — set_chrome_cursor would then
- * override the cursor of the client actually under the pointer. Walk
- * normal_layer front-to-back (as qdwin_toplevel_at_pos does): `tl`'s
- * chrome must be reached before any other window's content or chrome
- * that contains `pos`. */
-static bool
-qdwin_chrome_hover_on_top(struct qdwin *qdwin, struct qdwin_toplevel *tl,
-			  struct weston_coord_global pos)
-{
-	struct weston_view *v;
-	wl_list_for_each(v, &qdwin->normal_layer.view_list.link,
-			 layer_link.link) {
-		struct weston_surface *vs = v->surface;
-		if (!vs || vs->width <= 0 || vs->height <= 0)
-			continue;
-		struct weston_coord_global vp =
-			weston_view_get_pos_offset_global(v);
-		if (pos.c.x < vp.c.x || pos.c.x >= vp.c.x + vs->width ||
-		    pos.c.y < vp.c.y || pos.c.y >= vp.c.y + vs->height)
-			continue;
-		for (int s = 0; s < QDWIN_SIDES; s++)
-			if (tl->chrome[s].view == v)
-				return true;
-		struct qdwin_toplevel *t;
-		wl_list_for_each(t, &qdwin->toplevels, link) {
-			if (t->view == v)
-				return false;
-			for (int s = 0; s < QDWIN_SIDES; s++)
-				if (t->chrome[s].view == v)
-					return false;
-		}
-	}
-	return true;    /* not on normal_layer: chrome_at_pos already vetted */
-}
-
 static void
 qdwin_chrome_hover_update(struct qdwin *qdwin, struct weston_pointer *pointer)
 {
@@ -5433,8 +5435,7 @@ qdwin_chrome_hover_update(struct qdwin *qdwin, struct weston_pointer *pointer)
 	double sx = 0, sy = 0;
 	struct qdwin_toplevel *tl =
 		qdwin_chrome_at_pos(qdwin, pointer->pos, &side, &sx, &sy);
-	if (!tl || side < 0 || !qdwin_chrome_hover_on_top(qdwin, tl,
-							  pointer->pos)) {
+	if (!tl || side < 0) {
 		qdwin_chrome_hover_clear(qdwin, pointer, true);
 		return;
 	}
@@ -6446,7 +6447,7 @@ qdwin_toplevel_release_dependents(struct qdwin *qdwin, struct qdwin_toplevel *tl
 	/* toplevel_removed already tells the shell; no chrome_leave. */
 	if (qdwin->chrome_hover_handle == tl->handle) {
 		qdwin->chrome_hover_handle = 0;
-		qdwin->chrome_cursor_shape = 0;
+		qdwin_chrome_cursor_reset(qdwin);
 	}
 
 	struct qdwin_view_stream *vs, *next;
@@ -10879,7 +10880,7 @@ qdwin_shell_resource_destroy(struct wl_resource *resource)
 		qdwin->shell_resource = NULL;
 		qdwin->shell_bound = 0;
 		qdwin->chrome_hover_handle = 0;
-		qdwin->chrome_cursor_shape = 0;
+		qdwin_chrome_cursor_reset(qdwin);
 		qdwin->shell_pid = 0;
 		qdwin->shell_uid = 0;
 		qdwin->shell_starttime = 0;
