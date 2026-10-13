@@ -18,10 +18,14 @@ methods depending on configuration:
 
 Method selection (highest priority first):
 
+  0. ``FORCED_PAM_ACTIONS`` — actions that must verify the admin's
+     credential: always ``pam``, ahead of every override below, and the
+     ``QDISTRO_POLKIT_NONINTERACTIVE=allow`` shortcut does not apply.
   1. ``QDISTRO_POLKIT_METHOD``   — env override (tests).
   2. ``QDISTRO_POLKIT_NONINTERACTIVE`` — bypass prompts entirely
      (``allow`` / ``deny`` / ``password=<pw>``). Tests only.
-  3. /etc/qdistro/polkit-agent.conf  — fnmatch glob → method.
+  3. ~/.config/qdistro/polkit-agent.conf, then
+     /etc/qdistro/polkit-agent.conf — fnmatch glob → method.
   4. default ``broker``.
 
 polkitd accepts
@@ -124,6 +128,16 @@ DEFAULT_PROMPT_BIN = "/usr/local/bin/qdistro-polkit-prompt"
 PROMPT_INTERPRETER = "/usr/bin/python3"
 
 VALID_METHODS = ("pam", "fprint", "broker")
+
+# Actions whose authorization must come from the admin's credential, never
+# from a yes/no vote an admin-session process can cast, a user-writable
+# config line or a test env override. org.qdistro.tier5.bridge runs the root
+# half of a tier-5 launch (a uid-0 launcher parent plus RegisterLaunch);
+# its polkit default is auth_admin_keep, and this is the route that makes
+# that "auth" mean a verified password.
+FORCED_PAM_ACTIONS = frozenset({
+    "org.qdistro.tier5.bridge",
+})
 
 _FPRINTD_BUS_NAME = "net.reactivated.Fprint"
 _FPRINTD_MGR_PATH = "/net/reactivated/Fprint/Manager"
@@ -292,10 +306,13 @@ def select_method(action_id: str,
     """Pick an auth method for a polkit action.
 
     Priority:
+      0. ``FORCED_PAM_ACTIONS`` → ``pam``, regardless of anything below
       1. env ``QDISTRO_POLKIT_METHOD`` (test override)
       2. config glob match (first-match-wins)
       3. ``DEFAULT_METHOD``
     """
+    if action_id in FORCED_PAM_ACTIONS:
+        return "pam"
     if env is None:
         env = os.environ
     forced = env.get("QDISTRO_POLKIT_METHOD", "").strip().lower()
@@ -768,9 +785,11 @@ class QdistroPolkitAgent(dbus.service.Object):
         if pw is None:
             return False, "prompt-cancelled"
         # For "allow" non-interactive shortcut (empty pw + bypass mode),
-        # don't run PAM — let the caller treat it as a test pass.
+        # don't run PAM — let the caller treat it as a test pass. Never for
+        # a forced-PAM action: its empty password goes to PAM and fails.
         nonint = os.environ.get("QDISTRO_POLKIT_NONINTERACTIVE", "")
-        if nonint == "allow" and pw == "":
+        if nonint == "allow" and pw == "" \
+                and action_id not in FORCED_PAM_ACTIONS:
             return True, "noninteractive-allow"
         ok, reason = _pam_authenticate(user, pw)
         return ok, reason
