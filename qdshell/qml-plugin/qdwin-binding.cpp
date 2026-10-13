@@ -99,7 +99,7 @@ namespace {
 // Version 36 adds `toplevel_decoration` (client- vs server-side frame per
 // toplevel; Qdwin.qml frames only the server-side ones) and a working
 // `begin_interactive_resize` for the frame's edges.
-constexpr uint32_t kBindVersion = 36;
+constexpr uint32_t kBindVersion = 37;
 constexpr int kCaptureTimeoutMs = 8000;
 constexpr int kBrokerStartTimeoutMs = 250;
 constexpr int kBrokerGateTimeoutMs = 2000;
@@ -495,6 +495,17 @@ struct QdwinBindingDispatch {
                              wl_fixed_to_double(x), wl_fixed_to_double(y),
                              button, state, serial);
     }
+    // v37 hover over the shell's own chrome (same same-client reason).
+    static void chrome_motion(void *d, qdwin_shell_v1 *,
+                              uint32_t handle, uint32_t side,
+                              wl_fixed_t x, wl_fixed_t y) {
+        auto *b = static_cast<QdwinBinding *>(d);
+        emit b->chromeMotion(handle, side,
+                             wl_fixed_to_double(x), wl_fixed_to_double(y));
+    }
+    static void chrome_leave(void *d, qdwin_shell_v1 *, uint32_t handle) {
+        emit static_cast<QdwinBinding *>(d)->chromeLeave(handle);
+    }
     static void popup_button(void *d, qdwin_shell_v1 *,
                              uint32_t parent, wl_fixed_t x, wl_fixed_t y,
                              uint32_t button, uint32_t state,
@@ -555,6 +566,8 @@ static const qdwin_shell_v1_listener kShellListener = {
     .selection_set_source_peer_identity =
         QdwinBindingDispatch::selection_set_source_peer_identity,
     .toplevel_decoration       = QdwinBindingDispatch::toplevel_decoration,
+    .chrome_motion             = QdwinBindingDispatch::chrome_motion,
+    .chrome_leave              = QdwinBindingDispatch::chrome_leave,
 };
 
 // ---- qdwin_popup_v1 dispatch ----
@@ -1813,6 +1826,12 @@ void QdwinBinding::beginInteractiveResize(quint32 handle, quint32 serial,
     flushAfterRequest(__func__);
 }
 
+void QdwinBinding::setChromeCursor(quint32 handle, quint32 shape) {
+    if (!shell_ || !bound_ || shellVersion_ < 37) return;
+    qdwin_shell_v1_set_chrome_cursor(shell_, handle, shape);
+    flushAfterRequest(__func__);
+}
+
 // -------- shell chrome + context-menu popups --------
 
 // Raster → shm wl_buffer on the SHELL's display (surfaces created from
@@ -1960,7 +1979,8 @@ QColor QdwinBinding::rgbaColor(quint32 rgba) {
 // [width - (n - i) * height, width - (n - i - 1) * height).
 QImage QdwinBinding::renderTitleBar(int width, int height, quint32 rgba,
                                     const QString &title, bool active,
-                                    const QStringList &buttons) {
+                                    const QStringList &buttons,
+                                    int hoverIndex) {
     QImage img(width, height, QImage::Format_ARGB32_Premultiplied);
     QColor bg = rgbaColor(rgba);
     bg.setAlpha(255);
@@ -2001,6 +2021,21 @@ QImage QdwinBinding::renderTitleBar(int width, int height, quint32 rgba,
         const QRectF cell(x0, 0, height, height);
         const QRectF glyph = cell.adjusted(g, g, -g, -g);
         const QString &b = buttons.at(i);
+        // Hover cell: the close button turns red with a white glyph
+        // (the usual "this closes" cue); the others get a contrast wash.
+        if (i == hoverIndex) {
+            const bool closeBtn = b == QLatin1String("close");
+            const QColor wash = closeBtn ? QColor(0xc4, 0x2b, 0x1c)
+                : (light ? QColor(0, 0, 0, 0x30) : QColor(255, 255, 255, 0x38));
+            p.fillRect(cell, wash);
+            if (closeBtn) {
+                QPen hot(pen);
+                hot.setColor(QColor(0xff, 0xff, 0xff));
+                p.setPen(hot);
+            }
+        } else {
+            p.setPen(pen);
+        }
         if (b == QLatin1String("close")) {
             p.drawLine(glyph.topLeft(), glyph.bottomRight());
             p.drawLine(glyph.topRight(), glyph.bottomLeft());
@@ -2026,14 +2061,15 @@ bool QdwinBinding::attachFrame(quint32 handle, int contentWidth,
                                int contentHeight, int titleHeight,
                                int border, quint32 rgba,
                                const QString &title, bool active,
-                               const QStringList &buttons) {
+                               const QStringList &buttons, int hoverIndex) {
     if (!shell_ || !bound_ || contentWidth <= 0 || contentHeight <= 0 ||
         titleHeight <= 0 || border < 0)
         return false;
     const int outerWidth = contentWidth + 2 * border;
     bool ok = setChromeSide(handle, 0 /* N */,
                             renderTitleBar(outerWidth, titleHeight, rgba,
-                                           title, active, buttons));
+                                           title, active, buttons,
+                                           hoverIndex));
     if (ok && border > 0) {
         QColor c = rgbaColor(rgba);
         c.setAlpha(255);

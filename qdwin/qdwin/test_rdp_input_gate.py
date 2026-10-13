@@ -87,8 +87,8 @@ def main() -> int:
         return fail("qdwin shell protocol lacks the authoritative input result")
     if "send_remote_output_input_result" not in shell_gate:
         return fail("qdwin does not acknowledge the backend input transition")
-    if 'interface name="qdwin_shell_v1" version="36"' not in protocol:
-        return fail("qdwin shell protocol must retain v36 alongside the v34 safety drain")
+    if 'interface name="qdwin_shell_v1" version="37"' not in protocol:
+        return fail("qdwin shell protocol must retain v37 alongside the v34 safety drain")
     if 'request name="drain_remote_output_state" since="34"' not in protocol:
         return fail("qdwin shell protocol lacks the safety drain request")
     for token in (
@@ -112,12 +112,14 @@ def main() -> int:
     iface = ET.fromstring(protocol).find("interface")
     for kind, expected in {
         "request": {36: "request_set_position", 37: "prepare_output_capture",
-                    38: "set_remote_output_input", 39: "drain_remote_output_state"},
+                    38: "set_remote_output_input", 39: "drain_remote_output_state",
+                    40: "set_chrome_cursor"},
         "event": {30: "toplevel_app_id", 31: "capture_served_stale",
                   32: "nested_proxy_remote_identity", 33: "remote_output_input_result",
                   34: "remote_output_drain_result",
                   35: "selection_set_source_peer_identity",
-                  36: "toplevel_decoration"},
+                  36: "toplevel_decoration", 37: "chrome_motion",
+                  38: "chrome_leave"},
     }.items():
         entries = iface.findall(kind)
         for opcode, name in expected.items():

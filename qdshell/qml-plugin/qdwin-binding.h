@@ -141,6 +141,10 @@ public:
     // left=4, right=8); `serial` is the chrome_button press serial.
     Q_INVOKABLE void beginInteractiveResize(quint32 handle, quint32 serial,
                                             quint32 edges);
+    // v37: cursor for the hovered frame (a wp_cursor_shape_device_v1
+    // shape value). The compositor applies it only while the pointer is
+    // over `handle`'s chrome; a no-op below v37.
+    Q_INVOKABLE void setChromeCursor(quint32 handle, quint32 shape);
     Q_INVOKABLE void setBorderColor(quint32 handle, quint32 argb);
 
     // Shell chrome + context-menu popup plumbing. The wl_surfaces are
@@ -163,11 +167,14 @@ public:
     // left → right, flush right), plus `border`-px E/S/W edges (none
     // when border is 0, e.g. maximised). All sides land in ONE
     // attach_decoration. contentWidth/Height are the client's size.
+    // `hoverIndex` is the button under the pointer (index into
+    // `buttons`, -1 for none); it gets a highlight cell — red for close.
     Q_INVOKABLE bool attachFrame(quint32 handle, int contentWidth,
                                  int contentHeight, int titleHeight,
                                  int border, quint32 rgba,
                                  const QString &title, bool active,
-                                 const QStringList &buttons);
+                                 const QStringList &buttons,
+                                 int hoverIndex = -1);
     Q_INVOKABLE void detachFrame(quint32 handle);
     // showPopup renders a vertical label menu (items: [{label:…}]) into
     // a popup wl_surface and calls show_popup anchored at (x, y) in
@@ -547,6 +554,10 @@ signals:
     // must echo back to show_popup / begin_interactive_move.
     void chromeButton(quint32 handle, quint32 side, double x, double y,
                       quint32 button, quint32 state, quint32 serial);
+    // v37: pointer over / off a frame side (no wl_pointer delivery
+    // reaches the shell's own chrome surfaces, as for chrome_button).
+    void chromeMotion(quint32 handle, quint32 side, double x, double y);
+    void chromeLeave(quint32 handle);
     void popupButton(quint32 parent, double x, double y,
                      quint32 button, quint32 state, quint32 serial);
     // A press on a menu row inside an active popup hit a valid item —
@@ -764,7 +775,8 @@ private:
     static QColor rgbaColor(quint32 rgba);
     static QImage renderTitleBar(int width, int height, quint32 rgba,
                                  const QString &title, bool active,
-                                 const QStringList &buttons);
+                                 const QStringList &buttons,
+                                 int hoverIndex = -1);
     void chromePurge(quint32 handle);      // all four sides for a handle
     void popupTeardown(quint32 parent);    // destroy proxies, drop entry
     void popupHit(quint32 parent, double x, double y,

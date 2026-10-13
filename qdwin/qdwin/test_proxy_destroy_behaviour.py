@@ -239,6 +239,8 @@ struct qdwin {
 	uint32_t resize_grab_handle;
 	struct weston_pointer_grab resize_grab;
 	uint32_t resize_anchor_handle;
+	uint32_t chrome_hover_handle;   /* v37 hover, dropped on teardown */
+	uint32_t chrome_cursor_shape;
 };
 
 static struct qdwin *qdwin_singleton;
@@ -283,6 +285,20 @@ static void qdwin_popup_v1_send_dismissed(struct wl_resource *r)
 static void qdwin_view_stream_v1_send_torn_down(struct wl_resource *r,
 						const char *reason)
 { (void)r; (void)reason; torn_down_sent_total++; }
+/* v37 follow-ups reached from release_dependents / resize_grab_end_for. */
+static struct qdwin_toplevel *qdwin_toplevel_from_handle(struct qdwin *q,
+							 uint32_t h)
+{
+	struct qdwin_toplevel *t;
+	wl_list_for_each(t, &q->toplevels, link)
+		if (t->handle == h)
+			return t;
+	return NULL;
+}
+static void qdwin_nested_proxy_send_configured(struct qdwin_toplevel *tl)
+{ (void)tl; }
+static void qdwin_chrome_cursor_reset(struct qdwin *q)
+{ q->chrome_cursor_shape = 0; }
 static void qdwin_send_toplevel_removed(struct qdwin *q,
 					struct qdwin_toplevel *tl)
 { (void)q; (void)tl; }
