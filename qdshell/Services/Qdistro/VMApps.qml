@@ -14,7 +14,7 @@ import qs.Services.Qdwin
 // outer compositor — connections from the host-side `waypipe-client`
 // half of the waypipe-over-vsock bridge — tagged with
 // wp_security_context_v1 fields (engine + app_id + instance_id) that
-// spawn-tier5.sh plants by wrapping waypipe-client with
+// the root qdistro-tier5-bridge plants by running waypipe-client under
 // qdistro-secctx-exec. instance_id == the LAUNCH_TOKEN spawn-tier5.sh
 // emits on stdout, which is how we correlate cold-start placeholders
 // to the eventual real toplevel.
@@ -36,8 +36,8 @@ import qs.Services.Qdwin
 //   - qdistro/doc/containers.md "Why tier-2 first" (UI vocabulary
 //     parity with PodApps; transport differs)
 //   - qdistro/doc/ui.md "silo-badges" (badge ring colour for tier-5)
-//   - qdistro/tier5-vm/spawn-tier5.sh (LAUNCH_TOKEN emission +
-//     qdistro-secctx-exec wrap)
+//   - qdistro/tier5-vm/spawn-tier5.sh (LAUNCH_TOKEN emission) and
+//     qdistro_tier5_bridge.py (the qdistro-secctx-exec wrap)
 Singleton {
     id: root
 
@@ -47,14 +47,12 @@ Singleton {
     // Matches TIER5_SECCTX_ENGINE default in spawn-tier5.sh.
     readonly property string tier5Prefix: "qdistro.tier5."
 
-    // Spawn helper path. spawn-tier5.sh installs as this symlink by
-    // scripts/install/install-tier5-for-vm.sh. Requires root (libvirt
-    // domain define + virsh start + qemu launch), so we invoke via
-    // pkexec — install-tier5-for-vm.sh ships a polkit policy that
-    // lets the active admin session pkexec it without re-auth
-    // (allow_active=yes per qdistro single-tenant convention).
+    // Spawn helper, installed by scripts/install/install-tier5-for-vm.sh.
+    // It runs as admin (the VM lives in admin's qemu:///session); its one
+    // privileged step — the tagged, registered waypipe client — goes
+    // through pkexec of the root qdistro-tier5-bridge, which the polkit
+    // agent authenticates (org.qdistro.tier5.bridge, auth_admin_keep).
     readonly property string spawnHelper: "qdistro-tier5-spawn"
-    readonly property string spawnLauncher: "pkexec"
 
     // ---- catalogue (dynamic manifest) ------------------------------------
     // Shared tier-5 app catalogue. The launcher (VMAppsProvider) surfaces
@@ -377,15 +375,13 @@ Singleton {
         // manifest-supplied name would bypass _dropDomainCollisions and
         // could pin two apps to one guest (sol r2 P1).
         const vmName = root._vmNameForApp(row.appId);
-        // Build: pkexec qdistro-tier5-spawn --vm <vmName> --policy-key <appId>
+        // Build: qdistro-tier5-spawn --vm <vmName> --policy-key <appId>
         //        -- <argv...>
-        // --policy-key carries the STABLE catalogue appId so the wrapper can
-        // resolve this app's per-app lifecycle policy from
-        // ~/.config/qdistro/tier5-lifecycle.conf (env can't ride through pkexec,
-        // but argv does; the flag is parsed before `--` so it never reaches the
-        // guest argv). pkexec passes stdin/stdout/stderr through so the
-        // LAUNCH_TOKEN= line on stdout still reaches our SplitParser.
-        const cmd = [root.spawnLauncher, root.spawnHelper,
+        // --policy-key carries the STABLE catalogue appId: the wrapper
+        // resolves this app's lifecycle policy from
+        // ~/.config/qdistro/tier5-lifecycle.conf and binds the domain to it.
+        // It is parsed before `--`, so it never reaches the guest argv.
+        const cmd = [root.spawnHelper,
                      "--vm", vmName, "--policy-key", row.appId,
                      "--"].concat(argv);
 
@@ -489,10 +485,8 @@ Singleton {
                 root.rebuild();
 
             // Placeholder resolution: instance_id should match a
-            // pending LAUNCH_TOKEN. spawn-tier5.sh defaults
-            // TIER5_SECCTX_INSTANCE=LAUNCH_TOKEN, so instanceId
-            // is the launchToken modulo the wp_security_context_v1
-            // wire round-trip.
+            // pending LAUNCH_TOKEN — the bridge stamps the launch token
+            // as the waypipe client's instance_id.
             if (!instanceId) return;
             for (let i = 0; i < root.placeholders.count; i++) {
                 if (root.placeholders.get(i).launchToken === instanceId) {
