@@ -56,24 +56,146 @@ Singleton {
     readonly property string spawnHelper: "qdistro-tier5-spawn"
     readonly property string spawnLauncher: "pkexec"
 
-    // Shared tier-5 app catalogue. The launcher (VMAppsProvider) surfaces these
-    // and the Settings "Sandboxed VM apps" tab lists them for per-app lifecycle
-    // overrides — both read this single source so the policy key (appId) lines
-    // up. Hardcoded today (the base qcow2 ships a fixed app set); see
-    // VMAppsProvider for the future auto-scan note. Each entry: appId, name,
-    // iconName, comment, execArgv (JSON-stringified array of strings).
-    readonly property var catalogue: [
-        { "appId": "tier5/firefox",          "name": "Firefox (VM)",       "iconName": "firefox",                 "comment": "Isolated Firefox in a per-app VM",                        "execArgv": JSON.stringify(["firefox"]) },
-        { "appId": "tier5/weston-terminal",  "name": "Terminal (VM)",      "iconName": "utilities-terminal",      "comment": "Isolated weston-terminal in a per-app VM (test)",          "execArgv": JSON.stringify(["weston-terminal"]) },
-        { "appId": "tier5/baobab",           "name": "Disk Usage (VM)",    "iconName": "org.gnome.baobab",        "comment": "GNOME disk usage analyzer (GTK4/libadwaita, CSD)",         "execArgv": JSON.stringify(["baobab"]) },
-        { "appId": "tier5/gnome-text-editor","name": "Text Editor (VM)",   "iconName": "org.gnome.TextEditor",    "comment": "GNOME text editor (GTK4/libadwaita, CSD)",                 "execArgv": JSON.stringify(["gnome-text-editor"]) },
-        { "appId": "tier5/nautilus",         "name": "Files (VM)",         "iconName": "org.gnome.Nautilus",      "comment": "GNOME file manager (GTK4/libadwaita, CSD)",                "execArgv": JSON.stringify(["nautilus"]) },
-        { "appId": "tier5/gnome-calculator", "name": "Calculator (VM)",    "iconName": "org.gnome.Calculator",    "comment": "GNOME calculator (GTK4/libadwaita, CSD)",                  "execArgv": JSON.stringify(["gnome-calculator"]) },
-        { "appId": "tier5/dolphin",          "name": "Dolphin (VM)",       "iconName": "system-file-manager",     "comment": "KDE file manager (Qt6/KDE Frameworks, SSD)",               "execArgv": JSON.stringify(["dolphin"]) },
-        { "appId": "tier5/konsole",          "name": "Konsole (VM)",       "iconName": "utilities-terminal",      "comment": "KDE terminal (Qt6/KDE Frameworks, SSD)",                   "execArgv": JSON.stringify(["konsole"]) },
-        { "appId": "tier5/kate",             "name": "Kate (VM)",          "iconName": "accessories-text-editor", "comment": "KDE text editor (Qt6/KDE Frameworks, SSD)",                "execArgv": JSON.stringify(["kate"]) },
-        { "appId": "tier5/kcalc",            "name": "KCalc (VM)",         "iconName": "accessories-calculator",  "comment": "KDE calculator (Qt6, SSD)",                                "execArgv": JSON.stringify(["kcalc"]) },
-    ]
+    // ---- catalogue (dynamic manifest) ------------------------------------
+    // Shared tier-5 app catalogue. The launcher (VMAppsProvider) surfaces
+    // these and the Settings "Sandboxed VM apps" tab lists them for
+    // per-app lifecycle overrides — both read this single source so the
+    // policy key (appId) lines up.
+    //
+    // The catalogue is DISCOVERED from the guest base, not baked here:
+    // tier5-vm/vmapps-scan.py scans the base's .desktop files at image
+    // build time (and on base changes via the
+    // qdistro-tier5-vmapps-scan service/path/timer) and publishes
+    // /usr/share/qdistro/vmapps/base.json. This loader watches that
+    // manifest; on any missing/unparseable/empty/stale manifest the
+    // catalogue falls back to exactly one prebaked entry — foot, the
+    // operator escape hatch (the guest base always ships it, and the
+    // scanner refuses to publish a catalogue-bearing manifest for a
+    // base that lacks it).
+    //
+    // Each entry: appId, desktopId, name, iconName, comment, execArgv
+    // (JSON-stringified array of strings). appId values are the stable
+    // historical keys (tier5/konsole, tier5/firefox, ...) produced by
+    // the scanner's alias map — Settings overrides, --policy-key, VM
+    // naming and broker selectors all key on them.
+    readonly property string manifestPath: "/usr/share/qdistro/vmapps/base.json"
+    property var catalogue: root._footRows()
+    property bool _manifestMissing: false
+
+    // Emitted after every complete catalogue swap (manifest load OR a
+    // fallback transition). Providers refresh an open launcher on it;
+    // the swap is atomic — catalogue never holds a partial model.
+    signal refreshed()
+
+    function _footRows() {
+        return [{
+            "appId":     "tier5/foot",
+            "desktopId": "foot",
+            "name":      "Foot Terminal (VM)",
+            "iconName":  "utilities-terminal",
+            "comment":   "Isolated foot terminal in a per-app VM",
+            "execArgv":  JSON.stringify(["foot"]),
+        }];
+    }
+
+    // A manifest row is usable only with a stable appId, a name, and an
+    // execArgv that parses to a nonempty array of strings.
+    function _validRow(row) {
+        if (!row || typeof row !== "object") return false;
+        // The appId is the wrapper's --policy-key and the domain's bound
+        // identity; out-of-charset ids must never reach launch (sol r4).
+        if (typeof row.appId !== "string"
+                || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(row.appId))
+            return false;
+        if (typeof row.name !== "string" || !row.name) return false;
+        let argv;
+        try { argv = JSON.parse(row.execArgv); } catch (e) { return false; }
+        return Array.isArray(argv) && argv.length > 0
+               && argv.every(a => typeof a === "string") && !!argv[0];
+    }
+
+    function _loadManifest() {
+        let doc = null;
+        try { doc = JSON.parse(manifestFile.text()); } catch (e) { doc = null; }
+        if (!doc || doc.schema !== 1 || !!doc.stale
+                || !Array.isArray(doc.apps) || doc.apps.length === 0) {
+            const why = !doc ? "unparseable"
+                      : doc.schema !== 1 ? "schema != 1"
+                      : doc.stale ? "stale: " + doc.stale
+                      : "empty catalogue";
+            Logger.w("VMApps", "manifest " + why + " — foot-only fallback");
+            root._manifestMissing = false;
+            root.catalogue = root._footRows();
+            root.refreshed();
+            return;
+        }
+        const rows = [];
+        for (const r of doc.apps) {
+            if (!root._validRow(r)) {
+                Logger.w("VMApps", "manifest row malformed — foot-only fallback");
+                root._manifestMissing = false;
+                root.catalogue = root._footRows();
+                root.refreshed();
+                return;
+            }
+            rows.push({
+                "appId":     r.appId,
+                "desktopId": typeof r.desktopId === "string" ? r.desktopId : "",
+                "name":      r.name,
+                "iconName":  typeof r.iconName === "string" ? r.iconName : "",
+                "comment":   typeof r.comment === "string" ? r.comment : "",
+                "execArgv":  r.execArgv,
+            });
+        }
+        const launchable = root._dropDomainCollisions(rows);
+        if (launchable.length === 0) {
+            Logger.e("VMApps", "manifest left no launchable apps "
+                     + "— foot-only fallback");
+            root._manifestMissing = false;
+            root.catalogue = root._footRows();
+            root.refreshed();
+            return;
+        }
+        root._manifestMissing = false;
+        root.catalogue = launchable;
+        Logger.i("VMApps", "manifest loaded: " + launchable.length
+                 + " app(s)");
+        root.refreshed();
+    }
+
+    FileView {
+        id: manifestFile
+        path: root.manifestPath
+        watchChanges: true
+        printErrors: false
+        onLoaded: root._loadManifest()
+        onLoadFailed: function (error) {
+            Logger.w("VMApps", "manifest " + root.manifestPath
+                        + " unreadable (" + error + ") — foot-only fallback");
+            root._manifestMissing = true;
+            root.catalogue = root._footRows();
+            root.refreshed();
+        }
+        onFileChanged: {
+            // Re-parsed on the next tick; the write side publishes
+            // atomically (temp+rename), so what reload() reads is always
+            // a complete manifest.
+            reload();
+        }
+    }
+
+    // QFileSystemWatcher cannot watch a file that does not exist yet, so
+    // a manifest staged AFTER session start (rebuilt guest base +
+    // reconcile run while qdshell is up) would never fire onFileChanged.
+    // Poll only while the manifest is missing — once it exists, the
+    // watcher takes over and this timer stops.
+    Timer {
+        id: manifestRetry
+        interval: 15000
+        repeat: true
+        running: root._manifestMissing
+        onTriggered: manifestFile.reload()
+    }
 
     // ---- toplevel filter (existing v1 surface) ---------------------------
     // Each row mirrors Qdwin.windows + adds `silo` ("vm-<tag>").
@@ -110,14 +232,66 @@ Singleton {
         return !!secctxAppId && secctxAppId.startsWith(root.tier5Prefix);
     }
 
-    // Generate a fresh VM name for a launch. spawn-tier5.sh validates
-    // [a-zA-Z0-9][a-zA-Z0-9_-]{0,62}, so use a short hex suffix.
-    function _generateVmName(appId) {
-        const stub = (appId || "vmapp").replace(/[^a-zA-Z0-9_-]/g, "-")
-                                       .slice(0, 24);
-        const suffix = Math.floor(Math.random() * 0xFFFFFF)
-                           .toString(16).padStart(6, "0");
-        return "t5-" + stub + "-" + suffix;
+    // Deterministic per-app VM name — the tier-5 guest is the SILO for
+    // the catalogue appId, so every launch of the same app names the same
+    // domain. spawn-tier5.sh's hold-lock protocol lets a relaunch adopt
+    // the still-running VM instead of paying a cold start, keeps
+    // concurrent same-app launches on one guest (same trust domain: the
+    // silo tag IS the VM name), and hands teardown to whichever session
+    // is last out of the idle window. The wrapper validates
+    // [a-zA-Z0-9][a-zA-Z0-9_-]{0,62}.
+    //
+    // The name is "t5-" + a human-readable stub + "-" + a 64-bit hash of
+    // the FULL appId. The hash narrows collisions to the practically
+    // impossible; the GUARANTEE that two distinct appIds never share a
+    // guest is _dropDomainCollisions() at catalogue load — a collision
+    // would run the second app inside the first app's guest and break
+    // per-app isolation, so colliders are dropped, never launched
+    // (sol r1/r2 P1).
+    function _appIdHash(appId) {
+        // Two independent 32-bit hashes (FNV-1a + djb2-xor) concatenated.
+        let fnv = 0x811c9dc5;
+        let djb = 0x00001505;
+        for (let i = 0; i < appId.length; i++) {
+            const c = appId.charCodeAt(i);
+            fnv = Math.imul(fnv ^ c, 0x01000193) >>> 0;
+            djb = (Math.imul(djb, 33) ^ c) >>> 0;
+        }
+        const pad = h => ("0000000" + h.toString(16)).slice(-8);
+        return pad(fnv) + pad(djb);
+    }
+
+    function _vmNameForApp(appId) {
+        const id = appId || "vmapp";
+        const stub = id.replace(/[^a-zA-Z0-9_-]/g, "-")
+                       .replace(/-{2,}/g, "-")
+                       .replace(/^-+|-+$/g, "")
+                       .slice(0, 43);
+        // 3 + <=43 + 1 + 16 = <=63, inside the wrapper's name budget.
+        return "t5-" + (stub || "vmapp") + "-" + _appIdHash(id);
+    }
+
+    // Derive every row's domain name and drop rows whose name is claimed
+    // by a DIFFERENT appId — both colliders go, since catalogue order is
+    // no trust signal (which row is the attacker's?). nameFn is
+    // injectable so the detection is unit-testable under a forced
+    // collision; production passes the real _vmNameForApp.
+    function _dropDomainCollisions(rows, nameFn) {
+        const nf = nameFn || (id => root._vmNameForApp(id));
+        const byName = ({});
+        const bad = new Set();
+        for (const r of rows) {
+            const n = nf(r.appId);
+            if (byName[n] !== undefined && byName[n] !== r.appId) {
+                bad.add(n);
+                Logger.e("VMApps", "domain-name collision " + n
+                         + " claimed by " + byName[n] + " and " + r.appId
+                         + " — both dropped");
+            } else {
+                byName[n] = r.appId;
+            }
+        }
+        return rows.filter(r => !bad.has(nf(r.appId)));
     }
 
     function rebuild() {
@@ -165,11 +339,12 @@ Singleton {
 
     // ---- launch ----------------------------------------------------------
     // Called from Launcher / Taskbar click handlers. Forks
-    // spawn-tier5.sh --vm <auto-name> -- <argv...>; the helper emits
+    // spawn-tier5.sh --vm <per-app-name> -- <argv...>; the helper emits
     // LAUNCH_TOKEN=<hex> early on stdout. We register a placeholder
     // keyed on the token; it's resolved when the inner toplevel
     // arrives carrying instance_id == launchToken (set by spawn-
-    // tier5.sh's qdistro-secctx-exec wrap).
+    // tier5.sh's qdistro-secctx-exec wrap). The VM name is the appId's
+    // deterministic silo name — relaunches adopt the running guest.
     //
     // row shape: { appId, name, iconName, execArgv (string JSON-encoded
     // array of strings) }
@@ -178,13 +353,30 @@ Singleton {
             Logger.w("VMApps", "launch: missing appId");
             return;
         }
+        // A provider row can outlive the catalogue it came from. Only
+        // rows still authorized by the CURRENT catalogue may reach a
+        // domain — a stale row could otherwise adopt a guest its appId
+        // no longer owns (the wrapper also enforces this via the
+        // domain's bound appId; this is the shell-side belt, sol r3).
+        let authorized = false;
+        for (const cat of root.catalogue) {
+            if (cat.appId === row.appId) { authorized = true; break; }
+        }
+        if (!authorized) {
+            Logger.w("VMApps", "launch: " + row.appId
+                     + " not in current catalogue — dropped");
+            return;
+        }
         let argv = [];
         try { argv = JSON.parse(row.execArgv); } catch (e) { argv = []; }
         if (argv.length === 0) {
             Logger.w("VMApps", "launch: empty execArgv for " + row.appId);
             return;
         }
-        const vmName = row.vmName || root._generateVmName(row.appId);
+        // The ONLY name source is the deterministic derivation — a
+        // manifest-supplied name would bypass _dropDomainCollisions and
+        // could pin two apps to one guest (sol r2 P1).
+        const vmName = root._vmNameForApp(row.appId);
         // Build: pkexec qdistro-tier5-spawn --vm <vmName> --policy-key <appId>
         //        -- <argv...>
         // --policy-key carries the STABLE catalogue appId so the wrapper can

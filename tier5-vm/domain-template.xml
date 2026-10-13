@@ -1,6 +1,13 @@
 <!-- Tier-5-Linux libvirt domain template. spec/29 §3 picked path.
      Substituted by spawn-tier5.sh in vm mode:
        __VM_NAME__       domain name
+       __APP_ID__        the bound catalogue appId (spawn-tier5.sh's
+                         resolved POLICY_KEY). Recorded in <metadata> so
+                         adoption can verify a running/defined domain
+                         belongs to THIS app before attaching — two
+                         distinct appIds must never share a guest, even
+                         if their derived names collide across catalogue
+                         reloads.
        __MAC__           virtio-net MAC (only used when TIER5_NETWORK=user)
        __MEM_KIB__       memory in KiB (default 2097152 = 2 GiB)
        __CID__           guest vsock CID (greater than 2; uniqueness
@@ -40,6 +47,9 @@
 -->
 <domain type='kvm'>
   <name>__VM_NAME__</name>
+  <metadata>
+    <qdistro:appId xmlns:qdistro="urn:qdistro:tier5">__APP_ID__</qdistro:appId>
+  </metadata>
   <memory unit='KiB'>__MEM_KIB__</memory>
   <currentMemory unit='KiB'>__MEM_KIB__</currentMemory>
   <vcpu placement='static'>1</vcpu>

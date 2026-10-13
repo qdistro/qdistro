@@ -254,12 +254,243 @@ Singleton {
     // case (dead compositor) gets the same warning — an existing
     // binding object that isn't bound can't deliver the request.
     function setBorderColor(handle, rgba) {
+        // The north chrome strip carries the same silo colour as the
+        // compositor border — record it on the row even while unbound
+        // so the next _syncChromeForRow picks it up. rgba=0 means
+        // "no assigned colour" (neutral strip), matching the border
+        // fallback convention.
+        if (rgba !== 0) {
+            for (let i = 0; i < root.windows.count; i++) {
+                if (root.windows.get(i).handle === handle) {
+                    if (root.windows.get(i).chromeArgb !== (rgba >>> 0)) {
+                        root.windows.setProperty(i, "chromeArgb", rgba >>> 0);
+                        if (qdwinBinding && qdwinBinding.bound)
+                            root._syncChromeForRow(i);
+                    }
+                    break;
+                }
+            }
+        }
         if (!qdwinBinding || !qdwinBinding.bound) {
             Logger.w("Qdwin", "setBorderColor handle=" + handle
                               + " rgba=" + rgba + " — not bound (dropped)");
             return;
         }
         qdwinBinding.setBorderColor(handle, rgba >>> 0);
+    }
+
+    // ---- server-side window frames + window context menus ----------
+    // Every toplevel whose client negotiated server-side decorations
+    // (qdwin's v36 toplevel_decoration, mode 1) gets a shell-painted
+    // frame: a title bar (title, minimize / maximize / close) and thin
+    // E/S/W edges. Self-decorated clients (GTK4, weston-terminal,
+    // XWayland) keep their own frame and get none — two stacked title
+    // bars was the alternative. On the title bar: left-press drags
+    // (raise + interactive move), double-click toggles maximise, a press
+    // and release on one button runs it, right-press opens the window
+    // menu through show_popup. The top `resizeGrip` px of the title bar
+    // and the edges start an edge drag (begin_interactive_resize).
+    readonly property int chromeHeight: 24
+    readonly property int chromeBorder: 4
+    readonly property int resizeGrip: 4
+    // Edge length, from each corner, that resizes both edges at once.
+    readonly property int cornerGrip: 16
+    readonly property int doubleClickMs: 400
+    // 0xRRGGBBAA (the set_border_color order), neutral dark strip.
+    readonly property int chromeArgbDefault: 0x303034ff
+    // parentHandle → [action id strings]. The binding's popup hit-test
+    // reports an item index; the policy lives here so the C++ side
+    // stays menu-content-agnostic.
+    property var _menuActions: ({})
+    // Handles the compositor replayed since the last bind (null outside
+    // the post-bind window). See onBoundChanged.
+    property var _replayedHandles: null
+
+    function _resyncChromeAfterReplay() {
+        const live = root._replayedHandles;
+        root._replayedHandles = null;
+        if (!live)
+            return;
+        for (let i = 0; i < root.windows.count; i++) {
+            if (live[root.windows.get(i).handle])
+                root._syncChromeForRow(i);
+        }
+    }
+
+    // Title-bar buttons, left → right (they sit flush right). The
+    // binding paints this list and onChromeButton hit-tests it, so the
+    // two always agree.
+    function _titleButtons(row) {
+        const buttons = ["minimize",
+                         (row.state & 1) !== 0 ? "restore" : "maximize"];
+        // mm-remote toplevels refuse request_close compositor-side —
+        // don't offer a dead button (same rule as the window menu).
+        if (row.sandboxEngine !== "qdistro.mm")
+            buttons.push("close");
+        return buttons;
+    }
+
+    function _frameBorder(row) {
+        return (row.state & 1) !== 0 ? 0 : root.chromeBorder;
+    }
+
+    function _syncChromeForRow(i) {
+        if (!qdwinBinding || !qdwinBinding.bound)
+            return;
+        const row = root.windows.get(i);
+        if (!row)
+            return;
+        // Fullscreen windows and self-decorated clients: no frame.
+        if (row.decorationMode !== 1 || (row.state & 2) !== 0) {
+            qdwinBinding.detachFrame(row.handle);
+            return;
+        }
+        if (row.width <= 0 || row.height <= 0)
+            return;
+        qdwinBinding.attachFrame(row.handle, row.width, row.height,
+                                 root.chromeHeight, root._frameBorder(row),
+                                 (row.chromeArgb || root.chromeArgbDefault) >>> 0,
+                                 row.title || row.appId || "",
+                                 i === root.focusedWindowIndex,
+                                 root._titleButtons(row));
+    }
+
+    // Left-button handling on a frame side. Returns nothing; every path
+    // either starts a compositor drag or records a pending button press.
+    property var _chromePress: null      // {handle, button} awaiting release
+    property var _lastTitleClick: ({handle: 0, at: 0})
+
+    function _frameResizeEdges(row, side, x, y) {
+        const b = root._frameBorder(row);
+        const outerW = row.width + 2 * b;
+        const left = x < root.cornerGrip ? 4 : 0;
+        const right = x >= outerW - root.cornerGrip ? 8 : 0;
+        switch (side) {
+        case 0: {  // N: only its top grip resizes, never over a button
+            const firstButtonX = outerW - root._titleButtons(row).length
+                                        * root.chromeHeight;
+            return y < root.resizeGrip && x < firstButtonX
+                ? (1 | left) : 0;
+        }
+        case 2:  // S
+            return 2 | left | right;
+        case 1:  // E
+            return 8 | (y >= row.height - root.cornerGrip ? 2 : 0);
+        case 3:  // W
+            return 4 | (y >= row.height - root.cornerGrip ? 2 : 0);
+        }
+        return 0;
+    }
+
+    function _onFrameLeft(row, side, x, y, state, serial) {
+        const handle = row.handle;
+        if (state === 0) {                   // release
+            const press = root._chromePress;
+            root._chromePress = null;
+            if (!press || press.handle !== handle || side !== 0)
+                return;
+            const buttons = root._titleButtons(row);
+            const outerW = row.width + 2 * root._frameBorder(row);
+            const idx = Math.floor((x - (outerW - buttons.length
+                                         * root.chromeHeight))
+                                   / root.chromeHeight);
+            if (idx === press.index && idx >= 0 && idx < buttons.length)
+                root._runTitleButton(handle, buttons[idx]);
+            return;
+        }
+        root._chromePress = null;
+        const maximized = (row.state & 1) !== 0;
+        const edges = maximized ? 0 : root._frameResizeEdges(row, side, x, y);
+        if (edges !== 0) {
+            qdwinBinding.requestRaise(handle);
+            qdwinBinding.beginInteractiveResize(handle, serial, edges);
+            return;
+        }
+        if (side !== 0)
+            return;
+        const buttons = root._titleButtons(row);
+        const outerW = row.width + 2 * root._frameBorder(row);
+        const firstButtonX = outerW - buttons.length * root.chromeHeight;
+        if (x >= firstButtonX) {
+            // Act on release over the same button, like any toolkit.
+            root._chromePress = {
+                handle: handle,
+                index: Math.floor((x - firstButtonX) / root.chromeHeight)
+            };
+            return;
+        }
+        const now = Date.now();
+        const last = root._lastTitleClick;
+        if (last.handle === handle && now - last.at < root.doubleClickMs) {
+            root._lastTitleClick = {handle: 0, at: 0};
+            qdwinBinding.requestMaximize(handle, !maximized);
+            return;
+        }
+        root._lastTitleClick = {handle: handle, at: now};
+        qdwinBinding.requestRaise(handle);
+        qdwinBinding.beginInteractiveMove(handle, serial);
+    }
+
+    function _runTitleButton(handle, action) {
+        Logger.i("Qdwin", "title button " + action + " handle=" + handle);
+        switch (action) {
+        case "minimize":
+            qdwinBinding.requestMinimize(handle);
+            break;
+        case "maximize":
+            qdwinBinding.requestMaximize(handle, true);
+            break;
+        case "restore":
+            qdwinBinding.requestMaximize(handle, false);
+            break;
+        case "close":
+            qdwinBinding.closeWindow(handle);
+            break;
+        }
+    }
+
+    function _openWindowMenu(handle, serial, x, y) {
+        const row = root._windowByHandle(handle);
+        if (!row)
+            return;
+        const maximized = (row.state & 1) !== 0;
+        const items = [
+            { label: "Minimize", action: "minimize" },
+            { label: maximized ? "Restore" : "Maximize", action: "maximize" },
+        ];
+        // mm-remote toplevels refuse request_close compositor-side —
+        // don't offer a dead action.
+        if (row.sandboxEngine !== "qdistro.mm")
+            items.push({ label: "Close", action: "close" });
+        root._menuActions[handle] = items.map(it => it.action);
+        if (!qdwinBinding.showPopup(handle, serial, x, y, items)) {
+            delete root._menuActions[handle];
+            Logger.w("Qdwin", "window menu refused handle=" + handle);
+            return;
+        }
+        Logger.i("Qdwin", "window menu opened handle=" + handle
+                 + " items=" + items.length);
+    }
+
+    function _runMenuAction(parent, index) {
+        const actions = root._menuActions[parent];
+        delete root._menuActions[parent];
+        if (!actions || index < 0 || index >= actions.length)
+            return;
+        switch (actions[index]) {
+        case "minimize":
+            qdwinBinding.requestMinimize(parent);
+            break;
+        case "maximize": {
+            const row = root._windowByHandle(parent);
+            const maximized = row && (row.state & 1) !== 0;
+            qdwinBinding.requestMaximize(parent, !maximized);
+            break;
+        }
+        case "close":
+            qdwinBinding.closeWindow(parent);
+            break;
+        }
     }
 
     // Output (display) management wrappers. `layout` is the QVariantList the
@@ -587,6 +818,16 @@ Singleton {
                 // arrives via its own global, so also re-evaluate on
                 // idleNotifierAvailable change below.
                 root._refreshIdleDpmsCapability();
+                // Chrome surfaces + popups died with the previous
+                // connection. Rows persist across binds, but a row may
+                // belong to a toplevel that closed while we were unbound;
+                // attaching chrome to its handle is a protocol error that
+                // drops this bind too (a rebind storm). The compositor
+                // replays every live toplevel right after hello, inside
+                // the same dispatch, so collect the replayed handles and
+                // re-attach once that dispatch has finished.
+                root._replayedHandles = ({});
+                Qt.callLater(root._resyncChromeAfterReplay);
             } else {
                 // Unbound: the compositor can no longer apply WM policy or
                 // hold our hotkeys, so drop the capability (the tab reverts
@@ -600,6 +841,7 @@ Singleton {
                 // the compositor's handle counter dies with it, so queued
                 // retries must not outlive it.
                 root._clearNestedProxyRetries();
+                root._menuActions = {};
                 if (lastError.length > 0)
                     Logger.w("Qdwin", "qdwin_shell_v1 unbound: " + lastError);
             }
@@ -632,6 +874,35 @@ Singleton {
             }
             root._rebuildWorkspaces();
         }
+        // Per-window geometry: x/y is the frame's outer origin, w/h the
+        // client's own size. The frame is painted to the client size, so
+        // any size change re-renders it.
+        onToplevelGeometry: (handle, x, y, w, h) => {
+            for (let i = 0; i < root.windows.count; i++) {
+                if (root.windows.get(i).handle === handle) {
+                    const row = root.windows.get(i);
+                    if (row.width !== w || row.height !== h) {
+                        root.windows.setProperty(i, "width", w);
+                        root.windows.setProperty(i, "height", h);
+                        root._syncChromeForRow(i);
+                    }
+                    break;
+                }
+            }
+        }
+        // v36: who frames this window. Only server-side (1) windows get
+        // the shell's title bar and edges.
+        onToplevelDecoration: (handle, mode) => {
+            for (let i = 0; i < root.windows.count; i++) {
+                if (root.windows.get(i).handle === handle) {
+                    if (root.windows.get(i).decorationMode !== mode) {
+                        root.windows.setProperty(i, "decorationMode", mode);
+                        root._syncChromeForRow(i);
+                    }
+                    break;
+                }
+            }
+        }
         // Per-window state bitmask (QDWIN_TS_*: 1=maximized, 2=fullscreen,
         // 4=minimized, …). Tracked so the WM toggle-maximize / toggle-
         // fullscreen shortcuts can flip the *current* state of the focused
@@ -640,10 +911,38 @@ Singleton {
         onToplevelState: (handle, state) => {
             for (let i = 0; i < root.windows.count; i++) {
                 if (root.windows.get(i).handle === handle) {
+                    // Maximise drops the edges and swaps the button
+                    // glyph; fullscreen drops the frame.
+                    const was = root.windows.get(i).state & 3;
                     root.windows.setProperty(i, "state", state >>> 0);
+                    if (was !== (state & 3))
+                        root._syncChromeForRow(i);
                     break;
                 }
             }
+        }
+        // v20/v21 shell-chrome input forwards. The north strip: left
+        // press raises + starts the interactive move (the serial is the
+        // live grab serial the compositor validates), right press opens
+        // the window context menu through show_popup.
+        onChromeButton: (handle, side, x, y, button, state, serial) => {
+            const row = root._windowByHandle(handle);
+            if (!row)
+                return;
+            if (button === 0x110) {          // BTN_LEFT
+                root._onFrameLeft(row, side, x, y, state, serial);
+            } else if (button === 0x111 && side === 0 && state === 1) {
+                root._chromePress = null;    // BTN_RIGHT on the title bar
+                root._openWindowMenu(handle, serial, x, y);
+            }
+        }
+        // A press inside the active menu hit a valid row — the binding
+        // already tore the popup down; run the action.
+        onPopupItemTriggered: (parent, index) => {
+            root._runMenuAction(parent, index);
+        }
+        onPopupDismissed: (parent) => {
+            delete root._menuActions[parent];
         }
         // v19/v25: a registered WM-shortcut hotkey fired — relay the id so
         // WindowManagerService can map it to a window-manager action on the
@@ -688,6 +987,8 @@ Singleton {
         }
 
         onToplevelAdded: (handle, ownerUid, appId, title, isXwayland) => {
+            if (root._replayedHandles)
+                root._replayedHandles[handle] = true;
             root.windows.append({
                 handle: handle,
                 ownerUid: ownerUid,
@@ -696,6 +997,10 @@ Singleton {
                 isXwayland: isXwayland,
                 workspaceId: 0,
                 state: 0,
+                width: 0,
+                height: 0,
+                chromeArgb: 0,
+                decorationMode: 0,
                 sandboxEngine: "",
                 secctxAppId: "",
                 instanceId: "",
@@ -809,6 +1114,10 @@ Singleton {
             // when no windows row matches — the proxy may have been
             // destroyed before its toplevel row landed.
             root._forgetNestedProxyRetry(handle);
+            // The binding already tore the chrome surfaces and any
+            // menu popup for this toplevel down; drop the menu's
+            // action map too.
+            delete root._menuActions[handle];
             for (let i = 0; i < root.windows.count; i++) {
                 if (root.windows.get(i).handle === handle) {
                     root.windows.remove(i);
@@ -830,7 +1139,10 @@ Singleton {
         onToplevelTitle: (handle, title) => {
             for (let i = 0; i < root.windows.count; i++) {
                 if (root.windows.get(i).handle === handle) {
+                    const changed = root.windows.get(i).title !== (title || "");
                     root.windows.setProperty(i, "title", title || "");
+                    if (changed)
+                        root._syncChromeForRow(i);
                     if (i === root.focusedWindowIndex)
                         root.activeWindowChanged();
                     return;
@@ -857,7 +1169,13 @@ Singleton {
                 }
             }
             if (next !== root.focusedWindowIndex) {
+                const prev = root.focusedWindowIndex;
                 root.focusedWindowIndex = next;
+                // Repaint both title bars: focused vs dimmed.
+                if (prev >= 0 && prev < root.windows.count)
+                    root._syncChromeForRow(prev);
+                if (next >= 0)
+                    root._syncChromeForRow(next);
                 root.activeWindowChanged();
             }
         }

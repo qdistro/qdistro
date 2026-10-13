@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <QColor>
+#include <QImage>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -29,18 +31,24 @@
 #include <QVariantList>
 #include <cstdint>
 #include <memory>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "broker-call.h"
 
 class CtrlServer;
+class QImage;
 
 struct wl_display;
 struct wl_registry;
 struct wl_shm;
+struct wl_compositor;
+struct wl_surface;
+struct wl_buffer;
 struct wl_output;
 struct qdwin_shell_v1;
+struct qdwin_popup_v1;
 struct weston_capture_v1;
 struct ext_workspace_manager_v1;
 struct ext_workspace_group_handle_v1;
@@ -127,7 +135,52 @@ public:
     Q_INVOKABLE void closeWindow(quint32 handle);
     Q_INVOKABLE void requestMaximize(quint32 handle, bool maximized);
     Q_INVOKABLE void requestMinimize(quint32 handle);
+    Q_INVOKABLE void requestRaise(quint32 handle);
+    Q_INVOKABLE void beginInteractiveMove(quint32 handle, quint32 serial);
+    // v36: `edges` is an xdg_toplevel.resize_edge mask (top=1, bottom=2,
+    // left=4, right=8); `serial` is the chrome_button press serial.
+    Q_INVOKABLE void beginInteractiveResize(quint32 handle, quint32 serial,
+                                            quint32 edges);
     Q_INVOKABLE void setBorderColor(quint32 handle, quint32 argb);
+
+    // Shell chrome + context-menu popup plumbing. The wl_surfaces are
+    // created on THIS binding's display (the same wl_client that holds
+    // the qdwin_shell_v1 binding — the same-client rule the protocol's
+    // chrome_button/popup_button events exist to work around), painted
+    // from QImage rasters in shm buffers, and handed to the compositor
+    // through attach_decoration / show_popup.
+    //
+    // attachChrome paints a solid-fill chrome surface of (w, h) in
+    // `argb` (0xRRGGBBAA, the set_border_color wire order) and
+    // (re)issues attach_decoration for `side`
+    // (0=N … 3=W — QDWIN_SIDE_*). Chrome surfaces persist until the
+    // toplevel is removed, detached, or the binding tears down.
+    Q_INVOKABLE bool attachChrome(quint32 handle, quint32 side,
+                                  int width, int height, quint32 argb);
+    Q_INVOKABLE void detachChrome(quint32 handle, quint32 side);
+    // Server-side window frame: a title bar (N) painted with `title` and
+    // the `buttons` glyphs ("minimize", "maximize"/"restore", "close",
+    // left → right, flush right), plus `border`-px E/S/W edges (none
+    // when border is 0, e.g. maximised). All sides land in ONE
+    // attach_decoration. contentWidth/Height are the client's size.
+    Q_INVOKABLE bool attachFrame(quint32 handle, int contentWidth,
+                                 int contentHeight, int titleHeight,
+                                 int border, quint32 rgba,
+                                 const QString &title, bool active,
+                                 const QStringList &buttons);
+    Q_INVOKABLE void detachFrame(quint32 handle);
+    // showPopup renders a vertical label menu (items: [{label:…}]) into
+    // a popup wl_surface and calls show_popup anchored at (x, y) in
+    // parent-local coordinates. `serial` must be the input-event serial
+    // carried by the chrome_button/popup_button that triggered it —
+    // the compositor validates it as a live grab serial (v29).
+    // Returns false without side effects when unbound/unpaintable.
+    Q_INVOKABLE bool showPopup(quint32 parent, quint32 serial,
+                               int x, int y, const QVariantList &items);
+    // Tears the parent's popup down early (after an item fired, or a
+    // second menu open replaced the first). The compositor's own
+    // `dismissed` also lands here via popupDismissed().
+    Q_INVOKABLE void destroyPopup(quint32 parent);
 
     // v24 workspaces. activate/create/remove drive ext-workspace-v1;
     // setWorkspaceCount reconciles the compositor's workspace count to
@@ -350,6 +403,8 @@ signals:
     void toplevelRemoved(quint32 handle);
     void toplevelTitle(quint32 handle, const QString &title);
     void toplevelAppId(quint32 handle, const QString &appId);
+    // v36: 0 = client draws its own frame, 1 = shell should frame it.
+    void toplevelDecoration(quint32 handle, quint32 mode);
     void toplevelGeometry(quint32 handle, int x, int y, quint32 width, quint32 height);
     void toplevelState(quint32 handle, quint32 state);
     void seatFocusChanged(const QString &seat, quint32 handle);
@@ -483,6 +538,23 @@ signals:
                            quint32 sourceHandle,
                            quint32 targetHandle,
                            const QString &sourceAppId);
+
+    // v20/v21 input forwards over shell-owned chrome/popup surfaces.
+    // chrome_button carries (handle, side) of the chrome plus
+    // surface-local coords; popup_button carries the popup's parent
+    // handle and popup-local coords. Coords are decoded from wl_fixed
+    // to doubles. `serial` (v29) is the input-event serial the shell
+    // must echo back to show_popup / begin_interactive_move.
+    void chromeButton(quint32 handle, quint32 side, double x, double y,
+                      quint32 button, quint32 state, quint32 serial);
+    void popupButton(quint32 parent, double x, double y,
+                     quint32 button, quint32 state, quint32 serial);
+    // A press on a menu row inside an active popup hit a valid item —
+    // QML dispatches the action and the popup is already destroyed.
+    void popupItemTriggered(quint32 parent, int index);
+    // The compositor dismissed the parent's popup (outside click,
+    // parent closed/minimised, lock). The proxy is already torn down.
+    void popupDismissed(quint32 parent);
 
     void launcherRequested();
     void switcherNext(int dir);
@@ -656,6 +728,49 @@ private:
     friend struct QdwinIdleDispatch;
 
     CtrlServer *ctrlServer_ = nullptr;
+
+    // ---- shell chrome + popup client state ----
+    // wl_compositor/wl_shm bound on the MAIN registry (the same display
+    // that owns the shell binding — attach_decoration/show_popup only
+    // accept surfaces from the shell client itself).
+    wl_compositor *compositor_ = nullptr;
+    wl_shm *shm_ = nullptr;
+    uint32_t compositorGlobalName_ = 0;
+    uint32_t shmGlobalName_ = 0;
+    // Per-toplevel chrome surfaces keyed by handle, 4 slots
+    // (QDWIN_SIDE_*). attach_decoration is re-issued with the live set
+    // each time a side changes, so NULL sides stay undecorated.
+    struct ChromeSide {
+        wl_surface *surface = nullptr;
+        wl_buffer *buffer = nullptr;
+        int w = 0, h = 0;
+    };
+    struct ChromeEntry { ChromeSide sides[4]; };
+    std::unordered_map<quint32, ChromeEntry> chrome_;
+    // One popup per parent toplevel (protocol limit). Keyed by parent.
+    struct PopupEntry {
+        wl_surface *surface = nullptr;
+        wl_buffer *buffer = nullptr;
+        qdwin_popup_v1 *popup = nullptr;
+        int w = 0, h = 0, itemH = 0, itemCount = 0;
+    };
+    std::unordered_map<quint32, PopupEntry> popups_;
+    // Creates an shm wl_buffer holding a copy of `img` (ARGB32). The
+    // caller owns the returned buffer; the pool/fd/mmap are internal.
+    wl_buffer *makeArgbBuffer(const QImage &img);
+    void reattachDecoration(quint32 handle);
+    bool setChromeSide(quint32 handle, quint32 side, const QImage &img);
+    bool dropChromeSide(quint32 handle, quint32 side);
+    static QColor rgbaColor(quint32 rgba);
+    static QImage renderTitleBar(int width, int height, quint32 rgba,
+                                 const QString &title, bool active,
+                                 const QStringList &buttons);
+    void chromePurge(quint32 handle);      // all four sides for a handle
+    void popupTeardown(quint32 parent);    // destroy proxies, drop entry
+    void popupHit(quint32 parent, double x, double y,
+                  quint32 button, quint32 state, quint32 serial);
+    void chromePopupTeardownState();       // disconnect path: drop pointers
+    friend struct QdwinPopupDispatch;
 
     // Auto-reconnect after a dispatch error / compositor restart.
     // teardown() schedules connectAndBind() via singleShot with an

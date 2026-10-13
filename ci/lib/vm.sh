@@ -300,6 +300,7 @@ acquire_enforcing_vm() {
     [ -n "$wa_file" ] && rm -f "$wa_file" 2>/dev/null || true
     kv "vm_${gate}" "$vm"
     kv "vm_${gate}_ssh_port" "$port"
+    printf '%s\t%s\n' "$vm" "$port" >> "$RDIR/vm/ssh-ports.tsv"
     # The golden's session units come up after sshd; give the outer
     # compositor the same budget spin-test-vm.sh gives a permissive clone.
     # Not fatal here: the bats file asserts what it needs and its log then
@@ -331,6 +332,50 @@ collect_vm_artifacts_ssh() {
         > "$RDIR/journals/$label-avc.log" 2>&1 || true
 }
 
+# qci_offline_egress_check <vm> — offline only: read what the guest's egress
+# block (scripts/vm/lib/offline-egress.sh) recorded since boot. Any blocked
+# attempt to a destination that is not declared product chatter
+# (QCI_OFFLINE_EGRESS_EXPECTED) is a FAILED row: something in the guest tried
+# to fetch past the host cache. A guest that cannot be asked, was never
+# armed, or whose table no longer matches the ruleset is a failed row too:
+# unknown is not clean. Enforcing clones (no qga) are asked over SSH, on the
+# port acquire_enforcing_vm recorded.
+qci_offline_egress_check() {
+    local vm=$1 dir log cls unexpected expected broken port vmx="$VM_TOOLS/vm-exec"
+    . "$VM_TOOLS/lib/offline-egress.sh"
+    qd_offline_egress_enabled || return 0
+    dir="$RDIR/offline-egress"
+    mkdir -p "$dir"
+    log="$dir/$vm.log"
+    port=$(awk -F'\t' -v v="$vm" '$1 == v { p = $2 } END { print p }' "$RDIR/vm/ssh-ports.tsv" 2>/dev/null || true)
+    if [ -n "$port" ]; then
+        vmx="$dir/.ssh-exec-$port"
+        printf '#!/bin/bash\nexec ssh -p %s -i "$HOME/.ssh/qdistro_enforcing_id_ed25519" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=8 -o BatchMode=yes root@127.0.0.1 "$2"\n' \
+            "$port" > "$vmx" && chmod +x "$vmx"
+    fi
+    if ! qd_offline_egress_scan "$vm" "$vmx" > "$log" 2>&1; then
+        record_result offline-egress "$vm" fail "$EXIT_BUILD" build vm "$log" \
+            "QCI_OFFLINE: could not read the guest egress block (not armed or guest unreachable)"
+        return 0
+    fi
+    cls="$(qd_offline_egress_classify < "$log" 2>&1)" || cls="broken classifier failed: $cls"
+    printf '%s\n' "$cls" > "$dir/$vm.classified"
+    broken="$(printf '%s\n' "$cls" | sed -n 's/^broken //p' | head -n 1)"
+    if [ -n "$broken" ]; then
+        record_result offline-egress "$vm" fail "$EXIT_BUILD" build vm "$log" \
+            "QCI_OFFLINE: guest egress block not intact: $broken"
+        return 0
+    fi
+    unexpected="$(printf '%s\n' "$cls" | sed -n 's/^unexpected //p' | tr '\n' ' ')"
+    expected="$(printf '%s\n' "$cls" | sed -n 's/^expected \([^ ]*\).*/\1/p' | tr '\n' ' ')"
+    if [ -n "$unexpected" ]; then
+        record_result offline-egress "$vm" fail "$EXIT_BUILD" build vm "$log" \
+            "QCI_OFFLINE: guest tried to reach ${unexpected% } past the host cache (blocked)${expected:+; expected chatter: ${expected% }}"
+    elif [ -n "$expected" ]; then
+        log "offline-egress $vm: only expected product chatter blocked (${expected% })"
+    fi
+}
+
 release_vm() {
     local vm=$1 rc=$2
     [ -n "$vm" ] || return 0
@@ -349,6 +394,7 @@ release_vm() {
         log "preserving pre-existing VM $vm"
         return 0
     }
+    qci_offline_egress_check "$vm"
     if [ "$rc" -ne 0 ] && [ "${QCI_DELETE_FAILED_VM:-0}" != 1 ] && [ "${QCI_KEEP_FAILED_VM:-$KEEP_FAILED_DEFAULT}" = 1 ]; then
         # Preserve the failed VM for debugging, but do NOT leave it running.
         # A long multi-VM gate (bats spins one disposable VM per file) would
@@ -650,6 +696,21 @@ ensure_run_golden() {
         "${VIRSH[@]}" undefine "$gvm" --nvram >/dev/null 2>&1 || "${VIRSH[@]}" undefine "$gvm" >/dev/null 2>&1 || true
         record_result "$profile" "golden-build" fail "$EXIT_VM_PROVISION" vm_provision vm "$log" "could not resolve golden disk path"
         return "$EXIT_VM_PROVISION"
+    fi
+    # Offline: the golden build is where most guest fetches happen. Take its
+    # links down first, so nothing it does between this final scan and its
+    # shutdown can leave it; then seal it, so its clones do not inherit (and
+    # re-report) the golden's history.
+    . "$VM_TOOLS/lib/offline-egress.sh"
+    if qd_offline_egress_enabled; then
+        qd_offline_egress_set_links "$gvm" down \
+            || record_result offline-egress "$gvm" fail "$EXIT_BUILD" build vm "$log" \
+                "QCI_OFFLINE: could not take the golden's links down before its final egress scan"
+    fi
+    qci_offline_egress_check "$gvm"
+    if qd_offline_egress_enabled; then
+        qd_offline_egress_seal "$gvm" "$VM_TOOLS/vm-exec" \
+            || log "offline-egress: could not seal golden $gvm; its clones will re-report its history"
     fi
     # Quiesce: sync in-guest, clean shutdown, wait for shut off.
     "$VM_TOOLS/vm-exec" "$gvm" "sync" >/dev/null 2>&1 || true

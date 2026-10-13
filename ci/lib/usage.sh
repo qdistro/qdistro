@@ -178,14 +178,17 @@ Environment:
                             requires the import. baked always uses
                             baseweed-baked. The kiwi builder (build-in-vm.sh)
                             always clones baked. iso/14 Phase G.
-  QCI_OFFLINE=1             Host-only / no-egress posture for VM tests. Records
+  QCI_OFFLINE=1             No-egress posture: builds and guests use the local
+                            dependency cache only (a cache miss fails). Records
                             a source tarball + sha256 in manifest.txt, exports
                             the gate down to scenarios so external-network tests
-                            self-skip, and (statically clear cases) skips gates
-                            whose registry network column is 'external'. Deep
-                            podman/container/browser SLIRP-NAT egress audit is a
-                            VM task (see todo); this is the env gate + the
-                            test-annotation hook.
+                            self-skip, and skips tests whose registry network
+                            column is 'external'. Every test guest is armed
+                            with a recording egress block
+                            (scripts/vm/lib/offline-egress.sh); a blocked
+                            attempt outside QCI_OFFLINE_EGRESS_EXPECTED, or a
+                            missing/altered block, is a failed offline-egress
+                            row and fails the run (doc/dev.md "Offline runs").
   QCI_RELEASE=1             Release-profile mode (RC battery): a `blocked` or
                             `skip` row in
                             a release-relevant gate (vm-smoke / bats / gui /

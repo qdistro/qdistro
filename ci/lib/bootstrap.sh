@@ -126,8 +126,9 @@ MERGE_MALFORMED_TOTAL=0  # malformed fragment rows quarantined this run (escalat
 #     so a run is reproducible without re-fetching anything;
 #   - gates whose registry `network` column is 'external' are skipped where
 #     that is statically knowable.
-# The deep podman/container/browser egress audit under SLIRP NAT is a separate
-# VM task; this is the env gate + plumbing only.
+#   - every test guest is armed with a recording egress block, and a blocked
+#     attempt outside the declared product chatter fails the run
+#     (scripts/vm/lib/offline-egress.sh, ci/lib/vm.sh qci_offline_egress_check).
 QCI_OFFLINE="${QCI_OFFLINE:-0}"
 [ "$QCI_OFFLINE" = 1 ] && export QCI_OFFLINE
 

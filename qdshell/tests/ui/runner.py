@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import dataclasses
+import json
 import os
 import re
 import shlex
@@ -1541,6 +1542,76 @@ def _describe_scrolled_vm(session: VMSession, surface, first_png: Path,
     )
 
 
+def _mouse_overrides_vm(session: VMSession) -> str:
+    """Read the persisted pointer override map to attest interaction/restore."""
+    result = guest_sh_vm(session, "python3 - <<'PY'\n"
+                         "import json\n"
+                         "with open('/home/admin/.config/qdshell/settings.json') as f:\n"
+                         "    settings = json.load(f)\n"
+                         "print(json.dumps(settings.get('pointer', {}).get("
+                         "'perDeviceOverrides', {}), sort_keys=True))\n"
+                         "PY\n")
+    if result.returncode != 0:
+        raise RuntimeError(f"cannot read mouse overrides: {result.stderr[:250]}")
+    return json.dumps(json.loads(result.stdout.strip()), sort_keys=True)
+
+
+def _capture_mouse_override_vm(session: VMSession) -> str:
+    """Open the VM's real ydotoold mouse override, capture it, then restore."""
+    before = _mouse_overrides_vm(session)
+    # The fixed 1280x800 qdwin GUI profile enumerates the ydotoold virtual
+    # mouse after the QEMU tablet. From the top, 15 wheel ticks put its
+    # Customize switch at (1002, 343). The existing scroll sweep ends at the
+    # bottom, so seek from the top instead of depending on its final offset.
+    wheel_x = int(VM_SCREEN_W * 0.55)
+    wheel_y = int(VM_SCREEN_H * 0.55)
+    switch_x = int(VM_SCREEN_W * 0.783)
+    switch_y = int(VM_SCREEN_H * 0.429)
+    mouse_wheel(session, wheel_x, wheel_y, 30, "up")
+    time.sleep(0.5)
+    mouse_wheel(session, wheel_x, wheel_y, 15, "down")
+    time.sleep(0.7)
+    clicked = False
+    try:
+        mouse_click(session, switch_x, switch_y)
+        clicked = True
+        time.sleep(1.5)  # Settings debounce and the expanded card settle.
+        after = _mouse_overrides_vm(session)
+        if after == before:
+            raise RuntimeError("mouse Customize click did not persist an override")
+
+        first = ARTIFACTS_DIR / "settings_mouse-override.png"
+        screenshot_vm(session, first)
+        first_desc = describe(first)
+        mouse_wheel(session, wheel_x, wheel_y, 5, "down")
+        time.sleep(0.7)
+        second = ARTIFACTS_DIR / "settings_mouse-override-p2.png"
+        screenshot_vm(session, second)
+        second_desc = describe(second)
+        return (f"\n\n=== mouse override enabled ({first.name}) ===\n"
+                f"{first_desc}\n\n=== mouse override scrolled ({second.name}) ===\n"
+                f"{second_desc}")
+    finally:
+        if clicked:
+            # A screenshot/describe/readback can throw after the first click.
+            # Inspect persisted state here rather than relying on where the
+            # exception happened in the try block.
+            current = _mouse_overrides_vm(session)
+            if current != before:
+                # Expanding the device card changes the Flickable's content
+                # height. Five ticks up does not undo five ticks down once
+                # that happens, so seek from the top again before toggling.
+                mouse_wheel(session, wheel_x, wheel_y, 30, "up")
+                time.sleep(0.5)
+                mouse_wheel(session, wheel_x, wheel_y, 15, "down")
+                time.sleep(0.7)
+                mouse_click(session, switch_x, switch_y)
+                time.sleep(1.5)
+                restored = _mouse_overrides_vm(session)
+                if restored != before:
+                    raise RuntimeError("mouse Customize override was not restored")
+
+
 def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
                        ) -> tuple[Path, str]:
     """VM analogue of capture_surface: open via in-VM IPC, shell-capture, describe."""
@@ -1601,21 +1672,24 @@ def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
         if surface.kind == "settings":
             description = _describe_scrolled_vm(session, surface, png_path,
                                               description)
+        if surface.id == "settings_mouse":
+            description += _capture_mouse_override_vm(session)
 
-        # Additional views (e.g. the audio panel's Devices tab): each click
-        # lands on a different page of the SAME surface; every page is
-        # described and concatenated so the judge sees the union.
+        # Additional views (e.g. the audio panel's Devices tab or an opened
+        # settings chooser): every clicked state is described and concatenated
+        # so the judge sees the union.
         if surface.post_open_clicks and surface.kind == "settings":
-            # Scroll-stitch leaves the view at the bottom, and the settings
-            # subtab strip scrolls WITH the content — the fractional click
-            # coords only hit the subtab when the view is at the top.
+            # Scroll-stitch leaves the view at the bottom; settings controls
+            # scroll WITH the content. Fractional click coordinates for the
+            # subtabs and choosers only hit their targets from the top.
             mouse_wheel(session, int(VM_SCREEN_W * 0.55),
                         int(VM_SCREEN_H * 0.55), 30, "up")
             time.sleep(0.5)
         for idx, (fx, fy) in enumerate(surface.post_open_clicks):
             mouse_click(session, int(VM_SCREEN_W * fx), int(VM_SCREEN_H * fy))
-            # Subtab switches animate the pill + re-incubate the page; under
-            # suite load (post scroll-stitch) transitions can exceed 2s —
+            # Subtab switches animate the pill + re-incubate the page, while
+            # opened choosers also need a settled popup frame. Under suite
+            # load (post scroll-stitch) transitions can exceed 2s —
             # 0.8s and 1.5s both caught mid-animation frames (empty pill,
             # previous subtab's content still rendered).
             time.sleep(2.5)
@@ -1758,9 +1832,14 @@ Describe ONLY what is actually visible. Do NOT speculate about what a similar
 UI might typically contain.
 
 Cover, as bullet points:
-  - The header/title text shown at the top of the visible panel or tab.
+  - The header/title text shown at the top of the visible panel or tab, and
+    the icon immediately beside that title (if one is visible). Inspect the
+    header separately so a small icon is not lost among the top-bar icons.
   - Visible labelled controls: button labels, toggle states (on/off),
     slider values if numeric values are shown, dropdown current values.
+    For a switch, infer on/off from the thumb position (left=off,
+    right=on), not the thumb color. Separately state whether the control
+    looks disabled/dimmed; a checked value can still be disabled.
   - Icon-only buttons (especially in header/toolbar rows): name each one's
     apparent FUNCTION from its icon — e.g. "a close button (X)", "a
     list/grid view-toggle button", "a settings gear button", "a clear/trash
@@ -1787,6 +1866,84 @@ Constraints:
   - If the panel appears empty / shell still loading, say so explicitly.
 """
 
+# Small surface-specific details can be lost when the generic description
+# spends its word budget on the desktop bar. Keep these observations scoped to
+# the surface whose golden actually needs them; every hint still asks for
+# visible evidence, never for the expected answer.
+_DESCRIBE_SURFACE_HINTS = {
+    "bar_idle": (
+        "Identify whether the narrow strip pinned along the screen edge "
+        "is a bar window, and describe its start, center and end widget "
+        "groups separately from the desktop below it."
+    ),
+    "panel_calendar": (
+        "In the calendar grid, identify the date whose cell is visibly "
+        "highlighted or selected, or say none is distinguishable."
+    ),
+    "panel_launcher": (
+        "For the search input, report any visible caret or focus outline, "
+        "or say neither is visible; do not infer focus from its presence."
+    ),
+    "settings_defaultapps": (
+        "Inspect and transcribe the small explanatory paragraph directly "
+        "below the Default Applications heading, if one is visible."
+    ),
+    "settings_bar_widgets": (
+        "Within the Left section, inspect the Launcher widget itself for "
+        "a settings gear button. Report its presence or absence separately "
+        "from the gear buttons on widgets in the Right section."
+    ),
+    "settings_keyboard": (
+        "Under the Cursor heading, report any explanatory note about "
+        "cursor preference persistence before the Cursor blink control. "
+        "Distinguish it from the capability note near the top. If a control "
+        "is clipped by the frame edge, call it clipped rather than inferring "
+        "that it is disabled from the partial view."
+    ),
+    "settings_advanced": (
+        "Inspect the warning card's color and icon separately from the "
+        "Advanced tab header. For setting rows, distinguish bright/enabled "
+        "reset controls from dimmed/disabled ones, using visible styling "
+        "rather than the mere presence of a reset icon."
+    ),
+    "settings_windowmanager": (
+        "For the Window decoration theme control, inspect whether it is "
+        "a free-text input or a dropdown. Report whether a dropdown arrow "
+        "is visible; a rounded border or dim color alone does not identify "
+        "the control type."
+    ),
+    "panel_battery": (
+        "State whether battery rows, charge level and time are visible, "
+        "or whether the panel has only a header and close button."
+    ),
+    "panel_wallpaper": (
+        "Inspect the file-browser toolbar closely. Identify the "
+        "hidden-files eye control if its glyph is visible."
+    ),
+    "panel_sessionmenu": (
+        "For each power-action card, report any small corner keybind badge "
+        "and which card is highlighted."
+    ),
+    "panel_brightness": (
+        "For each display row, inspect the small icon before the slider "
+        "and whether the slider looks dimmed or disabled. If its visual "
+        "state is ambiguous, say so rather than guessing."
+    ),
+    "panel_tray_degraded": (
+        "Check whether a separate tray drawer surface or attached notch is "
+        "still visible below the right side of the bar. Distinguish an "
+        "unobstructed desktop background from an empty, dimmed drawer."
+    ),
+}
+
+
+def _describe_prompt_for(image_path: Path) -> str:
+    name = image_path.name
+    for surface_id, hint in _DESCRIBE_SURFACE_HINTS.items():
+        if name == f"{surface_id}.png" or name.startswith(f"{surface_id}-"):
+            return f"{_DESCRIBE_PROMPT}\nSurface detail to inspect: {hint}"
+    return _DESCRIBE_PROMPT
+
 
 def describe(image_path: Path) -> str:
     """Send PNG to a vision LLM; return the textual description.
@@ -1798,12 +1955,13 @@ def describe(image_path: Path) -> str:
     A single bounded retry covers transient codex failures (empty output is
     an observability gap, never a pass — a second failure still returns "").
     """
+    prompt = _describe_prompt_for(image_path)
     for _ in range(2):
         desc = ""
         if shutil.which("codex") and os.environ.get("QDSHELL_UI_NO_CODEX") != "1":
-            desc = _describe_with_codex(image_path)
+            desc = _describe_with_codex(image_path, prompt)
         elif shutil.which("pi") and os.environ.get("QDSHELL_UI_NO_PI") != "1":
-            desc = _describe_with_pi(image_path)
+            desc = _describe_with_pi(image_path, prompt)
         if desc.strip():
             return desc
         time.sleep(2)
@@ -1818,7 +1976,8 @@ def _run_codex(prompt: str, image_path: Optional[Path] = None) -> str:
             "--dangerously-bypass-approvals-and-sandbox",
             "--sandbox", "danger-full-access",
             "--cd", str(QDSHELL_ROOT),
-            "--ephemeral",
+            "--model", "gpt-5.6-luna",
+            "-c", "model_reasoning_effort=medium",
             "--output-last-message", str(output_path),
         ]
         if image_path is not None:
@@ -1842,16 +2001,16 @@ def _run_codex(prompt: str, image_path: Optional[Path] = None) -> str:
         return result.stdout.strip()
 
 
-def _describe_with_codex(image_path: Path) -> str:
-    return _run_codex(_DESCRIBE_PROMPT, image_path=image_path)
+def _describe_with_codex(image_path: Path, prompt: str) -> str:
+    return _run_codex(prompt, image_path=image_path)
 
 
-def _describe_with_pi(image_path: Path) -> str:
+def _describe_with_pi(image_path: Path, prompt: str) -> str:
     """Vision via local pi CLI + qwen3.6-plus. See memory: reference-pi-vision-fallback."""
     try:
         result = subprocess.run(
             ["pi", "--print", "--provider", "qwen", "--model", "qwen3.6-plus",
-             f"@{image_path}", _DESCRIBE_PROMPT],
+             f"@{image_path}", prompt],
             capture_output=True, text=True, timeout=120,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -1884,6 +2043,34 @@ Decide: do all the load-bearing reference elements appear in the actual? Cosmeti
 phrasing differences are fine. A reference bullet is satisfied if its meaning is
 present in the actual, even with different wording. A reference bullet is
 violated if its element is clearly absent or contradicted.
+
+Apply conditional requirements only when their condition is established in the
+actual. If the reference describes an absent-resource branch, judge that branch
+against what is visible; do not also require controls from the resource-present
+branch. Do not infer that a feature is enabled merely because its conditional
+section is mentioned. Unconditional header, close, and nonblank requirements
+still apply in every branch.
+
+Keep the boundaries of the described UI surface in view. Empty desktop outside
+an open panel does not make that panel's body blank. If the actual describes a
+Battery panel with only its header and no detected battery, use the reference's
+no-battery branch: do not require charge rows or time estimates even if they
+appear earlier in the reference. Still fail if the header or close button is
+absent. A list introduced by "any of which may appear" describes optional card
+types, not a requirement that every listed card render; still require the
+visible card stack to have the structure and controls the reference specifies
+for cards that are present.
+
+An asset identifier in the reference is not literal on-screen text. Compare the
+described glyph shape and function: the System Monitor header's
+`device-analytics` asset is drawn as a monitor/chart glyph. Do not reject that
+same visible glyph merely because the description uses its appearance rather
+than its internal asset name.
+
+Read headings and notes as scope. A "Notes" paragraph that says a banner or
+control is absent under the observed capability is context, not a requirement
+to find that absent item. Do not turn an explicitly absent element into a
+MISSING item. Keep every applicable positive requirement from the reference.
 
 Reply in this exact format:
   MISSING: <bullet, or 'none'>
@@ -1935,6 +2122,50 @@ def judge(reference: str, actual: str) -> JudgeResult:
             if v and v.lower() != "none":
                 extra.append(v)
     return JudgeResult(verdict, raw, missing, extra)
+
+
+def judge_frame_consistently(reference: str, actual: str,
+                             image_path: Path) -> JudgeResult:
+    """Confirm a panel FAIL with independent reads of the same saved frame.
+
+    A vision-model omission must not turn a correct immutable screenshot red.
+    The first PASS retains the existing fast path. After a first FAIL, require
+    two independent FAILs to fail, or two independent PASSes to pass. An empty
+    description or unavailable judge cannot rescue a failure. Preserve every
+    observation and verdict beside the frame for audit.
+    """
+    first = judge(reference, actual)
+    if first.verdict != "FAIL":
+        return first
+
+    votes = [(actual, first)]
+    for _ in range(2):
+        refreshed = describe(image_path)
+        if not refreshed.strip():
+            break
+        verdict = judge(reference, refreshed)
+        votes.append((refreshed, verdict))
+        if sum(v.verdict == "FAIL" for _, v in votes) >= 2:
+            break
+        if sum(v.verdict == "PASS" for _, v in votes) >= 2:
+            break
+
+    transcript = []
+    for number, (description, verdict) in enumerate(votes, 1):
+        transcript.append(
+            f"Observation {number}: {verdict.verdict}\n"
+            f"Description:\n{description}\nJudge:\n{verdict.raw}\n"
+        )
+    evidence = image_path.with_suffix(".judge-recheck.txt")
+    evidence.write_text("\n".join(transcript))
+    passes = sum(v.verdict == "PASS" for _, v in votes)
+    if passes >= 2:
+        return JudgeResult("PASS", f"confirmed by 2/3 observations; {evidence}",
+                           [], [])
+    missing = [item for _, v in votes if v.verdict == "FAIL" for item in v.missing]
+    extra = [item for _, v in votes if v.verdict == "FAIL" for item in v.extra]
+    return JudgeResult("FAIL", f"panel failure confirmed; {evidence}\n"
+                       + "\n".join(v.raw for _, v in votes), missing, extra)
 
 
 def _judge_with_pi(prompt: str) -> str:

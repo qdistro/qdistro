@@ -314,16 +314,18 @@ qs_ipc closeWindow "$handle" \
 #   removed      — the tier-5 toplevel actually went away within ~5s.
 # This split is the whole diagnostic: removed without request_seen would be an
 # app that exited on its own, not a close we drove.
+# Keep the end anchor at the end of the whole ERE: `$` inside `( |$)` is a
+# literal dollar under grep -E, and misses a valid line ending at the handle.
 request_seen=0; removed=0
 for _ in $(seq 1 10); do
     if [ "$request_seen" = 0 ] && $VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
         journalctl --user -u qdwin-compositor.service --after-cursor '$CUR2' --no-pager -o cat 2>/dev/null \
-        | grep -qE 'qdwin: request_close handle=$handle( |\$)'"; then
+        | grep -qE 'qdwin: request_close handle=$handle([[:space:]].*)?\$'"; then
         request_seen=1
     fi
     if $VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
         journalctl --user -u qdwin-compositor.service --after-cursor '$CUR2' --no-pager -o cat 2>/dev/null \
-        | grep -qE 'qdwin: toplevel_removed handle=$handle( |\$)'"; then
+        | grep -qE 'qdwin: toplevel_removed handle=$handle([[:space:]].*)?\$'"; then
         removed=1; break
     fi
     sleep 0.5

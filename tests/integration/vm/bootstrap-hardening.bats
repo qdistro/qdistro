@@ -101,8 +101,12 @@ run_boot() { run bash "$BOOT" "$@"; }
 }
 
 @test "hardening: domain_xml_tmpfile renders into a private 0700 dir + 0600 file" {
-    grep -q "chmod 0700" "$SPAWN_COMMON"
-    grep -q "chmod 0600" "$SPAWN_COMMON"
+    # created as the reader under umask 077 — root never chmods/chowns a
+    # path in a reader-writable dir (astra r43)
+    grep -q "umask 077; mktemp -d" "$SPAWN_COMMON"
+    grep -q "umask 077; mktemp \"" "$SPAWN_COMMON"
+    run grep -nE 'chown "\$owner"' "$SPAWN_COMMON"
+    [ "$status" -ne 0 ]
     # No world-readable chmod 0644 on the rendered XML remains in spawn scripts.
     for s in tier4-vm/spawn-tier4.sh tier5-vm/spawn-tier5.sh tier5b-vm/spawn-tier5b.sh; do
         run grep -nE 'chmod 0644 "\$TMP_XML"' "$REPO_ROOT/$s"

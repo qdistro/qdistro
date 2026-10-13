@@ -965,7 +965,7 @@
       "icon-theme-description": "Select the icon theme for applications. Themes are discovered from /usr/share/icons/.",
       "icon-theme-label": "Icon theme",
       "gtk-theme-label": "GTK theme",
-      "gtk-theme-description": "Select the GTK widget theme for applications. Discovered from ~/.themes and /usr/share/themes.",
+      "gtk-theme-description": "Select the GTK widget theme for applications. Discovered from ~/.themes, ~/.local/share/themes, and /usr/share/themes.",
       "system-default": "System default",
       "themes-header": "Themes",
       "font-rendering-header": "Font rendering",
@@ -1030,6 +1030,9 @@
       "visualizer-type-description": "Choose a visualization type for media playback.",
       "visualizer-type-label": "Visualization type",
       "volumes-desc": "Adjust volume controls and audio levels.",
+      "volumes-app-unknown": "Audio stream",
+      "volumes-applications-description": "Adjust the volume of each application currently playing audio.",
+      "volumes-applications-label": "Application volumes",
       "volumes-input-volume-description": "Microphone input volume level.",
       "volumes-mute-input-description": "Mute the default audio input (microphone).",
       "volumes-mute-input-label": "Mute audio input",
@@ -2229,7 +2232,7 @@
       "grace-description": "How long to wait for a graceful shutdown to finish before forcing the VM off.",
       "section-idle": "Idle",
       "idle-label": "Shut down idle VM after",
-      "idle-description": "Keep a VM running this long after its app closes, then shut it down. 0 shuts it down immediately. (No relaunch reuse yet — this is a shutdown delay.)",
+      "idle-description": "Keep a VM running this long after its app closes, then shut it down. Relaunching the same app during the window reuses the running VM instead of cold-starting. 0 shuts the VM down as soon as the last session ends.",
       "section-memory": "Memory",
       "lowmem-label": "Shut down idle VMs under low memory",
       "lowmem-description": "When free system memory drops below this amount, shut idle VMs down right away instead of waiting for the idle timeout. 0 disables this.",
@@ -2274,7 +2277,7 @@
       "decoration-theme-label": "Window decoration theme",
       "decoration-theme-description": "Name of the decoration theme to apply to window titlebars and borders.",
       "decoration-theme-placeholder": "Default",
-      "shortcuts-note": "Window-manager shortcuts are accelerator strings (e.g. Super+Left). They are saved now and will be applied once qdwin supports window-manager policy.",
+      "shortcuts-note": "Window-manager shortcuts are accelerator strings (e.g. Super+Left). Valid shortcuts are registered when qdwin supports global keybinds; otherwise they remain saved.",
       "shortcut-close-label": "Close window",
       "shortcut-close-description": "Shortcut to close the focused window.",
       "shortcut-maximize-label": "Toggle maximize",
@@ -2525,6 +2528,10 @@
       "broker-error": "could not read broker rules",
       "title": "Permissions"
     },
+    "podapp": {
+      "running": "{container} is still running or shutting down. Close it, or wait a moment, before launching another app in it.",
+      "running-title": "Already running"
+    },
     "qdshell-performance": {
       "disabled": "Performance mode disabled",
       "enabled": "Performance mode enabled",
@@ -2615,6 +2622,7 @@
     "switch-to-light-mode": "Light Mode",
     "unmute": "Unmute",
     "up": "Parent directory",
+    "vm-app-settings": "VM app settings",
     "volume-at": "Output volume: {volume}%",
     "wallpaper-selector": "Wallpaper selector"
   },

@@ -703,6 +703,19 @@ def check_state_requests_preserve_pending_gate(source):
             return fail(f"{fn} pending nested-proxy branch does not return "
                         "before moving/resizing")
 
+    # Both drag entry points (the shell's begin_interactive_move and a
+    # client's xdg_toplevel.move) go through qdwin_move_grab_start, which
+    # owns the refusal.
+    start_body, err = _function_body(
+        source,
+        r"static void\s+qdwin_move_grab_start\s*\(",
+        "qdwin_move_grab_start",
+    )
+    if err:
+        return fail(err)
+    if "tl->nested_proxy_pending_decision" not in start_body:
+        return fail("qdwin_move_grab_start does not reject pending nested "
+                    "proxies")
     move_body, err = _function_body(
         source,
         r"static void\s+qdwin_handle_begin_interactive_move\s*\(",
@@ -710,9 +723,8 @@ def check_state_requests_preserve_pending_gate(source):
     )
     if err:
         return fail(err)
-    if "tl->nested_proxy_pending_decision" not in move_body:
-        return fail("begin_interactive_move does not reject pending nested "
-                    "proxies")
+    if "qdwin_move_grab_start(" not in move_body:
+        return fail("begin_interactive_move bypasses qdwin_move_grab_start")
     return 0
 
 

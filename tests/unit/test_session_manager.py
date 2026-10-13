@@ -63,6 +63,10 @@ class _FakeOps:
         # is removed from) the shared tier-2 launch_envs dict.
         self.tier3s_launch_envs: dict[str, str] = {}  # name → env file content
         self.podapp_launch_envs: dict[str, str] = {}  # token → env content
+        # containers admin's podman reports present; podapp_exists_unknown
+        # simulates a `podman container exists` that could not run
+        self.podapp_present: set[str] = set()
+        self.podapp_exists_unknown = False
         self.killed: list[tuple[int, int]] = []
         self.useradd_should_fail = False
         self.userdel_should_fail = False
@@ -491,6 +495,11 @@ class _FakeOps:
 
     def remove_podapp_launch_env(self, token: str) -> None:
         self.podapp_launch_envs.pop(token, None)
+
+    def podapp_container_exists(self, container: str) -> bool | None:
+        if self.podapp_exists_unknown:
+            return None
+        return container in self.podapp_present
 
     def kill_pids(self, pids, sig: int) -> None:
         # Snapshot which cgroups are frozen at the moment we signal — a kill

@@ -5,6 +5,8 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Services.Qdwin
+import qs.Services.UI
+import "PodAppLaunch.js" as PodAppLaunch
 
 // PodApps — per-container app registry for the qdshell launcher.
 //
@@ -41,7 +43,7 @@ Singleton {
     signal refreshed()
 
     // ---- Cold-start placeholders -----------------------------------------
-    // Each entry: { launchToken, appId, name, iconName, silo, since }
+    // Each entry: { launchToken, appId, container, name, iconName, silo, since }
     // Inserted on spawn, removed on matching toplevel_security_context
     // event or after the placeholderTimeoutMs cap.
     property ListModel placeholders: ListModel {}
@@ -263,8 +265,26 @@ Singleton {
     // The D-Bus reply carries the launch token — the secctx instance-id the
     // window will arrive with — so placeholder resolution needs no access to
     // spawn-tier2's stdout (under a unit that is the journal, not our pipe).
+    //
+    // A pod is one container (`podman run --name <container>`), so a click on
+    // a pod that is already up cannot start a second copy: bring its window
+    // forward instead, and ignore repeat clicks while its launch is starting.
+    // See PodAppLaunch.js.
     function launch(row) {
         if (!row || !row.appId) return;
+        const verdict = PodAppLaunch.decideLaunch(
+            row.container, _windowRows(), _placeholderRows());
+        if (verdict.action === "focus") {
+            Logger.i("PodApps", "launch: " + row.container
+                                + " is running; focusing handle " + verdict.handle);
+            Qdwin.focusWindow(verdict.handle);
+            return;
+        }
+        if (verdict.action === "pending") {
+            Logger.i("PodApps", "launch: " + row.container
+                                + " is already starting; ignoring repeat click");
+            return;
+        }
         let argv = [];
         try { argv = JSON.parse(row.execArgv); } catch (e) { argv = []; }
         if (argv.length === 0) {
@@ -281,11 +301,31 @@ Singleton {
                         row.workload || "weston-terminal",
                         JSON.stringify(argv)],
             "_appId":    row.appId,
+            "_container": row.container,
             "_name":     row.name,
             "_iconName": row.iconName || "",
             "_silo":     row.silo,
         });
+        // Pending from the click on, not from the reply: the unit starts
+        // podman asynchronously, so a second click before the first
+        // container exists would pass the daemon's check and collide.
+        _inflight[row.container] = (_inflight[row.container] || 0) + 1;
+        _inflightSince[row.container] = Date.now();
         proc.running = true;
+    }
+
+    // container -> LaunchPodApp calls not yet answered (+ when the last one
+    // was made). Expires with the placeholder cap, so a call whose process
+    // never reports an exit cannot wedge the pod's launcher entry.
+    property var _inflight: ({})
+    property var _inflightSince: ({})
+    function _inflightDone(container) {
+        if (_inflight[container] > 1) {
+            _inflight[container]--;
+        } else {
+            delete _inflight[container];
+            delete _inflightSince[container];
+        }
     }
 
     // Internal helper Process component. One per launch.
@@ -300,13 +340,29 @@ Singleton {
         Process {
             id: launchProc
             property string _appId
+            property string _container
             property string _name
             property string _iconName
             property string _silo
             stdout: StdioCollector { id: launchOut }
             stderr: StdioCollector { id: launchErr }
             onExited: (code, status) => {
+                root._inflightDone(launchProc._container);
                 const err = String(launchErr.text || "").trim();
+                if (code !== 0 && PodAppLaunch.isRunningRefusal(err)) {
+                    // The pod is up but has no window we can raise (still
+                    // starting, or shutting down). Say so now rather than let
+                    // the click look like it did nothing.
+                    Logger.i("PodApps", "launch: " + launchProc._container
+                                        + " refused, pod already running");
+                    ToastService.showNotice(
+                        I18n.tr("toast.podapp.running-title"),
+                        I18n.tr("toast.podapp.running",
+                                { "container": launchProc._container }),
+                        "container", 4000);
+                    launchProc.destroy();
+                    return;
+                }
                 if (code !== 0) {
                     Logger.w("PodApps", "launch: LaunchPodApp failed for "
                                         + launchProc._appId + " (exit " + code
@@ -327,6 +383,7 @@ Singleton {
                     return;
                 }
                 root._registerPlaceholder(m[1], launchProc._appId,
+                                          launchProc._container,
                                           launchProc._name,
                                           launchProc._iconName,
                                           launchProc._silo);
@@ -335,10 +392,34 @@ Singleton {
         }
     }
 
-    function _registerPlaceholder(launchToken, appId, name, iconName, silo) {
+    function _windowRows() {
+        const out = [];
+        const wm = Qdwin.windows;
+        for (let i = 0; wm && i < wm.count; i++) {
+            const w = wm.get(i);
+            out.push({ handle: w.handle, sandboxEngine: w.sandboxEngine,
+                       secctxAppId: w.secctxAppId });
+        }
+        return out;
+    }
+
+    function _placeholderRows() {
+        const out = [];
+        for (let i = 0; i < placeholders.count; i++)
+            out.push({ container: placeholders.get(i).container });
+        const now = Date.now();
+        for (const c in _inflight) {
+            if (now - _inflightSince[c] <= placeholderTimeoutMs)
+                out.push({ container: c });
+        }
+        return out;
+    }
+
+    function _registerPlaceholder(launchToken, appId, container, name, iconName, silo) {
         placeholders.append({
             launchToken: launchToken,
             appId:       appId,
+            container:   container,
             name:        name,
             iconName:    iconName,
             silo:        silo,

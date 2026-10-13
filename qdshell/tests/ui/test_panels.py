@@ -32,7 +32,7 @@ def test_panel(capture, surface):
     png, actual = capture(surface)
     assert png.exists()
     reference = (runner.EXPECTATIONS_DIR / surface.expectation).read_text()
-    verdict = runner.judge(reference, actual)
+    verdict = runner.judge_frame_consistently(reference, actual, png)
     if verdict.verdict == "SKIP":
         pytest.skip(verdict.raw)
     assert verdict.verdict == "PASS", (

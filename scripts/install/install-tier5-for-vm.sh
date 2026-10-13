@@ -9,6 +9,13 @@
 #   - /usr/local/bin/qdistro-tier5-cleanup → tier5-vm/qdistro-tier5-cleanup.sh
 #   - /usr/local/bin/qdistro-tier5-build-guest-image →
 #     tier5-vm/build-guest-image.sh
+#   - /usr/local/bin/qdistro-tier5-vmapps-scan →
+#     tier5-vm/vmapps-scan.py (guest-base .desktop scanner)
+#   - /usr/local/bin/qdistro-tier5-vmapps-reconcile →
+#     tier5-vm/vmapps-reconcile.sh (service run for the catalogue)
+#   - /etc/systemd/system/qdistro-tier5-vmapps-scan.{service,path,timer}
+#     — boot + path-triggered + periodic reconcile of the dynamic
+#     VM-app catalogue (vmapps-dynamic)
 #   - /usr/share/polkit-1/actions/org.qdistro.tier5.policy — polkit
 #     rule that lets the *active* admin session pkexec the spawn
 #     helper without re-authenticating. qdshell's VMApps.launch
@@ -52,7 +59,9 @@ fi
 install -d /usr/local/bin
 for tool in spawn-tier5.sh:qdistro-tier5-spawn \
             qdistro-tier5-cleanup.sh:qdistro-tier5-cleanup \
-            build-guest-image.sh:qdistro-tier5-build-guest-image; do
+            build-guest-image.sh:qdistro-tier5-build-guest-image \
+            vmapps-scan.py:qdistro-tier5-vmapps-scan \
+            vmapps-reconcile.sh:qdistro-tier5-vmapps-reconcile; do
     src_basename="${tool%%:*}"
     dst_name="${tool##*:}"
     src="$TIER5_DIR/$src_basename"
@@ -117,6 +126,63 @@ cat > "$POLKIT_DIR/org.qdistro.tier5.policy" <<'EOF'
 EOF
 chmod 0644 "$POLKIT_DIR/org.qdistro.tier5.policy"
 echo "[install-tier5] installed polkit policy at $POLKIT_DIR/org.qdistro.tier5.policy"
+
+# --- dynamic VM-app catalogue reconcile units (vmapps-dynamic) -------
+#
+# The service is a oneshot reconcile run (vmapps-reconcile.sh): absent
+# base -> manifest removal; unreadable-by-admin base -> stale publish;
+# fresh manifest -> fast path; otherwise rescan with bounded retries.
+# It exits 0 even on exhaustion (the launcher just sees the stale
+# manifest and shows Foot only).
+#
+#   * boot:     WantedBy=multi-user.target does the initial reconcile
+#   * path:     base qcow2 replaced -> rescan
+#   * timer:    10min drift-safety reconcile
+SYSTEMD_DIR=/etc/systemd/system
+install -d "$SYSTEMD_DIR"
+cat > "$SYSTEMD_DIR/qdistro-tier5-vmapps-scan.service" <<'EOF'
+[Unit]
+Description=qdistro tier-5 VM-app catalogue reconcile
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/qdistro-tier5-vmapps-reconcile
+# guestfish opens + inspects the multi-GB base; keep it out of the way.
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
+EOF
+cat > "$SYSTEMD_DIR/qdistro-tier5-vmapps-scan.path" <<'EOF'
+[Unit]
+Description=Watch the tier-5 guest base for VM-app catalogue rescans
+
+[Path]
+PathChanged=/var/lib/libvirt/images/qdistro-tier5-base.qcow2
+Unit=qdistro-tier5-vmapps-scan.service
+
+[Install]
+WantedBy=paths.target
+EOF
+cat > "$SYSTEMD_DIR/qdistro-tier5-vmapps-scan.timer" <<'EOF'
+[Unit]
+Description=Periodic tier-5 VM-app catalogue reconcile
+
+[Timer]
+OnUnitInactiveSec=10min
+Unit=qdistro-tier5-vmapps-scan.service
+
+[Install]
+WantedBy=timers.target
+EOF
+chmod 0644 "$SYSTEMD_DIR"/qdistro-tier5-vmapps-scan.{service,path,timer}
+sd_daemon_reload
+sd_enable_now qdistro-tier5-vmapps-scan.service \
+              qdistro-tier5-vmapps-scan.path \
+              qdistro-tier5-vmapps-scan.timer
+echo "[install-tier5] installed + enabled qdistro-tier5-vmapps-scan.{service,path,timer}"
 
 # Reload polkit so the new policy takes effect immediately.
 sd_reload_polkit

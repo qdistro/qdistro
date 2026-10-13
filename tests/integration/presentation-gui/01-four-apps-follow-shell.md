@@ -19,6 +19,16 @@ title area background) in the frame you just opened. Page content of
 qdbrowser (`about:blank`, the web view) is CONTENT, not chrome: it does not
 have to follow and must not be graded as chrome.
 
+Keep every screenshot the harness captured. For a retry or a resumed step,
+choose a new attempt subdirectory under `QCI_GUI_ARTIFACT_DIR` and capture to
+new paths there. `qdwin_screenshot` removes an existing destination before
+recapturing it, so reusing any earlier path discards attested visual evidence
+even if the later attempt succeeds. Do not delete a partial attempt's frames.
+Before opening a frame with `view_image`, print its absolute path with
+`printf '%s\n' "$QCI_GUI_ARTIFACT_DIR/<frame>.png"` in the shell, then pass
+the printed path to the image tool. The image tool does not expand shell
+variables in path arguments.
+
 qterminator paints the narrow title strip of its FOCUSED terminal with the
 snapshot accent (`mPrimary`): pale yellow under the dark palette, indigo
 under light. That ~20 px strip is an accent marker, not the mode oracle —
@@ -40,10 +50,10 @@ SNAP_DARK=$(pres_snapshot); echo "SNAP_DARK=$SNAP_DARK"
 
 ## Steps
 
-Window stacking: qdwin opens these apps maximized, newest on top, and a
+Window stacking: qdwin opens these apps maximized, newest mapped on top, and a
 `focusWindow` IPC focuses a window without necessarily RAISING it. The
 steps therefore never rely on raising: each app is captured right after it
-starts (it is on top), and after the mode switch the apps are revealed one
+maps and takes focus (it is on top), and after the mode switch the apps are revealed one
 by one by CLOSING the one above. Every app is still running when the shell
 switches; only the reveal closes them, after their PIDs were checked.
 
@@ -52,8 +62,12 @@ switches; only the reveal closes them, after their PIDs were checked.
 ```bash
 for spec in "qfm:qfileman" "qterm:qterminator" "qdb:python3 -m qdbrowser --no-restore about:blank" "qnb:qnotebook"; do
     tag=${spec%%:*}; cmd=${spec#*:}
+    case "$tag" in
+        qfm) app=qfileman ;; qterm) app=qterminator ;;
+        qdb) app=qdbrowser ;; qnb) app=qnotebook ;;
+    esac
     pres_launch "$tag" "$cmd"
-    sleep 7
+    pres_wait_window_front "$app" 40 || { echo "FAIL: $tag did not map and focus"; exit 1; }
     qdwin_screenshot "/tmp/pres01-step1-$tag.png"
 done
 PIDS_1=$(pres_app_pids); echo "PIDS_1=$PIDS_1"
@@ -125,7 +139,13 @@ qdwin_screenshot /tmp/pres01-step4-after-shell-kill.png
 **Assert (4.2):** `SNAP_4` equals `SNAP_LIGHT` (a shell crash does not
 rewrite or delete the snapshot).
 **Assert (4.3):** OPEN the Step 4 frame: qfileman is in front with LIGHT
-chrome.
+chrome. Compare its qfileman window interior directly with
+`pres01-step3-qfileman.png`, especially the menu/toolbar and left side panel.
+The large desktop background outside the window is not qfileman chrome. If
+the app's interior pixels and light palette remain the same across these two
+captures, 4.3 passes; a shell kill cannot have restyled an unchanged window.
+The later `pres01-step6-qfileman-dark.png` is the dark-palette comparison
+frame: its window interior should visibly differ from both light frames.
 
 ### Step 5 — a new app started while qdshell is DOWN reads the persisted snapshot
 

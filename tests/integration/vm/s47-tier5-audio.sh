@@ -133,6 +133,7 @@ sed \
     -e "s|__NIC_XML__|$NIC_XML_ESCAPED|g" \
     -e "s|__SERIAL_XML__|$SERIAL_XML_ESCAPED|g" \
     -e "s|__VM_NAME__|$VM_NAME|g" \
+    -e "s|__APP_ID__|s47-tier5-audio|g" \
     -e "s|__MAC__|52:54:00:11:22:33|g" \
     -e "s|__MEM_KIB__|2097152|g" \
     -e "s|__CID__|$CID|g" \

@@ -507,6 +507,10 @@ class SiloBusy(SessionError):
     dbus_name = "SiloBusy"
 
 
+class PodAppRunning(SessionError):
+    dbus_name = "PodAppRunning"
+
+
 class BadState(SessionError):
     dbus_name = "BadState"
 
@@ -1923,6 +1927,25 @@ class _SystemOps:
             (PODAPP_LAUNCH_ENV_DIR / f"{token}.env").unlink()
         except FileNotFoundError:
             pass
+
+    def podapp_container_exists(self, container: str) -> bool | None:
+        """Whether admin's rootless podman already has *container*: True
+        present, False absent, None when the check itself failed or timed out
+        (the caller must not read that as either answer). Bounded like the
+        tier-2 status probe: this sits in front of a click on an offload
+        worker, and "unknown" already means "launch anyway", so a wedged
+        podman must not hold the click (or the worker) for _T_PODMAN."""
+        try:
+            verdict = self._podman_exists_verdict(
+                self._runuser_exists(container, timeout=3))
+        except (subprocess.TimeoutExpired, OSError) as e:
+            log.warning("podman container exists %s failed: %s", container, e)
+            return None
+        if verdict == 0:
+            return True
+        if verdict == 1:
+            return False
+        return None
 
     def _write_launch_env_in(self, env_dir: Path, name: str,
                              content: str, *, dir_mode: int | None = None) -> Path:
@@ -5206,6 +5229,24 @@ class _SiloStore:
         container = self._validate_podapp_token("container", container)
         workload = self._validate_podapp_token("workload", workload)
         argv = self._validate_podapp_argv(argv_json)
+        # spawn-tier2 runs the pod under the fixed name `podman run --name
+        # <container>`, so a second launch while one is up can only die at
+        # podman (exit 125) after the shell has already shown a placeholder
+        # for it. Refuse here instead, typed, so the shell can say so at once.
+        # The shell focuses a live window itself before calling us; this
+        # catches the window-less cases (still starting, or exiting). podman
+        # stays the real arbiter: a check that could not run is not a refusal.
+        present = self._ops.podapp_container_exists(container)
+        if present:
+            msg = (f"pod {container!r} is already running (or still shutting "
+                   f"down); close it before launching another app in it")
+            self._audit_record("podapp-launch", container, decision="deny",
+                               reason=msg, caller=caller)
+            raise PodAppRunning(msg)
+        if present is None:
+            log.warning("pod-app launch of %r: could not tell whether the "
+                        "container already exists; launching anyway",
+                        container)
         token = secrets.token_hex(16)
 
         kv = [

@@ -221,6 +221,10 @@ gate_mmnet() {
     # manual cleanup commands. Tolerates partial setup (vm_b may be empty).
     _mmnet_cleanup() {
         local v
+        # Offline: read both peers' egress blocks before they go (a no-op online).
+        for v in "$vm_a" "$vm_b"; do
+            [ -n "$v" ] && qci_offline_egress_check "$v"
+        done
         if [ "${QD_MMNET_KEEP:-0}" = 1 ]; then
             log "mmnet: QD_MMNET_KEEP=1 — keeping VMs; clean up manually:"
             for v in "$vm_a" "$vm_b"; do
@@ -246,7 +250,7 @@ gate_mmnet() {
     #    clone-baseweed.sh's vm-start-and-wait), THEN clone peer B — staggered so
     #    we never have two cold-booting guests competing for host CPU at once.
     log "mmnet: cloning peer A"
-    vm_a=$(MMNET_SEED="$seed" "$clone" qci-mmnet-a a --from-baked 2>"$log_dir/clone-a.log" | grep -E '^qci-mmnet-a-' | tail -1) || true
+    vm_a=$(MMNET_SEED="$seed" QD_OFFLINE_EGRESS_ARM=1 "$clone" qci-mmnet-a a --from-baked 2>"$log_dir/clone-a.log" | grep -E '^qci-mmnet-a-' | tail -1) || true
     if [ -z "$vm_a" ]; then
         record_result mmnet clone-a fail "$EXIT_VM_PROVISION" vm_provision mmnet "$log_dir/clone-a.log" "peer A clone failed"
         return "$EXIT_VM_PROVISION"
@@ -255,7 +259,7 @@ gate_mmnet() {
     kv mmnet_vm_a "$vm_a"; log "mmnet: peer A = $vm_a (up)"
 
     log "mmnet: cloning peer B"
-    vm_b=$(MMNET_SEED="$seed" "$clone" qci-mmnet-b b --from-baked 2>"$log_dir/clone-b.log" | grep -E '^qci-mmnet-b-' | tail -1) || true
+    vm_b=$(MMNET_SEED="$seed" QD_OFFLINE_EGRESS_ARM=1 "$clone" qci-mmnet-b b --from-baked 2>"$log_dir/clone-b.log" | grep -E '^qci-mmnet-b-' | tail -1) || true
     if [ -z "$vm_b" ]; then
         record_result mmnet clone-b fail "$EXIT_VM_PROVISION" vm_provision mmnet "$log_dir/clone-b.log" "peer B clone failed"
         return "$EXIT_VM_PROVISION"

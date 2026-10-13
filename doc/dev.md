@@ -100,13 +100,41 @@ How the container behaves (see `ci/containers/` and
   rebuilds the native stage; the host image re-keys when the rebuilt
   quickshell bytes differ (a qdwin-only change usually reuses it).
 - `QCI_OFFLINE=1` refuses to pull anything: it needs the image and the
-  npm/dependency caches already warm.
+  npm/dependency caches already warm (see [Offline runs](#offline-runs)).
 
 For manual builds of the root daemons, run meson through
 `ci/bin/qci-host-run` and point `PKG_CONFIG_PATH` at
 `qdwin/build-qci/meson-uninstalled` after a host gate run. There is no
 supported "native host" build path — don't install the toolchain on the
 workstation.
+
+## Offline runs
+
+`QCI_OFFLINE=1` (or `QDISTRO_DEPS_OFFLINE=1`) runs builds and VM tests
+from the local dependency cache under `~/.cache/qdistro` with no network.
+
+- `scripts/vm/qd-cache-warm` warms the cache for the snapshot pin: the
+  repo metadata and only the packages in `scripts/vm/repo-packages.list`
+  (what builds actually install, not the whole repository), the cloud
+  qcow2, the podman base image and the meson wrap seed. `--check` is the
+  offline preflight (no network; re-verifies every artifact); after an
+  online build that pulled new packages, `--record` folds them into the
+  list.
+- Guests reach the cache through a host-side caching proxy
+  (`scripts/vm/lib/deps-cache.sh`); offline, a request it cannot serve
+  from disk fails loudly as `MISS (offline)` instead of going upstream.
+- Every offline test guest is firewalled
+  (`scripts/vm/lib/offline-egress.sh`): a qci-owned nftables table allows
+  only private/loopback/link-local destinations and DNS to the host's own
+  nameservers, and rejects and records everything else. The table loads
+  before the network at every boot; fresh clones boot with their links
+  down until it is in place. When a guest is torn down, qci reads what it
+  blocked: a destination outside `QCI_OFFLINE_EGRESS_EXPECTED` (NTP, and
+  the session user's weather and plugin-registry calls) is a failed
+  `offline-egress` row and fails the run, as does a block that is missing
+  or altered.
+- Tests that need the internet are marked `network=external` in
+  `tests/registry.tsv` and skip offline with that reason.
 
 ## The Tumbleweed snapshot pin
 

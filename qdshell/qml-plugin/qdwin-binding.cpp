@@ -8,6 +8,12 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+// memfd_create + MFD_CLOEXEC (chrome/popup shm buffers) live behind
+// __USE_GNU; must precede every libc include.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "qdwin-binding.h"
 #include "ctrl-server.h"
 
@@ -21,13 +27,17 @@
 #include <algorithm>
 #include <initializer_list>
 
+#include <QColor>
 #include <QDebug>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QFontMetrics>
+#include <QGuiApplication>
 #include <QImage>
 #include <QMetaType>
+#include <QPainter>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QString>
@@ -86,7 +96,10 @@ namespace {
 // selection source's peer identity rather than the focused toplevel's
 // (tag equality is not peer equality — qdwin stamps the same secctx
 // tuple on every client accepted through one secctx listener).
-constexpr uint32_t kBindVersion = 35;
+// Version 36 adds `toplevel_decoration` (client- vs server-side frame per
+// toplevel; Qdwin.qml frames only the server-side ones) and a working
+// `begin_interactive_resize` for the frame's edges.
+constexpr uint32_t kBindVersion = 36;
 constexpr int kCaptureTimeoutMs = 8000;
 constexpr int kBrokerStartTimeoutMs = 250;
 constexpr int kBrokerGateTimeoutMs = 2000;
@@ -254,6 +267,11 @@ struct QdwinBindingDispatch {
         auto *b = static_cast<QdwinBinding *>(d);
         emit b->toplevelAppId(handle, qstr(app_id));
     }
+    static void toplevel_decoration(void *d, qdwin_shell_v1 *,
+                                    uint32_t handle, uint32_t mode) {
+        auto *b = static_cast<QdwinBinding *>(d);
+        emit b->toplevelDecoration(handle, mode);
+    }
     static void capture_served_stale(void *d, qdwin_shell_v1 *,
                                      const char *output_name, uint32_t age_ms,
                                      uint32_t msc) {
@@ -267,6 +285,12 @@ struct QdwinBindingDispatch {
     }
     static void toplevel_removed(void *d, qdwin_shell_v1 *, uint32_t handle) {
         auto *b = static_cast<QdwinBinding *>(d);
+        // Purge shell-owned surfaces first: the compositor detaches its
+        // chrome views on toplevel_removed, but OUR wl_surface/wl_buffer
+        // proxies are ours to reap (and any popup anchored to the dead
+        // parent is about to be dismissed anyway).
+        b->chromePurge(handle);
+        b->popupTeardown(handle);
         emit b->toplevelRemoved(handle);
     }
     static void locked_changed(void *, qdwin_shell_v1 *, uint32_t) {}
@@ -455,15 +479,32 @@ struct QdwinBindingDispatch {
     static void hotkey_pressed(void *d, qdwin_shell_v1 *, uint32_t id) {
         emit static_cast<QdwinBinding *>(d)->hotkeyPressed(id);
     }
-    // v29 appended a `serial` (last uint32_t) carrying the button's input
-    // event serial, for a future show_popup() context-menu caller. Not yet
-    // consumed here, but the dispatch signature must match the listener.
-    static void chrome_button(void *, qdwin_shell_v1 *,
-                              uint32_t, uint32_t, wl_fixed_t, wl_fixed_t,
-                              uint32_t, uint32_t, uint32_t) {}
-    static void popup_button(void *, qdwin_shell_v1 *,
-                             uint32_t, wl_fixed_t, wl_fixed_t,
-                             uint32_t, uint32_t, uint32_t) {}
+    // v20/v21 input forwards over shell-owned surfaces — the workaround
+    // for libweston's same-client wl_pointer suppression (see the XML).
+    // Both carry the v29 input serial the shell echoes back to
+    // show_popup / begin_interactive_move. popupButton emits raw first
+    // (observability + future submenu callers), then popupHit hit-tests
+    // the active menu and fires popupItemTriggered on a valid row.
+    static void chrome_button(void *d, qdwin_shell_v1 *,
+                              uint32_t handle, uint32_t side,
+                              wl_fixed_t x, wl_fixed_t y,
+                              uint32_t button, uint32_t state,
+                              uint32_t serial) {
+        auto *b = static_cast<QdwinBinding *>(d);
+        emit b->chromeButton(handle, side,
+                             wl_fixed_to_double(x), wl_fixed_to_double(y),
+                             button, state, serial);
+    }
+    static void popup_button(void *d, qdwin_shell_v1 *,
+                             uint32_t parent, wl_fixed_t x, wl_fixed_t y,
+                             uint32_t button, uint32_t state,
+                             uint32_t serial) {
+        auto *b = static_cast<QdwinBinding *>(d);
+        const double px = wl_fixed_to_double(x);
+        const double py = wl_fixed_to_double(y);
+        emit b->popupButton(parent, px, py, button, state, serial);
+        b->popupHit(parent, px, py, button, state, serial);
+    }
     // v24 sidecar — which workspace a toplevel is on.
     static void toplevel_workspace(void *d, qdwin_shell_v1 *,
                                    uint32_t handle, uint32_t index) {
@@ -513,6 +554,30 @@ static const qdwin_shell_v1_listener kShellListener = {
         QdwinBindingDispatch::remote_output_drain_result,
     .selection_set_source_peer_identity =
         QdwinBindingDispatch::selection_set_source_peer_identity,
+    .toplevel_decoration       = QdwinBindingDispatch::toplevel_decoration,
+};
+
+// ---- qdwin_popup_v1 dispatch ----
+// The compositor decided the popup goes away (outside click, parent
+// closed/minimised, lock). Find the owning parent in popups_, tear our
+// proxies down, and tell QML. popupTeardown also answers the
+// `dismissed` contract ("the shell should respond by calling destroy").
+struct QdwinPopupDispatch {
+    static void dismissed(void *d, qdwin_popup_v1 *pop) {
+        auto *b = static_cast<QdwinBinding *>(d);
+        for (auto &kv : b->popups_) {
+            if (kv.second.popup == pop) {
+                const quint32 parent = kv.first;
+                b->popupTeardown(parent);
+                emit b->popupDismissed(parent);
+                return;
+            }
+        }
+    }
+};
+
+static const qdwin_popup_v1_listener kPopupListener = {
+    QdwinPopupDispatch::dismissed,
 };
 
 // -------------------- ext-workspace-v1 client trampolines --------------------
@@ -947,6 +1012,26 @@ struct QdwinRegistry {
     static void global(void *data, wl_registry *reg, uint32_t name,
                        const char *interface, uint32_t version) {
         auto *b = static_cast<QdwinBinding *>(data);
+        // wl_compositor + wl_shm — needed to create the shell-owned
+        // chrome/popup wl_surfaces attach_decoration and show_popup
+        // take. They MUST come from this registry: only surfaces on the
+        // shell's own wl_client are accepted, and this display_ is it.
+        if (std::strcmp(interface, wl_compositor_interface.name) == 0) {
+            if (!b->compositor_) {
+                b->compositor_ = static_cast<wl_compositor *>(
+                    wl_registry_bind(reg, name, &wl_compositor_interface, 4));
+                b->compositorGlobalName_ = name;
+            }
+            return;
+        }
+        if (std::strcmp(interface, wl_shm_interface.name) == 0) {
+            if (!b->shm_) {
+                b->shm_ = static_cast<wl_shm *>(
+                    wl_registry_bind(reg, name, &wl_shm_interface, 1));
+                b->shmGlobalName_ = name;
+            }
+            return;
+        }
         if (std::strcmp(interface, qdwin_shell_v1_interface.name) == 0) {
             uint32_t v = version < kBindVersion ? version : kBindVersion;
             auto *proxy = static_cast<qdwin_shell_v1 *>(
@@ -1157,6 +1242,7 @@ void QdwinBinding::teardown(const QString &reason) {
     wsTeardownState();
     omTeardownState();
     idleTeardownState();
+    chromePopupTeardownState();
     if (bound_) setBound(false);
     if (!reason.isEmpty() && lastError_.isEmpty())
         setLastError(reason);
@@ -1708,6 +1794,451 @@ void QdwinBinding::setBorderColor(quint32 handle, quint32 argb) {
     flushAfterRequest(__func__);
 }
 
+void QdwinBinding::requestRaise(quint32 handle) {
+    if (!shell_) return;
+    qdwin_shell_v1_request_raise(shell_, handle);
+    flushAfterRequest(__func__);
+}
+
+void QdwinBinding::beginInteractiveMove(quint32 handle, quint32 serial) {
+    if (!shell_) return;
+    qdwin_shell_v1_begin_interactive_move(shell_, handle, serial);
+    flushAfterRequest(__func__);
+}
+
+void QdwinBinding::beginInteractiveResize(quint32 handle, quint32 serial,
+                                          quint32 edges) {
+    if (!shell_) return;
+    qdwin_shell_v1_begin_interactive_resize(shell_, handle, serial, edges);
+    flushAfterRequest(__func__);
+}
+
+// -------- shell chrome + context-menu popups --------
+
+// Raster → shm wl_buffer on the SHELL's display (surfaces created from
+// it are owned by the same wl_client as the qdwin_shell_v1 binding, the
+// client attach_decoration/show_popup require). Backing is memfd; the
+// returned buffer owns the only pool reference so pool/fd/mmap can all
+// be released immediately.
+wl_buffer *QdwinBinding::makeArgbBuffer(const QImage &img) {
+    if (!shm_ || img.isNull())
+        return nullptr;
+    const QImage argb = img.convertToFormat(QImage::Format_ARGB32);
+    const int w = argb.width(), h = argb.height();
+    const int stride = w * 4;
+    const size_t size = static_cast<size_t>(stride) * h;
+    if (w <= 0 || h <= 0 ||
+        size > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+        return nullptr;
+    const int fd = memfd_create("qdshell-chrome", MFD_CLOEXEC);
+    if (fd < 0)
+        return nullptr;
+    if (ftruncate(fd, static_cast<off_t>(size)) != 0) {
+        close(fd);
+        return nullptr;
+    }
+    void *px = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (px == MAP_FAILED) {
+        close(fd);
+        return nullptr;
+    }
+    memcpy(px, argb.constBits(), size);
+    munmap(px, size);
+    wl_shm_pool *pool = wl_shm_create_pool(shm_, fd,
+                                           static_cast<int32_t>(size));
+    wl_buffer *buf = pool
+        ? wl_shm_pool_create_buffer(pool, 0, w, h, stride,
+                                    WL_SHM_FORMAT_ARGB8888)
+        : nullptr;
+    if (pool)
+        wl_shm_pool_destroy(pool);
+    close(fd);
+    return buf;
+}
+
+// Re-issue attach_decoration with the live 4-side set. Every side
+// change funnels here so a side becoming NULL detaches it per the
+// protocol contract.
+void QdwinBinding::reattachDecoration(quint32 handle) {
+    if (!shell_ || !bound_)
+        return;
+    auto it = chrome_.find(handle);
+    if (it == chrome_.end())
+        return;
+    const ChromeEntry &e = it->second;
+    qdwin_shell_v1_attach_decoration(
+        shell_, handle,
+        e.sides[0].surface, e.sides[1].surface,
+        e.sides[2].surface, e.sides[3].surface);
+    flushAfterRequest(__func__);
+}
+
+// Paint `img` into the chrome surface for (handle, side) and commit it,
+// without re-issuing attach_decoration — callers batch the sides and
+// reattach once, so the compositor recomputes the inset (and
+// reconfigures the client) once per frame change, not once per side.
+bool QdwinBinding::setChromeSide(quint32 handle, quint32 side,
+                                 const QImage &img) {
+    if (!shell_ || !bound_ || !compositor_ || !shm_ || side > 3 ||
+        img.isNull())
+        return false;
+    wl_buffer *buf = makeArgbBuffer(img);
+    if (!buf)
+        return false;
+
+    const int width = img.width(), height = img.height();
+    ChromeSide &cs = chrome_[handle].sides[side];
+    if (!cs.surface || cs.w != width || cs.h != height) {
+        // Size change or first attach — the old surface's buffer dies
+        // with it; the compositor drops its view on surface destroy.
+        if (cs.surface)
+            wl_surface_destroy(cs.surface);
+        if (cs.buffer)
+            wl_buffer_destroy(cs.buffer);
+        cs.surface = wl_compositor_create_surface(compositor_);
+        cs.buffer = nullptr;
+        cs.w = width;
+        cs.h = height;
+        if (!cs.surface) {
+            cs.w = cs.h = 0;
+            wl_buffer_destroy(buf);
+            return false;
+        }
+    } else if (cs.buffer) {
+        // Same geometry, repaint only (title, focus or colour changed).
+        wl_buffer_destroy(cs.buffer);
+    }
+    cs.buffer = buf;
+    wl_surface_attach(cs.surface, buf, 0, 0);
+    wl_surface_damage_buffer(cs.surface, 0, 0, width, height);
+    wl_surface_commit(cs.surface);
+    return true;
+}
+
+// Drop one side's surface without reattaching. True if one existed.
+bool QdwinBinding::dropChromeSide(quint32 handle, quint32 side) {
+    auto it = chrome_.find(handle);
+    if (it == chrome_.end() || side > 3)
+        return false;
+    ChromeSide &cs = it->second.sides[side];
+    const bool had = cs.surface != nullptr;
+    if (cs.surface) {
+        wl_surface_destroy(cs.surface);
+        cs.surface = nullptr;
+    }
+    if (cs.buffer) {
+        wl_buffer_destroy(cs.buffer);
+        cs.buffer = nullptr;
+    }
+    cs.w = cs.h = 0;
+    return had;
+}
+
+bool QdwinBinding::attachChrome(quint32 handle, quint32 side,
+                                int width, int height, quint32 argb) {
+    if (width <= 0 || height <= 0)
+        return false;
+    // `argb` follows the set_border_color convention (0xRRGGBBAA), not
+    // the QImage/QRgb order — unpack explicitly.
+    QImage img(width, height, QImage::Format_ARGB32);
+    img.fill(rgbaColor(argb));
+    if (!setChromeSide(handle, side, img))
+        return false;
+    reattachDecoration(handle);
+    return true;
+}
+
+QColor QdwinBinding::rgbaColor(quint32 rgba) {
+    return QColor((rgba >> 24) & 0xFF, (rgba >> 16) & 0xFF,
+                  (rgba >> 8) & 0xFF, rgba & 0xFF);
+}
+
+// Title bar raster: the silo colour (dimmed when the window is not
+// focused), the elided title, and one square button per entry of
+// `buttons` (left → right, ending at the right edge). Qdwin.qml
+// hit-tests chrome_button against the same layout: button i spans
+// [width - (n - i) * height, width - (n - i - 1) * height).
+QImage QdwinBinding::renderTitleBar(int width, int height, quint32 rgba,
+                                    const QString &title, bool active,
+                                    const QStringList &buttons) {
+    QImage img(width, height, QImage::Format_ARGB32_Premultiplied);
+    QColor bg = rgbaColor(rgba);
+    bg.setAlpha(255);
+    if (!active)
+        bg = QColor((bg.red() + 0x60) / 2, (bg.green() + 0x60) / 2,
+                    (bg.blue() + 0x60) / 2);
+    img.fill(bg);
+    const bool light = bg.lightnessF() > 0.6;
+    QColor fg = light ? QColor(0x20, 0x20, 0x20) : QColor(0xf0, 0xf0, 0xf0);
+    if (!active)
+        fg.setAlphaF(0.65);
+
+    QPainter p(&img);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::TextAntialiasing, true);
+
+    const int n = static_cast<int>(buttons.size());
+    const int textRight = width - n * height - 4;
+    if (textRight > 8 && !title.isEmpty()) {
+        QFont font = QGuiApplication::font();
+        font.setPixelSize(std::max(9, height * 11 / 20));
+        p.setFont(font);
+        p.setPen(fg);
+        const QRect textRect(8, 0, textRight - 8, height);
+        const QString shown = QFontMetrics(font).elidedText(
+            title, Qt::ElideRight, textRect.width());
+        p.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, shown);
+    }
+
+    QPen pen(fg);
+    pen.setWidthF(std::max(1.0, height / 16.0));
+    pen.setCapStyle(Qt::SquareCap);
+    p.setPen(pen);
+    p.setBrush(Qt::NoBrush);
+    const qreal g = height * 0.3;  // glyph half-extent inset
+    for (int i = 0; i < n; i++) {
+        const qreal x0 = width - (n - i) * height;
+        const QRectF cell(x0, 0, height, height);
+        const QRectF glyph = cell.adjusted(g, g, -g, -g);
+        const QString &b = buttons.at(i);
+        if (b == QLatin1String("close")) {
+            p.drawLine(glyph.topLeft(), glyph.bottomRight());
+            p.drawLine(glyph.topRight(), glyph.bottomLeft());
+        } else if (b == QLatin1String("maximize")) {
+            p.drawRect(glyph);
+        } else if (b == QLatin1String("restore")) {
+            const qreal o = glyph.width() / 4;
+            p.drawRect(glyph.adjusted(0, o, -o, 0));
+            p.drawLine(QPointF(glyph.left() + o, glyph.top()),
+                       glyph.topRight());
+            p.drawLine(glyph.topRight(),
+                       QPointF(glyph.right(), glyph.bottom() - o));
+        } else if (b == QLatin1String("minimize")) {
+            p.drawLine(QPointF(glyph.left(), glyph.bottom()),
+                       glyph.bottomRight());
+        }
+    }
+    p.end();
+    return img;
+}
+
+bool QdwinBinding::attachFrame(quint32 handle, int contentWidth,
+                               int contentHeight, int titleHeight,
+                               int border, quint32 rgba,
+                               const QString &title, bool active,
+                               const QStringList &buttons) {
+    if (!shell_ || !bound_ || contentWidth <= 0 || contentHeight <= 0 ||
+        titleHeight <= 0 || border < 0)
+        return false;
+    const int outerWidth = contentWidth + 2 * border;
+    bool ok = setChromeSide(handle, 0 /* N */,
+                            renderTitleBar(outerWidth, titleHeight, rgba,
+                                           title, active, buttons));
+    if (ok && border > 0) {
+        QColor c = rgbaColor(rgba);
+        c.setAlpha(255);
+        if (!active)
+            c = QColor((c.red() + 0x60) / 2, (c.green() + 0x60) / 2,
+                       (c.blue() + 0x60) / 2);
+        QImage side(border, contentHeight, QImage::Format_ARGB32);
+        side.fill(c);
+        QImage bottom(outerWidth, border, QImage::Format_ARGB32);
+        bottom.fill(c);
+        ok = setChromeSide(handle, 1 /* E */, side) &&
+             setChromeSide(handle, 2 /* S */, bottom) &&
+             setChromeSide(handle, 3 /* W */, side);
+    } else if (ok) {
+        dropChromeSide(handle, 1);
+        dropChromeSide(handle, 2);
+        dropChromeSide(handle, 3);
+    }
+    // Reattach even on a partial failure so the compositor never keeps
+    // a view over a surface this side already replaced.
+    if (chrome_.count(handle))
+        reattachDecoration(handle);
+    return ok;
+}
+
+void QdwinBinding::detachFrame(quint32 handle) {
+    bool had = false;
+    for (quint32 side = 0; side < 4; side++)
+        had = dropChromeSide(handle, side) || had;
+    if (had)
+        reattachDecoration(handle);
+}
+
+void QdwinBinding::detachChrome(quint32 handle, quint32 side) {
+    // attach_decoration with a NULL side removes that edge's view.
+    if (dropChromeSide(handle, side))
+        reattachDecoration(handle);
+}
+
+void QdwinBinding::chromePurge(quint32 handle) {
+    auto it = chrome_.find(handle);
+    if (it == chrome_.end())
+        return;
+    for (auto &cs : it->second.sides) {
+        if (cs.surface)
+            wl_surface_destroy(cs.surface);
+        if (cs.buffer)
+            wl_buffer_destroy(cs.buffer);
+    }
+    chrome_.erase(it);
+    // No reattach — the toplevel itself is gone. Flush so the
+    // compositor drops the views now, not at the next unrelated request.
+    flushAfterRequest(__func__);
+}
+
+void QdwinBinding::popupTeardown(quint32 parent) {
+    auto it = popups_.find(parent);
+    if (it == popups_.end())
+        return;
+    PopupEntry &e = it->second;
+    // Order matters: the qdwin_popup_v1 destroy request tears the
+    // compositor's view down first so the compositor never reads a
+    // surface whose buffer we just freed.
+    if (e.popup)
+        qdwin_popup_v1_destroy(e.popup);
+    if (e.surface)
+        wl_surface_destroy(e.surface);
+    if (e.buffer)
+        wl_buffer_destroy(e.buffer);
+    popups_.erase(it);
+    flushAfterRequest(__func__);
+}
+
+void QdwinBinding::destroyPopup(quint32 parent) {
+    popupTeardown(parent);
+}
+
+// Press hit-test over the active menu. Layout MUST mirror the render
+// geometry in showPopup — the two move in lockstep. Only the press
+// transition and the primary button activate (the XML marks serial
+// meaningful on press; a press that lands outside every row is left to
+// the compositor's outside-click dismissal).
+void QdwinBinding::popupHit(quint32 parent, double x, double y,
+                            quint32 button, quint32 state,
+                            quint32 serial) {
+    (void)serial;
+    auto it = popups_.find(parent);
+    if (it == popups_.end())
+        return;
+    const PopupEntry &e = it->second;
+    if (state != 1 || button != 0x110 /* BTN_LEFT */ ||
+        e.itemH <= 0 || e.itemCount <= 0)
+        return;
+    const int ix = static_cast<int>(x);
+    const int iy = static_cast<int>(y);
+    if (ix < 0 || ix >= e.w || iy < 0 || iy >= e.h)
+        return;
+    const int index = iy / e.itemH;
+    if (index >= e.itemCount)
+        return;
+    // Emit AFTER tearing down: the handler runs the menu action
+    // (close/minimize/…) and must not find the popup still up.
+    popupTeardown(parent);
+    emit popupItemTriggered(parent, index);
+}
+
+bool QdwinBinding::showPopup(quint32 parent, quint32 serial,
+                             int x, int y, const QVariantList &items) {
+    if (!shell_ || !bound_ || !compositor_ || !shm_ || items.isEmpty())
+        return false;
+
+    // Render the label menu. Item height/width feed popupHit's
+    // hit-test verbatim — keep the two geometries identical.
+    const QFont font = QGuiApplication::font();
+    const QFontMetrics fm(font);
+    constexpr int padX = 14, padY = 7, minWidth = 140;
+    const int itemH = fm.height() + 2 * padY;
+    int textW = 0;
+    QStringList labels;
+    labels.reserve(items.size());
+    for (const QVariant &v : items) {
+        const QString label =
+            v.toMap().value(QStringLiteral("label")).toString();
+        labels << label;
+        textW = std::max(textW, fm.horizontalAdvance(label));
+    }
+    const int w = std::max(textW + 2 * padX, minWidth);
+    const int h = itemH * labels.size();
+    if (textW <= 0 || w <= 0 || h <= 0)
+        return false;
+
+    QImage img(w, h, QImage::Format_ARGB32);
+    QPainter p(&img);
+    p.setFont(font);
+    p.setRenderHint(QPainter::Antialiasing);
+    // Dark panel + hairline frame, light text — qdshell's neutral
+    // chrome look. (Real SSD titlebars stay decision-gated; this is
+    // the context menu only.)
+    p.fillRect(0, 0, w, h, QColor(38, 38, 40));
+    p.setPen(QColor(88, 88, 92));
+    p.drawRect(0, 0, w - 1, h - 1);
+    p.setPen(QColor(235, 235, 235));
+    for (int i = 0; i < labels.size(); ++i) {
+        if (i > 0) {
+            p.setPen(QColor(64, 64, 68));
+            p.drawLine(padX, i * itemH, w - padX, i * itemH);
+            p.setPen(QColor(235, 235, 235));
+        }
+        p.drawText(QRect(padX, i * itemH, w - 2 * padX, itemH),
+                   Qt::AlignVCenter | Qt::AlignLeft | Qt::TextSingleLine,
+                   fm.elidedText(labels[i], Qt::ElideRight, w - 2 * padX));
+    }
+    p.end();
+
+    // One popup per parent per the protocol — a re-open replaces the
+    // prior menu (compositor also dismisses the old one, this just
+    // reaps our side immediately).
+    popupTeardown(parent);
+
+    wl_buffer *buf = makeArgbBuffer(img);
+    if (!buf)
+        return false;
+    wl_surface *surf = wl_compositor_create_surface(compositor_);
+    if (!surf) {
+        wl_buffer_destroy(buf);
+        return false;
+    }
+    wl_surface_attach(surf, buf, 0, 0);
+    wl_surface_damage_buffer(surf, 0, 0, w, h);
+    // The protocol requires committed content before show_popup; the
+    // surface.commit below supplies it, then the request itself rides
+    // the same flush.
+    wl_surface_commit(surf);
+
+    qdwin_popup_v1 *pop = qdwin_shell_v1_show_popup(
+        shell_, parent, surf, serial, x, y);
+    if (!pop) {
+        wl_surface_destroy(surf);
+        wl_buffer_destroy(buf);
+        return false;
+    }
+    PopupEntry &e = popups_[parent];
+    e.surface = surf;
+    e.buffer = buf;
+    e.popup = pop;
+    e.w = w;
+    e.h = h;
+    e.itemH = itemH;
+    e.itemCount = labels.size();
+    qdwin_popup_v1_add_listener(pop, &kPopupListener, this);
+    return flushAfterRequest(__func__);
+}
+
+void QdwinBinding::chromePopupTeardownState() {
+    // Disconnect path — every proxy died with the display; drop our
+    // bookkeeping without marshalling destructors (same discipline as
+    // captureTeardownState).
+    chrome_.clear();
+    popups_.clear();
+    compositor_ = nullptr;
+    shm_ = nullptr;
+    compositorGlobalName_ = 0;
+    shmGlobalName_ = 0;
+}
+
 // -------- v24 workspaces (ext-workspace-v1 client) --------
 
 void QdwinBinding::wsBindGroup(ext_workspace_group_handle_v1 *grp) {
@@ -2025,6 +2556,24 @@ void QdwinBinding::idleGlobalRemoved(uint32_t name) {
     // notification and drop both proxies so a later setIdleNotification can't
     // touch a stale global. (Single-seat qdwin doesn't do this today, but the
     // protocol permits it.)
+    //
+    // wl_compositor / wl_shm hot-removal is handled here too: drop the
+    // factories so no further chrome/popup surface can be created on a
+    // dead global. Surfaces already handed to attach_decoration/show_popup
+    // stay composited (they're objects, not factory-dependent) until their
+    // normal teardown.
+    if (name == compositorGlobalName_ && compositor_) {
+        // Proxy-local free only (wl_compositor has no destroy request).
+        wl_compositor_destroy(compositor_);
+        compositorGlobalName_ = 0;
+        compositor_ = nullptr;
+    }
+    if (name == shmGlobalName_ && shm_) {
+        // Proxy-local free (bound at v1; wl_shm.release is v2+).
+        wl_shm_destroy(shm_);
+        shmGlobalName_ = 0;
+        shm_ = nullptr;
+    }
     if (name != seatName_ && name != idleNotifierName_)
         return;
     for (int i = 0; i < kIdleSlots; ++i) {

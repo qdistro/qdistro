@@ -154,6 +154,7 @@ Singleton {
                                             "sessionmenu": SettingsPanel.Tab.SessionMenu,
                                             "systemmonitor": SettingsPanel.Tab.SystemMonitor,
                                             "userinterface": SettingsPanel.Tab.UserInterface,
+                                            "vmapps": SettingsPanel.Tab.VMApps,
                                             "wallpaper": SettingsPanel.Tab.Wallpaper,
                                             "windowmanager": SettingsPanel.Tab.WindowManager
                                           })

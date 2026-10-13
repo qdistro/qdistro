@@ -172,7 +172,10 @@ SmartPanel {
   onOpened: {
     if (_settingsContent) {
       if (requestedEntry) {
-        _settingsContent.requestedTab = requestedEntry.tab;
+        // tabId entries carry the stable SettingsPanel.Tab enum id
+        // (selectTabById's domain); legacy entries carry a display index
+        // that navigateToResult resolves after initialize().
+        _settingsContent.requestedTab = (requestedEntry.tabId !== undefined && requestedEntry.tabId !== null) ? requestedEntry.tabId : requestedEntry.tab;
         _settingsContent.initialize();
         const entry = requestedEntry;
         requestedEntry = null;
