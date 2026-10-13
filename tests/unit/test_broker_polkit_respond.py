@@ -4,12 +4,16 @@ The session polkit agent runs as the admin uid, and polkitd accepts
 AuthenticationAgentResponse2 from uid 0 only — so positive polkit
 decisions are delivered by the privileged broker:
 
-- RequestPolkitAuth files a request carrying the polkit cookie and the
-  identity list polkit offered; an allow — admin click, rule, cache, or
-  hook — makes the broker answer polkitd itself.
+- RequestPolkitAuth files a one-shot request carrying the polkit cookie
+  and the identity list polkit offered; only an admin click ('once')
+  allows it, and the allow makes the broker answer polkitd itself. No
+  cache row, rules.d allow or hook verdict answers polkitd (F1); a
+  rules.d deny still pre-decides.
 - RespondPolkitAuth relays an agent-local pam/fprint verdict.
 - CancelPolkitAuth retires the queued request when polkitd cancels the
   auth session, so a dead prompt does not linger in the admin queue.
+- Every relay decision (local respond, cancel, stale reap) writes an
+  audit row; a respond whose row cannot be written is refused (F2).
 
 Stub-broker pattern matches test_broker_concurrency.py: subclass Broker
 to bypass dbus.service.Object registration + GLib timers, fake
@@ -280,19 +284,65 @@ class TestRequestPolkitAuth:
         assert "AuthenticationAgentResponse2 failed" in \
             capsys.readouterr().out
 
-    def test_a_cached_allow_answers_polkitd(self, broker):
-        """A 'forever' scope grant auto-approves the next identical
-        polkit auth — the response must still be delivered."""
-        broker.set_peer(0)
+    def test_a_cached_allow_never_answers_polkitd(self, broker):
+        """F1: the cache key (agent uid, action, agent exe) is blind to
+        the subject polkitd authenticates, so a standing grant must not
+        answer a later auth — it goes to the admin prompt."""
         assert broker.cache.store(ADMIN_UID, "qdistro.test.action",
-                                  PEER_EXE, "forever", True, ADMIN_UID)
-        broker.set_peer(ADMIN_UID)
+                                  AGENT_EXE, "forever", True, ADMIN_UID)
         rid = _file_polkit(broker, "cookie-cached", [IDENT_ROOT],
                            details={})
-        req = broker._pending[rid]
-        assert req.decision is True
+        assert broker._pending[rid].decision is None
+        assert rid in broker.pending_signals
+        assert broker.polkit_responded == []
+
+    def test_a_rule_allow_never_answers_polkitd(self, broker, rules_dir):
+        (rules_dir / "a.yaml").write_text(
+            "- name: polkit-allow\n"
+            "  decision: allow\n"
+            "  match: { action: qdistro.test.action }\n")
+        broker.reload_rules_from_disk(source="test")
+        rid = _file_polkit(broker, "cookie-rule", [IDENT_ROOT])
+        assert broker._pending[rid].decision is None
+        assert broker.polkit_responded == []
+
+    def test_a_rule_deny_still_predecides(self, broker, rules_dir):
+        (rules_dir / "d.yaml").write_text(
+            "- name: polkit-deny\n"
+            "  decision: deny\n"
+            "  match: { action: qdistro.test.action }\n")
+        broker.reload_rules_from_disk(source="test")
+        rid = _file_polkit(broker, "cookie-deny", [IDENT_ROOT])
+        assert broker._pending[rid].decision is False
+        assert rid not in broker.pending_signals
+        assert broker.polkit_responded == []
+
+    def test_a_hook_is_never_consulted(self, broker, monkeypatch):
+        called = []
+        monkeypatch.setattr(broker, "_start_hook",
+                            lambda req: called.append(req) or True)
+        rid = _file_polkit(broker, "cookie-hook", [IDENT_ROOT])
+        assert called == []
+        assert rid in broker.pending_signals
+
+    @pytest.mark.parametrize("scope", sorted(B._ONESHOT_FORBIDDEN_SCOPES))
+    def test_persistent_scopes_are_refused(self, broker, scope):
+        rid = _file_polkit(broker, "cookie-scope", [IDENT_ROOT])
+        with pytest.raises(dbus.DBusException) as exc:
+            broker.DecideRequest(rid, "allow", scope)
+        assert "ScopeNotPermitted" in exc.value.get_dbus_name()
+        assert broker._pending[rid].decision is None
+        assert broker.polkit_responded == []
+        assert broker.cache.lookup_detail(
+            ADMIN_UID, "qdistro.test.action", AGENT_EXE, None) is None
+
+    def test_a_once_allow_stores_no_cache_row(self, broker):
+        rid = _file_polkit(broker, "cookie-once", [IDENT_ROOT])
+        assert broker.DecideRequest(rid, "allow", "once") == "applied"
         assert len(broker.polkit_responded) == 1
-        assert broker.polkit_responded[0][1] == "cookie-cached"
+        rid2 = _file_polkit(broker, "cookie-once-2", [IDENT_ROOT])
+        assert broker._pending[rid2].decision is None
+        assert len(broker.polkit_responded) == 1
 
 
 class TestRespondPolkitAuth:
@@ -1004,3 +1054,83 @@ class TestIdentityNormalization:
         assert B._pick_polkit_identity([IDENT_GROUP], ADMIN_UID) == \
             ("unix-group", {"gid": dbus.UInt32(27)})
         assert B._pick_polkit_identity([], ADMIN_UID) is None
+
+
+def _audit_rows(broker):
+    return [r for r in broker.audit.recent(50)
+            if str(r["source"]).startswith("polkit_")]
+
+
+class TestPolkitRelayAudit:
+    """F2: every relay decision is a cross-uid decision and is audited;
+    the cookie itself (a bearer secret) is stored only as a digest."""
+
+    def test_a_local_respond_is_audited_before_the_relay(self, broker):
+        broker.AnnouncePolkitAuth("cookie-a1")
+        broker.RespondPolkitAuth("cookie-a1", [IDENT_ROOT])
+        rows = _audit_rows(broker)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["source"] == "polkit_local_auth"
+        assert row["decision"] == 1
+        assert row["scope"] == "once"
+        assert row["caller_uid"] == ADMIN_UID
+        assert "cookie_sha256=" in row["context"]
+        assert "cookie-a1" not in row["context"]
+        assert "identity=unix-user:0" in row["context"]
+
+    def test_a_respond_on_a_filed_request_names_it(self, broker):
+        rid = _file_polkit(broker, "cookie-a2", [IDENT_ROOT],
+                           action="org.example.act")
+        broker.RespondPolkitAuth("cookie-a2", [IDENT_ROOT])
+        row = _audit_rows(broker)[0]
+        assert row["request_id"] == rid
+        assert row["action"] == "org.example.act"
+
+    def test_an_audit_failure_refuses_the_relay(self, broker,
+                                                monkeypatch):
+        rid = _file_polkit(broker, "cookie-a3", [IDENT_ROOT])
+        def boom(**_kw):
+            raise OSError("disk full")
+        monkeypatch.setattr(broker.audit, "log", boom)
+        monkeypatch.setattr(B, "AUDIT_REQUIRED", True)
+        with pytest.raises(dbus.DBusException) as exc:
+            broker.RespondPolkitAuth("cookie-a3", [IDENT_ROOT])
+        assert "AuditUnavailable" in exc.value.get_dbus_name()
+        assert broker.polkit_responded == []
+        assert broker._pending[rid].decision is None
+
+    def test_a_cancel_is_audited(self, broker):
+        rid = _file_polkit(broker, "cookie-a4", [IDENT_ROOT])
+        broker.CancelPolkitAuth("cookie-a4")
+        rows = _audit_rows(broker)
+        assert [(r["source"], r["decision"], r["request_id"])
+                for r in rows] == [("polkit_cancel", 0, rid)]
+
+    def test_a_cancel_audit_failure_still_denies(self, broker,
+                                                 monkeypatch, capsys):
+        rid = _file_polkit(broker, "cookie-a5", [IDENT_ROOT])
+        def boom(**_kw):
+            raise OSError("disk full")
+        monkeypatch.setattr(broker.audit, "log", boom)
+        broker.CancelPolkitAuth("cookie-a5")
+        assert broker._pending[rid].decision is False
+        assert "qdistro.audit.failure: polkit_cancel" in \
+            capsys.readouterr().out
+
+    def test_a_cancel_that_beats_the_file_is_audited(self, broker):
+        broker.CancelPolkitAuth("cookie-a6")
+        rid = _file_polkit(broker, "cookie-a6", [IDENT_ROOT])
+        rows = _audit_rows(broker)
+        assert [(r["source"], r["request_id"]) for r in rows] == [
+            ("polkit_cancel", rid)]
+
+    def test_a_stale_reap_is_audited(self, broker):
+        rid = _file_polkit(broker, "cookie-a7", [IDENT_ROOT])
+        req = broker._pending[rid]
+        broker._reap_pending(now=req.created_at
+                             + B.POLKIT_UNDECIDED_TTL_S + 1)
+        assert req.decision is False
+        rows = _audit_rows(broker)
+        assert [(r["source"], r["decision"], r["request_id"])
+                for r in rows] == [("polkit_stale_reap", 0, rid)]
