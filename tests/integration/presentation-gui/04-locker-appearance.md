@@ -15,13 +15,24 @@ Machine oracles: `qdlocker_ctrl status` (`locked=True/False`),
 `qdlocker_ctrl unlock-result`, `pres_snapshot`. Visual oracle: the lock UI
 (clock, date, Password prompt) colours in the frames.
 
+**Grading:** if any `qdlocker_ctrl` call (or `qdlocker_wait_for_lock` /
+`qdlocker_wait_for_unlock`) returns 3 / prints `ERROR(harness): ctrl
+introspection is off`, the oracle is unavailable: the verdict is **ERROR**,
+never FAIL — re-check that Setup ran `qdlocker_session_healthy`.
+
 ## Setup
 
 ```bash
 source "${QDISTRO_REPO}/tests/integration/presentation-gui/presentation-helpers.sh"
 source "${QDLOCKER_REPO}/tests/gui/qdlocker-helpers.sh"
 qdwin_set_vm "${VMNAME:?qci sets VMNAME to this scenario's VM}"
-qdlocker_session_healthy || { echo "FAIL: session not up"; exit 2; }
+# Run BOTH checks, verbatim. qdlocker_session_healthy is the one that installs
+# the root-owned ctrl-introspection marker and restarts the locker; without it
+# every `qdlocker_ctrl status` below answers `error: command unavailable`
+# (a driver that ran only qdwin_session_healthy hit exactly that in
+# full-20261012T155315Z-2626707). Either failing is a setup ERROR (exit 2).
+qdwin_session_healthy || { echo "ERROR: qdwin session not up"; exit 2; }
+qdlocker_session_healthy || { echo "ERROR: locker not up or ctrl introspection unavailable"; exit 2; }
 case "$(qdlocker_ctrl status 2>/dev/null)" in
     *locked=True*) qdlocker_unlock_with_password; qdlocker_wait_for_unlock 5 ;;
 esac
