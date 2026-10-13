@@ -33,8 +33,11 @@ let
 
   symbolCheck = name: lw:
     runCommand name { nativeBuildInputs = [ binutils ]; } ''
+      # nm to a file first: `nm | grep -q` under pipefail fails whenever grep
+      # exits early and nm takes SIGPIPE, reporting a present symbol missing.
+      nm -D --defined-only ${lw}/lib/libweston-16.so.0 > syms.txt
       for s in ${lib.concatStringsSep " " popupHelpers}; do
-        nm -D --defined-only ${lw}/lib/libweston-16.so.0 | grep -q " $s\$" \
+        grep -q " $s\$" syms.txt \
           || { echo "MISSING exported symbol: $s"; exit 1; }
         echo "OK  $s"
       done
