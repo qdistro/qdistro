@@ -29,6 +29,15 @@ class FakeInnerTerm(QWidget):
     def historyLinesCount(self):
         return 0
 
+    # _buffer_text only reads the buffer when the real QTermWidget geometry
+    # API is present; without these the fake read "" and the plugin opened a
+    # modal "buffer is empty" QMessageBox that nothing could dismiss.
+    def screenColumnsCount(self):
+        return 80
+
+    def screenLinesCount(self):
+        return 24
+
 
 class FakeTerminal(QWidget):
     def __init__(self):
@@ -42,6 +51,17 @@ class FakeTerminal(QWidget):
 
     def selected_text(self):
         return ""
+
+
+@pytest.fixture(autouse=True)
+def no_modal_message_box(monkeypatch):
+    """A modal QMessageBox blocks forever offscreen; fail instead."""
+    def _modal(*args, **kwargs):
+        raise AssertionError(f"unexpected modal QMessageBox: {args[1:3]}")
+    for kind in ("information", "warning", "critical", "question"):
+        monkeypatch.setattr(
+            f"qterminator.plugins.print_terminal.QMessageBox.{kind}", _modal,
+        )
 
 
 @pytest.fixture

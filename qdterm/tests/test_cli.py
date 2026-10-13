@@ -106,11 +106,32 @@ def test_geometry_empty_string(monkeypatch):
 
 
 def test_geometry_negative_values_rejected(monkeypatch):
-    """Argparse treats -100x-200 as option flags, so this errors out."""
+    """A negative size never reaches the window.
+
+    Python <= 3.13 argparse reads "-100x-200" as an option flag and exits 2;
+    3.14 accepts it as the option's value, and then _apply_geometry must
+    ignore it. Either way the window is never resized or moved."""
+    from qterminator.__main__ import _apply_geometry
+
     monkeypatch.setattr("sys.argv", ["qterminator", "--geometry", "-100x-200"])
-    with pytest.raises(SystemExit) as exc_info:
-        parse_args()
-    assert exc_info.value.code == 2
+    try:
+        args = parse_args()
+    except SystemExit as exc:
+        assert exc.code == 2
+        return
+    assert args.geometry == "-100x-200"
+
+    calls = []
+
+    class Window:
+        def resize(self, *a):
+            calls.append(("resize", a))
+
+        def move(self, *a):
+            calls.append(("move", a))
+
+    _apply_geometry(Window(), args.geometry)
+    assert calls == []
 
 
 def test_geometry_zero_dimensions(monkeypatch):
