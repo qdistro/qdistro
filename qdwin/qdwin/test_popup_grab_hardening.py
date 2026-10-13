@@ -265,6 +265,18 @@ def check_d7_show_popup_serial_source(source):
     code = _strip_comments(source)
     if "qdwin_seat_grab_serial_matches" not in code:
         return fail("D7: shared grab-serial helper missing")
+    # A device that never produced input keeps grab_serial == 0, so the
+    # helper must refuse serial 0 itself or a literal-0 serial matches.
+    hbody, err = _function_body(
+        code, r"qdwin_seat_grab_serial_matches\s*\(",
+        "qdwin_seat_grab_serial_matches")
+    if err:
+        return fail(err)
+    guard = re.search(r"if\s*\(([^)]*\bserial\s*==\s*0\b[^)]*)\)\s*return\s+false",
+                      hbody)
+    if not guard or hbody.find(guard.group(0)) > hbody.find("grab_serial"):
+        return fail("D7: grab-serial helper must refuse serial 0 before "
+                    "comparing device grab serials (never-used devices hold 0)")
     body, err = _function_body(
         code, r"qdwin_handle_show_popup\s*\(", "qdwin_handle_show_popup")
     if err:

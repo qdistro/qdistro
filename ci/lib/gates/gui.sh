@@ -42,6 +42,7 @@ run_qdwin_executable_gui_smokes() {
         qdwin/tests/gui/agent-wm-policy-bystander-smoke.sh
         qdwin/tests/gui/agent-cursor-tracking-smoke.sh
         qdwin/tests/gui/agent-idle-dpms-recovery-smoke.sh
+        qdwin/tests/gui/agent-popup-forged-serial-smoke.sh
         qdlocker/tests/gui/agent-fprintd-fallback-smoke.sh
         qdlocker/tests/gui/agent-lock-occlusion-smoke.sh
     )
