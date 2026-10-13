@@ -22,7 +22,7 @@
 
 stdenv.mkDerivation {
   pname = "qdistro-daemons";
-  version = "0.1.0";
+  version = import ./meson-version.nix ../daemons/meson.build;
 
   src = ../daemons;
 

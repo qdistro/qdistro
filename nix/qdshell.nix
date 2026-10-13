@@ -47,7 +47,7 @@ in
 
 stdenv.mkDerivation {
   pname = "qdshell";
-  version = "0.1.0";
+  version = import ./meson-version.nix ../qdshell/meson.build;
 
   # Explicit fileset — the session payload + plugin build only.
   # quickshell-vendored/ is its own derivation; tests/Tests/scripts/nix/

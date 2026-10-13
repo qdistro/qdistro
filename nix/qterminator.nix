@@ -15,7 +15,7 @@
 
 python314Packages.buildPythonApplication {
   pname = "qterminator";
-  version = "0.1.0";
+  version = (lib.importTOML ../qdterm/pyproject.toml).project.version;
 
   src = ../qdterm;
 

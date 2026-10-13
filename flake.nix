@@ -40,13 +40,13 @@
           weston-qdistro = pkgs.callPackage ./nix/weston-qdistro.nix {
             vendoredSrc = vendoredSrcFor pkgs;
           };
-          qdwin = pkgs.callPackage ./nix/qdwin.nix { westonQdistro = self.packages.${system}.weston-qdistro; };
+          qdwin = pkgs.callPackage ./nix/qdwin.nix { westonQdistro = p.weston-qdistro; };
           quickshell-vendored = pkgs.callPackage ./nix/quickshell-vendored.nix { };
           qdshell = pkgs.callPackage ./nix/qdshell.nix {
             inherit (p) qdwin;
             quickshell = p.quickshell-vendored;
           };
-          daemons = pkgs.callPackage ./nix/daemons.nix { qdwin = self.packages.${system}.qdwin; };
+          daemons = pkgs.callPackage ./nix/daemons.nix { qdwin = p.qdwin; };
           qdistro-presentation = pkgs.callPackage ./nix/qdistro-presentation.nix { };
           qdistro-app-sdk = pkgs.callPackage ./nix/qdistro-app-sdk.nix { };
           qtermwidget-py = pkgs.callPackage ./nix/qtermwidget-py.nix { };
@@ -93,8 +93,9 @@
         system:
         let
           pkgs = pkgsFor system;
+          p = self.packages.${system};
         in
-        self.packages.${system}
+        p
         // import ./nix/checks.nix {
           inherit (pkgs)
             lib
@@ -108,10 +109,12 @@
             wayland-scanner
             wayland-protocols
             ;
-          apps = self.packages.${system};
-          westonQdistro = self.packages.${system}.weston-qdistro;
-          libwestonVendored = self.packages.${system}.libweston-vendored;
-          qdwin = self.packages.${system}.qdwin;
+          apps = p;
+          westonQdistro = p.weston-qdistro;
+          westonUpstreamSrc = pkgs.weston.src;
+          vendoredSrc = vendoredSrcFor pkgs;
+          libwestonVendored = p.libweston-vendored;
+          qdwin = p.qdwin;
         }
       );
     };

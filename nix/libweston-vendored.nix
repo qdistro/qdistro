@@ -36,7 +36,7 @@
 
 stdenv.mkDerivation {
   pname = "qdistro-libweston-vendored";
-  version = "16.0.0";
+  version = lib.fileContents ../qdwin/libweston-vendored/VERSION;
 
   src = builtins.path {
     path = ../qdwin/libweston-vendored/src;

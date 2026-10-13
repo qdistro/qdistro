@@ -16,6 +16,8 @@
   wayland-scanner,
   wayland-protocols,
   westonQdistro,
+  westonUpstreamSrc,
+  vendoredSrc,
   libwestonVendored,
   qdwin,
   apps,
@@ -162,6 +164,47 @@ in
     stop_weston client.log
     dump client.log weston.log > $out
   '';
+
+  # weston-qdistro copies nix/weston-delta.nix wholesale onto upstream. Every
+  # vendored file that differs from (or is absent in) the upstream tarball
+  # must be on that list, and every listed file must still differ — so an
+  # edit to an unlisted vendored file can't silently miss the nix compositor.
+  # Allowed exceptions are the build/stripping glue and doc files that
+  # nix/delta-audit.md excludes on purpose.
+  weston-delta-complete =
+    let
+      listed = builtins.toFile "weston-delta.txt"
+        (lib.concatLines (lib.sort lib.lessThan (import ./weston-delta.nix)));
+      excluded = builtins.toFile "weston-delta-excluded.txt" (lib.concatLines [
+        "README.md"
+        "include/libweston/meson.build"
+        "meson.build"
+        "releasing.md"
+      ]);
+    in
+    runCommand "weston-delta-complete" { } ''
+      ln -s ${westonUpstreamSrc} up   # nixpkgs' weston src: unpacked tree
+      ( cd ${vendoredSrc} && find . -type f -printf '%P\n' ) | LC_ALL=C sort > vendored.txt
+      : > changed.txt
+      while IFS= read -r f; do
+        if [ ! -e "up/$f" ] || ! cmp -s "${vendoredSrc}/$f" "up/$f"; then
+          echo "$f" >> changed.txt
+        fi
+      done < vendored.txt
+      LC_ALL=C sort -o changed.txt changed.txt
+      LC_ALL=C comm -23 changed.txt ${excluded} > functional.txt
+      LC_ALL=C sort ${listed} > listed.txt
+      if ! cmp -s functional.txt listed.txt; then
+        echo "nix/weston-delta.nix is out of sync with qdwin/libweston-vendored/src:"
+        echo "  vendored files differing from upstream but NOT listed:"
+        LC_ALL=C comm -23 functional.txt listed.txt | sed 's/^/    /'
+        echo "  listed files identical to upstream (stale entries):"
+        LC_ALL=C comm -13 functional.txt listed.txt | sed 's/^/    /'
+        exit 1
+      fi
+      echo "weston delta: $(wc -l < listed.txt) files, in sync"
+      cp listed.txt $out
+    '';
 
   qfileman-launch = launchSmoke "qfileman" "${apps.qfileman}/bin/qfileman" offscreen;
   qnotebook-launch = launchSmoke "qnotebook" "${apps.qnotebook}/bin/qnotebook" offscreen;

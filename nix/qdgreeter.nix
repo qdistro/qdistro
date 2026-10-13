@@ -12,7 +12,7 @@
 
 python314Packages.buildPythonApplication {
   pname = "qdgreeter";
-  version = "0.1.0";
+  version = (lib.importTOML ../qdgreeter/pyproject.toml).project.version;
 
   src = ../qdgreeter;
 

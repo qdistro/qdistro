@@ -15,7 +15,7 @@
 
 python314Packages.buildPythonApplication {
   pname = "qdbrowser";
-  version = "0.1.0";
+  version = (lib.importTOML ../qdbrowser/pyproject.toml).project.version;
 
   src = ../qdbrowser;
 

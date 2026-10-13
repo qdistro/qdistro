@@ -13,7 +13,7 @@
 
 python314Packages.buildPythonApplication {
   pname = "qnotebook";
-  version = "0.0.1";
+  version = (lib.importTOML ../qnotebook/pyproject.toml).project.version;
 
   src = ../qnotebook;
 

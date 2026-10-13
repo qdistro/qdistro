@@ -72,7 +72,7 @@ in
 
 python314Packages.buildPythonApplication {
   pname = "qfileman";
-  version = "0.1.0";
+  version = (lib.importTOML ../qdfileman/pyproject.toml).project.version;
 
   src = ../qdfileman;
 

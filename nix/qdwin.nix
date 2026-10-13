@@ -23,7 +23,7 @@
 
 stdenv.mkDerivation {
   pname = "qdwin";
-  version = "16.0.0";
+  version = import ./meson-version.nix ../qdwin/meson.build;
 
   src = builtins.path {
     path = ../qdwin;

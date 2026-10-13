@@ -1,10 +1,11 @@
 # weston-qdistro — full upstream weston 16.0.0 with qdistro's functional
 # libweston delta rebased in. Built by overriding nixpkgs' weston (itself
-# 16.0.0, unpatchced) so the frontend executable, shells and clients come
+# 16.0.0, unpatched) so the frontend executable, shells and clients come
 # back while the patched core keeps qdwin's required symbols.
 #
-# Carry list = every modified file under libweston/ + include/libweston/
-# per nix/delta-audit.md, EXCLUDING:
+# Carry list (nix/weston-delta.nix) = every modified file under libweston/ +
+# include/libweston/ per nix/delta-audit.md; the `weston-delta-complete`
+# check fails when the vendored tree and the list drift apart. EXCLUDING:
 #   - top-level meson.build      (stripping glue; upstream keeps all subdirs)
 #   - include/libweston/meson.build (its only hunk installs xwayland-api.h,
 #     which upstream already installs via xwayland/meson.build — copying
@@ -12,25 +13,12 @@
 { lib, weston, vendoredSrc }:
 
 let
-  # modified/added files to copy wholesale from the vendored tree
-  delta = [
-    "include/libweston/backend-rdp.h"
-    "include/libweston/desktop.h"
-    "libweston/backend-drm/drm-internal.h"
-    "libweston/backend-drm/drm-kms-enums.h"
-    "libweston/backend-drm/kms.c"
-    "libweston/backend-headless/headless.c"
-    "libweston/backend-rdp/rdp.c"
-    "libweston/backend-rdp/rdp.h"
-    "libweston/desktop/qdwin-xdg-constrain.h"
-    "libweston/desktop/xdg-shell.c"
-    "libweston/input.c"
-    "libweston/output-capture.c"
-    "libweston/output-capture.h"
-    "libweston/pixman-renderer.c"
-    "libweston/renderer-gl/gl-renderer.c"
-  ];
+  delta = import ./weston-delta.nix;
 in
+
+assert lib.assertMsg (weston.version == "16.0.0")
+  "weston-qdistro copies whole files rebased on weston 16.0.0; nixpkgs now has ${weston.version} — re-audit nix/delta-audit.md and nix/weston-delta.nix";
+
 
 # nixpkgs defaults pipewireSupport = false; qdistro's production libweston
 # builds -Dbackend-pipewire=true (nix/libweston-vendored.nix) and qdwin links

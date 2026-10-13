@@ -9,7 +9,7 @@
 
 python314Packages.buildPythonPackage {
   pname = "qdistro-presentation";
-  version = "1.0.0";
+  version = (lib.importTOML ../sdk/presentation/pyproject.toml).project.version;
 
   src = ../sdk/presentation;
 

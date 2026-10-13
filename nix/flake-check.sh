@@ -13,7 +13,8 @@
 #
 # Env: NIX_CHECK_CONTAINER (default nix-$USER), NIX_CHECK_VOLUME (default
 # nix-$USER-store), NIX_CHECK_IMAGE, NIX_CHECK_JOBS / NIX_CHECK_CORES,
-# NIX_EXTRA_CONF (extra nix.conf lines, e.g. an attic substituter).
+# NIX_CHECK_SANDBOX (default true), NIX_EXTRA_CONF (extra nix.conf lines,
+# e.g. an attic substituter).
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -43,18 +44,22 @@ fi
 
 # nix.conf lives outside the /nix volume, so (re)apply it every run.
 podman exec -i "$name" sh -euc '
+  # The image ships no sed; keep the pristine file aside and rebuild.
   conf=/etc/nix/nix.conf
-  sed -i "/^# qdistro-flake-check/,\$d" "$conf"
+  [ -e "$conf.orig" ] || cp "$conf" "$conf.orig"
   {
+    cat "$conf.orig"
     echo "# qdistro-flake-check"
     echo "experimental-features = nix-command flakes"
     echo "max-jobs = $1"
     echo "cores = $2"
+    echo "sandbox = $4"
     printf "%s\n" "$3"
-  } >> "$conf"
+  } > "$conf.new"
+  mv "$conf.new" "$conf"
   git config --global --get-all safe.directory | grep -qx "\*" \
     || git config --global --add safe.directory "*"
-' sh "$jobs" "$cores" "${NIX_EXTRA_CONF:-}"
+ ' sh "$jobs" "$cores" "${NIX_EXTRA_CONF:-}" "${NIX_CHECK_SANDBOX:-true}"
 
 [ $# -gt 0 ] || set -- flake check -L
 rc=0

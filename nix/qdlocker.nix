@@ -16,7 +16,7 @@
 
 python314Packages.buildPythonApplication {
   pname = "qdlocker";
-  version = "0.1.0";
+  version = (lib.importTOML ../qdlocker/pyproject.toml).project.version;
 
   src = ../qdlocker;
 
