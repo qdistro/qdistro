@@ -587,18 +587,8 @@ fi'
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     run_logged host qnotebook-pytest "$EXIT_HOST" pytest "$WORKSPACE/qnotebook" "$(host_pytest_cmd all)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    # qdterm (qterminator): exclude the printer-coupled print_terminal tests on the host.
-    # They construct QPrinter(QPrinter.PrinterMode.HighResolution), which resolves
-    # the host's DEFAULT printer and blocks indefinitely when that printer is an
-    # offline/unreachable network device (this workstation's Phaser-3020) — with
-    # no per-suite timeout that wedged the entire `full` pipeline. Qt ignores
-    # CUPS_SERVER for that path, so there is NO host-side env fix; these tests
-    # belong in a VM lane (clean image => no printer => no hang). Recorded below
-    # as a visible SKIP, not silently dropped.
-    # TODO(host-gate refactor): run test_print_terminal.py under the VM suite gate.
-    run_logged host qdterm-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdterm" "$(host_pytest_cmd all 0 '' '--ignore=tests/test_print_terminal.py')" "excludes printer-coupled test_print_terminal.py (belongs in VM lane)"; step_rc=$?
+    run_logged host qdterm-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdterm" "$(host_pytest_cmd all)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    record_skip host qdterm-print-tests pytest "tests/test_print_terminal.py excluded from host gate: QPrinter(HighResolution) blocks on the host default printer (Phaser-3020); move to VM lane (host-gate refactor)"
 
     # Extension repos: run tests + build. Coverage (REPORT-ONLY): when
     # @vitest/coverage-v8 is installed, run a SEPARATE non-gating vitest
