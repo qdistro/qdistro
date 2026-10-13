@@ -391,6 +391,57 @@ publish_launch_record(const char *lr_path, const char *xdg_runtime_dir,
 	close(fd);
 }
 
+/* QDISTRO_LAUNCH_REPORT_FD: a pipe the root launcher created and passed
+ * through runuser (tier-5's qdistro-tier5-bridge). Claimed at startup and
+ * marked close-on-exec at once, so the inner command never inherits it.
+ * Returns -1 when unset; exits the process on a malformed or closed fd —
+ * a launcher that asked for a report must not get a silent untracked
+ * launch. */
+static int
+claim_report_fd(void)
+{
+	const char *v = getenv("QDISTRO_LAUNCH_REPORT_FD");
+	char *end = NULL;
+	long fd;
+	int flags;
+
+	if (!v || !*v)
+		return -1;
+	errno = 0;
+	fd = strtol(v, &end, 10);
+	if (errno || !end || *end || fd < 3 || fd > 1023) {
+		fprintf(stderr,
+			"qdistro-secctx-exec: invalid QDISTRO_LAUNCH_REPORT_FD\n");
+		exit(2);
+	}
+	flags = fcntl((int)fd, F_GETFD);
+	if (flags < 0 || fcntl((int)fd, F_SETFD, flags | FD_CLOEXEC) < 0) {
+		fprintf(stderr,
+			"qdistro-secctx-exec: QDISTRO_LAUNCH_REPORT_FD is not open\n");
+		exit(2);
+	}
+	unsetenv("QDISTRO_LAUNCH_REPORT_FD");
+	return (int)fd;
+}
+
+/* Write "<pid>\n" to the launcher's report fd and close it. Only called
+ * once the inner command has exec'd, so the launcher's /proc checks see
+ * the final executable, never this wrapper's forked copy. */
+static void
+report_launch(int report_fd, pid_t pid)
+{
+	char buf[32];
+	int n;
+
+	if (report_fd < 0)
+		return;
+	n = snprintf(buf, sizeof buf, "%ld\n", (long)pid);
+	if (n > 0 && write(report_fd, buf, (size_t)n) != n)
+		fprintf(stderr, "qdistro-secctx-exec: launch report: %s\n",
+			strerror(errno));
+	close(report_fd);
+}
+
 static void
 registry_global(void *data, struct wl_registry *reg, uint32_t name,
 		const char *iface, uint32_t version)
@@ -539,6 +590,7 @@ int main(int argc, char **argv)
 		return 13;
 	if (validate_secctx(sandbox_engine, app_id, instance_id) < 0)
 		return 2;
+	int report_fd = claim_report_fd();
 
 	const char *xdg = getenv("XDG_RUNTIME_DIR");
 	if (!xdg || !*xdg) {
@@ -617,10 +669,26 @@ int main(int argc, char **argv)
 	 * until child reaps, then close in order: close_fd first so the
 	 * compositor sees HUP and stops accepting, then listen_fd. */
 
+	/* Exec-status pipe: the child's write end is close-on-exec, so EOF
+	 * without data means execvp() succeeded and a byte means it failed.
+	 * Launch records are published only after that verdict — before it,
+	 * the pid still names this wrapper's forked copy. */
+	int exec_pipe[2];
+	if (pipe2(exec_pipe, O_CLOEXEC) < 0) {
+		fprintf(stderr, "qdistro-secctx-exec: pipe2: %s\n",
+			strerror(errno));
+		close(listen_fd);
+		close(close_fd);
+		wl_display_disconnect(ctx.display);
+		return 9;
+	}
+
 	pid_t pid = fork();
 	if (pid < 0) {
 		fprintf(stderr, "qdistro-secctx-exec: fork: %s\n",
 			strerror(errno));
+		close(exec_pipe[0]);
+		close(exec_pipe[1]);
 		close(listen_fd);
 		close(close_fd);
 		wl_display_disconnect(ctx.display);
@@ -632,6 +700,9 @@ int main(int argc, char **argv)
 		wl_display_disconnect(ctx.display);
 		close(listen_fd);
 		close(close_fd);
+		close(exec_pipe[0]);
+		if (report_fd >= 0)
+			close(report_fd);
 
 		/* Inner client connects via the listener path. libwayland
 		 * resolves WAYLAND_DISPLAY relative to XDG_RUNTIME_DIR when
@@ -646,29 +717,20 @@ int main(int argc, char **argv)
 		unsetenv("QDISTRO_LAUNCH_RECORD_TOKEN");
 
 		execvp(argv[optind], &argv[optind]);
+		int exec_errno = errno;
+		(void)!write(exec_pipe[1], &exec_errno, sizeof exec_errno);
 		fprintf(stderr, "qdistro-secctx-exec: execvp(%s): %s\n",
-			argv[optind], strerror(errno));
+			argv[optind], strerror(exec_errno));
 		_exit(127);
 	}
-
-	/* Permission-lineage launch-record hook (P1-1 rollout). When the
-	 * launcher set QDISTRO_LAUNCH_RECORD_PATH, publish the inner child's
-	 * pid there so a trusted *root* launcher parent (e.g. spawn-tier3.sh)
-	 * can RegisterLaunch it with the broker. We are the only component that
-	 * knows this pid: it is our fork child, and its pid survives the
-	 * execvp() above, so it is exactly the pid that connects to the
-	 * compositor and that a later gate resolves. We write the bare pid; the
-	 * root consumer re-reads /proc (exe/starttime/uid) *after* the inner
-	 * command has exec'd and is up, and the broker re-verifies it again at
-	 * RegisterLaunch — so a stale or mid-exec read can only fail closed,
-	 * never mint a wrong record. Best-effort: a write failure is logged but
-	 * never blocks the launch. */
-	publish_launch_record(getenv("QDISTRO_LAUNCH_RECORD_PATH"), xdg, pid);
+	close(exec_pipe[1]);
 
 	/* Forward teardown signals to the inner client so it is not orphaned
-	 * when this lineage-parent wrapper is killed (e.g. spawn-tier5.sh's
-	 * cleanup `kill $CLIENT_PID`). The handler kills the child and returns;
-	 * waitpid() then resumes via EINTR, reaps it, and runs revoke/unlink. */
+	 * when this lineage-parent wrapper is killed (e.g. the tier-5 bridge
+	 * tearing down its launch chain). The handler kills the child and
+	 * returns; waitpid() then resumes via EINTR, reaps it, and runs
+	 * revoke/unlink. Installed before the exec wait below so a teardown
+	 * that lands mid-exec still reaches the child. */
 	g_child_pid = pid;
 	{
 		struct sigaction sa;
@@ -679,6 +741,34 @@ int main(int argc, char **argv)
 		sigaction(SIGTERM, &sa, NULL);
 		sigaction(SIGINT, &sa, NULL);
 		sigaction(SIGHUP, &sa, NULL);
+	}
+
+	int exec_errno = 0;
+	ssize_t got;
+	do {
+		got = read(exec_pipe[0], &exec_errno, sizeof exec_errno);
+	} while (got < 0 && errno == EINTR);
+	close(exec_pipe[0]);
+
+	if (got == 0) {
+		/* Permission-lineage launch-record hook (P1-1 rollout). When
+		 * the launcher set QDISTRO_LAUNCH_RECORD_PATH, publish the
+		 * inner child's pid there so a trusted *root* launcher parent
+		 * (e.g. spawn-tier3.sh) can RegisterLaunch it with the broker.
+		 * We are the only component that knows this pid: it is our
+		 * fork child, and its pid survives the execvp() above, so it is
+		 * exactly the pid that connects to the compositor and that a
+		 * later gate resolves. The root consumer re-reads /proc
+		 * (exe/starttime/uid) and the broker re-verifies it again at
+		 * RegisterLaunch. Best-effort: a write failure is logged but
+		 * never blocks the launch. */
+		publish_launch_record(getenv("QDISTRO_LAUNCH_RECORD_PATH"),
+				      xdg, pid);
+		report_launch(report_fd, pid);
+	} else if (report_fd >= 0) {
+		/* exec failed (or the verdict was unreadable): close without
+		 * a pid, so the launcher sees no launch to register. */
+		close(report_fd);
 	}
 
 	/* Parent: wait for child. */
