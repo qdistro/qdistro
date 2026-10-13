@@ -64,6 +64,15 @@ python314Packages.buildPythonApplication {
   # test_geometry_negative_values_rejected pins a Python 3.13 argparse quirk
   # (qci's host image is 3.13.15); 3.14 argparse accepts "-100x-200" as the
   # option value, so on the shipping python314 it does not raise.
+  # test_signal_no_permission SIGTERMs pid 1 expecting EPERM; in the build
+  # sandbox's PID namespace pid 1 is the builder itself (same uid), so the
+  # test would kill the build. Fixed upstream of this branch by a skip
+  # (claude/nix-findings-deps); until then deselect it where pid 1 is ours.
+  preCheck = ''
+    if [ "$(stat -c %u /proc/1)" = "$(id -u)" ]; then
+      QD_PYTEST_EXTRA="--deselect tests/test_process_control.py::test_signal_no_permission"
+    fi
+  '';
   checkPhase = qtPytestCheck {
     args = lib.concatStringsSep " " [
       "--ignore=tests/test_print_terminal.py"
