@@ -195,23 +195,29 @@ clamp_int() {  # clamp_int VARNAME DEFAULT MIN MAX — validate/clamp an integer
 # was written for). RETURN CODES are the contract:
 #   0 — pids printed: a backing qemu EXISTS
 #   1 — clean scan: confirmed NO backing qemu
-#   2 — scan unreliable (/proc unlistable, interpreter failure). NOT
+#   2 — scan unreliable (/proc unlistable, a process of ours unreadable
+#       for any reason but disappearance, interpreter failure). NOT
 #       "dead" — callers must fail closed.
 # Session qemus run as this uid with `-name guest=<domain>,…`: a candidate
 # must be ours, have a qemu comm, and carry `guest=<name>,` as the argument
 # right after `-name` (argv split on NUL, so no crafted argument can fake
-# the pair). A process that vanishes mid-scan is dead, not ambiguous.
+# the pair). A process that vanishes mid-scan (ENOENT/ESRCH) is dead, not
+# ambiguous; EACCES/EIO on one is ambiguous — it may be the live guest.
 qemu_pids_for_domain() {
     local name="${1:-$VM_NAME}" out rc
     out=$(T5NAME="$name" python3 - <<'PY'
-import os, sys
+import errno, os, sys
 needle = b"guest=" + os.environ["T5NAME"].encode() + b","
 me = os.getuid()
+# Only these prove the process is gone; any other failure (EACCES, EIO,
+# ...) on a candidate means it may be a live qemu we could not read.
+GONE = (errno.ENOENT, errno.ESRCH)
 try:
     pids = [p for p in os.listdir("/proc") if p.isdigit()]
 except OSError:
     sys.exit(2)
 found = []
+unsure = False
 for p in pids:
     try:
         if os.stat(f"/proc/{p}").st_uid != me:
@@ -222,14 +228,17 @@ for p in pids:
             continue
         with open(f"/proc/{p}/cmdline", "rb") as f:
             argv = f.read().split(b"\0")
-    except OSError:
+    except OSError as e:
+        if e.errno not in GONE:
+            unsure = True
         continue
     if any(a == b"-name" and argv[i + 1].startswith(needle)
            for i, a in enumerate(argv[:-1])):
         found.append(p)
-if not found:
-    sys.exit(1)
-print(" ".join(found))
+if found:
+    print(" ".join(found))
+    sys.exit(0)
+sys.exit(2 if unsure else 1)
 PY
 )
     rc=$?

@@ -145,7 +145,10 @@ elif cmd == "shutdown":
     elif pid and mode == "agent" and not flag("agent-ignored"):
         kill_qemu(n)
 elif cmd == "destroy":
-    kill_qemu(rest[0])
+    # destroy-noop: the nested-virt failure mode — destroy "succeeds"
+    # against a domstate that lies, and qemu stays alive
+    if not flag("destroy-noop"):
+        kill_qemu(rest[0])
 elif cmd == "undefine":
     n = rest[0]
     if flag("undefine-fails") or (flag("undefine-needs-metadata")
@@ -239,6 +242,35 @@ with open(f"{S}/bridge.log", "a") as f:
 sys.exit(0 if reason == "eof" else 1)
 '''
 
+# sitecustomize for every python the scripts run: with the state dir's
+# proc-unreadable flag set, opening /proc/<pid>/cmdline of a fake guest
+# fails with the errno the flag names (default EACCES) — an unreadable
+# candidate, or (ENOENT) one that vanished mid-scan.
+_SITECUSTOMIZE = r'''
+import builtins, errno, os, re
+_S = os.environ.get("T5FAKE", "")
+_F = os.path.join(_S, "proc-unreadable")
+_open = builtins.open
+
+
+def _guarded(file, *a, **kw):
+    m = re.fullmatch(r"/proc/(\d+)/cmdline", str(file))
+    if m and _S and os.path.exists(_F):
+        try:
+            with _open(f"/proc/{m.group(1)}/comm", "rb") as f:
+                comm = f.read()
+        except OSError:
+            comm = b""
+        if comm.startswith(b"qemu-system-"):
+            name = _open(_F).read().strip() or "EACCES"
+            code = getattr(errno, name)
+            raise OSError(code, os.strerror(code), str(file))
+    return _open(file, *a, **kw)
+
+
+builtins.open = _guarded
+'''
+
 _WAYPIPE = r'''#!/bin/sh
 # loopback server stand-in: waypipe ... server -- app args
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
@@ -254,10 +286,12 @@ class FakeHost:
         self.bin = tmp / "bin"
         self.run = tmp / "run"
         self.home = tmp / "home"
+        self.pyshim = tmp / "pyshim"
         self.images = tmp / "images"
         self.base = tmp / "base.qcow2"
         self.manifest = tmp / "base.json"
-        for d in (self.state, self.bin, self.run, self.home, self.images):
+        for d in (self.state, self.bin, self.run, self.home, self.images,
+                  self.pyshim):
             d.mkdir(parents=True)
         self.run.chmod(0o700)
         self.base.write_text("base")
@@ -271,6 +305,7 @@ class FakeHost:
             p.write_text(body.replace("{py}", py)
                          .replace("{bridge}", BRIDGE_PATH))
             p.chmod(0o755)
+        (self.pyshim / "sitecustomize.py").write_text(_SITECUSTOMIZE)
         self._sock = socket.socket(socket.AF_UNIX)
         self._sock.bind(str(self.run / "wayland-1"))
         self.procs: list[subprocess.Popen] = []
@@ -295,6 +330,7 @@ class FakeHost:
             "TIER5_QGA_TIMEOUT_SECS": "30",
             "TIER5_SHUTDOWN_GRACE_SECS": "2",
             "LANG": "C.UTF-8",
+            "PYTHONPATH": str(self.pyshim),
         }
         env.update({k: str(v) for k, v in extra.items()})
         return env

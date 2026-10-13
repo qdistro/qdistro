@@ -460,12 +460,13 @@ def _launch_and_finish(host, session):
 
 # -- liveness oracle ------------------------------------------------------------
 
-def _oracle(script: Path, name: str) -> str:
+def _oracle(script: Path, name: str, env: dict | None = None) -> str:
     body = re.search(r"^qemu_pids_for_domain\(\) \{\n.*?^\}\n",
                      script.read_text(), re.DOTALL | re.MULTILINE).group(0)
     return subprocess.run(
         ["bash", "-c", body + 'qemu_pids_for_domain "$1"; echo " rc=$?"',
-         "_", name], capture_output=True, text=True, check=True).stdout
+         "_", name], capture_output=True, text=True, check=True,
+        env=env).stdout
 
 
 @pytest.mark.parametrize("script", [SPAWN, CLEANUP],
@@ -496,6 +497,55 @@ def test_liveness_oracle_matches_only_the_named_guest(host, script):
     assert _oracle(script, "t5-live").strip() == "rc=1"
 
 
+@pytest.mark.parametrize("script", [SPAWN, CLEANUP],
+                         ids=["spawn", "cleanup"])
+def test_liveness_oracle_unreadable_candidate_is_unverifiable(host, script):
+    # ensures: a qemu of ours that cannot be read (EACCES, EIO) is NOT
+    #          "confirmed dead" — only disappearance (ENOENT/ESRCH) is
+    #          (sol t5-r1 P1: rc=1 there authorized overlay deletion)
+    qemu = str(host.bin / "qemu-system-x86_64")
+    p = subprocess.Popen([qemu, "-name", "guest=t5-live,debug-threads=on"])
+    try:
+        time.sleep(0.3)
+        env = host.env()
+        for code, want in (("EACCES", "rc=2"), ("EIO", "rc=2"),
+                           ("ENOENT", "rc=1")):
+            host.flag("proc-unreadable", code)
+            assert _oracle(script, "t5-live", env).strip() == want, code
+            assert _oracle(script, "t5-other", env).strip() == want, code
+        host.unflag("proc-unreadable")
+        assert _oracle(script, "t5-live", env).strip() == f"{p.pid} rc=0"
+    finally:
+        p.kill()
+        p.wait()
+
+
+def _leave_qemu_alive_on_teardown(host, unreadable):
+    """destroy no-ops (the lying-domstate case) and, optionally, the live
+    qemu becomes unreadable to the oracle."""
+    host.flag("destroy-noop")
+    if unreadable:
+        host.flag("proc-unreadable", "EACCES")
+
+
+@pytest.mark.parametrize("unreadable", [False, True],
+                         ids=["readable", "unreadable"])
+def test_destroy_that_leaves_qemu_alive_keeps_the_overlay(host, unreadable):
+    # ensures: after undefine, the overlay is unlinked only on a proven-dead
+    #          qemu; a destroy that left qemu running — visible or not to
+    #          the oracle — keeps the disk under the live guest
+    p = host.spawn(VM, APP, TIER5_SHUTDOWN_METHOD="force")
+    _session_up(host)
+    _leave_qemu_alive_on_teardown(host, unreadable)
+    _app_exit(host)
+    rc, _out, err = finish(p)
+    assert rc == 5, err
+    assert f"keeping {host.overlay(VM)}" in err
+    assert host.qemu_alive(VM)
+    assert host.overlay(VM).exists()
+    assert Path(f"{host.overlay(VM)}.appid").exists()
+
+
 # -- cleanup tool -------------------------------------------------------------
 
 def test_cleanup_tool_refuses_a_live_session(host):
@@ -520,6 +570,24 @@ def test_cleanup_tool_removes_a_leftover_guest(host):
     r = host.cleanup_tool(VM)
     assert r.returncode == 0, r.stderr
     assert _torn_down(host)
+
+
+@pytest.mark.parametrize("unreadable", [False, True],
+                         ids=["readable", "unreadable"])
+def test_cleanup_tool_keeps_the_overlay_of_a_surviving_qemu(host,
+                                                            unreadable):
+    # ensures: the cleanup tool's unlink needs a proven-dead qemu too; a
+    #          destroy that left it alive (readable or not) keeps the disk
+    a = host.spawn(VM, APP, TIER5_KEEP_DOMAIN=1)
+    _session_up(host)
+    _app_exit(host)
+    assert finish(a)[0] == 0
+    _leave_qemu_alive_on_teardown(host, unreadable)
+    r = host.cleanup_tool(VM)
+    assert r.returncode == 5, r.stderr
+    assert "qemu live or unverifiable" in r.stderr
+    assert host.qemu_alive(VM)
+    assert host.overlay(VM).exists()
 
 
 def test_cleanup_tool_refuses_a_foreign_binding(host):

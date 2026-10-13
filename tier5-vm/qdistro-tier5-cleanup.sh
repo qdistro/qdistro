@@ -27,20 +27,25 @@ export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 export LIBVIRT_DEFAULT_URI="qemu:///session"
 
 # qemu_pids_for_domain — same contract as spawn-tier5.sh: 0 pids live,
-# 1 confirmed dead, 2 scan unreliable. domstate can report "shut off" for
+# 1 confirmed dead, 2 scan unreliable (including a process of ours
+# unreadable for any reason but disappearance). domstate can report "shut off" for
 # a LIVE qemu under nested virt, so unlinking the overlay is gated on a
 # proven-dead scan, never on the destroy/undefine attempts.
 qemu_pids_for_domain() {
     local name="${1:-$VM_NAME}" out rc
     out=$(T5NAME="$name" python3 - <<'PY'
-import os, sys
+import errno, os, sys
 needle = b"guest=" + os.environ["T5NAME"].encode() + b","
 me = os.getuid()
+# Only these prove the process is gone; any other failure (EACCES, EIO,
+# ...) on a candidate means it may be a live qemu we could not read.
+GONE = (errno.ENOENT, errno.ESRCH)
 try:
     pids = [p for p in os.listdir("/proc") if p.isdigit()]
 except OSError:
     sys.exit(2)
 found = []
+unsure = False
 for p in pids:
     try:
         if os.stat(f"/proc/{p}").st_uid != me:
@@ -51,14 +56,17 @@ for p in pids:
             continue
         with open(f"/proc/{p}/cmdline", "rb") as f:
             argv = f.read().split(b"\0")
-    except OSError:
+    except OSError as e:
+        if e.errno not in GONE:
+            unsure = True
         continue
     if any(a == b"-name" and argv[i + 1].startswith(needle)
            for i, a in enumerate(argv[:-1])):
         found.append(p)
-if not found:
-    sys.exit(1)
-print(" ".join(found))
+if found:
+    print(" ".join(found))
+    sys.exit(0)
+sys.exit(2 if unsure else 1)
 PY
 )
     rc=$?
