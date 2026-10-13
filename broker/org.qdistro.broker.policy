@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Authority over the qdistro admin broker's approval queue and rules.
+
+  - org.qdistro.broker.approve — an admin-uid process calls a broker
+    authority method (DecideRequest, SaveRule, DeleteRule, ReloadRules,
+    RevokeApproval, RevokeAllForUid, ApproveWorkflowRun, RunAuditGc).
+
+  The broker checks this WITHOUT user interaction for the calling bus
+  name, on top of its /proc identity checks (which a same-uid process
+  can forge). The installed admin app / TUI obtain it for their own
+  process with AllowUserInteraction and retry. auth_admin_keep keeps it
+  for that process for polkit's retention window, so a run of approvals
+  prompts once.
+
+  qdistro-polkit-agent forces its PAM route for this action
+  (FORCED_PAM_ACTIONS in polkit/qdistro_polkit_agent.py): the admin
+  types their password. Its default route — filing a yes/no request in
+  the broker's own queue — would be circular here and is never used.
+  No .rules file grants it on a shipped image; GUI test VMs get a
+  temporary test-only grant from the qci GUI gate.
+-->
+<policyconfig>
+
+  <vendor>qdistro</vendor>
+  <vendor_url>https://qdistro.invalid/doc/permissions</vendor_url>
+
+  <action id="org.qdistro.broker.approve">
+    <description>Approve a qdistro permission request</description>
+    <message>Authentication is required to approve qdistro permission requests or change approval rules</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+</policyconfig>

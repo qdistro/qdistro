@@ -29,11 +29,17 @@ def rules_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def broker(tmp_path: Path, rules_dir: Path) -> _StubBroker:
-    return _StubBroker(
+    b = _StubBroker(
         str(tmp_path / "approvals.sqlite"),
         str(tmp_path / "audit.sqlite"),
         str(rules_dir),
     )
+    # This file pins the /proc identity layer; the polkit layer that
+    # follows it (org.qdistro.broker.approve) is pinned in
+    # test_broker_authority_polkit.py. Every refusal asserted here happens
+    # before polkit is asked.
+    b._polkit_peer_authorized = lambda _sender, _action: True
+    return b
 
 
 def _as_arbitrary_admin(broker: _StubBroker) -> None:

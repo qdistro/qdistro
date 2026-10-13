@@ -72,6 +72,11 @@ class _StubBroker(Broker):
             return True, "test-injected admin-control peer"
         return False, f"uid {uid} is not admin uid {ADMIN_UID}"
 
+    # The admin-uid peer here has already authenticated (polkit action
+    # org.qdistro.broker.approve; pinned in test_broker_authority_polkit.py).
+    def _polkit_peer_authorized(self, sender, action) -> bool:
+        return True
+
     def RequestPending(self, rid):  # type: ignore[override]
         self.pending_signals.append(int(rid))
 

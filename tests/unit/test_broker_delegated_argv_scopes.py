@@ -84,6 +84,9 @@ def broker(tmp_path: Path) -> _StubBroker:
     # logic, so trust is injected at the predicate, not via the env.
     b._peer_is_installed_admin_script = (
         lambda _pid, _exe, _argv: (True, "test: installed admin app"))
+    # ... which has authenticated (org.qdistro.broker.approve; the polkit
+    # layer is pinned in test_broker_authority_polkit.py).
+    b._polkit_peer_authorized = lambda _sender, _action: True
     return b
 
 

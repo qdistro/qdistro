@@ -212,7 +212,9 @@ _ADMIN_CONTROL_SCRIPT_PATHS = frozenset((
 # an installed admin control program: a generic D-Bus CLI or inline Python
 # run as admin is any admin-session process — approving its own qsu root
 # request that way was an unauthenticated admin->root path (fable
-# 2026-10-13). Root keeps its maintenance paths.
+# 2026-10-13). An admin-uid caller that passes that identity check must also
+# hold the polkit action BROKER_APPROVE_ACTION (a typed admin password;
+# _require_authority_authorization). Root keeps its maintenance paths.
 _ADMIN_CONTROL_AUTHORITY_METHODS = frozenset((
     "ApproveWorkflowRun",
     "DecideRequest",
@@ -471,6 +473,18 @@ POLKIT_AUTHORITY_IFACE = "org.freedesktop.PolicyKit1.Authority"
 # The response call is quick; bound it so a wedged polkitd cannot park
 # the broker's main loop inside a decision path.
 POLKIT_RESPOND_TIMEOUT_S = 15
+
+# The polkit action an admin-uid peer must hold to call an authority
+# method (_ADMIN_CONTROL_AUTHORITY_METHODS). Shipped as
+# broker/org.qdistro.broker.policy with allow_active=auth_admin_keep, and
+# forced onto the agent's PAM route (polkit/qdistro_polkit_agent.py
+# FORCED_PAM_ACTIONS), so only a typed admin password creates it: no
+# /proc identity check can stop a same-uid process forging the installed
+# app's argv (sol bsa r4). The broker only ASKS, never interactively —
+# the admin app/TUI obtain the authorization for their own process and
+# retry. A non-interactive check answers at once; bound it anyway.
+BROKER_APPROVE_ACTION = "org.qdistro.broker.approve"
+POLKIT_CHECK_TIMEOUT_S = 5
 
 # When set, _silo_state errors (manager offline, timeout, parse error)
 # stop falling through to the legacy trust-the-uid path. Instead they
@@ -1989,9 +2003,11 @@ class Broker(dbus.service.Object):
         merely present somewhere in argv (`python3 -c CODE <path>`) or an
         admin-writable dev copy does not qualify.
 
-        Same-uid identity stays defence-in-depth (a same-uid process can
-        ptrace the real app); approvals of root actions still need an
-        authenticated human — tracked as the structural follow-up."""
+        Same-uid identity is defence in depth only: a same-uid process can
+        rewrite its own argv to match (sol bsa r4) or ptrace the real app.
+        The structural control is _require_authority_authorization — the
+        peer must also hold BROKER_APPROVE_ACTION, which only a typed
+        admin password creates."""
         # The interpreter must be the root-owned system binary: an
         # admin-owned native client merely NAMED python3 ignores argv and
         # environment entirely (sol bsa r3; same rule as the polkit agent,
@@ -2047,7 +2063,59 @@ class Broker(dbus.service.Object):
                 f"peers; {reason}",
                 name=BUS_NAME + ".AccessDenied",
             )
+        self._require_authority_authorization(uid, sender, method)
         return uid, pid, exe, st
+
+    def _polkit_peer_authorized(self, sender, action: str) -> bool:
+        """polkitd's verdict on `action` for the bus peer `sender`, asked
+        WITHOUT user interaction (flags 0): the broker must never wait on
+        a human. The system-bus-name subject is resolved by polkitd itself
+        to the connection's process, so a temporary authorization the
+        admin app/TUI obtained for its own process (auth_admin_keep)
+        answers here and nothing else's does. Raises on any polkit
+        failure; the caller fails closed."""
+        obj = dbus.SystemBus().get_object(POLKIT_BUS, POLKIT_AUTHORITY_OBJ)
+        subject = dbus.Struct(
+            ("system-bus-name",
+             dbus.Dictionary({"name": dbus.String(str(sender))},
+                             signature="sv")),
+            signature="sa{sv}")
+        authorized, _challenge, _details = dbus.Interface(
+            obj, POLKIT_AUTHORITY_IFACE).CheckAuthorization(
+                subject, dbus.String(action),
+                dbus.Dictionary({}, signature="ss"), dbus.UInt32(0),
+                dbus.String(""), timeout=POLKIT_CHECK_TIMEOUT_S)
+        return bool(authorized)
+
+    def _require_authority_authorization(self, uid: int, sender,
+                                         method: str) -> None:
+        """An authority method called by a non-root peer additionally
+        needs BROKER_APPROVE_ACTION — a password-backed polkit
+        authorization — on top of the /proc identity checks, which a
+        same-uid process can forge. Root maintenance paths and the
+        in-process workflow sender are not polkit subjects and keep
+        their own gates. Not authorized raises .AuthRequired (the client
+        authenticates and retries); a polkit failure raises .AccessDenied
+        (fail closed, nothing to retry)."""
+        if (int(uid) == 0 or sender is _WORKFLOW_SENDER
+                or method not in _ADMIN_CONTROL_AUTHORITY_METHODS):
+            return
+        try:
+            ok = self._polkit_peer_authorized(sender, BROKER_APPROVE_ACTION)
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] {method}: polkit check for {sender} failed: "
+                  f"{e!r}; refusing", flush=True)
+            raise dbus.DBusException(
+                f"{method} refused: polkit could not confirm "
+                f"{BROKER_APPROVE_ACTION}",
+                name=BUS_NAME + ".AccessDenied",
+            ) from e
+        if not ok:
+            raise dbus.DBusException(
+                f"{method} needs the admin's authentication "
+                f"({BROKER_APPROVE_ACTION}); authenticate and retry",
+                name=BUS_NAME + ".AuthRequired",
+            )
 
     def _peer_matches_polkit_agent(self, *, uid: int, pid: int,
                                    exe: str, sender: str = ""
@@ -5941,6 +6009,13 @@ class Broker(dbus.service.Object):
                 f"peers; {reason}",
                 name=BUS_NAME + ".AccessDenied",
             )
+        try:
+            self._require_authority_authorization(admin_uid, sender,
+                                                  "DeleteRule")
+        except dbus.DBusException as e:
+            _audit(False, reason=f"refused: {e.get_dbus_name()}",
+                   path=source_path or None)
+            raise
 
         if not source_path:
             _audit(False, reason="refused: empty source_path", path=None)
