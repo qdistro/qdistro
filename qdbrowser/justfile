@@ -30,6 +30,11 @@ install-deps:
         echo "Unknown distro; install PyQt6 + PyQt6-WebEngine + pytest + pytest-qt + pillow manually." >&2
         exit 1
     fi
+    # pin_proxy.py needs ssl.SSLSocket.get_verified_chain() (3.13+).
+    if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 13))'; then
+        echo "qdbrowser needs Python >= 3.13; python3 is $(python3 -V 2>&1)." >&2
+        exit 1
+    fi
 
 # Install MCP support for agent-driving (optional).
 install-mcp:

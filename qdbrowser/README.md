@@ -33,6 +33,8 @@ Shared philosophy: PyQt6 where possible, filesystem-discovered plugins, TOML con
 
 ## Install
 
+Requires Python 3.13 or newer (the cert-pin check uses `ssl.SSLSocket.get_verified_chain()`).
+
 ```bash
 # System deps (openSUSE / Ubuntu / Fedora auto-detected):
 just install-deps
