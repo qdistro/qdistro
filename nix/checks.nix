@@ -178,12 +178,24 @@ in
     let
       listed = builtins.toFile "weston-delta.txt"
         (lib.concatLines (lib.sort lib.lessThan (import ./weston-delta.nix)));
-      excluded = builtins.toFile "weston-delta-excluded.txt" (lib.concatLines [
-        "README.md"
-        "include/libweston/meson.build"
-        "meson.build"
-        "releasing.md"
-      ]);
+      # Build glue weston-qdistro deliberately does NOT carry. Its whole-file
+      # exclusion would hide a new functional hunk, so the exact diff against
+      # upstream is pinned: any change to these files must re-pin here after
+      # deciding whether the new hunk needs carrying.
+      glue = {
+        "meson.build" = "ba515467e036ce9c64c5e5acbd5d99c407d563922508cfcd8f60d6888d861f3c";
+        "include/libweston/meson.build" = "967e0957bab181b3ab2be053c851d0b679147359c831cbbbc193d53f53d7e2e1";
+      };
+      excluded = builtins.toFile "weston-delta-excluded.txt" (lib.concatLines
+        (lib.sort lib.lessThan ([ "README.md" "releasing.md" ] ++ builtins.attrNames glue)));
+      glueChecks = lib.concatStrings (lib.mapAttrsToList (f: h: ''
+        got=$(diff "up/${f}" "${vendoredSrc}/${f}" | sha256sum | cut -d" " -f1) || true
+        if [ "$got" != "${h}" ]; then
+          echo "glue diff changed: ${f} (pinned ${h}, now $got)"
+          echo "  review the hunk; carry it via nix/weston-delta.nix if functional, then re-pin"
+          glue_rc=1
+        fi
+      '') glue);
     in
     runCommand "weston-delta-complete" { } ''
       ln -s ${westonUpstreamSrc} up   # nixpkgs' weston src: unpacked tree
@@ -205,7 +217,10 @@ in
         LC_ALL=C comm -13 functional.txt listed.txt | sed 's/^/    /'
         exit 1
       fi
-      echo "weston delta: $(wc -l < listed.txt) files, in sync"
+      glue_rc=0
+      ${glueChecks}
+      [ "$glue_rc" = 0 ] || exit 1
+      echo "weston delta: $(wc -l < listed.txt) files, in sync; glue diffs pinned"
       cp listed.txt $out
     '';
 

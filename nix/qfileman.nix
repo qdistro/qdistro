@@ -114,6 +114,8 @@ python314Packages.buildPythonApplication {
   preCheck = ''
     cp -r ${sessionManager} "$NIX_BUILD_TOP/session_manager"
     # lsblk needs sysfs (/sys/dev/block), which the build sandbox lacks.
+    # A renamed test would make --deselect a silent no-op; fail instead.
+    grep -q "def test_lsblk_json_parses" tests/test_integration_tools.py
     if [ ! -d /sys/dev/block ]; then
       QD_PYTEST_EXTRA="--deselect tests/test_integration_tools.py::test_lsblk_json_parses"
     fi

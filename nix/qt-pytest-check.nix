@@ -62,7 +62,8 @@ in
 )
 + ''
   kill "$(cat "$TMPDIR/bus.pid")" || true
-  rm -rf "$QD_PYTEST_TMP"
+  # Kept on failure for --keep-failed inspection.
+  [ "$rc" -ne 0 ] || rm -rf "$QD_PYTEST_TMP"
   [ "$rc" -eq 0 ]
   runHook postCheck
 ''

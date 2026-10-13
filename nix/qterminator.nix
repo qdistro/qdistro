@@ -56,29 +56,10 @@ python314Packages.buildPythonApplication {
     python314Packages.pytest-qt
   ];
 
-  # --ignore mirrors qci's host gate (ci/lib/gates/host.sh qdterm-pytest),
-  # which excludes test_print_terminal.py as printer-coupled. Independently
-  # of printers, its two print-buffer tests hang here: their FakeInnerTerm
-  # lacks screenColumnsCount/screenLinesCount, so pdf_export._buffer_text
-  # reads "" and the plugin opens a modal QMessageBox.
-  # test_geometry_negative_values_rejected pins a Python 3.13 argparse quirk
-  # (qci's host image is 3.13.15); 3.14 argparse accepts "-100x-200" as the
-  # option value, so on the shipping python314 it does not raise.
-  # test_signal_no_permission SIGTERMs pid 1 expecting EPERM; in the build
-  # sandbox's PID namespace pid 1 is the builder itself (same uid), so the
-  # test would kill the build. Fixed upstream of this branch by a skip
-  # (claude/nix-findings-deps); until then deselect it where pid 1 is ours.
-  preCheck = ''
-    if [ "$(stat -c %u /proc/1)" = "$(id -u)" ]; then
-      QD_PYTEST_EXTRA="--deselect tests/test_process_control.py::test_signal_no_permission"
-    fi
-  '';
-  checkPhase = qtPytestCheck {
-    args = lib.concatStringsSep " " [
-      "--ignore=tests/test_print_terminal.py"
-      "--deselect=tests/test_cli.py::test_geometry_negative_values_rejected"
-    ];
-  };
+  # The full suite runs: the print, negative-geometry and pid-1 tests that
+  # used to be excluded here were fixed in the product
+  # (claude/nix-findings-deps, merged into nix/main).
+  checkPhase = qtPytestCheck { };
 
   meta = {
     description = "qdistro terminal emulator — PyQt6 Terminator port on QTermWidget";

@@ -34,7 +34,9 @@ esac
 
 # Bump when the container's run options change; an older container is
 # replaced (the store volume is kept).
-spec=2
+# The label also records the bind-mounted checkout and the store volume, so
+# running from another clone never reuses a container that cannot see it.
+spec="3:$repo_root:$volume"
 if podman container exists "$name" &&
    [ "$(podman inspect -f '{{index .Config.Labels "qdistro.flake-check"}}' "$name")" != "$spec" ]; then
   podman rm -f -t 1 "$name" >/dev/null

@@ -8,8 +8,8 @@
 #
 # atticd runs from the same podman nix store nix/flake-check.sh uses
 # (volume nix-$USER-store, mounted read-only), on host networking at
-# 127.0.0.1:$ATTIC_PORT (default 20100 + uid % 10000, next to the
-# qd-repo-cache proxy's per-user port). State — sqlite db, chunk storage,
+# 127.0.0.1:$ATTIC_PORT (default 30100 + uid % 10000, a range disjoint from
+# the qd-repo-cache proxy's 20000 + uid % 10000). State — sqlite db, chunk storage,
 # the JWT secret, an admin token — lives in $ATTIC_STATE
 # (default ~/.local/share/qdistro-attic, mode 0700). The cache is named
 # `qdistro` and is public-read; pushing needs the token (push.sh).
@@ -17,7 +17,7 @@ set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 user=$(id -un)
-port=${ATTIC_PORT:-$((20100 + $(id -u) % 10000))}
+port=${ATTIC_PORT:-$((30100 + $(id -u) % 10000))}
 state=${ATTIC_STATE:-$HOME/.local/share/qdistro-attic}
 name=attic-$user
 volume=${NIX_CHECK_VOLUME:-nix-$user-store}
@@ -45,6 +45,7 @@ wait_up() {
 }
 
 start() {
+  umask 077   # secret, token and config are credentials
   mkdir -p "$state/storage"
   chmod 0700 "$state"
   mapfile -t paths < <(attic_paths)
@@ -54,10 +55,15 @@ start() {
     || { server=${paths[1]}; client=${paths[0]}; }
   printf '%s\n%s\n' "$server" "$client" > "$state/paths"
 
-  if [ ! -s "$state/server.toml" ]; then
-    secret=$(openssl rand -base64 64 | tr -d '\n')
-    umask 077
-    cat > "$state/server.toml" <<EOF
+  if [ ! -s "$state/jwt-secret" ]; then
+    if [ -s "$state/server.toml" ]; then   # state from an earlier layout
+      sed -n 's/^token-hs256-secret-base64 = "\(.*\)"$/\1/p' "$state/server.toml" > "$state/jwt-secret"
+    fi
+    [ -s "$state/jwt-secret" ] || openssl rand -base64 64 | tr -d '\n' > "$state/jwt-secret"
+  fi
+  secret=$(cat "$state/jwt-secret")
+  # Regenerated every start, so a port change takes effect.
+  cat > "$state/server.toml" <<EOF
 listen = "127.0.0.1:$port"
 api-endpoint = "$endpoint/"
 
@@ -83,10 +89,14 @@ interval = "0s"
 [jwt.signing]
 token-hs256-secret-base64 = "$secret"
 EOF
-  fi
 
+  # The listen port is baked into the running server; recreate on change.
+  if podman container exists "$name" &&
+     [ "$(podman inspect -f '{{index .Config.Labels "qdistro.attic-port"}}' "$name")" != "$port" ]; then
+    podman rm -f -t 5 "$name" >/dev/null
+  fi
   if ! podman container exists "$name"; then
-    podman run -d --name "$name" --network host --security-opt label=disable \
+    podman run -d --name "$name" --label "qdistro.attic-port=$port" --network host --security-opt label=disable \
       -v "$volume:/nix:ro" -v "$state:/state" \
       --entrypoint "$server/bin/atticd" "$image" \
       -f /state/server.toml --mode monolithic >/dev/null
@@ -118,14 +128,18 @@ EOF
 # on 127.0.0.1 because that container also uses host networking.
 client_run() {
   client=$(sed -n 2p "$state/paths")
+  podman container exists "nix-$user" || nixc --version >/dev/null
+  # The token goes over stdin, never argv (/proc/<pid>/cmdline is
+  # world-readable); the client config is written 0600.
   podman exec -i -e HOME=/tmp/attic-home "nix-$user" sh -euc '
+    IFS= read -r token
+    umask 077
     mkdir -p "$HOME/.config/attic"
     printf "default-server = \"local\"\n[servers.local]\nendpoint = \"%s\"\ntoken = \"%s\"\n" \
-      "$1" "$2" > "$HOME/.config/attic/config.toml"
-    shift 2
-    client=$1; shift
-    exec "$client/bin/attic" "$@"
-  ' sh "$endpoint/" "$(cat "$state/admin.token")" "$client" "$@"
+      "$1" "$token" > "$HOME/.config/attic/config.toml"
+    client=$2; shift 2
+    exec "$client/bin/attic" "$@" </dev/null
+  ' sh "$endpoint/" "$client" "$@" < "$state/admin.token"
 }
 
 case ${1:-status} in
@@ -137,7 +151,7 @@ case ${1:-status} in
       [ -s "$state/public-key" ] && echo "key: $(cat "$state/public-key")"
       client_run cache info "$cache"
     else
-      echo "attic: not running"; exit 1
+      echo "attic: not running (nix/attic/serve.sh start)" >&2; exit 1
     fi ;;
   env)
     echo "export ATTIC_ENDPOINT=$endpoint ATTIC_CACHE=$cache"

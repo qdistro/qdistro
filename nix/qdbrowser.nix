@@ -62,6 +62,8 @@ python314Packages.buildPythonApplication {
   # uid, so the resolver correctly rejects it; the test runs wherever the
   # sandbox root is root-owned (a normal nix daemon).
   preCheck = ''
+    # A renamed test would make --deselect a silent no-op; fail instead.
+    grep -q "def test_resolve_admin_used_when_no_user" tests/test_ca_bundle.py
     if [ "$(stat -c %u /)" != 0 ]; then
       QD_PYTEST_EXTRA="--deselect tests/test_ca_bundle.py::test_resolve_admin_used_when_no_user"
     fi
