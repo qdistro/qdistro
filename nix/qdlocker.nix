@@ -70,10 +70,13 @@ python314Packages.buildPythonApplication {
   # env -u PYTHONPATH: the build env's 3.14 site-packages must not leak into
   # the 3.13 interpreter (qdlocker itself imports via pyproject pythonpath).
   postCheck = ''
+    QD_PYTEST_TMP=$(mktemp -d "$TMPDIR/p3.XXXXXX")
+    [ "''${#QD_PYTEST_TMP}" -le 40 ] || QD_PYTEST_TMP=$(mktemp -d /tmp/qdpt.XXXXXX)
     env -u PYTHONPATH ${python313.withPackages (ps: [
       ps.pytest
       ps.dbus-next
-    ])}/bin/python -m pytest --basetemp=/tmp/nix-pytest-313 tests/unit/test_logind_inhibitor.py
+    ])}/bin/python -m pytest --basetemp="$QD_PYTEST_TMP/bt" tests/unit/test_logind_inhibitor.py
+    rm -rf "$QD_PYTEST_TMP"
   '';
 
   doInstallCheck = true;

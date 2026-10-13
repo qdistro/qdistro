@@ -32,10 +32,23 @@ case "$here" in
   *) echo "flake-check: $here is not under $repo_root" >&2; exit 2 ;;
 esac
 
+# Bump when the container's run options change; an older container is
+# replaced (the store volume is kept).
+spec=2
+if podman container exists "$name" &&
+   [ "$(podman inspect -f '{{index .Config.Labels "qdistro.flake-check"}}' "$name")" != "$spec" ]; then
+  podman rm -f -t 1 "$name" >/dev/null
+fi
 if ! podman container exists "$name"; then
+  # --privileged (rootless: still confined to the user's namespace) lets
+  # nix create its build sandbox; without it nix silently falls back to
+  # unsandboxed builds that share /tmp and the network.
   # label=disable: rootless + SELinux labels otherwise make the bind mount
   # unreadable inside the container.
-  podman run -d --name "$name" --security-opt label=disable \
+  # --network host: reach the per-user attic cache on 127.0.0.1
+  # (nix/attic/serve.sh); sandboxed builds still get no network.
+  podman run -d --name "$name" --label "qdistro.flake-check=$spec" \
+    --privileged --security-opt label=disable --network host \
     -v "$volume:/nix" -v "$repo_root:$repo_root" \
     --entrypoint sleep "$image" infinity >/dev/null
 elif [ "$(podman inspect -f '{{.State.Running}}' "$name")" != true ]; then
@@ -54,6 +67,7 @@ podman exec -i "$name" sh -euc '
     echo "max-jobs = $1"
     echo "cores = $2"
     echo "sandbox = $4"
+    echo "sandbox-fallback = false"
     printf "%s\n" "$3"
   } > "$conf.new"
   mv "$conf.new" "$conf"

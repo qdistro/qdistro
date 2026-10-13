@@ -4,8 +4,10 @@
 #   - a private dbus-daemon from the store's session.conf (dbus-run-session
 #     needs /etc/dbus-1), aliased as the system bus like enter-host.sh;
 #     pid tracked and killed after the run
-#   - short --basetemp: tmp_path under /nix/var/nix/builds/<hash>/ blows the
-#     108-byte AF_UNIX limit for socket tests
+#   - short, per-build --basetemp ($QD_PYTEST_TMP): tmp_path under an
+#     unsandboxed build dir (/nix/var/nix/builds/<hash>/) blows the 108-byte
+#     AF_UNIX limit for socket tests, and a fixed /tmp path collides between
+#     concurrent builds when the sandbox is off
 #   - faulthandler_timeout + exit_on_timeout: a wedged test (e.g. a modal
 #     QMessageBox nobody can click offscreen) dumps its stack into the build
 #     log and FAILS the build instead of hanging it forever
@@ -18,10 +20,15 @@
   perFile ? null,
 }:
 let
-  pytest = "python -m pytest --basetemp=/tmp/nix-pytest -o faulthandler_timeout=120 -o faulthandler_exit_on_timeout=true";
+  pytest = "python -m pytest --basetemp=\"$QD_PYTEST_TMP/bt\" -o faulthandler_timeout=120 -o faulthandler_exit_on_timeout=true";
 in
 ''
   runHook preCheck
+  QD_PYTEST_TMP=$(mktemp -d "$TMPDIR/pt.XXXXXX")
+  if [ "''${#QD_PYTEST_TMP}" -gt 40 ]; then
+    QD_PYTEST_TMP=$(mktemp -d /tmp/qdpt.XXXXXX)
+  fi
+  export QD_PYTEST_TMP
   export QT_QPA_PLATFORM=offscreen
   export HOME="$TMPDIR/home"
   mkdir -p "$HOME"
@@ -51,6 +58,7 @@ in
 )
 + ''
   kill "$(cat "$TMPDIR/bus.pid")" || true
+  rm -rf "$QD_PYTEST_TMP"
   [ "$rc" -eq 0 ]
   runHook postCheck
 ''
