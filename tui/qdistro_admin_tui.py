@@ -68,6 +68,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from broker_client import (  # noqa: E402
+    AuthNotGranted,
     BrokerClient,
     DBusBrokerClient,
     Request,
@@ -672,6 +673,10 @@ class AdminTuiApp(App):
                 except Exception as e:  # noqa: BLE001
                     log_broker_error(f"approve_all/decide rid={req.id}", e)
                     failures.append((req.id, broker_error_label(e)))
+                    if isinstance(e, AuthNotGranted):
+                        # The admin cancelled the password prompt: stop
+                        # here instead of prompting once per remaining row.
+                        break
                 else:
                     label = _decide_outcome_label(result, "once")
                     if result in ("applied", "applied-uncached"):
@@ -728,6 +733,10 @@ class AdminTuiApp(App):
                 except Exception as e:  # noqa: BLE001
                     log_broker_error(f"deny_all/decide rid={req.id}", e)
                     failures.append((req.id, broker_error_label(e)))
+                    if isinstance(e, AuthNotGranted):
+                        # The admin cancelled the password prompt: stop
+                        # here instead of prompting once per remaining row.
+                        break
                 else:
                     label = _decide_outcome_label(result, "once")
                     if result in ("applied", "applied-uncached"):
