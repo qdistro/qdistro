@@ -1067,7 +1067,14 @@ class TestPolkitRelayAudit:
 
     def test_a_local_respond_is_audited_before_the_relay(self, broker):
         broker.AnnouncePolkitAuth("cookie-a1")
+        rows_at_relay = []
+        relay = broker._respond_polkit_call
+        def spy(uid, cookie, identity):
+            rows_at_relay.append(len(_audit_rows(broker)))
+            relay(uid, cookie, identity)
+        broker._respond_polkit_call = spy
         broker.RespondPolkitAuth("cookie-a1", [IDENT_ROOT])
+        assert rows_at_relay == [1], "relay ran before its audit row"
         rows = _audit_rows(broker)
         assert len(rows) == 1
         row = rows[0]
@@ -1134,3 +1141,85 @@ class TestPolkitRelayAudit:
         rows = _audit_rows(broker)
         assert [(r["source"], r["decision"], r["request_id"])
                 for r in rows] == [("polkit_stale_reap", 0, rid)]
+
+    def test_an_announced_only_cancel_is_audited(self, broker):
+        """pam/fprint sessions announce without filing; their cancel is
+        still a relay decision (sol r1 #1)."""
+        broker.AnnouncePolkitAuth("cookie-a8")
+        broker.CancelPolkitAuth("cookie-a8")
+        rows = _audit_rows(broker)
+        assert [(r["source"], r["decision"], r["action"]) for r in rows] \
+            == [("polkit_cancel", 0, "polkit.local_auth")]
+        assert "cookie-a8" not in rows[0]["context"]
+
+    def test_a_foreign_or_unknown_cancel_writes_nothing(self, broker):
+        broker.AnnouncePolkitAuth("cookie-a9", sender=":1.9")
+        broker.CancelPolkitAuth("cookie-a9", sender=":1.10")
+        broker.CancelPolkitAuth("never-seen")
+        assert _audit_rows(broker) == []
+
+    def test_a_cancel_retires_every_duplicate_filing(self, broker):
+        """The same sender may file one cookie twice; a cancel must
+        release both waiters (sol r1 #3)."""
+        rid1 = _file_polkit(broker, "cookie-dup", [IDENT_ROOT])
+        rid2 = _file_polkit(broker, "cookie-dup", [IDENT_ROOT])
+        replies = []
+        for rid in (rid1, rid2):
+            broker._pending[rid].waiters.append(
+                (replies.append, lambda e: None))
+        broker.CancelPolkitAuth("cookie-dup")
+        assert broker._pending[rid1].decision is False
+        assert broker._pending[rid2].decision is False
+        assert replies == [False, False]
+        assert {(rid1, "deny"), (rid2, "deny")} <= set(
+            broker.decided_signals)
+        assert sorted(r["request_id"] for r in _audit_rows(broker)) \
+            == [rid1, rid2]
+
+
+class TestPolkitRulePrecedence:
+
+    def test_a_deny_behind_an_earlier_allow_still_predecides(
+            self, broker, rules_dir):
+        (rules_dir / "a.yaml").write_text(
+            "- name: allow-first\n"
+            "  decision: allow\n"
+            "  match: { action: qdistro.test.action }\n"
+            "- name: deny-second\n"
+            "  decision: deny\n"
+            "  match: { action: qdistro.test.action }\n")
+        broker.reload_rules_from_disk(source="test")
+        rid = _file_polkit(broker, "cookie-prec", [IDENT_ROOT])
+        assert broker._pending[rid].decision is False
+        assert broker.polkit_responded == []
+
+    def test_ordinary_requests_keep_first_match_precedence(
+            self, broker, rules_dir):
+        (rules_dir / "a.yaml").write_text(
+            "- name: allow-first\n"
+            "  decision: allow\n"
+            "  match: { action: qdistro.test.action }\n"
+            "- name: deny-second\n"
+            "  decision: deny\n"
+            "  match: { action: qdistro.test.action }\n")
+        broker.reload_rules_from_disk(source="test")
+        rid = broker.RequestPermission("qdistro.test.action", {})
+        assert broker._pending[rid].decision is True
+
+
+class TestCallerGoneAudit:
+
+    def test_a_recycled_caller_deny_is_audited(self, broker,
+                                               monkeypatch):
+        broker.set_peer(ADMIN_UID, pid=4242, exe=PEER_EXE, start=111)
+        rid = broker.RequestPermission("qdistro.test.action", {})
+        broker.set_peer(ADMIN_UID)
+        monkeypatch.setattr(B, "_read_proc_identity",
+                            lambda pid: (PEER_EXE, 222))
+        with pytest.raises(dbus.DBusException) as exc:
+            broker.DecideRequest(rid, "allow", "once")
+        assert "CallerGone" in exc.value.get_dbus_name()
+        rows = [r for r in broker.audit.recent(50)
+                if r["request_id"] == rid]
+        assert [(r["source"], r["decision"]) for r in rows] == [
+            ("prompt caller_gone", 0)]

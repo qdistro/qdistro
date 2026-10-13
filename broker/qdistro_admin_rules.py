@@ -355,8 +355,14 @@ class RulesEngine:
               sandbox_engine: str = "",
               mime_type: str = "",
               argv: list[str] | tuple[str, ...] | None = None,
+              decision: str | None = None,
               ) -> Rule | None:
+        """First matching rule; with ``decision``, the first matching
+        rule carrying that decision (the broker asks for "deny" only
+        on a polkit filing, which no rule may allow)."""
         for r in self._rules:
+            if decision is not None and r.decision != decision:
+                continue
             if r.matches(uid, action, exe,
                          app_id=app_id, sandbox_engine=sandbox_engine,
                          mime_type=mime_type, argv=argv):
