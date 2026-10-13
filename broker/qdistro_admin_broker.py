@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import ctypes
+import hashlib
 import json
 import math
 import os
@@ -1689,7 +1690,7 @@ class Broker(dbus.service.Object):
                             >= POLKIT_UNDECIDED_TTL_S):
                         req.decision = False
                         req.decided_at = now
-                        expired.append((rid, list(req.waiters)))
+                        expired.append((rid, list(req.waiters), req))
                         req.waiters.clear()
                     continue
                 if retention <= 0:
@@ -1703,7 +1704,8 @@ class Broker(dbus.service.Object):
                 if now - req.decided_at >= retention:
                     del self._pending[rid]
                     removed += 1
-        for rid, waiters in expired:
+        for rid, waiters, req in expired:
+            self._audit_polkit_deny(req, "polkit_stale_reap")
             for reply_cb, _err in waiters:
                 try:
                     reply_cb(False)
@@ -3137,8 +3139,8 @@ class Broker(dbus.service.Object):
                           identities, sender=None, conn=None) -> int:
         """Queue a polkit authorization for admin decision.
 
-        Same tiers as RequestPermission — rules, cache, hooks, then the
-        admin prompt — but an allow additionally answers polkitd with
+        Always reaches the admin prompt (one-shot, scope 'once'); only a
+        rules.d deny pre-decides it. An allow additionally answers polkitd with
         AuthenticationAgentResponse2(uid, cookie, identity) where
         identity is picked from the list polkit itself offered.
         Restricted to the session polkit agent: ADMIN_UID alone would
@@ -3147,9 +3149,14 @@ class Broker(dbus.service.Object):
         """
         uid, pid, exe, start_time = self._require_polkit_agent_peer(
             sender, conn, "RequestPolkitAuth")
+        # F1: one-shot. An allow answers polkitd as root for whatever
+        # subject polkitd is authenticating, and neither the cache key
+        # (agent uid, action, agent exe) nor a rules.d row sees that
+        # subject — so no standing grant, rule allow or hook may
+        # answer it, and DecideRequest refuses persistent scopes.
         return self._enqueue(
             uid, pid, exe, start_time, str(action), details,
-            delegated=False,
+            delegated=False, one_shot=True,
             polkit=(str(cookie), _polkit_identities(identities)),
             filed_by=str(sender or ""))
 
@@ -3211,7 +3218,7 @@ class Broker(dbus.service.Object):
         been announced or filed by this same unique sender: exe/argv/
         cgroup checks are defence-in-depth; the bus-assigned name is
         what binds the bearer secret to its holder (sol r164)."""
-        uid, _pid, _exe, _st = self._require_polkit_agent_peer(
+        uid, pid, exe, _st = self._require_polkit_agent_peer(
             sender, conn, "RespondPolkitAuth")
         cookie_s = str(cookie)
         sender_s = str(sender or "")
@@ -3245,6 +3252,29 @@ class Broker(dbus.service.Object):
             raise dbus.DBusException(
                 "polkit offered no identities to respond as",
                 name=BUS_NAME + ".BadArgument")
+        # F2: the relay moves a real polkitd authorization, so it is
+        # audited first and, like DecideRequest, refused when the row
+        # cannot be written.
+        try:
+            self.audit.log(
+                caller_uid=int(uid), caller_pid=int(pid),
+                caller_exe=str(exe),
+                action=req.action if req is not None else "polkit.local_auth",
+                decision=True, scope="once", source="polkit_local_auth",
+                approver_uid=int(uid),
+                request_id=req.id if req is not None else None,
+                context=(f"{self._polkit_cookie_ref(cookie_s)} "
+                         f"identity={identity[0]}:"
+                         f"{identity[1].get('uid', identity[1].get('gid', ''))}"))
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] qdistro.audit.failure: polkit_local_auth "
+                  f"path, reason={e!r}", flush=True)
+            if AUDIT_REQUIRED:
+                raise dbus.DBusException(
+                    f"Audit log unavailable; polkit response not relayed "
+                    f"({e}).",
+                    name=BUS_NAME + ".AuditUnavailable",
+                ) from e
         # Respond BEFORE releasing waiters, same as DecideRequest:
         # polkitd tears the cookie's session down the moment the agent's
         # BeginAuthentication returns.
@@ -3281,34 +3311,72 @@ class Broker(dbus.service.Object):
         back decided deny — a cancel from a different unique name must
         not pre-deny the real agent's filing (sol r164). Restricted to
         the session polkit agent."""
-        _uid, _pid, _exe, _st = self._require_polkit_agent_peer(
+        uid, pid, exe, _st = self._require_polkit_agent_peer(
             sender, conn, "CancelPolkitAuth")
         cookie_s = str(cookie)
         sender_s = str(sender or "")
         self._note_polkit_cancelled(cookie_s, sender_s)
         with self._lock:
+            announced = False
             ann = self._announced_polkit.get(cookie_s)
             if ann is not None and ann[0] == sender_s:
                 del self._announced_polkit[cookie_s]
-            hit = None
-            for rid, req in self._pending.items():
+                announced = True
+            # Every owned undecided filing of the cookie: the same
+            # sender may file it more than once, and each one parks a
+            # waiter.
+            hits = []
+            for req in self._pending.values():
                 if (req.polkit_cookie and req.polkit_cookie == cookie_s
                         and req.decision is None
                         and req.filed_by == sender_s):
-                    hit = (rid, req)
-                    break
-            if hit is None:
-                return
-            rid, req = hit
-            req.decision = False
-            waiters = list(req.waiters)
-            req.waiters.clear()
-        for reply_cb, _err in waiters:
-            try:
-                reply_cb(False)
-            except Exception as e:  # noqa: BLE001
-                print(f"[broker] reply_cb failed: {e}", flush=True)
-        self.RequestDecided(rid, "deny")
+                    req.decision = False
+                    hits.append((req, list(req.waiters)))
+                    req.waiters.clear()
+        if not hits:
+            if announced:
+                # A pam/fprint session announces without filing; its
+                # cancel is still a relay decision (F2).
+                try:
+                    self.audit.log(
+                        caller_uid=int(uid), caller_pid=int(pid),
+                        caller_exe=str(exe), action="polkit.local_auth",
+                        decision=False, scope=None, source="polkit_cancel",
+                        approver_uid=None,
+                        context=self._polkit_cookie_ref(cookie_s))
+                except Exception as e:  # noqa: BLE001
+                    print(f"[broker] qdistro.audit.failure: polkit_cancel "
+                          f"path, reason={e!r}", flush=True)
+            return
+        for req, waiters in hits:
+            self._audit_polkit_deny(req, "polkit_cancel")
+            for reply_cb, _err in waiters:
+                try:
+                    reply_cb(False)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[broker] reply_cb failed: {e}", flush=True)
+            self.RequestDecided(req.id, "deny")
+
+    @staticmethod
+    def _polkit_cookie_ref(cookie: str) -> str:
+        """Audit correlation for a polkit cookie. The cookie is a bearer
+        secret while its auth session lives, so only a digest is stored."""
+        return "cookie_sha256=" + hashlib.sha256(
+            cookie.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+
+    def _audit_polkit_deny(self, req, source: str) -> None:
+        """Audit a polkit request decided deny by the relay itself
+        (cancel, stale reap). A deny moves no authorization, so an audit
+        failure is logged and the deny stands (F2)."""
+        try:
+            self.audit.log(
+                caller_uid=req.uid, caller_pid=req.pid, caller_exe=req.exe,
+                action=req.action, decision=False, scope=None,
+                source=source, approver_uid=None, request_id=req.id,
+                context=self._polkit_cookie_ref(req.polkit_cookie))
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] qdistro.audit.failure: {source} path, "
+                  f"reason={e!r}", flush=True)
 
     def _respond_polkit(self, req) -> None:
         """Deliver an approved polkit auth to polkitd. Called on every
@@ -4923,7 +4991,11 @@ class Broker(dbus.service.Object):
                         del self._cancelled_polkit_cookies[cookie_s]
         matched_rule = None
         cached_row = None
-        if not one_shot and not polkit_cancelled:
+        # A polkit filing is one-shot but still consults rules.d — for
+        # denies only (F1): a deny is never a grant. Any matching deny
+        # counts, even behind an earlier matching allow.
+        consult_tiers = (not one_shot or bool(polkit)) and not polkit_cancelled
+        if consult_tiers:
             argv = _argv_from_details(details)
             # Permission lineage (finding P0-1): resolve the live caller
             # and use launcher-attested app_id/sandbox_engine in enforce
@@ -4940,8 +5012,9 @@ class Broker(dbus.service.Object):
                 sandbox_engine=lin_engine,
                 mime_type=_selector_from_details(details, "mime_type"),
                 argv=argv,
+                decision="deny" if polkit else None,
             )
-            if matched_rule is None:
+            if not polkit and matched_rule is None:
                 # Delegated requests must not be auto-satisfied by an
                 # argv-blind (exe_only / always) row — the decision-time
                 # mirror of the _DELEGATED_FORBIDDEN_SCOPES store guard.
@@ -4961,7 +5034,7 @@ class Broker(dbus.service.Object):
         # a hostile caller can inject ANSI escapes or newlines that
         # draw fake approval banners inside the detail pane.
         clean_details = _sanitize_details(details)
-        if not one_shot and not polkit_cancelled:
+        if consult_tiers:
             clean_details.update(app_id=lin_app, sandbox_engine=lin_engine)
 
         # --- Phase 2 (synchronous, fast): allocate rid + _Request ----
@@ -5053,11 +5126,11 @@ class Broker(dbus.service.Object):
             return rid
 
         if polkit_cancelled:
-            # Not audited as a rule/cache decision — the cancel is the
-            # event; a prompt-deny row would be noise.
+            # The cancel is the deciding event (F2: still audited).
             print(f"[broker] polkit auth filed for an already-cancelled "
                   f"cookie; rid={rid} decided deny without prompting",
                   flush=True)
+            self._audit_polkit_deny(req, "polkit_cancel")
             return rid
 
         # Audit before returning the decided request. A rule hit is history,
@@ -5081,11 +5154,8 @@ class Broker(dbus.service.Object):
                     scope=cached_row.get("scope"),
                     approver_uid=cached_row.get("approver_uid"), request_id=rid)
             req.decision = result == "allow"
-        # A rule/cache allow on a polkit-filed request still needs the
-        # response delivered — the admin pre-authorized it, but polkitd
-        # is waiting on a cookie only we can now answer.
-        if req.decision and req.polkit_cookie:
-            self._respond_polkit(req)
+        # No polkit response here: a polkit filing only pre-decides on a
+        # rules.d deny (F1), so a decided polkit request is never an allow.
         return rid
 
     def _start_hook(self, req):
@@ -5362,6 +5432,18 @@ class Broker(dbus.service.Object):
                 if req.start_time != 0 and st_now != 0 and st_now != req.start_time:
                     req.decision = False  # force deny
                     waiters = list(req.waiters); req.waiters.clear()
+                    # A forced deny moves nothing: audit best-effort.
+                    try:
+                        self.audit.log(
+                            caller_uid=req.uid, caller_pid=req.pid,
+                            caller_exe=req.exe, action=req.action,
+                            decision=False, scope=None,
+                            source="prompt caller_gone",
+                            approver_uid=admin_uid,
+                            request_id=int(request_id))
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[broker] qdistro.audit.failure: "
+                              f"caller_gone path, reason={e!r}", flush=True)
                     self.RequestDecided(int(request_id), "deny")
                     for reply_cb, _err in waiters:
                         try: reply_cb(False)

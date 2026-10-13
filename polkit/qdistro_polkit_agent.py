@@ -50,6 +50,7 @@ namespace).
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
 import pwd as _pwd_mod
 import subprocess
@@ -145,6 +146,14 @@ def _scrub_value(s: str) -> str:
     truncate to _MAX_POLKIT_VAL bytes."""
     out = "".join(c for c in s if c == "\t" or c == " " or c.isprintable())
     return out[:_MAX_POLKIT_VAL]
+
+
+def _cookie_ref(cookie) -> str:
+    """Log reference for a polkit cookie. The cookie is a bearer secret
+    while its auth session lives, so logs carry only a digest — the same
+    one the broker writes to its audit rows."""
+    return "cookie_sha256=" + hashlib.sha256(
+        str(cookie).encode("utf-8", "surrogateescape")).hexdigest()[:16]
 
 
 def _sanitize_polkit_details(raw) -> dict[str, str]:
@@ -604,8 +613,8 @@ class QdistroPolkitAgent(dbus.service.Object):
                 self._broker = None
         syslog.syslog(
             syslog.LOG_WARNING,
-            f"could not retire broker request for cookie "
-            f"{_scrub_value(str(cookie))}: {last}")
+            f"could not retire broker request for "
+            f"{_cookie_ref(cookie)}: {last}")
 
     def _ask_broker(self, qdistro_action: str, details: dict,
                     cookie: str, identities) -> bool:
@@ -791,7 +800,7 @@ class QdistroPolkitAgent(dbus.service.Object):
         # park the whole loop for up to _REQUEST_TIMEOUT_S. The local
         # tombstone above already protects the worker; the forward only
         # needs to reach the bus.
-        syslog.syslog(syslog.LOG_INFO, f"polkit cancel: {cookie}")
+        syslog.syslog(syslog.LOG_INFO, f"polkit cancel: {_cookie_ref(cookie)}")
 
         def _cancel_failed(e) -> None:
             syslog.syslog(

@@ -250,10 +250,15 @@ polkitd directly. The privileged broker (uid 0) delivers the response:
 - **broker method** — the agent files the authorization as
   `RequestPolkitAuth(action, details, cookie, identities)`, which queues
   like `RequestPermission` but carries polkit's correlation cookie and
-  the identity list polkitd offered. On an allow — admin click, rule,
-  cache, or hook — the broker calls `AuthenticationAgentResponse2`
-  itself. The agent still waits on `WaitForDecision` for the outcome,
-  so denial logging and audit correlation stay unchanged.
+  the identity list polkitd offered. The request is **one-shot**: an
+  allow answers polkitd as root for whatever subject polkitd is
+  authenticating, and neither a cache row (keyed on agent uid, action
+  and agent exe) nor a `rules.d` row sees that subject. So only an
+  admin click with scope `once` allows it — no cache row, rule allow or
+  hook verdict does, and persistent scopes are refused
+  (`ScopeNotPermitted`); a `rules.d` **deny** still pre-decides it. On
+  that allow the broker calls `AuthenticationAgentResponse2` itself.
+  The agent still waits on `WaitForDecision` for the outcome.
 - **pam / fprint methods** — the verdict is verified locally by the
   agent, then relayed: `RespondPolkitAuth(cookie, identities)` asks the
   broker to make the uid-0 call. Since these paths never file a
@@ -263,13 +268,21 @@ polkitd directly. The privileged broker (uid 0) delivers the response:
   `CancelPolkitAuth(cookie)`, which decides the matching queued request
   deny so a dead prompt does not linger in the admin queue and the
   parked `WaitForDecision` waiter releases.
+- **audit** — every relay decision writes an audit row: the admin
+  prompt (`source=prompt`), a relayed local verdict
+  (`polkit_local_auth`), a cancel (`polkit_cancel`) and a stale
+  undecided request denied by the reaper (`polkit_stale_reap`). The
+  cookie is recorded only as a SHA-256 prefix in `context`. A local
+  verdict whose row cannot be written is not relayed
+  (`AuditUnavailable`, unless `QDISTRO_AUDIT_REQUIRED=0`); a deny
+  stands even when its row fails.
 
 Two invariants make this safe:
 
 - **The cookie is the correlation secret, and it stays secret.** Only
   polkitd's registered agent ever sees it — the agent does not file it
   in request details (GetPending renders those to admin-control peers),
-  and it is never logged. A response naming a cookie polkitd is not
+  and it is never logged or audited in clear. A response naming a cookie polkitd is not
   waiting on is a silent no-op, so a stale, cancelled, or
   attacker-guessed cookie grants nothing.
 - **The response identity comes from polkit's own list.** On this image
