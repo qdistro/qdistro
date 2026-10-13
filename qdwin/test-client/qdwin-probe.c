@@ -10,6 +10,19 @@
  *   --as-shell          Bind, bind_as_shell, wait for toplevel_added,
  *                       set_border_color, exit. Used by S3.
  *
+ *   --show-popup-serial=N
+ *                       Live D7 negative. Bind at the advertised version,
+ *                       bind_as_shell, wait for a toplevel (the one whose
+ *                       app_id matches --parent-app-id=, if given), commit
+ *                       a small SHM surface, then show_popup on it with
+ *                       the FORGED grab serial N. The compositor must
+ *                       refuse with qdwin_shell_v1.error.invalid_grab
+ *                       (exit 0). Exit 4 if the popup was accepted, 5 on
+ *                       any other protocol error, 1 if the bind itself was
+ *                       refused (the shell role is held), 3 if no parent
+ *                       toplevel appeared. Only meaningful with no live
+ *                       shell bound (the real shell holds the role).
+ *
  *   --attach-inset      Bind, bind_as_shell, wait for toplevel_added,
  *                       allocate 4 solid-colour SHM wl_buffers (one per
  *                       side with configurable thickness), call
@@ -42,6 +55,7 @@ enum probe_mode {
 	MODE_HELLO_ONLY,
 	MODE_AS_SHELL,
 	MODE_ATTACH_INSET,
+	MODE_FORGED_POPUP,
 };
 
 struct probe {
@@ -50,6 +64,8 @@ struct probe {
 	struct wl_compositor *compositor;
 	struct wl_shm *shm;
 	struct qdwin_shell_v1 *shell;
+	uint32_t shell_name, shell_version;
+	const char *parent_app_id;	/* MODE_FORGED_POPUP filter, or NULL */
 
 	int received_hello;
 	uint32_t hello_uid;
@@ -164,6 +180,34 @@ static const struct qdwin_shell_v1_listener shell_listener = {
 	.locked_changed = noop_locked,
 };
 
+/* MODE_FORGED_POPUP binds at the advertised version, which carries far
+ * more events than the v1 listener above implements (a NULL listener slot
+ * is a client crash). A generic dispatcher matches the two events it needs
+ * by name and drops the rest. */
+static int
+shell_dispatch(const void *impl, void *target, uint32_t opcode,
+	       const struct wl_message *msg, union wl_argument *args)
+{
+	struct probe *p = wl_proxy_get_user_data(target);
+	(void)impl; (void)opcode;
+	if (strcmp(msg->name, "hello") == 0) {
+		p->received_hello = 1;
+		p->hello_uid = args[0].u;
+	} else if (strcmp(msg->name, "toplevel_added") == 0 &&
+		   !p->received_toplevel) {
+		const char *app_id = args[2].s ? args[2].s : "";
+		if (!p->parent_app_id ||
+		    strcmp(app_id, p->parent_app_id) == 0) {
+			p->received_toplevel = 1;
+			p->toplevel_handle = args[0].u;
+			fprintf(stderr,
+				"qdwin-probe: toplevel_added handle=%u app_id=\"%s\"\n",
+				args[0].u, app_id);
+		}
+	}
+	return 0;
+}
+
 /* ------------------------------------------------------------------
  * wl_registry.
  * ------------------------------------------------------------------ */
@@ -174,10 +218,9 @@ on_global(void *data, struct wl_registry *reg, uint32_t name,
 {
 	struct probe *p = data;
 	if (strcmp(interface, qdwin_shell_v1_interface.name) == 0) {
-		p->shell = wl_registry_bind(reg, name,
-					    &qdwin_shell_v1_interface,
-					    version < 1 ? version : 1);
-		qdwin_shell_v1_add_listener(p->shell, &shell_listener, p);
+		/* Bound in main(): the version depends on the mode. */
+		p->shell_name = name;
+		p->shell_version = version;
 	} else if (strcmp(interface, wl_shm_interface.name) == 0) {
 		p->shm = wl_registry_bind(reg, name, &wl_shm_interface,
 					  version < 1 ? version : 1);
@@ -239,6 +282,7 @@ int main(int argc, char *argv[])
 	int timeout = 5;
 	int persist = 0;
 	uint32_t color = 0x3388ccff;
+	uint32_t forged_serial = 0;
 	int in_n = 24, in_e = 4, in_s = 4, in_w = 4;
 	struct probe p = {0};
 
@@ -247,6 +291,11 @@ int main(int argc, char *argv[])
 			mode = MODE_AS_SHELL;
 		} else if (strcmp(argv[i], "--attach-inset") == 0) {
 			mode = MODE_ATTACH_INSET;
+		} else if (strncmp(argv[i], "--show-popup-serial=", 20) == 0) {
+			mode = MODE_FORGED_POPUP;
+			forged_serial = (uint32_t)strtoul(argv[i] + 20, NULL, 0);
+		} else if (strncmp(argv[i], "--parent-app-id=", 16) == 0) {
+			p.parent_app_id = argv[i] + 16;
 		} else if (strncmp(argv[i], "--timeout=", 10) == 0) {
 			timeout = atoi(argv[i] + 10);
 		} else if (strncmp(argv[i], "--persist=", 10) == 0) {
@@ -272,9 +321,22 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "qdwin-probe: registry roundtrip failed\n");
 		return 2;
 	}
-	if (!p.shell) {
+	if (!p.shell_name) {
 		fprintf(stderr, "qdwin-probe: qdwin_shell_v1 not advertised\n");
 		return 2;
+	}
+	if (mode == MODE_FORGED_POPUP) {
+		uint32_t v = p.shell_version;
+		if (v > (uint32_t)qdwin_shell_v1_interface.version)
+			v = (uint32_t)qdwin_shell_v1_interface.version;
+		p.shell = wl_registry_bind(p.registry, p.shell_name,
+					   &qdwin_shell_v1_interface, v);
+		wl_proxy_add_dispatcher((struct wl_proxy *)p.shell,
+					shell_dispatch, NULL, &p);
+	} else {
+		p.shell = wl_registry_bind(p.registry, p.shell_name,
+					   &qdwin_shell_v1_interface, 1);
+		qdwin_shell_v1_add_listener(p.shell, &shell_listener, &p);
 	}
 
 	int rc = wl_display_roundtrip(p.display);
@@ -298,7 +360,8 @@ int main(int argc, char *argv[])
 	if (mode == MODE_HELLO_ONLY)
 		return 0;
 
-	if ((mode == MODE_ATTACH_INSET) && !p.shm) {
+	if ((mode == MODE_ATTACH_INSET || mode == MODE_FORGED_POPUP) &&
+	    (!p.shm || !p.compositor)) {
 		fprintf(stderr, "qdwin-probe: wl_shm not advertised\n");
 		return 2;
 	}
@@ -309,6 +372,52 @@ int main(int argc, char *argv[])
 	if (dispatch_until(&p, done_toplevel, timeout) < 0) {
 		fprintf(stderr, "qdwin-probe: timed out waiting for toplevel_added\n");
 		return 3;
+	}
+
+	if (mode == MODE_FORGED_POPUP) {
+		struct wl_buffer *buf =
+			create_solid_shm_buffer(p.shm, 32, 32, color);
+		struct wl_surface *surf =
+			wl_compositor_create_surface(p.compositor);
+		if (!buf || !surf) {
+			fprintf(stderr, "qdwin-probe: popup buffer failed\n");
+			return 2;
+		}
+		wl_surface_attach(surf, buf, 0, 0);
+		wl_surface_damage_buffer(surf, 0, 0, 32, 32);
+		wl_surface_commit(surf);
+		if (wl_display_roundtrip(p.display) < 0) {
+			fprintf(stderr, "qdwin-probe: error before show_popup\n");
+			return 5;
+		}
+		printf("qdwin-probe: show_popup parent=%u serial=%u (forged)\n",
+		       p.toplevel_handle, forged_serial);
+		fflush(stdout);
+		struct qdwin_popup_v1 *pop = qdwin_shell_v1_show_popup(
+			p.shell, p.toplevel_handle, surf, forged_serial, 4, 4);
+		(void)pop;
+		int r1 = wl_display_roundtrip(p.display);
+		int r2 = r1 < 0 ? r1 : wl_display_roundtrip(p.display);
+		if (r1 >= 0 && r2 >= 0 && wl_display_get_error(p.display) == 0) {
+			printf("qdwin-probe: show_popup ACCEPTED serial=%u\n",
+			       forged_serial);
+			return 4;
+		}
+		const struct wl_interface *iface = NULL;
+		uint32_t obj_id = 0;
+		uint32_t code = wl_display_get_protocol_error(p.display,
+							      &iface, &obj_id);
+		if (iface == &qdwin_shell_v1_interface &&
+		    code == QDWIN_SHELL_V1_ERROR_INVALID_GRAB) {
+			printf("qdwin-probe: show_popup REFUSED invalid_grab "
+			       "serial=%u\n", forged_serial);
+			return 0;
+		}
+		printf("qdwin-probe: show_popup failed otherwise (code=%u on "
+		       "%s#%u, errno=%d)\n", code,
+		       iface ? iface->name : "(none)", obj_id,
+		       wl_display_get_error(p.display));
+		return 5;
 	}
 
 	if (mode == MODE_AS_SHELL) {
