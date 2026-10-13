@@ -1580,7 +1580,7 @@ Singleton {
         // so the user gets a window dismissal regardless.
         Quickshell.execDetached([
             "busctl", "--user", "--no-pager",
-            "call", busName, "/org/qdistro/Tier4VM",
+            "--", "call", busName, "/org/qdistro/Tier4VM",
             "org.qdistro.Tier4VM.Control", "Close"
         ]);
     }

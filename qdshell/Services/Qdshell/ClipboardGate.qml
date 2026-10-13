@@ -348,7 +348,7 @@ Singleton {
             }
             const id = entry.identity;
             root._verifyActive = entry;
-            _verifyProc.command = ["busctl", "--system", "--no-pager", "--timeout=2s", "call", "org.qdistro.AdminBroker1", "/org/qdistro/AdminBroker1", "org.qdistro.AdminBroker1", "VerifyClientIdentity", "utusssss", String(id.pid >>> 0), String(id.starttime), String(id.uid >>> 0), String(id.exe || ""), String(id.label || ""), String(id.sandboxEngine || ""), String(id.appId || ""), String(id.instanceId || "")];
+            _verifyProc.command = ["busctl", "--system", "--no-pager", "--timeout=2s", "--", "call", "org.qdistro.AdminBroker1", "/org/qdistro/AdminBroker1", "org.qdistro.AdminBroker1", "VerifyClientIdentity", "utusssss", String(id.pid >>> 0), String(id.starttime), String(id.uid >>> 0), String(id.exe || ""), String(id.label || ""), String(id.sandboxEngine || ""), String(id.appId || ""), String(id.instanceId || "")];
             _verifyProc.running = true;
             return;
         }

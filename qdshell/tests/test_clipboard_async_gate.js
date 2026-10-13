@@ -205,7 +205,7 @@ function gate({async = true} = {}) {
 {
     const source = fs.readFileSync(
         path.join(__dirname, '../Services/Qdshell/ClipboardGate.qml'), 'utf8');
-    assert.ok(source.includes('"--timeout=2s", "call", "org.qdistro.AdminBroker1", "/org/qdistro/AdminBroker1", "org.qdistro.AdminBroker1", "VerifyClientIdentity"'));
+    assert.ok(source.includes('"--timeout=2s", "--", "call", "org.qdistro.AdminBroker1", "/org/qdistro/AdminBroker1", "org.qdistro.AdminBroker1", "VerifyClientIdentity"'));
     assert.ok(!source.includes('--timeout=200ms'));
 }
 
