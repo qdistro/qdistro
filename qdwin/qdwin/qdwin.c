@@ -1008,6 +1008,11 @@ struct qdwin {
 	 * the left button is still down (e.g. a refused drag on a maximised
 	 * window) reports a serial grab_serial never takes. */
 	uint32_t chrome_press_serial;
+	/* v37 chrome hover: the toplevel whose chrome the pointer is over
+	 * (0 = none) and the cursor shape the shell set for it via
+	 * set_chrome_cursor (0 = none installed by us). */
+	uint32_t chrome_hover_handle;
+	uint32_t chrome_cursor_shape;
 
 	/* Edge drag (qdwin_shell_v1.begin_interactive_resize, or a
 	 * client's xdg_toplevel.resize). Same one-at-a-time rule as the
@@ -1382,6 +1387,13 @@ static void qdwin_overlay_grab_end(struct qdwin *qdwin);
  * seat-tracker pointer-focus listener installer. */
 static void qdwin_install_default_cursor_on_pointer(struct qdwin *qdwin,
 						    struct weston_pointer *pointer);
+/* v37 set_chrome_cursor installs a registered shape sprite; both are
+ * defined with the rest of the cursor-shape code far below. */
+static struct weston_view *qdwin_install_cursor_sprite_view(
+	struct qdwin *qdwin, struct weston_pointer *pointer,
+	struct weston_surface *surface, int32_t hotspot_x, int32_t hotspot_y,
+	const char *log_prefix);
+static const char *qdwin_cursor_shape_name(uint32_t shape);
 static void qdwin_default_cursor_on_focus_changed(struct wl_listener *l,
 						  void *data);
 /* Stale-shell-slot release — defined with the shell bind handlers far
@@ -4784,6 +4796,56 @@ qdwin_handle_begin_interactive_resize(struct wl_client *client,
 				"begin_interactive_resize");
 }
 
+/* v37: the shell picks the cursor for its own frame (it alone knows
+ * where the edges, corners and buttons are). Never a protocol error
+ * beyond the version gate: a hover request racing a lock, a hide or
+ * the pointer moving on is routine, and must not kill the shell. */
+static void
+qdwin_handle_set_chrome_cursor(struct wl_client *client,
+			       struct wl_resource *resource,
+			       uint32_t handle, uint32_t shape)
+{
+	struct qdwin *qdwin = wl_resource_get_user_data(resource);
+	(void)client;
+	if (!qdwin_shell_require_bound(qdwin, resource))
+		return;
+	if (wl_resource_get_version(resource) < 37) {
+		wl_resource_post_error(resource, WL_DISPLAY_ERROR_INVALID_METHOD,
+				       "set_chrome_cursor requires qdwin shell v37");
+		return;
+	}
+	if (qdwin->locked || handle == 0 ||
+	    qdwin->chrome_hover_handle != handle)
+		return;
+	if (shape < 1 || shape > WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALL_RESIZE ||
+	    shape >= sizeof qdwin->cursor_sprites /
+		     sizeof qdwin->cursor_sprites[0]) {
+		weston_log("qdwin: set_chrome_cursor handle=%u ignored — "
+			   "unknown shape %u\n", handle, shape);
+		return;
+	}
+	if (qdwin->chrome_cursor_shape == shape)
+		return;
+	if (qdwin_move_grab_live(qdwin) || qdwin_resize_grab_live(qdwin))
+		return;
+	struct qdwin_cursor_sprite *slot = &qdwin->cursor_sprites[shape];
+	struct weston_pointer *pointer = qdwin_first_pointer(qdwin);
+	if (!slot->surface || !pointer) {
+		weston_log("qdwin: set_chrome_cursor handle=%u shape=%s "
+			   "ignored — %s\n", handle,
+			   qdwin_cursor_shape_name(shape),
+			   pointer ? "no sprite registered" : "no pointer");
+		return;
+	}
+	if (!qdwin_install_cursor_sprite_view(qdwin, pointer, slot->surface,
+					      slot->hotspot_x, slot->hotspot_y,
+					      "chrome_cursor"))
+		return;
+	qdwin->chrome_cursor_shape = shape;
+	weston_log("qdwin: chrome_cursor handle=%u shape=%s\n", handle,
+		   qdwin_cursor_shape_name(shape));
+}
+
 /* ------------------------------------------------------------------
  * Popups (§6.4).
  *
@@ -5040,6 +5102,12 @@ qdwin_proxy_default_grab_focus(struct weston_pointer_grab *grab)
 	qdwin_proxy_pointer_track_focus(qdwin_singleton, pointer);
 }
 
+static void qdwin_chrome_hover_update(struct qdwin *qdwin,
+				      struct weston_pointer *pointer);
+static void qdwin_chrome_hover_clear(struct qdwin *qdwin,
+				     struct weston_pointer *pointer,
+				     bool restore_cursor);
+
 static void
 qdwin_proxy_default_grab_motion(struct weston_pointer_grab *grab,
 				const struct weston_pointer_motion_event *event)
@@ -5054,6 +5122,8 @@ qdwin_proxy_default_grab_motion(struct weston_pointer_grab *grab,
 		if (pointer->focus != lv)
 			weston_pointer_set_focus(pointer, lv);
 		weston_pointer_send_motion(pointer, event);
+		/* The lock surface owns the cursor now; just end the hover. */
+		qdwin_chrome_hover_clear(qdwin_singleton, pointer, false);
 		return;
 	}
 	struct weston_view *view = weston_compositor_pick_view(
@@ -5087,6 +5157,12 @@ qdwin_proxy_default_grab_motion(struct weston_pointer_grab *grab,
 	if (!pointer->sprite && qdwin_singleton)
 		qdwin_install_default_cursor_on_pointer(qdwin_singleton, pointer);
 	weston_pointer_send_motion(pointer, event);
+
+	/* v37: chrome hover. After set_focus, so a client the pointer just
+	 * entered has its enter queued before we restore the default
+	 * cursor — its own set_cursor then lands last and wins. */
+	if (qdwin_singleton)
+		qdwin_chrome_hover_update(qdwin_singleton, pointer);
 
 	/* v25: focus-follows-mouse. Retarget keyboard focus to the toplevel
 	 * under the pointer (immediately or after the settle delay) when the
@@ -5210,6 +5286,96 @@ qdwin_toplevel_at_pos(struct qdwin *qdwin, struct weston_coord_global pos)
 			return cand;
 	}
 	return NULL;
+}
+
+/* v37 chrome hover. The shell cannot see wl_pointer enter/motion on its
+ * own chrome surfaces (same-client suppression, see chrome_button), so
+ * qdwin reports which chrome side the pointer is over, as it does for
+ * presses. Uses the same hit-test as chrome_button, so hidden windows'
+ * chrome never hovers. */
+static void
+qdwin_chrome_hover_clear(struct qdwin *qdwin, struct weston_pointer *pointer,
+			 bool restore_cursor)
+{
+	if (!qdwin || qdwin->chrome_hover_handle == 0)
+		return;
+	uint32_t handle = qdwin->chrome_hover_handle;
+	qdwin->chrome_hover_handle = 0;
+	if (qdwin->shell_bound && qdwin->shell_resource &&
+	    wl_resource_get_version(qdwin->shell_resource) >= 37)
+		qdwin_shell_v1_send_chrome_leave(qdwin->shell_resource, handle);
+	weston_log("qdwin: chrome_leave handle=%u\n", handle);
+	if (qdwin->chrome_cursor_shape != 0) {
+		qdwin->chrome_cursor_shape = 0;
+		if (restore_cursor && pointer)
+			qdwin_install_default_cursor_on_pointer(qdwin, pointer);
+	}
+}
+
+/* qdwin_chrome_at_pos walks tracking order, not z-order. For hover that
+ * matters: where an upper window's content overlaps a lower window's
+ * frame, the lower frame must not hover — set_chrome_cursor would then
+ * override the cursor of the client actually under the pointer. Walk
+ * normal_layer front-to-back (as qdwin_toplevel_at_pos does): `tl`'s
+ * chrome must be reached before any other window's content or chrome
+ * that contains `pos`. */
+static bool
+qdwin_chrome_hover_on_top(struct qdwin *qdwin, struct qdwin_toplevel *tl,
+			  struct weston_coord_global pos)
+{
+	struct weston_view *v;
+	wl_list_for_each(v, &qdwin->normal_layer.view_list.link,
+			 layer_link.link) {
+		struct weston_surface *vs = v->surface;
+		if (!vs || vs->width <= 0 || vs->height <= 0)
+			continue;
+		struct weston_coord_global vp =
+			weston_view_get_pos_offset_global(v);
+		if (pos.c.x < vp.c.x || pos.c.x >= vp.c.x + vs->width ||
+		    pos.c.y < vp.c.y || pos.c.y >= vp.c.y + vs->height)
+			continue;
+		for (int s = 0; s < QDWIN_SIDES; s++)
+			if (tl->chrome[s].view == v)
+				return true;
+		struct qdwin_toplevel *t;
+		wl_list_for_each(t, &qdwin->toplevels, link) {
+			if (t->view == v)
+				return false;
+			for (int s = 0; s < QDWIN_SIDES; s++)
+				if (t->chrome[s].view == v)
+					return false;
+		}
+	}
+	return true;    /* not on normal_layer: chrome_at_pos already vetted */
+}
+
+static void
+qdwin_chrome_hover_update(struct qdwin *qdwin, struct weston_pointer *pointer)
+{
+	if (!qdwin->shell_bound || !qdwin->shell_resource ||
+	    wl_resource_get_version(qdwin->shell_resource) < 37)
+		return;
+	int side = -1;
+	double sx = 0, sy = 0;
+	struct qdwin_toplevel *tl =
+		qdwin_chrome_at_pos(qdwin, pointer->pos, &side, &sx, &sy);
+	if (!tl || side < 0 || !qdwin_chrome_hover_on_top(qdwin, tl,
+							  pointer->pos)) {
+		qdwin_chrome_hover_clear(qdwin, pointer, true);
+		return;
+	}
+	if (qdwin->chrome_hover_handle != tl->handle) {
+		/* Chrome to chrome: the shell sets the new frame's cursor
+		 * on the motion below; no default flash in between. */
+		qdwin_chrome_hover_clear(qdwin, pointer, false);
+		qdwin->chrome_hover_handle = tl->handle;
+		weston_log("qdwin: chrome_hover handle=%u side=%d\n",
+			   tl->handle, side);
+	}
+	qdwin_shell_v1_send_chrome_motion(qdwin->shell_resource, tl->handle,
+					  (uint32_t)side,
+					  wl_fixed_from_double(sx),
+					  wl_fixed_from_double(sy));
 }
 
 static void
@@ -6203,6 +6369,11 @@ qdwin_toplevel_release_dependents(struct qdwin *qdwin, struct qdwin_toplevel *tl
 	}
 	qdwin_move_grab_end_for(qdwin, tl->handle);
 	qdwin_resize_grab_end_for(qdwin, tl->handle);
+	/* toplevel_removed already tells the shell; no chrome_leave. */
+	if (qdwin->chrome_hover_handle == tl->handle) {
+		qdwin->chrome_hover_handle = 0;
+		qdwin->chrome_cursor_shape = 0;
+	}
 
 	struct qdwin_view_stream *vs, *next;
 	wl_list_for_each_safe(vs, next, &qdwin->view_streams, link)
@@ -10575,6 +10746,7 @@ static const struct qdwin_shell_v1_interface qdwin_shell_impl = {
 	.prepare_output_capture = qdwin_handle_prepare_output_capture,
 	.set_remote_output_input = qdwin_handle_set_remote_output_input,
 	.drain_remote_output_state = qdwin_handle_drain_remote_output_state,
+	.set_chrome_cursor = qdwin_handle_set_chrome_cursor,
 };
 
 static void
@@ -10632,6 +10804,8 @@ qdwin_shell_resource_destroy(struct wl_resource *resource)
 		qdwin_data_offer_pending_free_all(qdwin);
 		qdwin->shell_resource = NULL;
 		qdwin->shell_bound = 0;
+		qdwin->chrome_hover_handle = 0;
+		qdwin->chrome_cursor_shape = 0;
 		qdwin->shell_pid = 0;
 		qdwin->shell_uid = 0;
 		qdwin->shell_starttime = 0;
@@ -25662,10 +25836,11 @@ wet_shell_init(struct weston_compositor *ec, int *argc, char *argv[])
 	}
 
 	/* Advertise the full interface version so the shell can bind every
-	 * request/event through v36 (toplevel_decoration). */
+	 * request/event through v37 (chrome_motion/chrome_leave/
+	 * set_chrome_cursor). */
 	qdwin->shell_global = wl_global_create(ec->wl_display,
 					       &qdwin_shell_v1_interface,
-					       36, qdwin, bind_qdwin_shell);
+					       37, qdwin, bind_qdwin_shell);
 	if (!qdwin->shell_global) {
 		weston_log("qdwin: wl_global_create failed\n");
 		goto fail;

@@ -163,7 +163,11 @@ language pays for itself.
 > attaches a frame to exactly those windows through `attach_decoration`: a
 > 24 px title bar (title, minimize / maximize / close, double-click to
 > maximise, right-click window menu via `show_popup`) and 4 px E/S/W edges
-> that start `begin_interactive_resize` drags. The frame carries the silo
+> that start `begin_interactive_resize` drags. Since v37 qdwin also reports
+> the pointer over and off the frame (`chrome_motion` / `chrome_leave`), so
+> qdshell highlights the button under it and sets the cursor through
+> `set_chrome_cursor`: resize arrows on the edges and corners, the default
+> arrow elsewhere. The frame carries the silo
 > colour qdshell records with `setBorderColor`. Clients that never negotiate
 > (GTK4, weston-terminal) and XWayland windows (framed by the XWM) keep their
 > own decorations and get no shell frame; their own title bars move and

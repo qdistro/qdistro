@@ -44,7 +44,7 @@
     "experimental" convention: version 1 is the first unstable draft.
   </description>
 
-  <interface name="qdwin_shell_v1" version="36">
+  <interface name="qdwin_shell_v1" version="37">
     <description summary="the qdwin shell attach point">
       The shell binds this global once and holds it for the lifetime of
       its process. qdwin rejects a second bind from the same client; a
@@ -2029,6 +2029,54 @@
       <arg name="handle" type="uint"/>
       <arg name="mode" type="uint" enum="decoration_mode"/>
     </event>
+
+    <event name="chrome_motion" since="37">
+      <description summary="pointer moved over a chrome wl_surface">
+        Hover companion of `chrome_button`, for the same same-client
+        reason: the shell never reliably sees wl_pointer enter/motion on
+        the chrome surfaces it attached via attach_decoration, so it
+        could not highlight a title-bar button or pick a resize cursor.
+        Sent on every pointer motion over a chrome side (the first one
+        is the "enter"), with the (handle, side) of the chrome and
+        surface-local wl_fixed coordinates — the same tuple
+        `chrome_button` carries. Hidden (minimised, off-workspace, held)
+        windows' chrome never produces it.
+      </description>
+      <arg name="handle" type="uint"/>
+      <arg name="side" type="uint"
+           summary="0=N (titlebar), 1=E, 2=S, 3=W"/>
+      <arg name="surface_x" type="fixed"/>
+      <arg name="surface_y" type="fixed"/>
+    </event>
+
+    <event name="chrome_leave" since="37">
+      <description summary="pointer left a toplevel's chrome">
+        The pointer is no longer over any chrome side of `handle`: it
+        moved onto content, the desktop, another toplevel's chrome (a
+        `chrome_motion` for that one follows), or the window was hidden.
+        Not sent during a move/resize/popup grab; the next ordinary
+        motion settles the hover state.
+      </description>
+      <arg name="handle" type="uint"/>
+    </event>
+
+    <request name="set_chrome_cursor" since="37">
+      <description summary="cursor shape for the hovered chrome">
+        The shell picks the cursor for its own frame (a resize arrow on
+        an edge or corner, the default arrow on the title bar) because
+        only it knows the frame layout. `shape` is a
+        wp_cursor_shape_device_v1.shape value; qdwin installs the
+        sprite the cursor helper registered for it (set_cursor_sprite).
+        Applied only while the pointer is over a chrome side of
+        `handle` — a late request after the pointer moved on is
+        ignored. Leaving the chrome restores the default cursor (a
+        client under the pointer then sets its own as usual). An
+        unknown shape is ignored, not an error.
+      </description>
+      <arg name="handle" type="uint"/>
+      <arg name="shape" type="uint"
+           summary="wp_cursor_shape_device_v1.shape value"/>
+    </request>
 
   </interface>
 

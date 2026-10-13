@@ -1342,6 +1342,17 @@ test('window-decoration-policy',
   ],
 )
 
+# v37 frame hover + shell-chosen frame cursors.
+test('chrome-hover-policy',
+  python3,
+  suite: 'source_invariant',
+  args: [
+    files('qdwin/test_chrome_hover_policy.py'),
+    files('qdwin/qdwin.c'),
+    files('qdwin/qdwin-shell-v1.xml'),
+  ],
+)
+
 # v27 ext-workspace-v1 workspace-NAME parity invariants
 # (qdwin_shell_v1.set_workspace_name). Driven by
 # tests/host/21-ext-workspace-names.md; the live-VM half (a real

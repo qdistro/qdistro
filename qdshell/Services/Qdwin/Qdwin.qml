@@ -352,7 +352,88 @@ Singleton {
                                  (row.chromeArgb || root.chromeArgbDefault) >>> 0,
                                  row.title || row.appId || "",
                                  i === root.focusedWindowIndex,
-                                 root._titleButtons(row));
+                                 root._titleButtons(row),
+                                 root._chromeHover.handle === row.handle
+                                     ? root._chromeHover.index : -1);
+    }
+
+    // v37 frame hover: the compositor reports the pointer over / off our
+    // own chrome (chromeMotion/chromeLeave). We highlight the title-bar
+    // button under it and ask for the matching cursor — a resize arrow
+    // on the edges and corners _frameResizeEdges grips, the default
+    // arrow everywhere else on the frame. One pointer, one hover.
+    property var _chromeHover: ({handle: 0, index: -1, shape: 0})
+
+    // xdg_toplevel.resize_edge mask → wp_cursor_shape_device_v1 shape.
+    function _resizeCursorShape(edges) {
+        switch (edges) {
+        case 1: return 19;    // n-resize
+        case 2: return 22;    // s-resize
+        case 4: return 25;    // w-resize
+        case 8: return 18;    // e-resize
+        case 5: return 21;    // nw-resize
+        case 9: return 20;    // ne-resize
+        case 6: return 24;    // sw-resize
+        case 10: return 23;   // se-resize
+        }
+        return 1;             // default
+    }
+
+    // Button index under (x, y) on side `side`, or -1. Same layout as
+    // _onFrameLeft's press hit-test.
+    function _titleButtonAt(row, side, x) {
+        if (side !== 0)
+            return -1;
+        const buttons = root._titleButtons(row);
+        const outerW = row.width + 2 * root._frameBorder(row);
+        const firstButtonX = outerW - buttons.length * root.chromeHeight;
+        if (x < firstButtonX)
+            return -1;
+        const idx = Math.floor((x - firstButtonX) / root.chromeHeight);
+        return idx < buttons.length ? idx : -1;
+    }
+
+    function _repaintChromeFor(handle) {
+        for (let i = 0; i < root.windows.count; i++) {
+            if (root.windows.get(i).handle === handle) {
+                root._syncChromeForRow(i);
+                return;
+            }
+        }
+    }
+
+    function _onChromeMotion(handle, side, x, y) {
+        const row = root._windowByHandle(handle);
+        if (!row)
+            return;
+        let hover = root._chromeHover;
+        if (hover.handle !== handle) {
+            if (hover.handle !== 0 && hover.index >= 0) {
+                const old = hover.handle;
+                root._chromeHover = {handle: 0, index: -1, shape: 0};
+                root._repaintChromeFor(old);
+            }
+            hover = {handle: handle, index: -1, shape: 0};
+        }
+        const maximized = (row.state & 1) !== 0;
+        const edges = maximized ? 0 : root._frameResizeEdges(row, side, x, y);
+        const index = edges !== 0 ? -1 : root._titleButtonAt(row, side, x);
+        const shape = root._resizeCursorShape(edges);
+        const repaint = index !== hover.index;
+        root._chromeHover = {handle: handle, index: index, shape: shape};
+        if (shape !== hover.shape)
+            qdwinBinding.setChromeCursor(handle, shape);
+        if (repaint)
+            root._repaintChromeFor(handle);
+    }
+
+    function _onChromeLeave(handle) {
+        const hover = root._chromeHover;
+        if (hover.handle !== handle)
+            return;
+        root._chromeHover = {handle: 0, index: -1, shape: 0};
+        if (hover.index >= 0)
+            root._repaintChromeFor(handle);
     }
 
     // Left-button handling on a frame side. Returns nothing; every path
@@ -936,6 +1017,12 @@ Singleton {
                 root._openWindowMenu(handle, serial, x, y);
             }
         }
+        onChromeMotion: (handle, side, x, y) => {
+            root._onChromeMotion(handle, side, x, y);
+        }
+        onChromeLeave: (handle) => {
+            root._onChromeLeave(handle);
+        }
         // A press inside the active menu hit a valid row — the binding
         // already tore the popup down; run the action.
         onPopupItemTriggered: (parent, index) => {
@@ -1118,6 +1205,9 @@ Singleton {
             // menu popup for this toplevel down; drop the menu's
             // action map too.
             delete root._menuActions[handle];
+            // No chrome_leave follows a removal; forget the hover.
+            if (root._chromeHover.handle === handle)
+                root._chromeHover = {handle: 0, index: -1, shape: 0};
             for (let i = 0; i < root.windows.count; i++) {
                 if (root.windows.get(i).handle === handle) {
                     root.windows.remove(i);

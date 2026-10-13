@@ -13,7 +13,10 @@ maximize button maximises (`set_maximized ... max=1`) and a double-click
 on the title bar restores; a drag on the bottom-right corner resizes
 (`begin_interactive_resize` → `end_interactive_resize`); the menu's
 Minimize row minimises; the close button closes a fresh window
-(`request_close` + `toplevel_removed`). On a self-decorated client
+(`request_close` + `toplevel_removed`). Hovering the frame (v37)
+highlights the button under the pointer (`chrome_hover`) and sets frame
+cursors (`chrome_cursor ... shape=default` on the bar, `se-resize` on the
+corner; `chrome_leave` on the content). On a self-decorated client
 (weston-terminal): NO shell frame (`mode=client_side`, no
 `attach_decoration`) — and its OWN title bar still drags it
 (`xdg_toplevel.move`).
@@ -115,6 +118,14 @@ await_qdwin_line() {
     return 1
 }
 count_qdwin_line() { qdwin_journal | grep -cE "$1"; }
+# await_count_above <ere> <n>: wait (~20 s) until more than n lines match.
+await_count_above() {
+    for i in $(seq 1 40); do
+        [ "$(count_qdwin_line "$1")" -gt "$2" ] && return 0
+        sleep 0.5
+    done
+    return 1
+}
 "$@"
 EOF
     chmod +x /tmp/61-driver.sh'
@@ -150,6 +161,47 @@ full width, carrying the window title on the left and three button
 glyphs (underscore, square, X) on the right; and thin (~4 px) edges of
 the same colour down both sides and along the bottom. No title bar, a
 title bar without text or buttons, or two stacked title bars is a FAIL.
+
+### S1b — hovering the frame: button highlight and frame cursors
+
+The shell never sees pointer motion on its own frame surfaces; since
+qdwin v37 the compositor reports it (`chrome_motion`/`chrome_leave`)
+and the shell answers with `set_chrome_cursor`. `click-preview` moves
+the pointer with no button event, which is exactly a hover. qdwin logs
+`chrome_hover handle=H side=N` when the pointer enters a window's
+frame, `chrome_cursor handle=H shape=<name>` when the shell's cursor
+for it changes, and `chrome_leave handle=H` when it leaves.
+
+```bash
+CNT='H=$(cat /tmp/61-app.handle); bash /tmp/61-driver.sh count_qdwin_line'
+# Runner: title-bar point (TX,TY) left of the buttons, from s1-frame.png
+$VMGUI "$VM" click-preview TX TY title-bar
+$VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
+    bash /tmp/61-driver.sh await_qdwin_line "chrome_hover handle=$H side=0" &&
+    bash /tmp/61-driver.sh await_qdwin_line "chrome_cursor handle=$H shape=default"' \
+    || { echo "FAIL(S1b): hovering the title bar gave no hover / default cursor"; exit 1; }
+# Runner: close-button centre (HX,HY) — rightmost 24x24 cell of the bar
+$VMGUI "$VM" click-preview HX HY close-button
+qdwin_screenshot "$ART/s1b-hover-close.png"
+# Runner: bottom-right corner (KX,KY) — within the last 16 px of the
+# bottom edge, at the 4 px edge's vertical middle
+$VMGUI "$VM" click-preview KX KY bottom-right-corner
+$VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
+    bash /tmp/61-driver.sh await_qdwin_line "chrome_cursor handle=$H shape=se-resize"' \
+    || { echo "FAIL(S1b): the corner did not get the se-resize cursor"; exit 1; }
+L0=$($VMEXEC "$VM" "$CNT \"chrome_leave handle=\$H\$\"")
+# Runner: a point well inside the window's content (WX,WY)
+$VMGUI "$VM" click-preview WX WY window-content
+AWAIT='H=$(cat /tmp/61-app.handle); bash /tmp/61-driver.sh await_count_above'
+$VMEXEC "$VM" "$AWAIT \"chrome_leave handle=\$H\$\" $L0" \
+    || { echo "FAIL(S1b): moving onto the content did not end the frame hover"; exit 1; }
+```
+
+**Assert** (hard, agent-visual): in `s1b-hover-close.png` the close
+button's 24x24 cell is filled red with a white X while the minimize and
+maximize cells keep the plain title-bar colour. Journal: the hover,
+`shape=default`, `shape=se-resize` and the extra `chrome_leave` lines
+above, all for this handle.
 
 ### S2 — left-drag on the title bar raises and moves the window
 

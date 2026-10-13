@@ -127,8 +127,9 @@ def main():
     added = body(src, "qdwin_send_toplevel_added")
     if not added or "qdwin_emit_toplevel_decoration(qdwin, tl)" not in added:
         return fail("toplevel_added (incl. bind replay) must carry toplevel_decoration")
-    if not re.search(r"&qdwin_shell_v1_interface\s*,\s*36\s*,", src):
-        return fail("qdwin_shell_v1 global must advertise v36")
+    # v37 (chrome hover) builds on v36; the global advertises the newest.
+    if not re.search(r"&qdwin_shell_v1_interface\s*,\s*37\s*,", src):
+        return fail("qdwin_shell_v1 global must advertise v37")
     if not re.search(r'<event name="toplevel_decoration" since="36">', xml):
         return fail("toplevel_decoration must be a since=36 event")
 

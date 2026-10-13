@@ -239,6 +239,8 @@ struct qdwin {
 	uint32_t resize_grab_handle;
 	struct weston_pointer_grab resize_grab;
 	uint32_t resize_anchor_handle;
+	uint32_t chrome_hover_handle;   /* v37 hover, dropped on teardown */
+	uint32_t chrome_cursor_shape;
 };
 
 static struct qdwin *qdwin_singleton;

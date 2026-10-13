@@ -209,7 +209,7 @@ function body(name) {
     assert.ok(/row\.decorationMode !== 1 \|\| \(row\.state & 2\) !== 0/.test(sync)
               && /detachFrame\(row\.handle\)/.test(sync),
         "self-decorated and fullscreen windows must not keep a frame");
-    assert.ok(/attachFrame\([\s\S]*?root\._titleButtons\(row\)\)/.test(sync),
+    assert.ok(/attachFrame\([\s\S]*?root\._titleButtons\(row\)[,)]/.test(sync),
         "the frame paints the hit-tested button list");
     assert.ok(/onToplevelDecoration[\s\S]*?_syncChromeForRow/.test(qml),
         "a decoration-mode change must re-sync the frame");
