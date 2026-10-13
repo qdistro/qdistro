@@ -1992,7 +1992,13 @@ class Broker(dbus.service.Object):
         Same-uid identity stays defence-in-depth (a same-uid process can
         ptrace the real app); approvals of root actions still need an
         authenticated human — tracked as the structural follow-up."""
-        if os.path.basename(exe_s) not in _PYTHON_EXE_BASENAMES:
+        # The interpreter must be the root-owned system binary: an
+        # admin-owned native client merely NAMED python3 ignores argv and
+        # environment entirely (sol bsa r3; same rule as the polkit agent,
+        # sol r167).
+        if not (os.path.basename(exe_s) in _PYTHON_EXE_BASENAMES
+                and os.path.dirname(exe_s) in _POLKIT_AGENT_EXE_DIRS
+                and " (deleted)" not in exe_s):
             return False, (f"untrusted admin-control exe={exe_s!r} for an "
                            f"authority method")
         i = 1

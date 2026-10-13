@@ -686,3 +686,24 @@ def test_dev_copy_is_not_reexecd():
     src = _AUTHORITY_SCRIPTS["/usr/local/bin/qdistro-admin-approval-app"]
     _, calls = _load_reexec(src, [str(src)], {"QT_PLUGIN_PATH": "/x"}, 0)
     assert calls == []
+
+
+@pytest.mark.parametrize("exe", ["/home/admin/python3", "/tmp/python3.13",
+                                 "/usr/bin/python3 (deleted)"])
+def test_admin_owned_interpreter_named_python_cannot_decide(broker,
+                                                            monkeypatch, exe):
+    """The authority predicate binds the system interpreter, not a
+    basename: a native client named python3 ignores argv and env (sol bsa
+    r3)."""
+    rid = broker._enqueue(NON_ADMIN_UID, 0, PEER_EXE, 0,
+                          "qdistro.test.installed-admin-app", {},
+                          delegated=False, one_shot=True)
+    argv = [exe, "-I", "/usr/local/bin/qdistro-admin-approval-app"]
+    broker.set_peer(uid=ADMIN_UID, pid=1234, exe=exe)
+    monkeypatch.setattr(B, "_read_proc_cmdline", lambda _pid: argv)
+    monkeypatch.setattr(B, "_read_proc_identity", lambda _pid: (exe, 1))
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
+    monkeypatch.setattr(B, "_read_proc_environ", lambda _pid: {})
+    with pytest.raises(dbus.DBusException):
+        broker.DecideRequest(rid, "allow", "once")
+    assert broker._pending[rid].decision is None
