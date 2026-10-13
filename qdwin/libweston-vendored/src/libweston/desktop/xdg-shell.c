@@ -80,6 +80,11 @@ struct weston_desktop_xdg_surface {
 	bool configured;
 	struct wl_event_source *configure_idle;
 	struct wl_list configure_list; /* weston_desktop_xdg_surface_configure::link */
+	/* qdistro patch (D9): popups whose parent is this surface
+	 * (weston_desktop_xdg_popup::parent_link). Destroying the surface
+	 * nulls their parent pointer, so no grab, commit or reposition on a
+	 * surviving child reads it. */
+	struct wl_list popup_children;
 
 	bool has_next_geometry;
 	struct weston_geometry next_geometry;
@@ -139,6 +144,7 @@ struct weston_desktop_xdg_popup {
 	bool in_layer_chain;
 	struct weston_desktop_xdg_popup *chain_parent;
 	struct weston_desktop_xdg_popup *chain_child;
+	struct wl_list parent_link;	/* parent->popup_children */
 	struct weston_desktop_seat *seat;
 	struct weston_geometry geometry;
 
@@ -1845,6 +1851,8 @@ weston_desktop_xdg_popup_destroy(struct weston_desktop_xdg_popup *popup)
 		popup->chain_parent->chain_child = NULL;
 		popup->chain_parent = NULL;
 	}
+	wl_list_remove(&popup->parent_link);
+	wl_list_init(&popup->parent_link);
 
 	if (!weston_desktop_surface_get_grab(popup->base.desktop_surface))
 		return;
@@ -2153,6 +2161,10 @@ weston_desktop_xdg_surface_protocol_get_popup(struct wl_client *wl_client,
 
 	popup->base.role = WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP;
 	popup->parent = parent;
+	if (parent)
+		wl_list_insert(&parent->popup_children, &popup->parent_link);
+	else
+		wl_list_init(&popup->parent_link);
 
 	if (parent_surface) {
 		popup->geometry =
@@ -2402,6 +2414,15 @@ weston_desktop_xdg_surface_destroy(struct weston_desktop_surface *dsurface,
 		break;
 	}
 
+	/* qdistro patch (D9): orphan surviving child popups. */
+	struct weston_desktop_xdg_popup *child, *child_tmp;
+	wl_list_for_each_safe(child, child_tmp, &surface->popup_children,
+			      parent_link) {
+		child->parent = NULL;
+		wl_list_remove(&child->parent_link);
+		wl_list_init(&child->parent_link);
+	}
+
 	if (surface->configure_idle != NULL)
 		wl_event_source_remove(surface->configure_idle);
 
@@ -2527,6 +2548,7 @@ weston_desktop_xdg_shell_protocol_get_xdg_surface(struct wl_client *wl_client,
 	surface->desktop = weston_desktop_client_get_desktop(client);
 	surface->surface = wsurface;
 	wl_list_init(&surface->configure_list);
+	wl_list_init(&surface->popup_children);
 
 	surface->desktop_surface =
 		weston_desktop_surface_create(surface->desktop, client,

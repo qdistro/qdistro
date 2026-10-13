@@ -14,7 +14,10 @@ joins it to the root popup's grab. Only the immediate parent is read (it
 is the layer-parented root or already in_layer_chain). Accepted links are
 kept both ways (chain_parent/chain_child) so destroying a popup under a
 live joined child posts xdg_wm_base.not_the_topmost_popup, as the desktop
-seat grab does, and severs the child's parent pointer. Applies after 0001.
+seat grab does, and severs the child's parent pointer. Every xdg_surface
+also tracks its popup children (popup_children/parent_link) and nulls
+their parent pointer when it is destroyed, so a surviving ungrabbed or
+pending child never reads a freed parent. Applies after 0001.
 
 Regression gates: qdwin test_zwlr_layer_shell.py
 (test_layer_popup_nested_grab_routed) and the live lane
@@ -40,10 +43,22 @@ index d2e46401..bf232d64 100644
  	struct wl_resource *popup_resource,
  	struct weston_surface *popup_surface,
 diff --git a/libweston/desktop/xdg-shell.c b/libweston/desktop/xdg-shell.c
-index 2c56c741..55098eb3 100644
+index 2c56c741..de6e5edf 100644
 --- a/libweston/desktop/xdg-shell.c
 +++ b/libweston/desktop/xdg-shell.c
-@@ -132,6 +132,13 @@ struct weston_desktop_xdg_popup {
+@@ -80,6 +80,11 @@ struct weston_desktop_xdg_surface {
+ 	bool configured;
+ 	struct wl_event_source *configure_idle;
+ 	struct wl_list configure_list; /* weston_desktop_xdg_surface_configure::link */
++	/* qdistro patch (D9): popups whose parent is this surface
++	 * (weston_desktop_xdg_popup::parent_link). Destroying the surface
++	 * nulls their parent pointer, so no grab, commit or reposition on a
++	 * surviving child reads it. */
++	struct wl_list popup_children;
+ 
+ 	bool has_next_geometry;
+ 	struct weston_geometry next_geometry;
+@@ -132,6 +137,14 @@ struct weston_desktop_xdg_popup {
  	struct wl_resource *resource;
  	struct weston_desktop_xdg_surface *parent;
  	struct weston_surface *layer_parent_surface;
@@ -54,10 +69,11 @@ index 2c56c741..55098eb3 100644
 +	bool in_layer_chain;
 +	struct weston_desktop_xdg_popup *chain_parent;
 +	struct weston_desktop_xdg_popup *chain_child;
++	struct wl_list parent_link;	/* parent->popup_children */
  	struct weston_desktop_seat *seat;
  	struct weston_geometry geometry;
  
-@@ -1434,6 +1441,25 @@ static struct {
+@@ -1434,6 +1447,25 @@ static struct {
  	void *user_data;
  } weston_desktop_xdg_popup_layer_grab;
  
@@ -83,7 +99,7 @@ index 2c56c741..55098eb3 100644
  static void
  weston_desktop_xdg_popup_protocol_grab(struct wl_client *wl_client,
  				       struct wl_resource *resource,
-@@ -1493,6 +1519,40 @@ weston_desktop_xdg_popup_protocol_grab(struct wl_client *wl_client,
+@@ -1493,6 +1525,40 @@ weston_desktop_xdg_popup_protocol_grab(struct wl_client *wl_client,
  		return;
  	}
  
@@ -124,7 +140,7 @@ index 2c56c741..55098eb3 100644
  	topmost = weston_desktop_seat_popup_grab_get_topmost_surface(seat);
  	if (topmost != NULL && topmost != popup->parent->desktop_surface) {
  		struct weston_desktop_client *client =
-@@ -1764,6 +1824,28 @@ weston_desktop_xdg_popup_destroy(struct weston_desktop_xdg_popup *popup)
+@@ -1764,6 +1830,30 @@ weston_desktop_xdg_popup_destroy(struct weston_desktop_xdg_popup *popup)
  	struct weston_desktop_client *client =
  		weston_desktop_surface_get_client(popup->base.desktop_surface);
  
@@ -149,7 +165,44 @@ index 2c56c741..55098eb3 100644
 +		popup->chain_parent->chain_child = NULL;
 +		popup->chain_parent = NULL;
 +	}
++	wl_list_remove(&popup->parent_link);
++	wl_list_init(&popup->parent_link);
 +
  	if (!weston_desktop_surface_get_grab(popup->base.desktop_surface))
  		return;
  
+@@ -2071,6 +2161,10 @@ weston_desktop_xdg_surface_protocol_get_popup(struct wl_client *wl_client,
+ 
+ 	popup->base.role = WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP;
+ 	popup->parent = parent;
++	if (parent)
++		wl_list_insert(&parent->popup_children, &popup->parent_link);
++	else
++		wl_list_init(&popup->parent_link);
+ 
+ 	if (parent_surface) {
+ 		popup->geometry =
+@@ -2320,6 +2414,15 @@ weston_desktop_xdg_surface_destroy(struct weston_desktop_surface *dsurface,
+ 		break;
+ 	}
+ 
++	/* qdistro patch (D9): orphan surviving child popups. */
++	struct weston_desktop_xdg_popup *child, *child_tmp;
++	wl_list_for_each_safe(child, child_tmp, &surface->popup_children,
++			      parent_link) {
++		child->parent = NULL;
++		wl_list_remove(&child->parent_link);
++		wl_list_init(&child->parent_link);
++	}
++
+ 	if (surface->configure_idle != NULL)
+ 		wl_event_source_remove(surface->configure_idle);
+ 
+@@ -2445,6 +2548,7 @@ weston_desktop_xdg_shell_protocol_get_xdg_surface(struct wl_client *wl_client,
+ 	surface->desktop = weston_desktop_client_get_desktop(client);
+ 	surface->surface = wsurface;
+ 	wl_list_init(&surface->configure_list);
++	wl_list_init(&surface->popup_children);
+ 
+ 	surface->desktop_surface =
+ 		weston_desktop_surface_create(surface->desktop, client,

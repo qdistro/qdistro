@@ -381,6 +381,7 @@ struct qdwin_layer_popup_nested {
 	struct wl_resource *resource;
 	struct weston_surface *surface;
 	struct wl_listener destroy_listener;
+	struct wl_listener surface_destroy_listener;
 	struct wl_list link;
 };
 enum qdwin_ext_ws_pending_kind { QDWIN_EXT_WS_PENDING_ACTIVATE };
@@ -1597,6 +1598,7 @@ layer_popup_nest(struct qdwin_layer_popup *lp)
 	assert(n);
 	n->root = lp;
 	wl_list_init(&n->destroy_listener.link);
+	wl_list_init(&n->surface_destroy_listener.link);
 	wl_list_insert(&lp->nested, &n->link);
 	return n;
 }

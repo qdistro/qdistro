@@ -15673,6 +15673,9 @@ struct qdwin_layer_popup_nested {
 	struct wl_resource *resource;          /* xdg_popup */
 	struct weston_surface *surface;
 	struct wl_listener destroy_listener;   /* on resource */
+	/* The wl_surface can go first (a protocol error, but cleanup must
+	 * stay safe): the record never outlives either object. */
+	struct wl_listener surface_destroy_listener;
 	struct wl_list link;                   /* qdwin_layer_popup::nested */
 };
 
@@ -16291,6 +16294,7 @@ static void
 qdwin_layer_popup_nested_free(struct qdwin_layer_popup_nested *n)
 {
 	wl_list_remove(&n->destroy_listener.link);
+	wl_list_remove(&n->surface_destroy_listener.link);
 	wl_list_remove(&n->link);
 	free(n);
 }
@@ -16351,17 +16355,33 @@ qdwin_layer_popup_chain_refocus(struct qdwin_layer_popup *lp,
  * the submenu, or answered popup_done). The root grab carries on; keyboard
  * focus steps back down the chain. */
 static void
-qdwin_layer_popup_nested_on_destroyed(struct wl_listener *listener, void *data)
+qdwin_layer_popup_nested_gone(struct qdwin_layer_popup_nested *n)
 {
-	struct qdwin_layer_popup_nested *n =
-		wl_container_of(listener, n, destroy_listener);
-	(void)data;
 	struct qdwin_layer_popup *root = n->root;
 	struct weston_surface *gone = n->surface;
 	qdwin_layer_popup_nested_free(n);
 	qdwin_layer_popup_chain_refocus(root, gone);
 	if (wl_list_empty(&root->nested))
 		qdwin_layer_popup_kbd_restore_set(root, NULL);
+}
+
+static void
+qdwin_layer_popup_nested_on_destroyed(struct wl_listener *listener, void *data)
+{
+	struct qdwin_layer_popup_nested *n =
+		wl_container_of(listener, n, destroy_listener);
+	(void)data;
+	qdwin_layer_popup_nested_gone(n);
+}
+
+static void
+qdwin_layer_popup_nested_on_surface_destroyed(struct wl_listener *listener,
+					      void *data)
+{
+	struct qdwin_layer_popup_nested *n =
+		wl_container_of(listener, n, surface_destroy_listener);
+	(void)data;
+	qdwin_layer_popup_nested_gone(n);
 }
 
 static void
@@ -16798,6 +16818,9 @@ qdwin_layer_popup_nested_grab(struct qdwin *qdwin,
 	n->surface = popup_surface;
 	n->destroy_listener.notify = qdwin_layer_popup_nested_on_destroyed;
 	wl_resource_add_destroy_listener(popup_resource, &n->destroy_listener);
+	n->surface_destroy_listener.notify =
+		qdwin_layer_popup_nested_on_surface_destroyed;
+	wl_signal_add(&popup_surface->destroy_signal, &n->surface_destroy_listener);
 	struct weston_keyboard *kb = qdwin_layer_popup_chain_keyboard(root);
 	if (kb && wl_list_empty(&root->nested))
 		qdwin_layer_popup_kbd_restore_set(root, kb->focus);
