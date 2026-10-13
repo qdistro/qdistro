@@ -294,19 +294,49 @@ noct_idle_wait_script() {
         "printf 'dpms=%s waited_s=%s\\n' \"\$d\" \"\$((end-start))\" > $res.tmp && mv -f $res.tmp $res"
 }
 
-# noct_idle_wait_start <result-path>: start the detached guest wait. The path
-# must be fresh (per-attempt token) so a stale record can never be read.
+# noct_idle_wait_start_script <result-path> <wake-cursor-file>: the guest
+# script that records the wake cursor and then starts the wait (pure;
+# host-testable).
+#
+# The compositor journal cursor for steps 3-4 is written HERE, in the same
+# guest command that starts the wait, and before it. It used to be a separate
+# base64 block in the scenario, and in full-20261012T183404Z-1725371 the driver
+# folded Setup into its own script, ran step 2 from noct_idle_wait_start
+# onward, never wrote /tmp/05-wake.cur, and the wake oracle was unavailable
+# (ERROR). Now no idle wait starts without a cursor: an empty cursor fails the
+# start, and the wait unit is never launched.
+noct_idle_wait_start_script() {
+    local res=$1 cur=$2 b64
+    b64=$(noct_idle_wait_script "$res" | base64 -w0) || return 2
+    printf '%s\n' \
+        "test ! -e $res || { echo 'FAIL: idle-wait result path already exists: $res'; exit 2; }" \
+        "c=\$(runuser -l admin -c 'journalctl --user -u qdwin-compositor.service -n0 --show-cursor 2>/dev/null' | sed -n 's/^-- cursor: //p')" \
+        "[ -n \"\$c\" ] || { echo 'FAIL: could not read the qdwin-compositor journal cursor; idle wait NOT started'; exit 3; }" \
+        "printf '%s\\n' \"\$c\" > $cur.tmp && mv -f $cur.tmp $cur || { echo 'FAIL: could not write $cur; idle wait NOT started'; exit 3; }" \
+        "systemd-run --quiet --collect --unit=qci-noct-idle-wait-\$(date +%s%N) /bin/sh -c 'echo $b64 | base64 -d | sh'"
+}
+
+# noct_idle_wait_start <result-path> <wake-cursor-file>: record the
+# qdwin-compositor journal cursor into <wake-cursor-file> (guest path), then
+# start the detached guest wait. The result path must be fresh (per-attempt
+# token) so a stale record can never be read. Both are REQUIRED.
 noct_idle_wait_start() {
-    local res=$1 b64
+    local res=$1 cur=${2-} b64
     case "$res" in
         "$NOCT_QCI_DIR"/*/*) ;;
         *) echo "FAIL: idle-wait result path must be under the per-scenario $NOCT_QCI_DIR dir, got '$res'"; return 2 ;;
     esac
+    case "$cur" in
+        /*) ;;
+        *) echo "FAIL: noct_idle_wait_start needs an absolute wake-cursor file (e.g. /tmp/05-wake.cur), got '$cur'"; return 2 ;;
+    esac
+    case "$res$cur" in
+        *[!A-Za-z0-9._/-]*) echo "FAIL: idle-wait paths must be [A-Za-z0-9._/-] only, got '$res' '$cur'"; return 2 ;;
+    esac
     case "$NOCT_IDLE_WAIT_S" in ''|*[!0-9]*) echo "FAIL: bad NOCT_IDLE_WAIT_S '$NOCT_IDLE_WAIT_S'"; return 2 ;; esac
-    b64=$(noct_idle_wait_script "$res" | base64 -w0) || return 2
-    # Single quotes only: vm-exec's qga JSON breaks on an embedded double quote.
-    "$QDWIN_VM_EXEC" "$VMNAME" \
-        "test ! -e $res && systemd-run --quiet --collect --unit=qci-noct-idle-wait-\$(date +%s%N) /bin/sh -c 'echo $b64 | base64 -d | sh'"
+    b64=$(noct_idle_wait_start_script "$res" "$cur" | base64 -w0) || return 2
+    # Base64 so no double quote reaches vm-exec's qga JSON.
+    "$QDWIN_VM_EXEC" "$VMNAME" "echo $b64 | base64 -d | bash"
 }
 
 # noct_idle_wait_poll <result-path>: print the record once the guest wrote it.

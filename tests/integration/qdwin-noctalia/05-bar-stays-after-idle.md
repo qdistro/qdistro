@@ -285,21 +285,20 @@ noct_screenshot_awake /tmp/05-step1-awake.png
 > guest wait is still running: re-run ONLY the last three lines (they re-read
 > the saved result path) until it prints `step2:`. Never start a second wait,
 > and never read `/sys/class/drm/*/dpms` yourself as the verdict.
+>
+> Start the wait ONLY with `noct_idle_wait_start "$STEP2_RES" /tmp/05-wake.cur`
+> exactly as below, whether this block runs from your host shell or inside
+> your guest driver. That call also writes the pre-idle compositor cursor that
+> Steps 3-4 read; a hand-rolled `systemd-run sleep 75` or a call without the
+> cursor file leaves the wake oracle without a cursor.
+> full-20261012T183404Z-1725371 recorded ERROR that way when the cursor was
+> still a separate block that the driver dropped.
 > full-20261006T175536Z-3524705 lost this scenario that way: the driver's
 > 75 s call was cut short, it read sysfs ~50 s after its last pointer input --
 > before the 60 s display-off timeout -- and recorded FAIL "dpms stayed On";
 > every replay blanked on time.
 
 ```bash
-# Cursor before the idle wait so Step 4's clean-log + wake-remap checks scope to
-# THIS idle/wake cycle, not a stale line in a --since '1 minute ago' window.
-# Base64-wrapped: embedded quotes in a vm-exec payload break qga JSON parsing.
-B64=$(base64 -w0 <<'EOF'
-runuser -l admin -c 'journalctl --user -u qdwin-compositor.service -n0 --show-cursor 2>/dev/null' \
-    | sed -n 's/^-- cursor: //p' > /tmp/05-wake.cur
-EOF
-)
-"$QDWIN_VM_EXEC" "$VMNAME" "echo $B64 | base64 -d | bash"
 # 60s display-off timeout (1-minute minimum) + grace; no input this period.
 # DPMS verdict comes from sysfs, NOT a screenshot: while the output is
 # DPMS-off the compositor suspends repaint, so the shell-capture path
@@ -307,7 +306,11 @@ EOF
 # DRM connector state is the ground truth for "display off" anyway.
 STEP2_RES=/tmp/qci/${QCI_SCENARIO_SLUG:?}/05-step2-$(date +%s%N).txt
 printf '%s\n' "$STEP2_RES" > "${QCI_SCENARIO_TMPDIR:?}/05-step2.path"
-noct_idle_wait_start "$STEP2_RES" || { echo "FAIL: could not start the guest idle wait"; exit 1; }
+# The start writes the compositor journal cursor to /tmp/05-wake.cur FIRST
+# (same guest command), so Steps 3-4 scope to THIS idle/wake cycle. It refuses
+# to start the wait without that cursor -- there is no separate cursor step to
+# drop.
+noct_idle_wait_start "$STEP2_RES" /tmp/05-wake.cur || { echo "FAIL: could not record the wake cursor / start the guest idle wait"; exit 1; }
 # --- re-run from here if the call above returned early ---
 STEP2_RES=$(cat "${QCI_SCENARIO_TMPDIR:?}/05-step2.path")
 noct_idle_wait_poll "$STEP2_RES" > "$QCI_SCENARIO_TMPDIR/05-step2-dpms.txt" \
