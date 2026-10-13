@@ -15661,6 +15661,11 @@ struct qdwin_layer_popup {
 	 * handler instead of its desktop seat grab, so this popup's grab stays
 	 * the installed one for the whole chain. */
 	struct wl_list nested;
+	/* D9: keyboard focus follows the topmost joined submenu, as libweston's
+	 * desktop popup grab did; kbd_restore is the focus to hand back when
+	 * the chain empties (nulled by its surface's destroy). */
+	struct weston_surface *kbd_restore;
+	struct wl_listener kbd_restore_destroy_listener;
 };
 
 struct qdwin_layer_popup_nested {
@@ -16290,15 +16295,73 @@ qdwin_layer_popup_nested_free(struct qdwin_layer_popup_nested *n)
 	free(n);
 }
 
+static void
+qdwin_layer_popup_kbd_restore_set(struct qdwin_layer_popup *lp,
+				  struct weston_surface *s)
+{
+	wl_list_remove(&lp->kbd_restore_destroy_listener.link);
+	wl_list_init(&lp->kbd_restore_destroy_listener.link);
+	lp->kbd_restore = s;
+	if (s)
+		wl_signal_add(&s->destroy_signal,
+			      &lp->kbd_restore_destroy_listener);
+}
+
+static void
+qdwin_layer_popup_on_kbd_restore_destroyed(struct wl_listener *listener,
+					   void *data)
+{
+	struct qdwin_layer_popup *lp =
+		wl_container_of(listener, lp, kbd_restore_destroy_listener);
+	(void)data;
+	qdwin_layer_popup_kbd_restore_set(lp, NULL);
+}
+
+/* D9: the grab seat's keyboard, or NULL while locked (the locker owns
+ * focus) or without a grab seat. */
+static struct weston_keyboard *
+qdwin_layer_popup_chain_keyboard(struct qdwin_layer_popup *lp)
+{
+	if (!lp->grab_seat || !lp->parent || lp->parent->qdwin->locked)
+		return NULL;
+	return weston_seat_get_keyboard(lp->grab_seat);
+}
+
+/* D9: hand keyboard focus back once the chain stops holding it: to the new
+ * topmost submenu while one is left, else to the pre-chain focus. Only
+ * moves focus that still sits on `from` (a chain surface), so a focus
+ * change made meanwhile is left alone. */
+static void
+qdwin_layer_popup_chain_refocus(struct qdwin_layer_popup *lp,
+				struct weston_surface *from)
+{
+	struct weston_keyboard *kb = qdwin_layer_popup_chain_keyboard(lp);
+	if (!kb || kb->focus != from)
+		return;
+	struct weston_surface *to = lp->kbd_restore;
+	if (!wl_list_empty(&lp->nested)) {
+		struct qdwin_layer_popup_nested *top =
+			wl_container_of(lp->nested.next, top, link);
+		to = top->surface;
+	}
+	weston_keyboard_set_focus(kb, to);
+}
+
 /* D9: a nested popup that joined the chain was destroyed (the client closed
- * the submenu, or answered popup_done). The root grab carries on. */
+ * the submenu, or answered popup_done). The root grab carries on; keyboard
+ * focus steps back down the chain. */
 static void
 qdwin_layer_popup_nested_on_destroyed(struct wl_listener *listener, void *data)
 {
 	struct qdwin_layer_popup_nested *n =
 		wl_container_of(listener, n, destroy_listener);
 	(void)data;
+	struct qdwin_layer_popup *root = n->root;
+	struct weston_surface *gone = n->surface;
 	qdwin_layer_popup_nested_free(n);
+	qdwin_layer_popup_chain_refocus(root, gone);
+	if (wl_list_empty(&root->nested))
+		qdwin_layer_popup_kbd_restore_set(root, NULL);
 }
 
 static void
@@ -16308,8 +16371,12 @@ qdwin_layer_popup_destroy(struct qdwin_layer_popup *lp)
 		return;
 
 	struct qdwin_layer_popup_nested *n, *ntmp;
-	wl_list_for_each_safe(n, ntmp, &lp->nested, link)
+	wl_list_for_each_safe(n, ntmp, &lp->nested, link) {
+		struct weston_surface *gone = n->surface;
 		qdwin_layer_popup_nested_free(n);
+		qdwin_layer_popup_chain_refocus(lp, gone);
+	}
+	qdwin_layer_popup_kbd_restore_set(lp, NULL);
 
 	/* plan3 NEW-H1 + deep-review H3/H5: end any active pointer grab so
 	 * libweston rebinds the default grab before we free the
@@ -16545,10 +16612,13 @@ qdwin_layer_popup_dismiss_chain(struct qdwin_layer_popup *lp,
 		qdwin_xdg_popup_dismiss_layer_grab_sym();
 	struct qdwin_layer_popup_nested *n, *tmp;
 	wl_list_for_each_safe(n, tmp, &lp->nested, link) {
+		struct weston_surface *gone = n->surface;
 		if (dismiss)
 			dismiss(n->resource);
 		qdwin_layer_popup_nested_free(n);
+		qdwin_layer_popup_chain_refocus(lp, gone);
 	}
+	qdwin_layer_popup_kbd_restore_set(lp, NULL);
 	if (root_resource && dismiss)
 		dismiss(root_resource);
 }
@@ -16728,7 +16798,14 @@ qdwin_layer_popup_nested_grab(struct qdwin *qdwin,
 	n->surface = popup_surface;
 	n->destroy_listener.notify = qdwin_layer_popup_nested_on_destroyed;
 	wl_resource_add_destroy_listener(popup_resource, &n->destroy_listener);
+	struct weston_keyboard *kb = qdwin_layer_popup_chain_keyboard(root);
+	if (kb && wl_list_empty(&root->nested))
+		qdwin_layer_popup_kbd_restore_set(root, kb->focus);
 	wl_list_insert(&root->nested, &n->link);
+	/* The topmost grabbing popup takes keyboard focus (xdg_popup.grab),
+	 * as libweston's desktop popup grab gave it. */
+	if (kb)
+		weston_keyboard_set_focus(kb, popup_surface);
 	weston_log("qdwin: layer-popup nested grab joined popup=%p root=%p\n",
 		   (void *)popup_resource, (void *)root->popup_resource);
 	return true;
@@ -16853,6 +16930,9 @@ qdwin_layer_surface_get_popup(struct wl_client *client,
 	lp->parent = ls;
 	lp->popup_resource = popup;
 	wl_list_init(&lp->nested);
+	wl_list_init(&lp->kbd_restore_destroy_listener.link);
+	lp->kbd_restore_destroy_listener.notify =
+		qdwin_layer_popup_on_kbd_restore_destroyed;
 	lp->desktop_surface = dsurf;
 	lp->surface = weston_desktop_surface_get_surface(dsurf);
 	lp->view = weston_desktop_surface_create_view(dsurf);
@@ -21019,12 +21099,8 @@ qdwin_output_boundary_cancel_state(struct qdwin *qdwin,
 			 * second time. qdwin_layer_popup_destroy ends the pointer grab
 			 * itself whenever it is still installed, after this one protocol
 			 * dismissal. */
-			if (lp->popup_resource) {
-				qdwin_xdg_popup_dismiss_layer_grab_fn dismiss =
-					qdwin_xdg_popup_dismiss_layer_grab_sym();
-				if (dismiss)
-					dismiss(lp->popup_resource);
-			}
+			/* D9: the whole chain, topmost submenu first. */
+			qdwin_layer_popup_dismiss_chain(lp, lp->popup_resource);
 			qdwin_layer_popup_destroy(lp);
 		}
 	}

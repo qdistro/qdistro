@@ -54,7 +54,7 @@ def main() -> int:
 
     if require_all(cleanup, (
         "qdwin_popup_teardown", "qdwin_layer_popup_destroy",
-        "qdwin_xdg_popup_dismiss_layer_grab_sym",
+        "qdwin_layer_popup_dismiss_chain",
         "qdwin_move_grab_end_for", "qdwin_switcher_grab_end",
         "qdwin_overlay_grab_end", "qdwin_stream_confine_grab_end",
         "qdwin_im_deactivate", "wl_resource_destroy(im->grab->resource)",
@@ -65,10 +65,12 @@ def main() -> int:
         "qdwin_primary_seat_clear_selection",
     ), "output-boundary cleanup"):
         return 1
-    popup_dismiss_at = cleanup.find("qdwin_xdg_popup_dismiss_layer_grab_sym")
+    # D9: the whole chain (nested submenus first, then the root) gets
+    # popup_done before the grab-owning destroy.
+    popup_dismiss_at = cleanup.find("qdwin_layer_popup_dismiss_chain")
     popup_destroy_at = cleanup.find("qdwin_layer_popup_destroy", popup_dismiss_at)
     if popup_dismiss_at < 0 or popup_destroy_at < popup_dismiss_at:
-        return fail("layer popup must receive popup_done before grab-owning destroy")
+        return fail("layer popup chain must receive popup_done before grab-owning destroy")
 
     if require_all(rehome, (
         "qdwin_output_boundary_rehome_saved",

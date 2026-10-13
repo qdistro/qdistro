@@ -1626,9 +1626,11 @@ test('s13-failopen-pins',
 # execute instead of skipping; a system /usr libweston keeps the stock run.
 layer_shell_protocol_env = environment()
 libweston_prefix = dep_libweston.get_variable(pkgconfig: 'prefix', default_value: '/usr')
-if libweston_prefix != '/usr'
+libweston_libdir = dep_libweston.get_variable(pkgconfig: 'libdir', default_value: '')
+if libweston_prefix != '/usr' and libweston_libdir != ''
   layer_shell_protocol_env.set('QDWIN_USE_VENDORED_LIBWESTON', '1')
   layer_shell_protocol_env.set('QDWIN_VENDORED_LIBWESTON_PREFIX', libweston_prefix)
+  layer_shell_protocol_env.set('QDWIN_VENDORED_LIBWESTON_LIBDIR', libweston_libdir)
 endif
 test('layer-shell-protocol',
   find_program('tests/protocol/run-layer-shell-protocol-test.sh'),
