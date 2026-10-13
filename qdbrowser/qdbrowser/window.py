@@ -287,11 +287,13 @@ class MainWindow(QMainWindow):
         fault-tolerant: missing pin files mean an empty store and the
         browser still starts.
 
-        Scope of the cert-pin control (iso2 `13` E2): it is an
+        Scope of the cert-pin control here (iso2 `13` E2): an
         error-path hook, connected per page in ``WebView.__init__``,
         that hard-rejects a pinned host whose chain Chromium ALREADY
-        refused. It does not inspect CA-valid certificates and is not
-        HPKP. See ``cert_policy`` for the full limitation note.
+        refused. CA-valid certificates get a best-effort probe from the
+        loopback pin proxy ``__main__`` starts before QApplication
+        (``pin_proxy``), which reads the store registered here. See
+        ``cert_policy``.
         """
         # 1. Security interceptor (HTTPS-only, DNT, UA validation).
         try:
