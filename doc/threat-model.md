@@ -65,7 +65,13 @@ per-user auth) only make sense once the model is clear.
  isolation).
 - **Admin is the trusted computing base.** Admin's compositor, session manager,
  polkit agent, and locker all run with full trust. If admin is compromised,
- the whole machine is.
+ the whole machine is. That trust is in those designated components and in
+ the authenticated human acting through them — it does not authorize every
+ process running as the admin uid to exercise root capabilities. On
+ daily-driver/release profiles, admin→root is a protected boundary:
+ passwordless sudo is dev-only, and privileged launch helpers (tier-3 spawn,
+ the tier-5 bridge) require the admin's password (`auth_admin_keep`).
+ Unauthenticated root-entry paths are defects to close, not design.
 - **VMs exist for the real adversarial case.** The VM tiers on the
  [isolation ladder](isolation-tiers.md) are where containment hardens to
  actually-adversarial levels.
