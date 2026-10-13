@@ -126,8 +126,9 @@ qdlocker_wait_for_unlock() {
 # Convenience: assert the locker prompt has N characters (after typing).
 qdlocker_assert_prompt_len() {
     local want="$1"
-    local got
-    got=$(qdlocker_ctrl status | sed -n 's/.*prompt-len=\([0-9]*\).*/\1/p')
+    local st got
+    st=$(qdlocker_ctrl status) || return $?
+    got=$(printf '%s\n' "$st" | sed -n 's/.*prompt-len=\([0-9]*\).*/\1/p')
     if [ "$got" != "$want" ]; then
         echo "qdlocker_assert_prompt_len: want=$want got=$got" >&2
         return 1
@@ -182,9 +183,11 @@ qdlocker_type_password_chars() {
     for attempt in 1 2 3; do
         _qdlocker_type_password_chars_once "$password" || return $?
         sleep 0.2
-        if qdlocker_assert_prompt_len "$want" 2>/dev/null; then
-            return 0
-        fi
+        local rc=0
+        qdlocker_assert_prompt_len "$want" 2>/dev/null || rc=$?
+        [ "$rc" -eq 0 ] && return 0
+        # rc 3: introspection is off — a harness ERROR, not a typing miss.
+        [ "$rc" -eq 3 ] && { qdlocker_ctrl status >/dev/null; return 3; }
         echo "qdlocker_type_password_chars: attempt $attempt prompt-len mismatch (want $want); clearing + retrying" >&2
         # Clear the field: send a generous number of backspaces, then confirm the
         # field is actually empty before retyping — otherwise residual chars make

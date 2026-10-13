@@ -42,9 +42,9 @@ def test_notification_detail_mode_combo_options():
     translations = json.loads(
         (QDSHELL_ROOT / "Assets/Translations/en.json").read_text())
     names = translations["options"]["notification-detail-mode"]
-    assert names["compact"].startswith("Compact")
-    assert names["normal"].startswith("Normal")
-    assert names["detailed"].startswith("Detailed")
+    assert names == {"compact": "Compact (title only)",
+                     "normal": "Normal (title and body)",
+                     "detailed": "Detailed (title, body, actions, time)"}
 
 def test_appearance_gtk_theme_description_matches_scanner_roots():
     source = (QDSHELL_ROOT / "Modules/Panels/Settings/Tabs/Appearance"
