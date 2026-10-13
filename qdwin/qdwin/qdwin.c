@@ -224,6 +224,7 @@ static void qdwin_chrome_detach(struct qdwin_chrome *c);
 static void qdwin_toplevel_position_chrome(struct qdwin_toplevel *tl);
 static void qdwin_move_grab_end_for(struct qdwin *qdwin, uint32_t handle);
 static void qdwin_resize_grab_end_for(struct qdwin *qdwin, uint32_t handle);
+static void qdwin_nested_proxy_send_configured(struct qdwin_toplevel *tl);
 static struct weston_pointer *qdwin_first_pointer(struct qdwin *qdwin);
 static void qdwin_move_grab_start(struct qdwin *qdwin,
 				  struct qdwin_toplevel *tl,
@@ -4438,6 +4439,46 @@ qdwin_resize_clamp(int v, int32_t min, int32_t max)
 	return v;
 }
 
+/* Nested-proxy edge drag. A proxy has no desktop surface: its curtain
+ * IS the content box, sized by qdwin_nested_proxy_set_geometry (which
+ * recreates it at the view's top-left and reports toplevel_geometry).
+ * So instead of configuring a client and anchoring on its commit, size
+ * the curtain directly and, for a left/top edge, move the view first so
+ * the opposite edges stay put. The publishing nested compositor learns
+ * the final size from `configured` when the drag ends
+ * (qdwin_nested_proxy_send_configured) — one reconfigure of the remote
+ * app per drag, not one per motion. */
+static void
+qdwin_resize_grab_motion_proxy(struct qdwin *qd, struct qdwin_toplevel *tl,
+			       int ow, int oh)
+{
+	int iw = qdwin_resize_clamp(ow - tl->inset_w - tl->inset_e, 64, 0);
+	int ih = qdwin_resize_clamp(oh - tl->inset_n - tl->inset_s, 48, 0);
+	if (iw == qd->resize_sent_w && ih == qd->resize_sent_h)
+		return;
+	qd->resize_sent_w = iw;
+	qd->resize_sent_h = ih;
+	uint32_t e = qd->resize_edges;
+	struct weston_coord_global vp =
+		weston_view_get_pos_offset_global(tl->view);
+	double nx = (e & WESTON_DESKTOP_SURFACE_EDGE_LEFT)
+		? qd->resize_anchor_right - iw : vp.c.x;
+	double ny = (e & WESTON_DESKTOP_SURFACE_EDGE_TOP)
+		? qd->resize_anchor_bottom - ih : vp.c.y;
+	if (nx != vp.c.x || ny != vp.c.y) {
+		struct weston_coord_global p = { .c = weston_coord(nx, ny) };
+		weston_view_set_position(tl->view, p);
+		weston_view_update_transform(tl->view);
+	}
+	/* Proxy convention (qdwin_toplevel_seed_outer_from_committed): the
+	 * curtain is the outer rect for maximise/restore bookkeeping. */
+	tl->outer_width = iw;
+	tl->outer_height = ih;
+	qdwin_nested_proxy_set_geometry(tl, iw, ih);
+	if (tl->view)
+		qdwin_toplevel_position_chrome(tl);
+}
+
 static void
 qdwin_resize_grab_focus(struct weston_pointer_grab *grab)
 {
@@ -4456,7 +4497,8 @@ qdwin_resize_grab_motion(struct weston_pointer_grab *grab,
 		return;
 	struct qdwin_toplevel *tl =
 		qdwin_toplevel_from_handle(qd, qd->resize_grab_handle);
-	if (!tl || !tl->view || !tl->desktop_surface)
+	if (!tl || !tl->view ||
+	    (!tl->desktop_surface && !tl->is_nested_proxy))
 		return;
 	/* Maximised / fullscreened / tiled mid-drag (keyboard shortcut,
 	 * client request): the drag is over — keep sizing it and the window
@@ -4482,6 +4524,11 @@ qdwin_resize_grab_motion(struct weston_pointer_grab *grab,
 		oh += (int)dy;
 	else if (e & WESTON_DESKTOP_SURFACE_EDGE_TOP)
 		oh -= (int)dy;
+
+	if (tl->is_nested_proxy) {
+		qdwin_resize_grab_motion_proxy(qd, tl, ow, oh);
+		return;
+	}
 
 	/* 64x48 floor keeps a dragged window grabbable even when the
 	 * client publishes no min size. */
@@ -4515,6 +4562,11 @@ qdwin_resize_grab_finish(struct qdwin *qd, const char *why)
 	qd->resize_grab_active = 0;
 	weston_log("qdwin: end_interactive_resize handle=%u (%s)\n",
 		   handle, why);
+	if (tl && tl->is_nested_proxy) {
+		qd->resize_anchor_handle = 0;
+		qdwin_nested_proxy_send_configured(tl);
+		return;
+	}
 	if (!tl || !tl->desktop_surface) {
 		qd->resize_anchor_handle = 0;
 		return;
@@ -4692,11 +4744,18 @@ qdwin_resize_grab_start(struct qdwin *qdwin, struct qdwin_toplevel *tl,
 			   "active\n", why, handle);
 		return;
 	}
-	/* Curtains are sized by the nested compositor's own configure
-	 * path; an edge drag on one is not wired yet. */
-	if (tl->is_nested_proxy || !tl->desktop_surface) {
-		weston_log("qdwin: %s handle=%u ignored — nested proxy\n",
-			   why, handle);
+	/* A nested proxy is sized through its curtain (see
+	 * qdwin_resize_grab_motion_proxy); one still awaiting the shell's
+	 * advertise decision is invisible and must not be dragged. */
+	if (tl->is_nested_proxy &&
+	    (!tl->proxy_curtain || tl->nested_proxy_pending_decision)) {
+		weston_log("qdwin: %s handle=%u ignored — nested proxy has no "
+			   "approved curtain\n", why, handle);
+		return;
+	}
+	if (!tl->is_nested_proxy && !tl->desktop_surface) {
+		weston_log("qdwin: %s handle=%u ignored — no desktop "
+			   "surface\n", why, handle);
 		return;
 	}
 	if ((tl->state & (QDWIN_TS_MAXIMIZED | QDWIN_TS_FULLSCREEN)) ||
@@ -4715,14 +4774,26 @@ qdwin_resize_grab_start(struct qdwin *qdwin, struct qdwin_toplevel *tl,
 
 	double x, y;
 	int w, h;
-	qdwin_toplevel_content_box(tl, &x, &y, &w, &h);
-	qdwin_toplevel_seed_outer_from_committed(tl);
+	if (tl->is_nested_proxy) {
+		struct weston_coord_global vp =
+			weston_view_get_pos_offset_global(tl->view);
+		x = vp.c.x;
+		y = vp.c.y;
+		w = tl->last_width;
+		h = tl->last_height;
+		/* The motion path subtracts the insets again. */
+		qdwin->resize_start_outer_w = w + tl->inset_w + tl->inset_e;
+		qdwin->resize_start_outer_h = h + tl->inset_n + tl->inset_s;
+	} else {
+		qdwin_toplevel_content_box(tl, &x, &y, &w, &h);
+		qdwin_toplevel_seed_outer_from_committed(tl);
+		qdwin->resize_start_outer_w = tl->outer_width;
+		qdwin->resize_start_outer_h = tl->outer_height;
+	}
 	qdwin->resize_grab_handle = handle;
 	qdwin->resize_edges = edges;
 	qdwin->resize_start_px = pointer->pos.c.x;
 	qdwin->resize_start_py = pointer->pos.c.y;
-	qdwin->resize_start_outer_w = tl->outer_width;
-	qdwin->resize_start_outer_h = tl->outer_height;
 	qdwin->resize_anchor_right = x + w;
 	qdwin->resize_anchor_bottom = y + h;
 	qdwin->resize_sent_w = w;
@@ -4731,10 +4802,13 @@ qdwin_resize_grab_start(struct qdwin *qdwin, struct qdwin_toplevel *tl,
 	qdwin->resize_anchor_released = false;
 	qdwin->resize_grab.interface = &qdwin_resize_grab_iface;
 	qdwin->resize_grab_active = 1;
-	weston_desktop_surface_set_resizing(tl->desktop_surface, true);
+	if (tl->desktop_surface)
+		weston_desktop_surface_set_resizing(tl->desktop_surface, true);
 	weston_pointer_start_grab(pointer, &qdwin->resize_grab);
-	weston_log("qdwin: %s handle=%u edges=%#x outer=%dx%d\n",
-		   why, handle, edges, tl->outer_width, tl->outer_height);
+	weston_log("qdwin: %s handle=%u edges=%#x outer=%dx%d%s\n",
+		   why, handle, edges, qdwin->resize_start_outer_w,
+		   qdwin->resize_start_outer_h,
+		   tl->is_nested_proxy ? " (nested proxy)" : "");
 }
 
 static void
@@ -24227,6 +24301,31 @@ qdwin_nested_proxy_set_geometry(struct qdwin_toplevel *tl, int w, int h)
 	}
 	weston_log("qdwin/nested-proxy: handle=%u resized to %dx%d\n",
 		   tl->handle, w, h);
+}
+
+/* Tell the publishing nested compositor the size the user dragged the
+ * proxy to (qdwin_nested_v1 `configured`: "any time the outer shell
+ * changes the allocated size"), so it reconfigures its inner client.
+ * Only when it differs from what the publisher was last told. */
+static void
+qdwin_nested_proxy_send_configured(struct qdwin_toplevel *tl)
+{
+	if (!tl || !tl->is_nested_proxy)
+		return;
+	struct qdwin_nested_toplevel *owner = tl->proxy_nested_owner;
+	if (!owner || !owner->resource || tl->last_width <= 0 ||
+	    tl->last_height <= 0)
+		return;
+	if (owner->configured_w == (uint32_t)tl->last_width &&
+	    owner->configured_h == (uint32_t)tl->last_height)
+		return;
+	qdwin_nested_toplevel_v1_send_configured(owner->resource,
+						 tl->last_width,
+						 tl->last_height);
+	owner->configured_w = (uint32_t)tl->last_width;
+	owner->configured_h = (uint32_t)tl->last_height;
+	weston_log("qdwin/nested-proxy: handle=%u configured publisher "
+		   "%dx%d\n", tl->handle, tl->last_width, tl->last_height);
 }
 
 static uid_t

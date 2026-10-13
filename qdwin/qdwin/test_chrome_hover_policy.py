@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Source invariants for frame hover and frame cursors (v37).
+"""Source invariants for frame hover, frame cursors and proxy edge drags (v37).
 
 qdshell paints the server-side frame but never sees wl_pointer enter or
 motion on its own chrome surfaces (the same-client suppression
@@ -19,6 +19,10 @@ shell pick the frame cursor. The load-bearing pieces pinned here:
    version gate posts an error; locked, stale-handle, unknown-shape and
    mid-drag requests are ignored. It installs a registered sprite.
 4. Hover state cannot outlive its toplevel or the shell binding.
+5. Nested proxies are resizable: an approved curtain is sized directly
+   (left/top edges move the view so the opposite edges stay put), a
+   held proxy is refused, and the publisher learns the final size once,
+   via qdwin_nested_v1 `configured`, when the drag ends.
 """
 import re
 import sys
@@ -143,7 +147,43 @@ def main():
     if not re.search(r"qdwin->shell_bound = 0;\s*qdwin->chrome_hover_handle = 0;", src):
         return fail("shell unbind must forget the hover")
 
-    print("PASS: frame hover and frame cursors hold")
+    # 5. nested-proxy edge drag
+    start = body(src, "qdwin_resize_grab_start")
+    if not start:
+        return fail("qdwin_resize_grab_start not found")
+    if "ignored — nested proxy\\n" in start:
+        return fail("nested proxies must no longer be refused outright")
+    if "tl->nested_proxy_pending_decision" not in start \
+            or "!tl->proxy_curtain" not in start:
+        return fail("a held proxy (or one without a curtain) must be refused")
+    if "if (tl->desktop_surface)\n\t\tweston_desktop_surface_set_resizing" not in start:
+        return fail("set_resizing must not be called on a proxy (NULL desktop surface)")
+    pm = body(src, "qdwin_resize_grab_motion_proxy")
+    if not pm:
+        return fail("qdwin_resize_grab_motion_proxy not found")
+    for token, why in (
+        ("qdwin_nested_proxy_set_geometry(tl, iw, ih)", "size the curtain"),
+        ("resize_anchor_right - iw", "keep the right edge for a left drag"),
+        ("resize_anchor_bottom - ih", "keep the bottom edge for a top drag"),
+        ("qdwin_toplevel_position_chrome(tl)", "move the frame with it"),
+    ):
+        if token not in pm:
+            return fail(f"proxy drag must {why}")
+    motion = body(src, "qdwin_resize_grab_motion")
+    if not motion or "qdwin_resize_grab_motion_proxy(qd, tl, ow, oh)" not in motion:
+        return fail("the resize grab must route proxies to the curtain path")
+    if motion.find("qdwin_resize_grab_motion_proxy") > motion.find(
+            "weston_desktop_surface_get_min_size"):
+        return fail("proxies must leave before any desktop-surface call")
+    fin = body(src, "qdwin_resize_grab_finish")
+    if not fin or "qdwin_nested_proxy_send_configured(tl)" not in fin:
+        return fail("the drag end must tell the publisher the new size")
+    cfg = body(src, "qdwin_nested_proxy_send_configured")
+    if not cfg or "qdwin_nested_toplevel_v1_send_configured" not in cfg \
+            or "configured_w ==" not in cfg:
+        return fail("configured goes to the publisher once per size change")
+
+    print("PASS: frame hover, frame cursors and proxy edge drags hold")
     return 0
 
 

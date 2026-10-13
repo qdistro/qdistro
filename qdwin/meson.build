@@ -1342,7 +1342,7 @@ test('window-decoration-policy',
   ],
 )
 
-# v37 frame hover + shell-chosen frame cursors.
+# v37 frame hover + shell-chosen frame cursors, and nested-proxy edge drags.
 test('chrome-hover-policy',
   python3,
   suite: 'source_invariant',
