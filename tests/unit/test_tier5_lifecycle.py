@@ -83,6 +83,37 @@ def test_lifecycle_refuses_root(host, tmp_path):
     assert host.log() == ""
 
 
+@pytest.mark.parametrize("which", ["legacy-run", "legacy-boot"])
+def test_unretired_root_lifecycle_state_refuses_spawn_and_cleanup(host,
+                                                                  which):
+    # ensures: while a deferred upgrade leaves the old root-run lifecycle's
+    #          locks/boot mounts in place (an old wrapper may own a guest
+    #          through locks this lifecycle cannot see), the new lifecycle
+    #          neither launches, adopts nor tears down anything
+    #          (sol t5-r1 P2)
+    keep = host.spawn(VM, APP, TIER5_KEEP_DOMAIN=1)
+    _session_up(host)
+    _app_exit(host)
+    assert finish(keep)[0] == 0
+    (host.tmp / which).mkdir()
+    before = host.log()
+    rc, _out, err = finish(host.spawn(VM, APP))
+    assert rc == 3, err
+    assert "has not been retired" in err
+    r = host.cleanup_tool(VM)
+    assert r.returncode == 4, r.stderr
+    assert host.log() == before
+    assert host.qemu_alive(VM) and host.defined(VM)
+    assert host.overlay(VM).exists()
+    # once retired (installer re-run, or reboot), the guest is adoptable
+    (host.tmp / which).rmdir()
+    p = host.spawn(VM, APP)
+    _session_up(host, count=2)
+    _app_exit(host)
+    rc, _out, err = finish(p)
+    assert rc == 0 and "adopted running domain" in err, err
+
+
 def test_bridge_gets_only_fixed_path_and_bounded_args(host):
     # ensures: the one privileged step is pkexec of the pinned bridge path
     #          with exactly the VM name, port and the launch token qdshell

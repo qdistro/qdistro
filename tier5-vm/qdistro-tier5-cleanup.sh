@@ -19,6 +19,17 @@ if [ "$(id -u)" -eq 0 ]; then
     echo "[tier5-cleanup] FAIL: run as the admin user, not root" >&2
     exit 2
 fi
+# A deferred upgrade leaves the old root-run lifecycle's locks in place:
+# its wrappers' holds are invisible to ours, so refuse (see spawn-tier5.sh
+# and scripts/install/lib/tier5-legacy.sh).
+for _legacy in ${TIER5_LEGACY_STATE_DIRS-/run/qdistro-tier5 /run/qdistro-tier5-boot}; do
+    if [ -e "$_legacy" ]; then
+        echo "[tier5-cleanup] FAIL: $_legacy exists — the pre-bridge root-run" >&2
+        echo "        lifecycle has not been retired; re-run" >&2
+        echo "        install-tier5-for-vm.sh once its sessions end, or reboot" >&2
+        exit 4
+    fi
+done
 DISK_DIR="${TIER5_DISK_DIR:-$HOME/.local/share/libvirt/images}"
 DISK="$DISK_DIR/$VM_NAME.qcow2"
 DISK_BASE="${TIER5_BASE_DISK:-/var/lib/libvirt/images/qdistro-tier5-base.qcow2}"

@@ -68,6 +68,10 @@
 #   TIER5_NETWORK        (--vm only) "user" (default: virtio NIC with
 #                        QEMU usermode NAT) or "none" (no NIC).
 #   TIER5_NO_REAP=1      (--vm only) skip the startup orphan-overlay reaper.
+#   TIER5_LEGACY_STATE_DIRS
+#                        (--vm only; tests) the old root-run lifecycle's
+#                        state dirs whose presence refuses the launch
+#                        (default "/run/qdistro-tier5 /run/qdistro-tier5-boot").
 #   TIER5_DECISION_WAIT_SECS
 #                        (--vm only) bound on waiting for another wrapper's
 #                        adopt/create decision (1..600, default 120). A
@@ -385,6 +389,19 @@ else
         exit 1
     fi
     SILO_TAG="$VM_NAME"
+    # A deferred upgrade (scripts/install/lib/tier5-legacy.sh): the old
+    # root-run lifecycle's locks and boot mounts still exist, so an old
+    # wrapper may own a guest through locks this lifecycle cannot see.
+    # Adopting or tearing anything down now could destroy its guest.
+    for _legacy in ${TIER5_LEGACY_STATE_DIRS-/run/qdistro-tier5 /run/qdistro-tier5-boot}; do
+        if [ -e "$_legacy" ]; then
+            echo "[tier5] FAIL: $_legacy exists — the pre-bridge root-run tier-5" >&2
+            echo "        lifecycle has not been retired (sessions were live at" >&2
+            echo "        upgrade). Re-run install-tier5-for-vm.sh once they end," >&2
+            echo "        or reboot." >&2
+            exit 3
+        fi
+    done
     DISK_BASE="${TIER5_BASE_DISK:-/var/lib/libvirt/images/qdistro-tier5-base.qcow2}"
     # qemu:///session domains run as admin, so per-VM disks live in admin's
     # session image dir; the base stays shared under /var/lib/libvirt/images.

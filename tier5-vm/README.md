@@ -205,6 +205,19 @@ broker yes/no vote, which an admin-session process can cast, does not
 authorize it. polkit's keep window still applies: a fresh prompt per
 launch is not promised.
 
+Upgrade from the root-run lifecycle: its locks (`/run/qdistro-tier5`),
+boot bind mounts (`/run/qdistro-tier5-boot`) and root ownership registry
+(`/var/lib/qdistro/tier5-owned`) are retired by `install-tier5-for-vm.sh`
+only when that lifecycle is quiescent — no old lock held, no root-run
+spawn/cleanup process, no guest booted from the old mount dir
+(`scripts/install/lib/tier5-legacy.sh`). Otherwise the migration is
+deferred and nothing is deleted: removing the locks under a live old
+wrapper would hide its hold from the new admin-run locks, so a new launch
+could adopt and then destroy its guest. While either `/run` dir exists,
+`spawn-tier5.sh --vm` and `qdistro-tier5-cleanup.sh` refuse to run;
+re-running the installer after the old sessions end, or rebooting, clears
+it.
+
 ## Per-app guests: adoption, not pooling
 
 The domain is the SILO for a catalogue appId: `VMApps.launch()` derives

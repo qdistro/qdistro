@@ -130,21 +130,31 @@ chmod 0644 "$POLKIT_DIR/org.qdistro.tier5.policy"
 echo "[install-tier5] installed polkit policy at $POLKIT_DIR/org.qdistro.tier5.policy"
 
 # --- upgrade: retire the root-run lifecycle's state ---
-# Before the bridge split the lifecycle ran as root and kept a root
-# ownership registry plus bind-mounted boot disks. Neither is read any
-# more; a still-running guest keeps its open disk across the lazy unmount
-# and is re-adopted by its app, whose next define points at the overlay.
-rm -rf /var/lib/qdistro/tier5-owned
-_retire_tier5_runtime() {
-    local m
-    for m in /run/qdistro-tier5-boot/*.qcow2; do
-        [ -e "$m" ] || continue
-        umount -l "$m" 2>/dev/null || true
-    done
-    rm -rf /run/qdistro-tier5-boot /run/qdistro-tier5
-}
-live_only "retire /run/qdistro-tier5-boot mounts and /run/qdistro-tier5 locks" \
-    _retire_tier5_runtime
+# Before the bridge split the lifecycle ran as root, with its locks under
+# /run/qdistro-tier5, bind-mounted boot disks under /run/qdistro-tier5-boot
+# and a root ownership registry. Deleting that state under a still-running
+# old wrapper would split the lock namespace (its hold is invisible to the
+# new admin-run wrappers, which could adopt and then destroy its guest) and
+# break its own registry-backed cleanup — running guests can NOT simply be
+# re-adopted. So migration happens only when the old lifecycle is
+# quiescent; otherwise it is deferred and every old file is left in place,
+# and the new spawn/cleanup refuse to run while /run/qdistro-tier5{,-boot}
+# exist (a reboot clears them; so does re-running this installer once the
+# old sessions have ended). Design: lib/tier5-legacy.sh.
+# shellcheck source=lib/tier5-legacy.sh
+. "$_QDO_DIR/lib/tier5-legacy.sh"
+if is_offline; then
+    # The image being built runs nothing: only the persistent registry can
+    # exist in its tree, and nothing live is there to quiesce.
+    rm -rf "$T5_LEGACY_OWNED_DIR"
+elif t5_legacy_retire | sed 's/^/[install-tier5] /'; [ "${PIPESTATUS[0]}" -eq 0 ]; then
+    echo "[install-tier5] no root-run tier-5 lifecycle state remains"
+else
+    echo "[install-tier5] WARN: root-run tier-5 sessions are still active —" >&2
+    echo "        migration DEFERRED, old state kept. New tier-5 launches are" >&2
+    echo "        refused until those sessions end and this installer is" >&2
+    echo "        re-run, or until the next reboot." >&2
+fi
 
 # --- dynamic VM-app catalogue reconcile units (vmapps-dynamic) -------
 #

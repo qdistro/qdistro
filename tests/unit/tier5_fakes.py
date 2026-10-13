@@ -331,6 +331,9 @@ class FakeHost:
             "TIER5_SHUTDOWN_GRACE_SECS": "2",
             "LANG": "C.UTF-8",
             "PYTHONPATH": str(self.pyshim),
+            # hermetic: the host's own /run never decides these tests
+            "TIER5_LEGACY_STATE_DIRS": f"{self.tmp}/legacy-run "
+                                       f"{self.tmp}/legacy-boot",
         }
         env.update({k: str(v) for k, v in extra.items()})
         return env
