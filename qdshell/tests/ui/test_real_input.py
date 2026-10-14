@@ -247,8 +247,10 @@ def test_launcher_shift_and_backspace(vm_session):
     s = vm_session
     _open_launcher(s)
     try:
-        # Type a mixed-case word, then backspace the last char.
-        runner.type_text(s, "Firefox")
+        # Type a mixed-case non-word, then backspace the last char. A real
+        # word ("Firefox") let the describer fill in the deleted letter from
+        # its word prior; G/g keeps the Shift check unambiguous.
+        runner.type_text(s, "Gajkuz")
         time.sleep(0.4)
         runner.tap_key(s, "backspace")
         time.sleep(0.5)
@@ -274,8 +276,8 @@ def test_launcher_shift_and_backspace(vm_session):
         detail_actual = f"Magnified launcher search-field crop: {detail_actual}"
         overlay_verdict = runner.judge("- A launcher overlay is open.", actual)
         reference_text = (
-            "- The search field shows 'Firefo' — an uppercase F (Shift handled) "
-            "followed by lowercase letters, with the final 'x' removed by "
+            "- The search field shows 'Gajku' — an uppercase G (Shift handled) "
+            "followed by lowercase letters, with the final 'z' removed by "
             "Backspace.\n"
         )
         text_verdict = runner.judge(reference_text, detail_actual)
