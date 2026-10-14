@@ -810,7 +810,8 @@ class _D9Session:
             self.touch.dispatcher["motion"] = (
                 lambda *a: self.events.append(("touch_motion",)))
             self.touch.dispatcher["frame"] = lambda *a: None
-            self.touch.dispatcher["cancel"] = lambda *a: None
+            self.touch.dispatcher["cancel"] = (
+                lambda *a: self.events.append(("touch_cancel",)))
         self.ok = True
 
     # -- event log -----------------------------------------------------
@@ -982,6 +983,7 @@ class _D9Session:
         sh.bind_as_shell()
         surf = self.g["compositor"].create_surface()
         self.names[surf._ptr] = "LOCK"
+        self.lock_surf = surf
         self.lock_obj = sh.attach_lock_surface(surf)
         self.lock_obj.dispatcher["dismissed"] = lambda *a: None
         surf.attach(self._buffer(1024, 640), 0, 0)
@@ -990,6 +992,14 @@ class _D9Session:
         self.d.roundtrip()
         self.locked = True
         return True
+
+    def unlock(self):
+        """Unlock and take the lock surface down, as a locker does."""
+        self.g["qdwin_shell"].set_locked(0)
+        self.lock_obj.destroy()
+        self.lock_surf.destroy()
+        self.d.roundtrip()
+        self.locked = False
 
     def close(self):
         if getattr(self, "locked", False):
@@ -1309,6 +1319,7 @@ def test_layer_chain_lock_touch(display_name):
             print(f"  SKIP [{label}] cannot bind as the shell")
             return True
         done = [e[1] for e in s.since(m, "popup_done")]
+        cancels = len(s.since(m, "touch_cancel"))
         s.touch_motion(85, 25)
         s.touch_up()
         leaked = [e for e in s.since(m)
@@ -1316,11 +1327,11 @@ def test_layer_chain_lock_touch(display_name):
         m2 = s.mark()
         s.tap(600, 300)
         downs = [e[1] for e in s.since(m2, "touch_down")]
-        if done != ["P1"] or leaked or downs != ["LOCK"]:
+        if done != ["P1"] or cancels != 1 or leaked or downs != ["LOCK"]:
             print(f"  FAIL [{label}] at lock: popup_done {done} (want "
-                  f"['P1']); held touch after lock delivered {leaked} "
-                  f"(want nothing); locker's first touch went to {downs} "
-                  f"(want ['LOCK'])")
+                  f"['P1']); wl_touch.cancel x{cancels} (want 1); held "
+                  f"touch after lock delivered {leaked} (want nothing); "
+                  f"locker's first touch went to {downs} (want ['LOCK'])")
             return False
         print(f"  PASS [{label}] lock dismissed the chain, the held touch "
               f"went quiet, the locker got its first touch")
@@ -1361,6 +1372,107 @@ def test_layer_chain_lock_pointer(display_name):
         return True
     finally:
         s.close()
+
+
+def test_lock_touch_cancel_reuse(display_name):
+    """sol r2: a lock cancels a touch in progress on any surface, not only
+    a menu. A finger held on an ordinary surface (L2, no grab) when the
+    lock lands gets wl_touch.cancel; its motion/up while locked go
+    nowhere; after unlock a new touch reusing the same id starts a clean
+    session on L2 (down then up), with no up ever delivered for the
+    cancelled one."""
+    label = "lock_touch_cancel_reuse"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        if s.touch is None or "qdwin_shell" not in s.g:
+            print(f"  SKIP [{label}] no touch / qdwin_shell_v1")
+            return True
+        l2 = s.layer("L2", 50, 50, margin_left=300)
+        m = s.mark()
+        s.touch_down(310, 10)
+        if [e[1] for e in s.since(m, "touch_down")] != ["L2"]:
+            print(f"  FAIL [{label}] setup: held touch not on L2: "
+                  f"{s.since(m)}")
+            return False
+        m = s.mark()
+        if not s.lock():
+            print(f"  SKIP [{label}] cannot bind as the shell")
+            return True
+        s.touch_motion(315, 15)
+        s.touch_up()
+        locked_events = [e[0] for e in s.since(m)
+                         if e[0].startswith("touch_")]
+        s.unlock()
+        s._commit_and_repaint(l2["surf"])
+        m2 = s.mark()
+        s.tap(310, 10)
+        after = [e[0] if e[0] != "touch_down" else ("touch_down", e[1])
+                 for e in s.since(m2) if e[0].startswith("touch_")]
+        if locked_events != ["touch_cancel"] or \
+                after != [("touch_down", "L2"), "touch_up"]:
+            print(f"  FAIL [{label}] while locked got {locked_events} "
+                  f"(want ['touch_cancel']); after unlock got {after} "
+                  f"(want down on L2 then up)")
+            return False
+        print(f"  PASS [{label}] lock cancelled the held touch; the reused "
+              f"id after unlock is a clean down/up on L2")
+        return True
+    finally:
+        s.close()
+
+
+def test_layer_chain_grab_after_lock(display_name):
+    """sol r2: a serial obtained before the lock cannot grab after it. The
+    client keeps its last touch-down / press serial, the lock lands, then it
+    opens a layer popup and grabs with that serial: the grab is denied the
+    spec way (popup_done, no protocol error), no grab is installed, and the
+    locker's next touch / press is delivered to it."""
+    label = "layer_chain_grab_after_lock"
+    ok = True
+    for kind in ("touch", "pointer"):
+        sub = f"{label}:{kind}"
+        s = _d9_session(sub, display_name)
+        if s is None:
+            return True
+        try:
+            if "qdwin_shell" not in s.g or (kind == "touch" and
+                                            s.touch is None):
+                print(f"  SKIP [{sub}] no touch / qdwin_shell_v1")
+                continue
+            l1 = s.layer("L1", 50, 50)
+            if kind == "touch":
+                s.tap(10, 10)
+            else:
+                s.click(10, 10)
+            serial = s.serial
+            if not s.lock():
+                print(f"  SKIP [{sub}] cannot bind as the shell")
+                continue
+            start = _stderr_size()
+            m = s.mark()
+            s.popup("P1", 60, 0, layer=l1, grab=serial, wait=False)
+            done = [e[1] for e in s.since(m, "popup_done")]
+            errs = _errors_since(start)
+            m2 = s.mark()
+            if kind == "touch":
+                s.tap(600, 300)
+                got = [e[1] for e in s.since(m2, "touch_down")]
+            else:
+                s.click(600, 300)
+                got = [e[1] for e in s.since(m2, "button") if e[2] == 1]
+            if done != ["P1"] or errs or got != ["LOCK"]:
+                print(f"  FAIL [{sub}] grab after lock: popup_done {done} "
+                      f"(want ['P1']), errors {errs} (want none); the "
+                      f"locker's next {kind} went to {got} (want ['LOCK'])")
+                ok = False
+            else:
+                print(f"  PASS [{sub}] pre-lock serial grab denied with "
+                      f"popup_done; the locker got its {kind}")
+        finally:
+            s.close()
+    return ok
 
 
 def _d9_session_probe(label, display_name):
@@ -1557,6 +1669,8 @@ def main():
         ("layer_chain_admission",       test_layer_chain_admission),
         ("layer_chain_lock_touch",      test_layer_chain_lock_touch),
         ("layer_chain_lock_pointer",    test_layer_chain_lock_pointer),
+        ("lock_touch_cancel_reuse",     test_lock_touch_cancel_reuse),
+        ("layer_chain_grab_after_lock", test_layer_chain_grab_after_lock),
         ("layer_popup_reposition",      test_layer_popup_reposition),
         ("v19_register_hotkey_live",    test_v19_register_hotkey_live),
     ]

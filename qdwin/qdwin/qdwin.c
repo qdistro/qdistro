@@ -8655,11 +8655,28 @@ static void qdwin_layer_popups_end_for_lock(struct qdwin *qdwin);
  * chain grab, and drop each seat's touch focus (an ongoing touch session
  * delivers nothing more; the next first touch picks the lock surface).
  * Pointer focus needs nothing: the default grab pins it to the lock view
- * while locked. */
+ * while locked.
+ *
+ * sol r2: dropping the focus alone leaves the focused client with touch
+ * points that never got an up — after unlock a new down may reuse such an
+ * id and leave its gesture state stuck. So the touch session is cancelled
+ * first (wl_touch.cancel to the focus's resources, while that focus is
+ * still set: the chain dismissal below destroys popup views, and a view's
+ * destruction clears touch focus silently). num_tp is left alone: the
+ * points are still physically down and their ups keep the count right;
+ * with no focus they deliver nothing. */
 static void
 qdwin_lock_revoke_routed_input(struct qdwin *qdwin)
 {
 	struct weston_seat *seat;
+	wl_list_for_each(seat, &qdwin->compositor->seat_list, link) {
+		struct weston_touch *touch = weston_seat_get_touch(seat);
+		struct wl_resource *r;
+		if (!touch || !touch->focus || touch->num_tp == 0)
+			continue;
+		wl_resource_for_each(r, &touch->focus_resource_list)
+			wl_touch_send_cancel(r);
+	}
 	qdwin_layer_popups_end_for_lock(qdwin);
 	wl_list_for_each(seat, &qdwin->compositor->seat_list, link) {
 		struct weston_touch *touch = weston_seat_get_touch(seat);
@@ -17054,6 +17071,33 @@ qdwin_layer_popup_layer_grab_handler(struct wl_resource *popup_resource,
 	struct qdwin *qdwin = user_data;
 	if (!qdwin || !wseat || !popup_resource)
 		return false;
+
+	/* sol r2: no layer-chain grab while locked. Device grab serials
+	 * survive the lock, so a client holding its last press/touch serial
+	 * could otherwise grab after the lock lands, replace the default grabs
+	 * and have the locker's next press or touch spent dismissing a menu
+	 * the lock hides. The grab is denied the spec way — "If the compositor
+	 * denies the grab, the popup will be immediately dismissed" — with
+	 * popup_done, not a protocol error (a shell can race its own menu
+	 * against the lock). Returning true keeps libweston from posting
+	 * invalid_grab; the dismiss marks the popup layer_dismissed, so a
+	 * submenu grab on it is dismissed in libweston too. Checked before the
+	 * serial, which would only decide which error a doomed grab gets. */
+	if (qdwin->locked) {
+		qdwin_xdg_popup_dismiss_layer_grab_fn dismiss =
+			qdwin_xdg_popup_dismiss_layer_grab_sym();
+		struct qdwin_layer_popup *lp =
+			qdwin_layer_popup_for_resource(qdwin, popup_resource);
+		weston_log("qdwin: layer-popup grab denied while locked "
+			   "popup=%p\n", (void *)popup_resource);
+		if (lp) {
+			lp->popup_resource = NULL;
+			qdwin_layer_popup_dismiss_chain(lp, popup_resource);
+		} else if (dismiss) {
+			dismiss(popup_resource);
+		}
+		return true;
+	}
 
 	/* Validate that one of the input devices on this seat has a grab
 	 * serial matching the request. Mirrors libweston's serial check

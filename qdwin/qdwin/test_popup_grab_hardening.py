@@ -493,6 +493,20 @@ def check_d9_followups(source):
             "weston_touch_set_focus(touch, NULL)" not in body):
         return fail("D9: lock does not end chain grabs and revoke touch "
                     "focus")
+    # sol r2: the session is cancelled (not just dropped), before the
+    # dismissal can clear the focus silently.
+    cancel = body.find("wl_touch_send_cancel")
+    if cancel < 0 or cancel > body.find("qdwin_layer_popups_end_for_lock"):
+        return fail("D9: lock drops touch focus without wl_touch.cancel "
+                    "first")
+    body, err = _function_body(
+        code, r"qdwin_layer_popup_layer_grab_handler\s*\(",
+        "qdwin_layer_popup_layer_grab_handler")
+    if err:
+        return fail(err)
+    locked = body.find("qdwin->locked")
+    if locked < 0 or locked > body.find("weston_pointer_start_grab"):
+        return fail("D9: a layer-chain grab can be installed while locked")
     return 0
 
 
