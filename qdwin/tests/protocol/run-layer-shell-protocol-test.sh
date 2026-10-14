@@ -22,6 +22,14 @@
 #   $2  path to test_zwlr_layer_shell.py
 #   $3  path to wlr-layer-shell-unstable-v1.xml
 #   $4  path to qdwin-shell-v1.xml
+#   $5  path to the built test input module (qdwin-test-input.so; optional)
+#   $6  path to weston-test.xml, the protocol that module serves (optional)
+#
+# With $5/$6 the compositor loads the module (--modules): a seat named
+# "qdwin-test-input" with pointer, keyboard and touch, driven by the client
+# over weston_test, so the D9 layer-chain tests take real grabs. Without
+# them those tests SKIP (the VM runner, qdwin/run-protocol-tests.sh, loads
+# no module).
 #
 # Env knobs:
 #   QDWIN_USE_VENDORED_LIBWESTON=1
@@ -47,6 +55,8 @@ PLUGIN="${1:-}"
 CLIENT="${2:-}"
 LAYER_SHELL_XML="${3:-}"
 QDWIN_SHELL_XML="${4:-}"
+INPUT_MODULE="${5:-}"
+WESTON_TEST_XML="${6:-}"
 
 [ -n "$PLUGIN" ] && [ -n "$CLIENT" ] && [ -n "$LAYER_SHELL_XML" ] \
     && [ -n "$QDWIN_SHELL_XML" ] || die "usage: $0 <plugin.so> <client.py> <layer-shell.xml> <qdwin-shell.xml>"
@@ -61,6 +71,15 @@ PLUGIN="$(abspath "$PLUGIN")"
 CLIENT="$(abspath "$CLIENT")"
 LAYER_SHELL_XML="$(abspath "$LAYER_SHELL_XML")"
 QDWIN_SHELL_XML="$(abspath "$QDWIN_SHELL_XML")"
+if [ -n "$INPUT_MODULE" ] && [ -n "$WESTON_TEST_XML" ]; then
+    INPUT_MODULE="$(abspath "$INPUT_MODULE")"
+    WESTON_TEST_XML="$(abspath "$WESTON_TEST_XML")"
+    [ -f "$INPUT_MODULE" ] || die "test input module not found at $INPUT_MODULE"
+    [ -f "$WESTON_TEST_XML" ] || die "weston-test.xml not found at $WESTON_TEST_XML"
+else
+    INPUT_MODULE=""
+    WESTON_TEST_XML=""
+fi
 
 # J29: the libweston major this plugin targets comes from qdwin's single source
 # of truth (libweston-vendored/VERSION) so the probes below track a version bump
@@ -173,6 +192,7 @@ cp "$CLIENT" "$STAGE/qdwin-test/" || die "cannot stage client"
 
 python3 -m pywayland.scanner \
     -i "$WAYLAND_XML" "$LAYER_SHELL_XML" "$XDG_SHELL_XML" "$QDWIN_SHELL_XML" \
+       ${WESTON_TEST_XML:+"$WESTON_TEST_XML"} \
     -o "$STAGE/qdshell/protocol" >/dev/null 2>"$STAGE/scanner.err" \
     || { echo "--- scanner stderr ---" >&2; cat "$STAGE/scanner.err" >&2; \
          die "pywayland scanner failed to generate bindings"; }
@@ -206,6 +226,7 @@ XDG_RUNTIME_DIR="$RUNDIR" \
 LD_LIBRARY_PATH="$WESTON_LD" \
     weston --backend=headless-backend.so --renderer=pixman --fake-seat \
            --config="$STAGE/weston.ini" --socket="$WLD" \
+           ${INPUT_MODULE:+--modules="$INPUT_MODULE"} \
            >"$WLOG" 2>&1 &
 WPID=$!
 
@@ -241,7 +262,7 @@ RC=$?
 
 echo "" >&2
 echo "=== weston log (zwlr / qdwin layer lines) ===" >&2
-grep -nE 'zwlr_layer|qdwin: layer|qdwin: register_hotkey|qdwin: unregister_hotkey' \
+grep -nE 'zwlr_layer|qdwin: layer|qdwin: register_hotkey|qdwin: unregister_hotkey|qdwin-test-input' \
     "$WLOG" >&2 || echo "(none)" >&2
 
 exit "$RC"

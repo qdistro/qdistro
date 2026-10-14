@@ -39,6 +39,10 @@ try:  # qdwin_shell_v1 may be absent on installs that didn't gen this protocol
     from protocol.qdwin_shell_v1 import QdwinShellV1  # noqa: E402
 except Exception:
     QdwinShellV1 = None  # type: ignore
+try:  # weston_test: only when the harness loaded the test input module
+    from protocol.weston_test import WestonTest  # noqa: E402
+except Exception:
+    WestonTest = None  # type: ignore
 
 
 def _vendored_libweston_active():
@@ -712,6 +716,318 @@ def test_popup_double_construct_refused(display_name):
     return False
 
 
+# ---------------------------------------------------------------------------
+# D9 follow-ups: live layer-chain grabs on the test input seat.
+#
+# The harness loads tests/protocol/weston-test-input-module.c, a seat named
+# "qdwin-test-input" (pointer, keyboard, touch) driven over weston_test.
+# These tests take REAL grabs on it — press/touch serials, outside presses —
+# which the stale-serial tests above cannot. Layout (global coordinates,
+# headless output at 0,0):
+#
+#   L1  layer surface (top layer)          (0,0)    50x50
+#   P1  root popup on L1                   (60,0)   40x40
+#   P2  submenu, parent P1                 (100,0)  40x40
+#   L2  sibling layer surface, same client (300,0)  50x50
+#   Q   ungrabbed root popup on L2         (300,60) 40x40
+#   (600,300) is empty: an outside press lands on nothing.
+# ---------------------------------------------------------------------------
+
+BTN_LEFT = 0x110
+TEST_SEAT = "qdwin-test-input"
+XDG_POSITIONER_ANCHOR_TOP_LEFT = 5
+XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT = 8
+
+
+class _D9Session:
+    """One client connection with the globals, the test seat's pointer and
+    touch, and an event log the tests assert on."""
+
+    def __init__(self, display_name):
+        from pywayland.protocol.wayland import WlSeat
+        self.ok = False
+        self.why = ""
+        self.d = Display(display_name)
+        self.d.connect()
+        self.g = {}
+        self.seats = []
+        self.events = []          # (kind, name, *details)
+        self.serial = None        # latest press / touch-down serial
+        self.names = {}           # surface ptr -> name
+        reg = self.d.get_registry()
+
+        def on_global(r, name, iface, ver):
+            if iface == WlCompositor.name:
+                self.g["compositor"] = r.bind(name, WlCompositor, min(ver, 4))
+            elif iface == ZwlrLayerShellV1.name:
+                self.g["shell"] = r.bind(name, ZwlrLayerShellV1, min(ver, 5))
+            elif iface == XdgWmBase.name:
+                self.g["xdg"] = r.bind(name, XdgWmBase, min(ver, 3))
+            elif iface == WlShm.name:
+                self.g["shm"] = r.bind(name, WlShm, 1)
+            elif iface == "weston_test" and WestonTest is not None:
+                self.g["test"] = r.bind(name, WestonTest, 1)
+            elif iface == "wl_seat":
+                s = r.bind(name, WlSeat, min(ver, 5))
+                rec = {"seat": s, "name": None, "caps": 0}
+                s.dispatcher["name"] = lambda _s, n, rec=rec: rec.update(name=n)
+                s.dispatcher["capabilities"] = (
+                    lambda _s, c, rec=rec: rec.update(caps=c))
+                self.seats.append(rec)
+
+        reg.dispatcher["global"] = on_global
+        reg.dispatcher["global_remove"] = lambda r, n: None
+        self.d.roundtrip()
+        self.d.roundtrip()
+        missing = [k for k in ("compositor", "shell", "xdg", "shm", "test")
+                   if k not in self.g]
+        if missing:
+            self.why = "missing globals: " + ", ".join(missing)
+            return
+        self.g["xdg"].dispatcher["ping"] = lambda x, serial: x.pong(serial)
+        rec = next((r for r in self.seats if r["name"] == TEST_SEAT), None)
+        if rec is None:
+            self.why = f"no wl_seat named {TEST_SEAT}"
+            return
+        self.seat = rec["seat"]
+        self.pointer = self.seat.get_pointer()
+        self.touch = self.seat.get_touch() if rec["caps"] & 4 else None
+        self.pointer.dispatcher["enter"] = self._on_enter
+        self.pointer.dispatcher["leave"] = lambda *a: None
+        self.pointer.dispatcher["motion"] = lambda *a: None
+        self.pointer.dispatcher["frame"] = lambda *a: None
+        self.pointer.dispatcher["button"] = self._on_button
+        if self.touch is not None:
+            self.touch.dispatcher["down"] = self._on_touch_down
+            self.touch.dispatcher["up"] = lambda *a: None
+            self.touch.dispatcher["motion"] = lambda *a: None
+            self.touch.dispatcher["frame"] = lambda *a: None
+            self.touch.dispatcher["cancel"] = lambda *a: None
+        self.ok = True
+
+    # -- event log -----------------------------------------------------
+    def _name(self, surface):
+        if surface is None:
+            return None
+        for ptr, name in self.names.items():
+            if getattr(surface, "_ptr", None) == ptr:
+                return name
+        return "?"
+
+    def _on_enter(self, _p, serial, surface, sx, sy):
+        self.events.append(("enter", self._name(surface)))
+
+    def _on_button(self, _p, serial, time, button, state):
+        if state == 1:
+            self.serial = serial
+        self.events.append(("button", self.focus_name(), state))
+
+    def focus_name(self):
+        for kind, *rest in reversed(self.events):
+            if kind == "enter":
+                return rest[0]
+        return None
+
+    def _on_touch_down(self, _t, serial, time, surface, tid, x, y):
+        self.serial = serial
+        self.events.append(("touch_down", self._name(surface)))
+
+    def mark(self):
+        return len(self.events)
+
+    def since(self, mark, kind=None):
+        return [e for e in self.events[mark:] if kind is None or e[0] == kind]
+
+    # -- input on the test seat -----------------------------------------
+    def _ts(self):
+        import time
+        ns = time.monotonic_ns()
+        sec, nsec = divmod(ns, 1_000_000_000)
+        return (sec >> 32, sec & 0xffffffff, nsec)
+
+    def move(self, x, y):
+        self.g["test"].move_pointer(*self._ts(), x, y)
+        self.d.roundtrip()
+
+    def click(self, x, y):
+        self.move(x, y)
+        self.g["test"].send_button(*self._ts(), BTN_LEFT, 1)
+        self.d.roundtrip()
+        self.g["test"].send_button(*self._ts(), BTN_LEFT, 0)
+        self.d.roundtrip()
+
+    def tap(self, x, y, tid=0):
+        self.g["test"].send_touch(*self._ts(), tid, x, y, 0)   # down
+        self.d.roundtrip()
+        self.g["test"].send_touch(*self._ts(), tid, 0, 0, 1)   # up
+        self.d.roundtrip()
+
+    # -- surfaces --------------------------------------------------------
+    def _buffer(self, w, h):
+        stride = w * 4
+        size = stride * h
+        fd = os.memfd_create("d9-buf")
+        os.ftruncate(fd, size)
+        os.write(fd, b"\xff" * size)
+        pool = self.g["shm"].create_pool(fd, size)
+        buf = pool.create_buffer(0, w, h, stride, 0)   # argb8888
+        pool.destroy()
+        os.close(fd)
+        return buf
+
+    def _commit_and_repaint(self, surf):
+        """Commit and wait for the frame callback. Input picking walks the
+        compositor's view list, which is rebuilt at repaint: until the
+        output has repainted, a freshly mapped surface takes no input."""
+        import time
+        done = []
+        cb = surf.frame()
+        cb.dispatcher["done"] = lambda _cb, t: done.append(t)
+        surf.commit()
+        deadline = time.monotonic() + 3.0
+        while not done and time.monotonic() < deadline:
+            try:
+                self.d.roundtrip()
+            except Exception:
+                return
+            time.sleep(0.005)
+
+    def layer(self, name, w, h, margin_left=0):
+        surf = self.g["compositor"].create_surface()
+        self.names[surf._ptr] = name
+        ls = self.g["shell"].get_layer_surface(
+            surf, None, ZwlrLayerShellV1.layer.top.value, "d9-" + name)
+        ls.set_size(w, h)
+        ls.set_anchor(ZwlrLayerSurfaceV1.anchor.top.value
+                      | ZwlrLayerSurfaceV1.anchor.left.value)
+        if margin_left:
+            ls.set_margin(0, 0, 0, margin_left)
+        ls.dispatcher["configure"] = lambda _ls, s, cw, ch: _ls.ack_configure(s)
+        surf.commit()
+        self.d.roundtrip()
+        surf.attach(self._buffer(w, h), 0, 0)
+        self._commit_and_repaint(surf)
+        return {"surf": surf, "ls": ls, "name": name}
+
+    def popup(self, name, x, y, layer=None, parent=None, grab=None,
+              wait=True):
+        """A 40x40 popup at (x,y) relative to its parent: a root popup on a
+        layer surface, or a submenu of another popup. grab=serial takes
+        xdg_popup.grab before the first commit (the spec order). wait=False
+        skips waiting for the repaint (a popup refused or dismissed at
+        grab time never maps)."""
+        pos = self.g["xdg"].create_positioner()
+        pos.set_size(40, 40)
+        pos.set_anchor_rect(x, y, 1, 1)
+        pos.set_anchor(XDG_POSITIONER_ANCHOR_TOP_LEFT)
+        pos.set_gravity(XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT)
+        surf = self.g["compositor"].create_surface()
+        self.names[surf._ptr] = name
+        xs = self.g["xdg"].get_xdg_surface(surf)
+        p = xs.get_popup(parent["xs"] if parent else None, pos)
+        rec = {"surf": surf, "xs": xs, "popup": p, "name": name,
+               "configured": []}
+        p.dispatcher["configure"] = lambda *a: None
+        p.dispatcher["popup_done"] = (
+            lambda _p, n=name: self.events.append(("popup_done", n)))
+        xs.dispatcher["configure"] = (
+            lambda _xs, s, rec=rec: (_xs.ack_configure(s),
+                                     rec["configured"].append(s)))
+        if layer is not None:
+            layer["ls"].get_popup(p)
+        if grab is not None:
+            p.grab(self.seat, grab)
+        surf.commit()
+        self.d.roundtrip()
+        if rec["configured"]:
+            surf.attach(self._buffer(40, 40), 0, 0)
+            if wait:
+                self._commit_and_repaint(surf)
+            else:
+                surf.commit()
+        try:
+            self.d.roundtrip()
+        except Exception:
+            pass
+        return rec
+
+    def close(self):
+        try:
+            self.d.disconnect()
+        except Exception:
+            pass
+
+
+def _d9_session(label, display_name):
+    """A ready session, or None after printing why the test SKIPs."""
+    if not _vendored_libweston_active():
+        print(f"  SKIP [{label}] layer-chain grabs need the vendored "
+              f"libweston; set QDWIN_USE_VENDORED_LIBWESTON=1")
+        return None
+    if WestonTest is None:
+        print(f"  SKIP [{label}] no weston_test bindings (harness loaded no "
+              f"test input module)")
+        return None
+    s = _D9Session(display_name)
+    if not s.ok:
+        print(f"  SKIP [{label}] {s.why} (harness loaded no test input "
+              f"module?)")
+        s.close()
+        return None
+    return s
+
+
+def _errors_since(start):
+    return [(m.group(1), int(m.group(3)), m.group(4))
+            for m in _WL_ERR_RE.finditer(_read_captured_stderr_since(start))]
+
+
+def _open_chain(s, nested=True):
+    """L1 + grabbed P1 (+ grabbed submenu P2), each grab on a fresh press
+    serial: the press on L1 opens P1, a press on P1 opens P2."""
+    l1 = s.layer("L1", 50, 50)
+    s.click(10, 10)
+    p1 = s.popup("P1", 60, 0, layer=l1, grab=s.serial)
+    if not nested:
+        return l1, p1, None
+    s.click(80, 20)
+    p2 = s.popup("P2", 40, 0, parent=p1, grab=s.serial)
+    return l1, p1, p2
+
+
+def test_layer_chain_grab_live(display_name):
+    """D9 positive path on a real grab: a submenu joins the root's grab, a
+    press on it is delivered (no dismissal), and an outside press dismisses
+    the chain topmost first."""
+    label = "layer_chain_grab_live"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        start = _stderr_size()
+        _l1, _p1, _p2 = _open_chain(s)
+        m = s.mark()
+        s.click(120, 20)
+        pressed = [e for e in s.since(m, "button") if e[2] == 1]
+        if s.since(m, "popup_done") or not pressed or pressed[0][1] != "P2":
+            print(f"  FAIL [{label}] press on the submenu was not delivered "
+                  f"to it inside the grab: {s.since(m)}")
+            return False
+        m = s.mark()
+        s.click(600, 300)
+        done = [e[1] for e in s.since(m, "popup_done")]
+        errs = _errors_since(start)
+        if done != ["P2", "P1"] or errs:
+            print(f"  FAIL [{label}] outside press: popup_done {done} "
+                  f"(want ['P2', 'P1']), errors {errs}")
+            return False
+        print(f"  PASS [{label}] submenu press delivered; outside press "
+              f"dismissed P2 then P1")
+        return True
+    finally:
+        s.close()
+
+
 def test_layer_popup_grab_handler_registered(display_name):
     """plan3 post-review: positive discriminator for H1.
 
@@ -892,6 +1208,7 @@ def main():
         ("layer_popup_grab_handler_registered", test_layer_popup_grab_handler_registered),
         ("layer_popup_nested_grab_routed", test_layer_popup_nested_grab_routed),
         ("popup_double_construct_refused", test_popup_double_construct_refused),
+        ("layer_chain_grab_live",       test_layer_chain_grab_live),
         ("layer_popup_reposition",      test_layer_popup_reposition),
         ("v19_register_hotkey_live",    test_v19_register_hotkey_live),
     ]
