@@ -173,7 +173,15 @@ counts)
     echo "overlay=$(ls "$IMG/$N".qcow2* 2>/dev/null | wc -l)"
     echo "records=$(sqlite3 "$DB" "SELECT count(*) FROM audit WHERE id > $A0 AND action='qdistro.lineage.register:vm-$N';")"
     echo "new-waypipe=$(for p in $(pgrep -x waypipe); do grep -qx "$p" "$S/chain-before" || echo "$p"; done | wc -l)"
-    echo "root-files=$(find /home/admin/.local/share/libvirt /run/user/1000 -xdev -user root -newer "$S/vmname" 2>/dev/null | wc -l)"
+    # Root-owned files the launch chain created in admin's dirs. The one
+    # root file the HARNESS writes there is excluded by exact path:
+    # qdwin_screenshot (qdwin/tests/gui/qdwin-helpers.sh) records the
+    # compositor's VT in /run/user/1000/qdwin-active-vt through root vm-exec
+    # on every capture. Every other hit is listed so it can be named.
+    rf=$(find /home/admin/.local/share/libvirt /run/user/1000 -xdev -user root \
+             -newer "$S/vmname" ! -path /run/user/1000/qdwin-active-vt 2>/dev/null)
+    echo "root-files=$(grep -c . <<<"$rf")"
+    [ -n "$rf" ] && printf 'root-file %s\n' $rf
     [ -n "$roots" ] && printf '%s\n' "$roots" ;;
 rows)
     sqlite3 "$DB" "SELECT source FROM audit WHERE id > $A0 AND action='qdistro.lineage.register:vm-$N' ORDER BY id;" ;;
