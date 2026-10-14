@@ -200,7 +200,8 @@ TMP_SCOPED_HINT_RE = re.compile(r"\$|`|mktemp")
 # flagged; and a top-level `runuser -c` is host-side unless already nested inside a
 # wrapper span (which the scanner covers for free).
 # Env-var-style wrappers ($VMEXEC / "$QDWIN_VM_EXEC" / ${FOO_VM_EXEC}), the
-# bareword `vm_ssh` helper (run-55 defines it as an ssh-into-guest runner), and
+# bareword `vm_ssh` helper (an ssh-into-guest runner; the retired run-55 used
+# it), and
 # a literal `vm-exec` binary (path or bare). The bareword form needs a left
 # word-boundary check (see the scanner) so `myvm_ssh` does not arm. `vm-exec`
 # additionally requires a path/command boundary so `--vm-exec` does not arm.
