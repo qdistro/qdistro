@@ -7,7 +7,7 @@
 lane" section of `AGENTS.md` first: no xdotool, no `DISPLAY=:0`; graded frames
 come from `qdwin_screenshot`.
 
-**What**: launching **Foot Terminal (VM)** (catalogue appId `tier5/foot`) from
+**What**: launching the foot VM row (catalogue appId `tier5/foot`) from
 qdshell's launcher runs `qdistro-tier5-spawn --vm <derived name> --policy-key
 tier5/foot -- foot` as admin. Its one root step is `pkexec
 /usr/libexec/qdistro/qdistro-tier5-bridge`, polkit action
@@ -235,8 +235,11 @@ launch_foot_vm
 qdwin_screenshot "$ART/63-s1-launcher.png"
 ```
 
-OPEN `63-s1-launcher.png`. The launcher lists **Foot Terminal (VM)** (a VM
-catalogue row, `[VM]` / `(VM)` marker). If it is not the highlighted row, press
+OPEN `63-s1-launcher.png`. The launcher lists the guest's foot as a VM
+catalogue row (appId `tier5/foot`): **Foot** with a `[VM]` description when
+the boot-time scan published the guest base's catalogue, or **Foot Terminal
+(VM)** when VMApps fell back to its built-in row. Either is the same launch
+(`--policy-key tier5/foot -- foot`); the guest base ships foot either way. If it is not the highlighted row, press
 Down (`$VMGUI "$VM" key Down`) and re-capture until it is. Then start it:
 
 ```bash
@@ -414,7 +417,7 @@ $VMEXEC "$VM" 'systemctl stop qci-63-login.service 2>/dev/null; rm -f /etc/polki
 ```
 
 ## Screenshots
-- `63-s1-launcher.png` — the launcher with the Foot Terminal (VM) row
+- `63-s1-launcher.png` — the launcher with the foot VM row (`tier5/foot`)
 - `63-s1-password-dialog.png` — the agent's password dialog for the tier-5 bridge
 - `63-s1-cancelled.png` — after Cancel: no dialog, no app window
 - `63-s2-password-dialog-again.png` — the dialog again on the second launch
