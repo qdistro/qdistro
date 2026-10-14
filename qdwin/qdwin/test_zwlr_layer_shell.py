@@ -768,6 +768,9 @@ class _D9Session:
                 self.g["xdg"] = r.bind(name, XdgWmBase, min(ver, 3))
             elif iface == WlShm.name:
                 self.g["shm"] = r.bind(name, WlShm, 1)
+            elif iface == "qdwin_shell_v1" and QdwinShellV1 is not None:
+                self.g["qdwin_shell"] = r.bind(name, QdwinShellV1,
+                                               min(ver, 19))
             elif iface == "weston_test" and WestonTest is not None:
                 self.g["test"] = r.bind(name, WestonTest, 1)
             elif iface == "wl_seat":
@@ -802,8 +805,10 @@ class _D9Session:
         self.pointer.dispatcher["button"] = self._on_button
         if self.touch is not None:
             self.touch.dispatcher["down"] = self._on_touch_down
-            self.touch.dispatcher["up"] = lambda *a: None
-            self.touch.dispatcher["motion"] = lambda *a: None
+            self.touch.dispatcher["up"] = (
+                lambda *a: self.events.append(("touch_up",)))
+            self.touch.dispatcher["motion"] = (
+                lambda *a: self.events.append(("touch_motion",)))
             self.touch.dispatcher["frame"] = lambda *a: None
             self.touch.dispatcher["cancel"] = lambda *a: None
         self.ok = True
@@ -857,6 +862,18 @@ class _D9Session:
         self.g["test"].send_button(*self._ts(), BTN_LEFT, 1)
         self.d.roundtrip()
         self.g["test"].send_button(*self._ts(), BTN_LEFT, 0)
+        self.d.roundtrip()
+
+    def touch_down(self, x, y, tid=0):
+        self.g["test"].send_touch(*self._ts(), tid, x, y, 0)
+        self.d.roundtrip()
+
+    def touch_motion(self, x, y, tid=0):
+        self.g["test"].send_touch(*self._ts(), tid, x, y, 2)
+        self.d.roundtrip()
+
+    def touch_up(self, tid=0):
+        self.g["test"].send_touch(*self._ts(), tid, 0, 0, 1)
         self.d.roundtrip()
 
     def tap(self, x, y, tid=0):
@@ -954,7 +971,33 @@ class _D9Session:
             pass
         return rec
 
+    def lock(self):
+        """Bind as the shell, attach an output-sized lock surface named
+        LOCK and lock (qdwin_shell_v1 set_locked, the path every lock -
+        hotkey, idle timeout, locker - ends in). Returns False when this
+        connection cannot be the shell."""
+        sh = self.g.get("qdwin_shell")
+        if sh is None:
+            return False
+        sh.bind_as_shell()
+        surf = self.g["compositor"].create_surface()
+        self.names[surf._ptr] = "LOCK"
+        self.lock_obj = sh.attach_lock_surface(surf)
+        self.lock_obj.dispatcher["dismissed"] = lambda *a: None
+        surf.attach(self._buffer(1024, 640), 0, 0)
+        self._commit_and_repaint(surf)
+        sh.set_locked(1)
+        self.d.roundtrip()
+        self.locked = True
+        return True
+
     def close(self):
+        if getattr(self, "locked", False):
+            try:
+                self.g["qdwin_shell"].set_locked(0)
+                self.d.roundtrip()
+            except Exception:
+                pass
         try:
             self.d.disconnect()
         except Exception:
@@ -1238,6 +1281,88 @@ def test_layer_chain_admission(display_name):
     return ok
 
 
+def test_layer_chain_lock_touch(display_name):
+    """D9 follow-up (sol r1): a lock ends the chain grab and the touch that
+    is in progress. A finger held on the grabbed popup when the lock lands
+    must deliver nothing more (its motion and up would go to a menu the
+    lock hides), the chain is dismissed by the lock itself, and the
+    locker's first touch reaches the lock surface instead of being eaten
+    to dismiss the hidden menu."""
+    label = "layer_chain_lock_touch"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        if s.touch is None or "qdwin_shell" not in s.g:
+            print(f"  SKIP [{label}] no touch / qdwin_shell_v1 on this "
+                  f"connection")
+            return True
+        l1 = s.layer("L1", 50, 50)
+        s.tap(10, 10)
+        s.popup("P1", 60, 0, layer=l1, grab=s.serial)
+        s.touch_down(80, 20)
+        if [e[1] for e in s.since(0, "touch_down")][-1:] != ["P1"]:
+            print(f"  FAIL [{label}] setup: held touch not on P1: {s.events}")
+            return False
+        m = s.mark()
+        if not s.lock():
+            print(f"  SKIP [{label}] cannot bind as the shell")
+            return True
+        done = [e[1] for e in s.since(m, "popup_done")]
+        s.touch_motion(85, 25)
+        s.touch_up()
+        leaked = [e for e in s.since(m)
+                  if e[0] in ("touch_motion", "touch_up")]
+        m2 = s.mark()
+        s.tap(600, 300)
+        downs = [e[1] for e in s.since(m2, "touch_down")]
+        if done != ["P1"] or leaked or downs != ["LOCK"]:
+            print(f"  FAIL [{label}] at lock: popup_done {done} (want "
+                  f"['P1']); held touch after lock delivered {leaked} "
+                  f"(want nothing); locker's first touch went to {downs} "
+                  f"(want ['LOCK'])")
+            return False
+        print(f"  PASS [{label}] lock dismissed the chain, the held touch "
+              f"went quiet, the locker got its first touch")
+        return True
+    finally:
+        s.close()
+
+
+def test_layer_chain_lock_pointer(display_name):
+    """D9 follow-up (sol r1), pointer half: a lock with a chain grab live
+    dismisses the chain (topmost first) at once, and the locker's first
+    press reaches the lock surface rather than dismissing the hidden
+    menu."""
+    label = "layer_chain_lock_pointer"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        if "qdwin_shell" not in s.g:
+            print(f"  SKIP [{label}] no qdwin_shell_v1 on this connection")
+            return True
+        _open_chain(s)
+        m = s.mark()
+        if not s.lock():
+            print(f"  SKIP [{label}] cannot bind as the shell")
+            return True
+        done = [e[1] for e in s.since(m, "popup_done")]
+        m2 = s.mark()
+        s.click(600, 300)
+        pressed = [e[1] for e in s.since(m2, "button") if e[2] == 1]
+        if done != ["P2", "P1"] or pressed != ["LOCK"]:
+            print(f"  FAIL [{label}] at lock: popup_done {done} (want "
+                  f"['P2', 'P1']); locker's first press went to {pressed} "
+                  f"(want ['LOCK'])")
+            return False
+        print(f"  PASS [{label}] lock dismissed P2 then P1; the locker got "
+              f"its first press")
+        return True
+    finally:
+        s.close()
+
+
 def _d9_session_probe(label, display_name):
     s = _d9_session(label, display_name)
     if s is not None:
@@ -1430,6 +1555,8 @@ def main():
         ("layer_chain_touch",           test_layer_chain_touch),
         ("layer_chain_refilter_scope",  test_layer_chain_refilter_scope),
         ("layer_chain_admission",       test_layer_chain_admission),
+        ("layer_chain_lock_touch",      test_layer_chain_lock_touch),
+        ("layer_chain_lock_pointer",    test_layer_chain_lock_pointer),
         ("layer_popup_reposition",      test_layer_popup_reposition),
         ("v19_register_hotkey_live",    test_v19_register_hotkey_live),
     ]

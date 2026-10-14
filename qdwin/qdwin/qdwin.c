@@ -8644,10 +8644,35 @@ qdwin_handle_attach_launcher(struct wl_client *client,
 
 /* §6.6 S5 — lock surface + set_locked. */
 
+static void qdwin_layer_popups_end_for_lock(struct qdwin *qdwin);
+
+/* D9 follow-up (sol r1): hiding a layer only removes it from picking. Input
+ * already routed to a surface keeps flowing: a live layer-popup chain grab
+ * would keep the pointer/touch for the hidden menu (and eat the locker's
+ * first press or touch to dismiss it), and a finger held down at lock time
+ * keeps its touch focus, so its motion/up reach the hidden surface. Every
+ * lock path hides the layers here, so end both here: dismiss every live
+ * chain grab, and drop each seat's touch focus (an ongoing touch session
+ * delivers nothing more; the next first touch picks the lock surface).
+ * Pointer focus needs nothing: the default grab pins it to the lock view
+ * while locked. */
+static void
+qdwin_lock_revoke_routed_input(struct qdwin *qdwin)
+{
+	struct weston_seat *seat;
+	qdwin_layer_popups_end_for_lock(qdwin);
+	wl_list_for_each(seat, &qdwin->compositor->seat_list, link) {
+		struct weston_touch *touch = weston_seat_get_touch(seat);
+		if (touch && touch->focus)
+			weston_touch_set_focus(touch, NULL);
+	}
+}
+
 static void
 qdwin_hide_non_lock_layers(struct qdwin *qdwin)
 {
 	weston_log("qdwin: hiding non-lock layers for lock\n");
+	qdwin_lock_revoke_routed_input(qdwin);
 	weston_layer_unset_position(&qdwin->background_layer);
 	weston_layer_unset_position(&qdwin->normal_layer);
 	weston_layer_unset_position(&qdwin->panel_layer);
@@ -16916,6 +16941,28 @@ qdwin_layer_popup_touch_grab_iface = {
 	.frame  = qdwin_layer_popup_touch_grab_frame,
 	.cancel = qdwin_layer_popup_touch_grab_cancel,
 };
+
+/* D9 follow-up (sol r1): the lock hides the layers a chain lives on; end
+ * every live chain grab then (popup_done, chain unmapped, both halves
+ * ended), so nothing is routed to a hidden menu and the locker's first
+ * press or touch is its own. See qdwin_lock_revoke_routed_input. */
+static void
+qdwin_layer_popups_end_for_lock(struct qdwin *qdwin)
+{
+	struct qdwin_layer_surface *ls;
+	wl_list_for_each(ls, &qdwin->layer_surfaces, link) {
+		struct qdwin_layer_popup *lp, *tmp;
+		wl_list_for_each_safe(lp, tmp, &ls->popups, link) {
+			if (!lp->grab_active &&
+			    !qdwin_layer_popup_pointer_grab_installed(lp) &&
+			    !qdwin_layer_popup_touch_grab_installed(lp))
+				continue;
+			weston_log("qdwin: layer-popup chain dismissed by "
+				   "lock\n");
+			qdwin_layer_popup_grab_dismiss(lp);
+		}
+	}
+}
 
 /* Forward declaration: defined later to find the qdwin_layer_popup that
  * owns a given xdg_popup resource. */

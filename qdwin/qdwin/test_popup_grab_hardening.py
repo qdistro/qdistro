@@ -474,6 +474,25 @@ def check_d9_followups(source):
     if "weston_view_destroy(lp->view)" not in body:
         return fail("D9: dismissing the chain leaves it mapped until the "
                     "client destroys the popups")
+    # sol r1: every lock path hides the layers through one helper; it must
+    # end chain grabs and drop touch focus, or a hidden menu keeps input.
+    body, err = _function_body(
+        code, r"qdwin_hide_non_lock_layers\s*\(",
+        "qdwin_hide_non_lock_layers")
+    if err:
+        return fail(err)
+    if "qdwin_lock_revoke_routed_input" not in body:
+        return fail("D9: locking leaves layer-chain grabs / touch focus "
+                    "routed to the hidden layers")
+    body, err = _function_body(
+        code, r"qdwin_lock_revoke_routed_input\s*\(",
+        "qdwin_lock_revoke_routed_input")
+    if err:
+        return fail(err)
+    if ("qdwin_layer_popups_end_for_lock" not in body or
+            "weston_touch_set_focus(touch, NULL)" not in body):
+        return fail("D9: lock does not end chain grabs and revoke touch "
+                    "focus")
     return 0
 
 
