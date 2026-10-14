@@ -50,6 +50,18 @@ WORK_UID=$(id -u "$WORK_USER")
 APPROVALS=/var/lib/qdistro/approvals/approvals.sqlite
 QSU_PGID=""
 
+# ausearch_since <epoch> — AVC/USER_AVC records since <epoch>. ausearch takes
+# the start DATE and TIME as TWO arguments (`--start 10/14/26 09:50:47`; one
+# "date time" word is parsed as a time and refused), in the locale's %x
+# format, so both the date(1) rendering and ausearch run under the same C
+# locale. tests/integration/qci/qsu-enforcing-driver.bats pins this argv.
+ausearch_since() {
+    local d t
+    d=$(LC_ALL=C date -d "@$1" +%x) || return 2
+    t=$(LC_ALL=C date -d "@$1" +%T) || return 2
+    LC_ALL=C ausearch -m AVC,USER_AVC --start "$d" "$t"
+}
+
 drain_qsu_cache() {
     python3 - "$APPROVALS" <<'PYEOF'
 import sqlite3, sys
@@ -182,8 +194,7 @@ AVCS=/tmp/s54-avcs.txt
 AU_ERR=/tmp/s54-ausearch.err
 : >"$AVCS"
 AU_RC=0
-ausearch -m AVC,USER_AVC --start "$(date -d @"$BASELINE_TS" '+%x %T')" \
-    >/tmp/s54-ausearch.out 2>"$AU_ERR" || AU_RC=$?
+ausearch_since "$BASELINE_TS" >/tmp/s54-ausearch.out 2>"$AU_ERR" || AU_RC=$?
 # ausearch exits 1 with "<no matches>" when there is nothing; any other
 # failure (no audit log, no permission, bad time) proves nothing.
 if [ "$AU_RC" -eq 0 ] || { [ "$AU_RC" -eq 1 ] && grep -q '<no matches>' "$AU_ERR"; }; then
