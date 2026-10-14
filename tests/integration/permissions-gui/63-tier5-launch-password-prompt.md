@@ -19,8 +19,9 @@ for this action and shows its "Authentication Required" password dialog.
 - **S2 Password** → the agent verifies `Pa_ssw0rd45` through PAM; the bridge
   starts the waypipe client, the broker registers it, the guest boots and the
   foot window appears, tagged `qdistro.tier5.<name>` by the compositor.
-- **S3 Second launch within the keep window** → no new dialog, no new
-  authentication; a second foot session joins the same guest.
+- **S3 Second launch** → the dialog appears AGAIN (every launch
+  authenticates); the password admits it and a second foot session joins
+  the same guest, tagged and registered.
 - **S4 Close** → both sessions closed: guest, overlay and every bridge-chain
   process are gone.
 
@@ -52,16 +53,17 @@ it is the one that tests authentication.
    `allow_active` states. It grants nothing: the password is still required,
    and S1 proves it.
 
-**Read before grading S3.** polkit keeps an `auth_admin_keep` grant for the
-authenticated SUBJECT, and pkexec's subject is its parent process — here the
-`spawn-tier5.sh` wrapper of the FIRST launch. polkitd treats a different
-process as the same subject only when both share parent, cgroup and a
-controlling terminal (none here). S3's second launch is a new wrapper
-process, so on the current product a second dialog is expected to appear.
-The requirement S3 states (no prompt within the keep window) is the
-acceptance bar this scenario was written to; a dialog in S3 is a **FAIL of
-S3**, recorded with the agent's `BeginAuth` line — never an ERROR, never a
-retry. Cancel that dialog and continue to S4.
+**Contract graded by S3: every launch authenticates.** polkit keeps an
+`auth_admin_keep` grant only for the authenticated SUBJECT, and pkexec's
+subject is its parent process — the `spawn-tier5.sh` wrapper of that launch.
+polkitd treats a different process as the same subject only when both share
+parent, cgroup and a controlling terminal (none here), and the product keeps
+no long-lived helper to carry a grant across launches. So each launch from
+the shell is a fresh wrapper, a fresh subject and a fresh password dialog:
+S3 PASSES when the dialog appears again and the password admits the second
+launch. The keep grant serves only the same caller process re-running pkexec
+(`tests/integration/vm/tier5-bridge-enforcing.bats`, `keep-same-caller`).
+A second launch that comes up WITHOUT a dialog is a FAIL of S3.
 
 ## Setup
 
@@ -286,11 +288,10 @@ If the agent logged `-> deny` with a PAM reason instead (wrong characters
 typed), that is a harness typing failure, not a product verdict: record ERROR
 with the agent line, do not retry more than once.
 
-**Go to S3 NOW** — do not wait for the guest to boot first: the keep window
-(about five minutes) runs from the `pam-ok` line, and a cold boot can take
-several minutes. S2's remaining assertions are checked after S3's launch.
+Go to S3 without waiting for the guest to boot; S2's remaining assertions
+are checked after S3's launch.
 
-### S3 — a second launch within the keep window: no dialog
+### S3 — a second launch asks for the password again
 
 ```bash
 launch_foot_vm
@@ -299,30 +300,46 @@ $VMGUI "$VM" key Return
 $VMEXEC "$VM" 'bash /run/qci-63/probe.sh wait-wrappers 2'
 # ... and its bridge became ready (or a dialog appeared). _UID=1000 covers
 # qdshell's spawn output AND the agent (User=admin), never qemu-ga's own log.
+# ... and the agent was asked again: a fresh wrapper is a fresh polkit
+# subject. _UID=1000 covers qdshell's spawn output AND the agent (User=admin).
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; c=$(cat /run/qci-63/s3.cur); await_journal_line_after_cursor "$c" "bridge ready: waypipe client pid=[0-9]+ silo=vm-t5-tier5-foot-|polkit BeginAuth: action=org.qdistro.tier5.bridge" 60 1 _UID=1000'
-$VMEXEC "$VM" 'c=$(cat /run/qci-63/s3.cur); echo "s3-beginauth=$(journalctl -u qdistro-polkit-agent.service --after-cursor "$c" --no-pager -o cat | grep -c "BeginAuth: action=org.qdistro.tier5.bridge method=pam\$")"; echo "s3-ready=$(journalctl _UID=1000 --after-cursor "$c" --no-pager -o cat | grep -c "bridge ready: waypipe client pid=")"'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_qdwin_window_title "Authentication Required" 60'
 qdwin_screenshot "$ART/63-s3-second-launch.png"
 ```
 
-If an "Authentication Required" dialog is visible in `63-s3-second-launch.png`
-(or `s3-beginauth` is not `0`): S3 FAILS (see "Read before grading S3"). Click
-its **Cancel** (coordinates from that frame) so the second wrapper exits, and
-continue.
+Click into the dialog's **Password:** field (coordinates from that frame) and
+type the password again:
+
+```bash
+qdwin_chord shift -- p
+qdwin_type_lower a
+qdwin_chord shift -- minus
+qdwin_type_lower ssw0rd45
+qdwin_send_key KEY_ENTER
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; c=$(cat /run/qci-63/s3.cur); await_journal_line_after_cursor "$c" "action=org.qdistro.tier5.bridge method=pam -> allow \(pam-ok\)" 60 1 -u qdistro-polkit-agent.service'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; c=$(cat /run/qci-63/s3.cur); await_journal_line_after_cursor "$c" "bridge ready: waypipe client pid=[0-9]+ silo=vm-t5-tier5-foot-" 60 1 _UID=1000'
+$VMEXEC "$VM" 'c=$(cat /run/qci-63/s3.cur); echo "s3-beginauth=$(journalctl -u qdistro-polkit-agent.service --after-cursor "$c" --no-pager -o cat | grep -c "BeginAuth: action=org.qdistro.tier5.bridge method=pam\$")"; echo "s3-pamok=$(journalctl -u qdistro-polkit-agent.service --after-cursor "$c" --no-pager -o cat | grep -c "action=org.qdistro.tier5.bridge method=pam -> allow (pam-ok)")"; echo "s3-ready=$(journalctl _UID=1000 --after-cursor "$c" --no-pager -o cat | grep -c "bridge ready: waypipe client pid=")"'
+```
+
+As in S2, a `-> deny` with a PAM reason here is a harness typing failure:
+record ERROR with the agent line, retry the typing at most once.
 
 **Assert (S3):**
-- `wrappers=2`.
-- `s3-beginauth=0`: no new authentication was started for the action.
-- `s3-ready=1`: the second launch's bridge came up without a prompt.
-- OPEN `63-s3-second-launch.png`: no "Authentication Required" dialog.
+- `wrappers=2` (both sessions running).
+- OPEN `63-s3-second-launch.png`: the same "Authentication Required" dialog
+  as in S1/S2, for `Action: org.qdistro.tier5.bridge`. No dialog here (the
+  second launch admitted without authenticating) is a FAIL.
+- `s3-beginauth=1` and `s3-pamok=1`: the agent asked once more and PAM
+  verified the password; `s3-ready=1`: only then did the second bridge come
+  up.
 
 ### S2/S3 (continued) — the guest boots; windows are tagged and registered
 
-Run this only after any S3 dialog was cancelled. Wait for as many tagged
-clients and windows as launches whose bridge came up since S2
-(`launches=`): 2 when S3 launched without a prompt, 1 when its dialog was
-cancelled. (The waiters' third argument is a poll interval, not a count, so
-the count is checked explicitly; a cancelled S3 must not stall the wait and a
-passed S3 must not be graded on its first window alone.)
+Wait for as many tagged clients and windows as launches whose bridge came
+up since S2 (`launches=`, 2 when S2 and S3 both authenticated). The waiters'
+third argument is a poll interval, not a count, so the count is checked
+explicitly: a failed S3 must not stall the wait, and S3 must not be graded
+on the first window alone.
 
 ```bash
 $VMEXEC "$VM" 'c=$(cat /run/qci-63/s2.cur); n=$(journalctl _UID=1000 --after-cursor "$c" --no-pager -o cat | grep -c "bridge ready: waypipe client pid="); echo "$n" > /run/qci-63/launches; echo "launches=$n"'
@@ -341,13 +358,14 @@ qdwin_screenshot "$ART/63-s2-app-running.png"
 - The compositor logged `client accepted engine=qdistro.tier5
   app_id=qdistro.tier5.<VMNAME>`; the window list has a toplevel titled
   `[tier5:<VMNAME>] …`.
-- `launches=` is 1 or 2 (2 only when S3 passed); `records=` equals it and each printed register row reads
+- `launches=2` and `records=2`; each printed register row reads
   `engine='qdistro.tier5' app='qdistro.tier5.<VMNAME>'`; `running=1`,
   `qemu=1` (one shared guest), each listed bridge has `uid=0`.
 - OPEN `63-s2-app-running.png`: a foot terminal window is visible at full
   opacity, no dialog.
-- (S3, when it passed) a SECOND foot window is listed and visible
-  (`accepted=2`) — the second session joined the same guest.
+- (S3) a SECOND foot window is listed and visible (`accepted=2`,
+  `windows-wait=2/2`) — the second, separately authenticated session joined
+  the same guest.
 
 ### S4 — close: guest, overlay and every chain process are gone
 
@@ -375,6 +393,6 @@ $VMEXEC "$VM" 'systemctl stop qci-63-login.service 2>/dev/null; rm -f /etc/polki
 - `63-s1-password-dialog.png` — the agent's password dialog for the tier-5 bridge
 - `63-s1-cancelled.png` — after Cancel: no dialog, no app window
 - `63-s2-password-dialog-again.png` — the dialog again on the second launch
-- `63-s3-second-launch.png` — the launch within the keep window (no dialog expected)
+- `63-s3-second-launch.png` — the second launch's password dialog (expected)
 - `63-s2-app-running.png` — the foot window(s) from the tier-5 guest
 - `63-s4-closed.png` — after closing: nothing left on screen
