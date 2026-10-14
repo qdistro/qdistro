@@ -1653,10 +1653,16 @@ def _crop_box_px(box: tuple, width: int, height: int) -> tuple[int, int, int, in
 def make_zoom_crop(src: Path, out: Path, crop, issued: set) -> Path:
     """Write a magnified, contrast-stretched crop of `src` to `out`.
 
-    The region is autocontrasted then histogram-equalized (monotonic per
-    channel, so which part is brighter than which is preserved while a
-    #161645-on-#070722 outline becomes plainly visible) and magnified
-    `crop.scale` times. Then the vision-repeat-region rule applies (vision
+    The region is autocontrasted then histogram-equalized so a
+    #161645-on-#070722 outline becomes plainly visible, and magnified
+    `crop.scale` times. Both steps remap each RGB channel on its own through
+    a non-decreasing lookup table: within one channel two levels never swap
+    order, but neighbouring levels can merge, and because R, G and B are
+    stretched independently the overall brightness (luma) order and hue of
+    differently coloured pixels is NOT guaranteed to survive. The crop is
+    shape-and-position evidence only; anything about light/dark order is
+    measured from the unstretched frame (measure_switch_knob), never read
+    off this image. Then the vision-repeat-region rule applies (vision
     models read a region repeated from an earlier same-size image as
     BLACK): the result is padded with a black right/bottom margin of the
     smallest k >= 1 whose (W, H) is not yet in `issued` (which the caller
@@ -1697,6 +1703,79 @@ def make_zoom_crop(src: Path, out: Path, crop, issued: set) -> Path:
     return out
 
 
+def measure_switch_knob(src: Path, crop) -> dict:
+    """Measure which end of a toggle switch's track its knob sits at.
+
+    Deterministic, from the UNSTRETCHED pixels of `crop.box` in `src` (the
+    zoom crop's per-channel stretch does not preserve luma order, so it is
+    never measured). Polarity-free, because NToggle inverts it with state:
+    unchecked = dark track + bright knob at the left, checked = bright
+    filled track + dark knob at the right. So the knob is found as the
+    columns of the track interior that deviate most from the interior's
+    median, not as "the bright part" (a filled track with a dark knob at the
+    right has its bright mass LEFT of centre).
+
+      1. track = bounding box of pixels whose luma differs from the region
+         median (the card) by >= 6 (the dim off-state outline is ~+15);
+      2. interior = the middle third of the track's rows, its columns
+         inset 2 px from the outline; per-column mean luma;
+      3. knob columns = those deviating >= half the maximum deviation from
+         the interior median; centre = deviation-weighted mean column;
+      4. side = left if centre < 40 % of the track width, right if > 60 %,
+         otherwise middle. No track, no contrast inside it (< 10 luma), or a
+         "knob" wider than 60 % of the track is "undetermined".
+
+    Returns {side, frac, track: (x0, x1) frame px, knob: (x0, x1) frame px,
+    contrast}; never raises on a recognisable crop box.
+    """
+    from PIL import Image
+    with Image.open(src) as im:
+        im.load()
+        lum = im.convert("L")
+    bx0, by0, bx1, by1 = _crop_box_px(crop.box, lum.width, lum.height)
+    region = lum.crop((bx0, by0, bx1, by1))
+    w, h = region.size
+    px = region.load()
+    vals = sorted(region.tobytes())          # mode "L": one byte per pixel
+    card = vals[len(vals) // 2]
+    marked = [(x, y) for y in range(h) for x in range(w)
+              if abs(px[x, y] - card) >= 6]
+    result = {"side": "undetermined", "frac": None, "track": None,
+              "knob": None, "contrast": 0}
+    if not marked:
+        return result
+    tx0 = min(x for x, _ in marked)
+    tx1 = max(x for x, _ in marked)
+    ty0 = min(y for _, y in marked)
+    ty1 = max(y for _, y in marked)
+    result["track"] = (bx0 + tx0, bx0 + tx1)
+    track_w, track_h = tx1 - tx0 + 1, ty1 - ty0 + 1
+    if track_w < 12 or track_h < 6:
+        return result
+    ry0 = ty0 + track_h // 3
+    ry1 = max(ry0 + 1, ty1 - track_h // 3)
+    cols = list(range(tx0 + 2, tx1 - 1))
+    profile = [sum(px[x, y] for y in range(ry0, ry1)) / (ry1 - ry0)
+               for x in cols]
+    median = sorted(profile)[len(profile) // 2]
+    dev = [abs(v - median) for v in profile]
+    peak = max(dev)
+    result["contrast"] = round(peak)
+    if peak < 10:
+        return result
+    knob = [(x, d) for x, d in zip(cols, dev) if d >= peak / 2]
+    kx0, kx1 = knob[0][0], knob[-1][0]
+    result["knob"] = (bx0 + kx0, bx0 + kx1)
+    if (kx1 - kx0 + 1) > 0.6 * track_w:
+        return result
+    centre = sum(x * d for x, d in knob) / sum(d for _, d in knob)
+    frac = (centre - tx0) / (tx1 - tx0)
+    result["frac"] = round(frac, 3)
+    result["side"] = ("left" if frac < 0.4
+                      else "right" if frac > 0.6 else "middle")
+    return result
+
+
 def _describe_zoom_crops_vm(surface, views: dict, issued: set) -> str:
     """Crop, enhance and describe each of `surface.zoom_crops`.
 
@@ -1717,6 +1796,25 @@ def _describe_zoom_crops_vm(surface, views: dict, issued: set) -> str:
         out += (f"\n\n=== zoomed crop {idx}: {crop.label} "
                 f"({crop.scale}x, contrast-stretched, of "
                 f"{views[crop.view].name}; {crop_png.name}) ===\n{desc}")
+        if crop.knob_must_be is None:
+            continue
+        m = measure_switch_knob(views[crop.view], crop)
+        line = (f"Harness pixel measurement of {crop.label} (deterministic, "
+                f"from the unstretched {views[crop.view].name}): knob at the "
+                f"{m['side'].upper()} end (knob centre at "
+                f"{m['frac'] if m['frac'] is not None else 'n/a'} of the "
+                f"track width; track x {m['track']}, knob x {m['knob']}, "
+                f"interior contrast {m['contrast']}).")
+        out += f"\n{line}"
+        if m["side"] != crop.knob_must_be:
+            # Fail closed: a switch at the wrong end, in the middle, or not
+            # measurable is a FAIL whatever any vision description says.
+            raise AssertionError(
+                f"{surface.id}: {crop.label} must have its knob at the "
+                f"{crop.knob_must_be.upper()} end, but the pixels say "
+                f"{m['side'].upper()}.\n  {line}\n  frame: "
+                f"{views[crop.view]}\n  crop:  {crop_png}\n"
+                f"  crop described as: {desc}")
     return out
 
 

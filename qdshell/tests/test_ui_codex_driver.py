@@ -218,8 +218,11 @@ def test_zoom_crop_makes_a_dim_off_track_and_knob_position_observable(tmp_path):
         assert im.convert("L").getpixel((998, 176)) < 40   # dim at source
     assert lum.getpixel((mid_x, top_y)) > 150
     assert lum.getpixel((mid_x, top_y - 3 * crop.scale)) < 40   # card stays dark
-    # Brightness ordering survives: the knob mass is in the LEFT half of the
-    # track, so the crop shows what the full frame did not.
+    # The stretch is a per-channel non-decreasing remap, so luma order is
+    # not guaranteed in general; for this near-grey knob on a near-black
+    # card the knob mass still lands in the LEFT half of the track, so the
+    # crop shows what the full frame did not. Position is MEASURED from the
+    # unstretched frame (measure_switch_knob), not from this image.
     cols = _luma_columns(raw)
     mid = _track_mid_col(crop)
     assert sum(cols[:mid]) > sum(cols[mid:]) * 1.5
@@ -263,7 +266,8 @@ def test_zoom_crop_of_a_flat_region_fails_loud(tmp_path):
         runner.make_zoom_crop(src, tmp_path / "z.png", crop, set())
 
 
-def _drive_connections_capture(monkeypatch, tmp_path, describe):
+def _drive_connections_capture(monkeypatch, tmp_path, describe,
+                               bluetooth_frame=None):
     surface = _connections_surface()
     monkeypatch.setattr(runner, "ARTIFACTS_DIR", tmp_path)
     for name in ("ipc_vm", "mouse_wheel", "mouse_click", "mouse_move",
@@ -273,7 +277,10 @@ def _drive_connections_capture(monkeypatch, tmp_path, describe):
     def fake_shot(_s, out, **_k):
         # The Wi-Fi view has its knob on the RIGHT, the Bluetooth view
         # (click1) on the LEFT: a crop of the wrong view is detectable.
-        _switch_frame(out, knob_left=out.name.endswith("-click1.png"))
+        if out.name.endswith("-click1.png") and bluetooth_frame is not None:
+            bluetooth_frame(out)
+        else:
+            _switch_frame(out, knob_left=out.name.endswith("-click1.png"))
         return out
 
     monkeypatch.setattr(runner, "screenshot_vm", fake_shot)
@@ -329,3 +336,177 @@ def test_connections_expectation_requires_the_crop_to_show_a_left_knob():
     assert "zoomed crop of the Bluetooth master switch" in text
     assert "knob at the LEFT end of that track" in text
     assert "A crop showing the knob at the RIGHT end, or no switch," in text
+
+
+# --- the crop is authoritative for the Bluetooth knob; pixels enforce it ---
+
+_FILL = (60, 60, 120)      # checked track fill (mPrimary, dimmed)
+_DARK_KNOB = (14, 14, 40)  # checked knob (mOnPrimary), darker than the fill
+
+
+def _checked_switch_frame(path):
+    """The product's CHECKED NToggle shape, as measured on the real Wi-Fi
+    switch of the 2026-10-14 frame (track x 977-1020, knob x ~998-1017):
+    a FILLED track with a DARK knob at the right end. Its bright mass is
+    left of centre, so a "where is the bright part" measurement would call
+    this switch LEFT/off."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (1280, 800), _CARD)
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((977, 176, 1020, 201), radius=12, fill=_FILL,
+                        outline=_OUTLINE, width=1)
+    d.ellipse((1001, 182, 1015, 196), fill=_DARK_KNOB)
+    img.save(path)
+    return path
+
+
+def _knobless_frame(path, knob_x=None):
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (1280, 800), _CARD)
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((977, 176, 1020, 201), radius=12, outline=_OUTLINE)
+    if knob_x is not None:
+        d.ellipse((knob_x, 182, knob_x + 14, 196), fill=_KNOB)
+    img.save(path)
+    return path
+
+
+def test_connections_crop_enforces_a_left_knob():
+    assert _connections_surface().zoom_crops[0].knob_must_be == "left"
+
+
+def test_measure_switch_knob_reads_left_and_right(tmp_path):
+    crop = _connections_surface().zoom_crops[0]
+    left = runner.measure_switch_knob(
+        _switch_frame(tmp_path / "l.png", knob_left=True), crop)
+    right = runner.measure_switch_knob(
+        _switch_frame(tmp_path / "r.png", knob_left=False), crop)
+    assert left["side"] == "left" and left["frac"] < 0.4, left
+    assert left["track"] == (977, 1020)
+    assert right["side"] == "right" and right["frac"] > 0.6, right
+
+
+def test_measure_switch_knob_is_polarity_free_for_a_checked_switch(tmp_path):
+    from PIL import Image
+    crop = _connections_surface().zoom_crops[0]
+    src = _checked_switch_frame(tmp_path / "checked.png")
+    # The trap: the bright mass of a checked switch sits LEFT of centre.
+    with Image.open(src) as im:
+        cols = _luma_columns(im.crop((977, 176, 1021, 202)))
+    mid = len(cols) // 2
+    assert sum(cols[:mid]) > sum(cols[mid:])
+    m = runner.measure_switch_knob(src, crop)
+    assert m["side"] == "right", m
+
+
+def test_measure_switch_knob_middle_and_blank_are_not_left(tmp_path):
+    crop = _connections_surface().zoom_crops[0]
+    mid = runner.measure_switch_knob(
+        _knobless_frame(tmp_path / "mid.png", knob_x=992), crop)
+    assert mid["side"] == "middle", mid
+    empty = runner.measure_switch_knob(
+        _knobless_frame(tmp_path / "empty.png"), crop)
+    assert empty["side"] == "undetermined", empty
+
+
+def test_full_frame_right_claim_does_not_override_a_left_crop(
+        monkeypatch, tmp_path):
+    """The 2026-10-14 conflict: the full-frame describer put the Bluetooth
+    thumb RIGHT while the crop (and the pixels) show it LEFT. The capture
+    keeps the full-frame text verbatim (no redaction), adds the measured
+    LEFT line under the crop, and the golden tells the judge the crop is
+    authoritative for that one knob, while keeping every failing branch."""
+    full_claim = ("Visible switch row: Bluetooth. Its round thumb is at the "
+                  "RIGHT end of an unfilled/dark track; the row is dimmed.")
+
+    def describe(frame, prompt=None):
+        if "-zoom" in frame.name:
+            return "pill outline; the round knob sits at the LEFT end"
+        if frame.name.endswith("-click1.png"):
+            return full_claim
+        return "Wi-Fi subtab"
+
+    _png, actual = _drive_connections_capture(monkeypatch, tmp_path, describe)
+    assert full_claim in actual
+    crop_part = actual.split("=== zoomed crop 1:", 1)[1]
+    assert "the round knob sits at the LEFT end" in crop_part
+    assert "Harness pixel measurement of Bluetooth master switch" in crop_part
+    assert "knob at the LEFT end" in crop_part
+
+    text = (runner.EXPECTATIONS_DIR / "settings_connections.md").read_text()
+    flat = " ".join(text.split())
+    assert ("The crop is AUTHORITATIVE for the Bluetooth master switch's "
+            "thumb position") in flat
+    assert ("a full-frame view that places the Bluetooth thumb at the RIGHT "
+            "end (or calls it on) is not evidence about its position") in flat
+    assert ("must NOT be reported as MISSING, contradicted or EXTRA when the "
+            "crop and the measurement both show the LEFT end") in flat
+    # The exemption is scoped: everything else is still judged in full.
+    assert ("This exemption covers only the Bluetooth master switch's thumb "
+            "position") in flat
+    assert ("The full-frame views must show this Bluetooth toggle row, its "
+            "label and its dimmed/disabled state") in flat
+    # The failing side of the bullet is intact.
+    assert "A crop showing the knob at the RIGHT end, or no switch," in text
+    assert "a measurement line that does not say LEFT" in flat
+
+
+@pytest.mark.parametrize("frame", ["right_knob", "checked_product_shape"])
+def test_a_genuinely_on_switch_fails_even_if_the_crop_is_described_left(
+        monkeypatch, tmp_path, frame):
+    """Authority for the crop must not become a pass for an ON switch: the
+    pixels decide, so a describer that (wrongly) says LEFT cannot save it."""
+    make = {
+        "right_knob": lambda p: _switch_frame(p, knob_left=False),
+        "checked_product_shape": _checked_switch_frame,
+    }[frame]
+
+    def describe(frame_path, prompt=None):
+        if "-zoom" in frame_path.name:
+            return "pill outline; the round knob sits at the LEFT end"
+        return "Bluetooth thumb at the LEFT end"
+
+    with pytest.raises(AssertionError) as exc:
+        _drive_connections_capture(monkeypatch, tmp_path, describe,
+                                   bluetooth_frame=make)
+    msg = str(exc.value)
+    assert "must have its knob at the LEFT end" in msg
+    assert "the pixels say RIGHT" in msg
+    assert "settings_connections-zoom1.png" in msg
+
+
+def test_an_unmeasurable_switch_fails_closed(monkeypatch, tmp_path):
+    def describe(frame_path, prompt=None):
+        return "knob at the LEFT end"
+
+    with pytest.raises(AssertionError, match="pixels say UNDETERMINED"):
+        _drive_connections_capture(monkeypatch, tmp_path, describe,
+                                   bluetooth_frame=_knobless_frame)
+
+
+def test_zoom_crop_docstring_does_not_claim_luma_order_survives():
+    doc = " ".join(runner.make_zoom_crop.__doc__.split())
+    assert "brighter than which is preserved" not in doc
+    assert "NOT guaranteed to survive" in doc
+
+
+# --- panel_tray: the empty drawer auto-closes; the golden says so ---
+
+def test_tray_golden_matches_the_empty_drawer_auto_close():
+    qml = (runner.QDSHELL_ROOT / "Modules/Panels/Tray/TrayDrawerPanel.qml"
+           ).read_text()
+    flat_qml = " ".join(qml.split())
+    # Product (8da5194c7, fixed by 8b97bfdb5): an already-empty drawer closes itself on open.
+    assert ("panelContent.updateFilteredItems(); "
+            "if (root.trayValues.length === 0) root.close();") in flat_qml
+    text = " ".join((runner.EXPECTATIONS_DIR / "panel_tray.md").read_text()
+                    .split())
+    assert "An empty drawer is the right answer here" not in text
+    assert "TrayDrawerPanel auto-closes when `trayValues` is empty" in text
+    assert "do NOT require a visible empty drawer" in text
+    # Still strict about what must NOT be on screen.
+    for banned in ("no visible drawer surface",
+                   "no empty or half-rendered drawer stub",
+                   "no stale or placeholder tray icons",
+                   "no other panel/surface", "no crash dialog"):
+        assert banned in text

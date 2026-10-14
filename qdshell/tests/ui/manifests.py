@@ -16,6 +16,7 @@ Coverage status:
 """
 
 from dataclasses import dataclass
+from typing import Optional
 
 from . import fixtures
 
@@ -32,12 +33,19 @@ class ZoomCrop:
     out of an already-captured view, stretches its contrast, magnifies it
     and describes it as an EXTRA view with its own `question`. It adds
     evidence to the judged description; it never replaces a full view.
+
+    `knob_must_be` ("left"/"right"), when set, makes the crop a switch
+    check on top of the description: the harness measures the knob's side
+    from the UNSTRETCHED pixels (runner.measure_switch_knob) and fails the
+    capture unless it is at that end. The measurement line is appended to
+    the crop's described view, so the judge sees it next to the crop text.
     """
     view: int        # 0 = the first capture; n = the view after post_open_clicks[n-1]
     box: tuple       # (x0, y0, x1, y1) screen fractions of the region to crop
     label: str       # short human name used in the stitched description
     question: str    # what the describer must report from the crop (neutral)
     scale: int = 8   # integer magnification
+    knob_must_be: Optional[str] = None   # "left" / "right": measured, enforced
 
 
 @dataclass(frozen=True)
@@ -116,6 +124,13 @@ _SETTINGS_EXTRA_CLICKS = {
 # #070722 card; luna repeatedly read the knob as "RIGHT / on" from the full
 # frame although it sits at the left end (knob x~982-996 in a track
 # x~977-1020 at y~176-201 of 1280x800, measured on the 2026-10-13 frame).
+# 2026-10-14 full run: the crop was described "knob at the LEFT end" while the
+# full-frame describer still placed the thumb RIGHT, and the judge sided with
+# the full frame. The crop is therefore also measured from pixels and the
+# product's off state enforced: NToggle draws an unchecked thumb at x=3 (the
+# LEFT end); BluetoothSubTab binds the master toggle's `checked` to
+# BluetoothService.enabled (false without an adapter) and disables it
+# (`enabled: ... && BluetoothService.bluetoothAvailable`).
 _SETTINGS_ZOOM_CROPS = {
     "connections": (
         ZoomCrop(
@@ -130,6 +145,7 @@ _SETTINGS_ZOOM_CROPS = {
                 "is filled with a solid color or is an empty outline. If no "
                 "switch is recognisable, say so."
             ),
+            knob_must_be="left",
         ),
     ),
 }
