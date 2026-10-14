@@ -32,13 +32,21 @@
 #     admin on this action: the requirement allow_active states for an active
 #     session. It grants nothing; `cancel` and `wrong-password` prove it.
 #
-# The password reaches the agent through its test seam
-# QDISTRO_POLKIT_NONINTERACTIVE (password=<pw> | deny), set by a runtime
-# drop-in on qdistro-polkit-agent.service. The seam replaces only the Qt
-# prompt: the agent still runs the forced PAM route for this action and
-# verifies the password with PAM as `admin`; the `allow` shortcut cannot
-# apply to a forced-PAM action. The test-VM admin password is Pa_ssw0rd45
-# (scripts/vm/fresh-vm-bootstrap.sh, build-baseweed-from-scratch.sh).
+# The password reaches the agent through its real prompt path: the agent
+# runs `python3 -I /usr/local/bin/qdistro-polkit-prompt --mode=pam ...` and
+# reads the password from its stdout. A root-owned 0755 stand-in, labelled
+# like the real file, is bind-mounted over that path (prompt_seam) and
+# answers from $W/prompt-answer (password=<pw> | deny) instead of drawing a
+# Qt dialog — a headless test cannot type into one. Only the dialog is
+# replaced: the agent runs unmodified, with its shipped unit environment,
+# takes the forced PAM route for this action, verifies the password with
+# PAM as `admin`, and relays the verdict through the broker, whose peer
+# checks (exe/argv, clean environment, unit cgroup, MainPID, origin pidfd)
+# all apply. The agent's former QDISTRO_POLKIT_NONINTERACTIVE seam is not
+# used: the broker rightly refuses to relay for an agent carrying it, and
+# `posture` asserts the agent runs without it. The test-VM admin password
+# is Pa_ssw0rd45 (scripts/vm/fresh-vm-bootstrap.sh,
+# build-baseweed-from-scratch.sh).
 #
 # Release-like posture: the per-run golden is a dev-profile install, which
 # grants admin passwordless sudo (qdistro-bootstrap.sh, dev only). That rule
@@ -73,10 +81,13 @@ WAYPIPE=/usr/bin/waypipe
 ACTION=org.qdistro.tier5.bridge
 AUTH_RULE=/etc/polkit-1/rules.d/11-qci-s65-tier5-bridge-auth.rules
 TEST_YES_RULE=/etc/polkit-1/rules.d/10-qdistro-tier5-bridge-test.rules
-LOG_RULE=/etc/polkit-1/rules.d/05-qci-s65-subject-log.rules
 AGENT=qdistro-polkit-agent.service
-DROPIN_DIR=/run/systemd/system/$AGENT.d
-DROPIN=$DROPIN_DIR/90-qci-s65-seam.conf
+PROMPT=/usr/local/bin/qdistro-polkit-prompt
+ANSWER=$W/prompt-answer
+# Test-only probe action (see `inactive`): polkitd's own verdict reveals
+# which session class it resolved a subject to.
+PROBE_ACTION=org.qdistro.qci.s65probe
+PROBE_POLICY=/usr/share/polkit-1/actions/$PROBE_ACTION.policy
 LOGIN_UNIT=qci-s65-login
 BROKER=qdistro-admin-broker.service
 SUDOERS=/etc/sudoers.d/99-admin
@@ -103,7 +114,6 @@ check() {   # check <name> <cmd...> — PASS when cmd succeeds
 cursor() { journalctl -n0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'; }
 alog()   { journalctl -b --no-pager -o cat -t qdistro-polkit-agent ${1:+--after-cursor="$1"} 2>/dev/null; }
 comp_log() { journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service -b --no-pager -o cat ${1:+--after-cursor="$1"} 2>/dev/null; }
-pklog()  { journalctl -u polkit.service -b --no-pager -o cat ${1:+--after-cursor="$1"} 2>/dev/null; }
 blog()   { journalctl -u "$BROKER" -b --no-pager -o cat ${1:+--after-cursor="$1"} 2>/dev/null; }
 wait_for() {   # wait_for <secs> <cmd...>
     local end=$((SECONDS + $1)); shift
@@ -203,31 +213,31 @@ kill_caller() {   # SIGKILL the caller shell and its stdin holder
     return 0
 }
 
-# --- the agent's seam -------------------------------------------------------
-agent_seam() {   # agent_seam password=<pw> | deny | none
-    local c ul frag
-    c=$(cursor)
-    if [ "$1" = none ]; then
-        rm -f "$DROPIN"
-    else
-        frag=$(systemctl show -P FragmentPath "$AGENT")
-        ul=$(sed -n 's/^UnsetEnvironment=//p' "$frag" | tr ' ' '\n' \
-             | grep -vx 'QDISTRO_POLKIT_NONINTERACTIVE' | grep . | tr '\n' ' ')
-        install -d -m 0755 "$DROPIN_DIR"
-        printf '%s\n' '# qci s65 (tier5-bridge-enforcing.bats) TEST-ONLY seam; removed by teardown.' \
-            '[Service]' 'UnsetEnvironment=' "UnsetEnvironment=$ul" \
-            "Environment=\"QDISTRO_POLKIT_NONINTERACTIVE=$1\"" > "$DROPIN"
-    fi
-    systemctl daemon-reload
-    systemctl restart "$AGENT" || return 1
-    wait_for 45 sh -c "journalctl -b --no-pager -o cat -t qdistro-polkit-agent --after-cursor='$c' | grep -q 'registered as session polkit agent'" || return 1
-    local mp; mp=$(systemctl show -P MainPID "$AGENT")
-    if [ "$1" = none ]; then
-        ! environ_of "$mp" | grep -q '^QDISTRO_POLKIT_NONINTERACTIVE='
-    else
-        environ_of "$mp" | grep -qxF "QDISTRO_POLKIT_NONINTERACTIVE=$1"
-    fi
+# --- the agent's prompt -----------------------------------------------------
+prompt_mounted() { findmnt -rn --target "$PROMPT" -o TARGET 2>/dev/null | grep -qxF "$PROMPT"; }
+unbind_prompt() {
+    while prompt_mounted; do
+        umount "$PROMPT" 2>/dev/null || { umount -l "$PROMPT" 2>/dev/null; break; }
+    done
 }
+agent_clean() {   # the running agent carries none of the broker-refused test seams
+    local mp; mp=$(systemctl show -P MainPID "$AGENT")
+    [ -n "$mp" ] && [ "$mp" != 0 ] \
+        && ! environ_of "$mp" | grep -qE '^QDISTRO_POLKIT_(NONINTERACTIVE|METHOD|SESSION_ID)='
+}
+prompt_seam() {   # prompt_seam password=<pw> | deny | none
+    if [ "$1" = none ]; then
+        unbind_prompt
+        rm -f "$ANSWER"
+        ! prompt_mounted && agent_clean
+        return
+    fi
+    printf '%s\n' "$1" > "$ANSWER"
+    chmod 0644 "$ANSWER"
+    prompt_mounted || bind_fake "$PROMPT" "$FAKES/prompt-standin"
+    prompt_mounted && agent_clean
+}
+prompts() { wc -l < "$U/prompt.log" 2>/dev/null || echo 0; }
 no_temp_grant() {   # no cached grant for the action in the display session
     local out
     out=$(as_admin systemd-run --user --scope --quiet --collect pkcheck --list-temp 2>&1) || true
@@ -274,7 +284,7 @@ bind_fake() {   # bind_fake <target> <fake-file>
     chcon --reference="$1" "$2" 2>/dev/null || true
     mount --bind "$2" "$1"
 }
-unbind_all() {
+unbind_all() {   # the fault-injection mounts (not the prompt: see unbind_prompt)
     local t
     for t in "$SECCTX" "$WAYPIPE"; do
         while findmnt -rn --target "$t" -o TARGET 2>/dev/null | grep -qxF "$t"; do
@@ -300,6 +310,23 @@ EOF
     chown root:root "$FAKES/secctx-standin"; chmod 0755 "$FAKES/secctx-standin"
     printf '#!/nonexistent/qci-s65-interpreter\n' > "$FAKES/waypipe-noexec"
     chown root:root "$FAKES/waypipe-noexec"; chmod 0755 "$FAKES/waypipe-noexec"
+    # The agent runs this as `python3 -I <prompt> --mode=pam --action=...
+    # --message=...` and reads the password from stdout; exit 1 = cancel.
+    cat > "$FAKES/prompt-standin" <<EOF
+# qci s65 stand-in for qdistro-polkit-prompt: answers from $ANSWER.
+import sys
+try:
+    ans = open("$ANSWER").read().strip()
+except OSError:
+    sys.exit(1)
+with open("$U/prompt.log", "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\\n")
+if ans.startswith("password="):
+    print(ans.split("=", 1)[1])
+    sys.exit(0)
+sys.exit(1)
+EOF
+    chown root:root "$FAKES/prompt-standin"; chmod 0755 "$FAKES/prompt-standin"
 }
 
 # =============================================================================
@@ -313,19 +340,29 @@ setup)
         mv -f "$SUDOERS" "$SUDOERS_SAVED"
     fi
     rm -f "$TEST_YES_RULE"
-    # Log-only rule (returns nothing, so it never changes a verdict): records
-    # which session/activity polkitd resolved each caller to, as evidence.
-    install -d -m 0755 /etc/polkit-1/rules.d
-    cat > "$LOG_RULE" <<'RULE'
-// qci s65 (tier5-bridge-enforcing.bats) ONLY: evidence log, no verdict.
-polkit.addRule(function(action, subject) {
-    if (action.id == "org.qdistro.tier5.bridge") {
-        polkit.log("s65-subject user=" + subject.user + " session=" + subject.session +
-                   " local=" + subject.local + " active=" + subject.active);
-    }
-});
-RULE
-    chmod 0644 "$LOG_RULE"
+    # Probe action: any=auth_admin, inactive=no, active=yes. A pkcheck of a
+    # subject against it answers 0 (active session), 1 (inactive session) or
+    # 2 (no session: auth_admin) — polkitd's own subject resolution, which
+    # the polkit.log rule this replaced could not report (polkitd runs with
+    # --log-level=notice and drops rule log lines).
+    cat > "$PROBE_POLICY" <<'POLICY'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- qci s65 (tier5-bridge-enforcing.bats) TEST-ONLY probe; removed by teardown. -->
+<policyconfig>
+  <action id="org.qdistro.qci.s65probe">
+    <description>qci s65 session-class probe</description>
+    <message>qci s65 probe</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
+POLICY
+    chmod 0644 "$PROBE_POLICY"
     systemctl reset-failed "$LOGIN_UNIT" 2>/dev/null || true
     if ! systemctl is-active --quiet "$LOGIN_UNIT"; then
         for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '$3=="admin"{print $1}'); do
@@ -345,9 +382,13 @@ RULE
     fi
     write_fake_secctx
     unbind_all
+    unbind_prompt
     if [ ! -s "$W/sha" ]; then
-        sha256sum "$SECCTX" "$WAYPIPE" "$BRIDGE" /usr/bin/dbus-send /usr/bin/pkexec > "$W/sha"
+        sha256sum "$SECCTX" "$WAYPIPE" "$BRIDGE" "$PROMPT" /usr/bin/dbus-send /usr/bin/pkexec > "$W/sha"
     fi
+    wait_for 10 sh -c "pkaction --action-id $PROBE_ACTION >/dev/null 2>&1" \
+        && pass "polkitd loaded the session-class probe action $PROBE_ACTION" \
+        || fail "polkitd did not load $PROBE_POLICY"
     if [ ! -e "$W/mark" ]; then
         chain_procs | awk '{print $1}' > "$W/baseline-procs"
         touch "$W/mark"
@@ -379,7 +420,7 @@ posture)
     else
         fail "action $ACTION not installed as shipped"
     fi
-    hits=$(grep -rl "$ACTION" /etc/polkit-1/rules.d /usr/share/polkit-1/rules.d 2>/dev/null | grep -vxF "$AUTH_RULE" | grep -vxF "$LOG_RULE" || true)
+    hits=$(grep -rl "$ACTION" /etc/polkit-1/rules.d /usr/share/polkit-1/rules.d 2>/dev/null | grep -vxF "$AUTH_RULE" || true)
     [ -z "$hits" ] && pass "no polkit rule (YES test rule or other) names $ACTION" \
                    || fail "polkit rules naming $ACTION present: $hits"
     systemctl is-active --quiet "$AGENT" && pass "qdistro-polkit-agent active" || fail "qdistro-polkit-agent not active"
@@ -413,10 +454,10 @@ EOF
     [ "$(loginctl show-session "$(loginctl show-user admin -p Display --value)" -p Active --value 2>/dev/null)" = no ] \
         && pass "admin's display session is the inactive tty6 login (adaptation 1)" \
         || fail "admin's display session is not the inactive tty6 login"
-    if agent_seam none && no_temp_grant; then
+    if prompt_seam none && no_temp_grant; then
         pass "agent has no seam and the session holds no cached grant for $ACTION"
     else
-        fail "agent seam/cached-grant precondition"
+        fail "agent seam/cached-grant precondition (prompt overmounted, test variable in the agent's environment, or a cached grant)"
     fi
     finish ;;
 
@@ -439,23 +480,33 @@ no-session)
 
 inactive)
     # Shipped allow_inactive=no, before the AUTH_ADMIN_KEEP adaptation exists.
+    # The caller first asks polkitd about ITSELF against the probe action
+    # (rc 0 active / 1 inactive / 2 no session), then runs pkexec.
     rm -f "$AUTH_RULE"; sleep 1
-    agent_seam "password=$PW" || fail "inactive: agent seam not applied"
-    c=$(cursor); a=$(audit_max_id); cc=$c
+    prompt_seam "password=$PW" || fail "inactive: prompt stand-in not applied"
+    c=$(cursor); a=$(audit_max_id); cc=$c; p0=$(prompts)
     bridge_script inactive --loopback "$(newloop)" --port "$(newport)" --token "$(token)"
+    { head -n1 "$S/inactive.sh"
+      printf '/usr/bin/pkcheck --action-id %s --process $$ >/dev/null 2>&1; echo $? > %s\n' \
+          "$PROBE_ACTION" "$U/inactive.probe"
+      tail -n +2 "$S/inactive.sh"; } > "$S/inactive.sh.new"
+    mv -f "$S/inactive.sh.new" "$S/inactive.sh"; chmod 0644 "$S/inactive.sh"
     scope_run inactive "$S/inactive.sh"
     wait_rc inactive 60 || fail "inactive: caller never finished"
     pkexec_refused inactive "inactive session"
     disp=$(loginctl show-user admin -p Display --value)
-    l=$(pklog "$c" | grep 's65-subject user=admin' | tail -1)
-    if [[ "$l" == *"session=$disp "* && "$l" == *"active=false"* ]]; then
-        pass "inactive: polkitd resolved the caller to the inactive display session $disp ($l)"
+    dact=$(loginctl show-session "$disp" -p Active --value 2>/dev/null)
+    probe=$(cat "$U/inactive.probe" 2>/dev/null)
+    if [ "$probe" = 1 ] && [ -n "$disp" ] && [ "$dact" = no ]; then
+        pass "inactive: polkitd resolved the caller to the inactive display session $disp (probe allow_inactive=no -> pkcheck rc=1; logind Active=$dact)"
     else
-        fail "inactive: polkitd subject not the inactive session $disp: '$l'"
+        fail "inactive: polkitd subject not the inactive session $disp: probe rc='$probe' (0=active 1=inactive 2=no session), logind Active='$dact'"
     fi
-    alog "$c" | grep -q "BeginAuth: action=$ACTION" \
-        && fail "inactive: the agent was asked (allow_inactive=no must refuse without a prompt)" \
-        || pass "inactive: refused without any authentication attempt (allow_inactive=no)"
+    if alog "$c" | grep -q "BeginAuth: action=$ACTION" || [ "$(prompts)" != "$p0" ]; then
+        fail "inactive: the agent was asked (allow_inactive=no must refuse without a prompt)"
+    else
+        pass "inactive: refused without any authentication attempt (allow_inactive=no)"
+    fi
     no_registration_after "$a" inactive
     no_tier5_commit_after "$cc" inactive
     assert_chain_gone inactive
@@ -463,7 +514,7 @@ inactive)
 
 cancel)
     install_auth_rule
-    agent_seam deny || fail "cancel: agent seam not applied"
+    prompt_seam deny || fail "cancel: prompt stand-in not applied"
     no_temp_grant && pass "cancel: no cached grant before the attempt" || fail "cancel: a cached grant exists"
     c=$(cursor); a=$(audit_max_id)
     bridge_script cancel --loopback "$(newloop)" --port "$(newport)" --token "$(token)"
@@ -481,7 +532,7 @@ cancel)
 
 wrong-password)
     install_auth_rule
-    agent_seam "password=Wr0ng_${RANDOM}x" || fail "wrong-password: agent seam not applied"
+    prompt_seam "password=Wr0ng_${RANDOM}x" || fail "wrong-password: prompt stand-in not applied"
     c=$(cursor); a=$(audit_max_id)
     bridge_script wrongpw --loopback "$(newloop)" --port "$(newport)" --token "$(token)"
     scope_run wrongpw "$S/wrongpw.sh"
@@ -503,7 +554,7 @@ auth-success)
     # The real launcher (installed qdistro-tier5-spawn --loopback) with a
     # long-lived Wayland client, authenticated by the admin password via PAM.
     install_auth_rule
-    agent_seam "password=$PW" || fail "auth-success: agent seam not applied"
+    prompt_seam "password=$PW" || fail "auth-success: prompt stand-in not applied"
     command -v qdistro-test-window >/dev/null || fail "auth-success: qdistro-test-window missing (bake regression)"
     c=$(cursor); a=$(audit_max_id)
     P=$(newport)
@@ -563,11 +614,12 @@ auth-success)
 
 keep-same-caller)
     # One caller process, two pkexec runs: the first authenticates (PAM via
-    # the seam), the seam then switches to deny, and the second must succeed
+    # the prompt stand-in), the stand-in then answers deny, and the second
+    # must succeed
     # without a new authentication — the auth_admin_keep grant is bound to
     # this caller process.
     install_auth_rule
-    agent_seam "password=$PW" || fail "keep: agent seam not applied"
+    prompt_seam "password=$PW" || fail "keep: prompt stand-in not applied"
     c=$(cursor)
     T1=$(token); T2=$(token); L1=$(newloop); L2=$(newloop)
     cat > "$S/keep.sh" <<EOF
@@ -588,21 +640,23 @@ EOF
         || fail "keep: first run rc=$(rc_of keep1) err=$(cat "$U/keep1.err")"
     alog "$c" | grep -q "action=$ACTION method=pam -> allow (pam-ok)" \
         && pass "keep: first run authenticated by PAM" || fail "keep: no pam-ok for the first run"
-    agent_seam deny || fail "keep: deny seam not applied"
-    c2=$(cursor)
+    prompt_seam deny || fail "keep: deny answer not applied"
+    c2=$(cursor); p2=$(prompts)
     touch "$U/keep.go"
     if wait_for 60 grep -q '^READY [0-9]*$' "$U/keep2.out"; then
         pass "keep: second run from the same caller launched (READY $(sed 's/READY //' "$U/keep2.out"))"
     else
         fail "keep: second run not READY: rc=$(rc_of keep2) err=$(cat "$U/keep2.err" 2>/dev/null)"
     fi
-    alog "$c2" | grep -q "BeginAuth: action=$ACTION" \
-        && fail "keep: the second run started a new authentication" \
-        || pass "keep: no new authentication for the second run (kept grant)"
+    if alog "$c2" | grep -q "BeginAuth: action=$ACTION" || [ "$(prompts)" != "$p2" ]; then
+        fail "keep: the second run started a new authentication"
+    else
+        pass "keep: no new authentication for the second run (kept grant)"
+    fi
     kill "$(cat "$U/keep2.holder" 2>/dev/null)" 2>/dev/null
     wait_rc keep2 30
     assert_chain_gone keep
-    agent_seam "password=$PW" >/dev/null || true
+    prompt_seam "password=$PW" >/dev/null || true
     finish ;;
 
 admin-register)
@@ -663,7 +717,7 @@ direct-invoke)
 
 malformed)
     install_auth_rule
-    agent_seam "password=$PW" || fail "malformed: agent seam not applied"
+    prompt_seam "password=$PW" || fail "malformed: prompt stand-in not applied"
     c=$(cursor); a=$(audit_max_id)
     T=$(token); L=$(newloop)
     long=$(printf 'a%.0s' $(seq 1 64))
@@ -709,7 +763,7 @@ malformed)
 
 env-injection)
     install_auth_rule
-    agent_seam "password=$PW" || fail "env-injection: agent seam not applied"
+    prompt_seam "password=$PW" || fail "env-injection: prompt stand-in not applied"
     rm -f "$U"/evil-ran-*
     for t in waypipe runuser env dbus-send qdistro-secctx-exec python3 python3.13 sh bash true; do
         printf '#!/bin/sh\n: > %q/evil-ran-$(basename "$0")\nexit 99\n' "$U" > "$EVIL/$t"
@@ -782,7 +836,7 @@ env-injection)
 
 pid-report)
     install_auth_rule
-    agent_seam "password=$PW" || fail "pid-report: agent seam not applied"
+    prompt_seam "password=$PW" || fail "pid-report: prompt stand-in not applied"
     write_fake_secctx
     runuser -u admin -- sleep 900 & frp=$!
     wait_for 5 sh -c "pgrep -P $frp -x sleep >/dev/null"
@@ -824,7 +878,7 @@ pid-report)
 
 exec-failure)
     install_auth_rule
-    agent_seam "password=$PW" || fail "exec-failure: agent seam not applied"
+    prompt_seam "password=$PW" || fail "exec-failure: prompt stand-in not applied"
     write_fake_secctx
     before=$(find "$RT" -maxdepth 1 -name 'wayland-secctx-*' -printf '%f\n' | sort)
     bind_fake "$WAYPIPE" "$FAKES/waypipe-noexec" || fail "exec-failure: cannot bind the unexecutable waypipe"
@@ -851,7 +905,7 @@ exec-failure)
 
 broker-failure)
     install_auth_rule
-    agent_seam "password=$PW" || fail "broker-failure: agent seam not applied"
+    prompt_seam "password=$PW" || fail "broker-failure: prompt stand-in not applied"
     L=$(newloop); T=$(token); P=$(newport); a=$(audit_max_id)
     cat > "$S/bf.sh" <<EOF
 #!/bin/bash
@@ -890,7 +944,7 @@ EOF
 
 caller-death)
     install_auth_rule
-    agent_seam "password=$PW" || fail "caller-death: agent seam not applied"
+    prompt_seam "password=$PW" || fail "caller-death: prompt stand-in not applied"
     write_fake_secctx
     # (1) during the launch: the stand-in never reports.
     echo slow > "$W/fake-mode"; chmod 0644 "$W/fake-mode"
@@ -949,16 +1003,19 @@ caller-death)
 
 postconditions)
     unbind_all
+    unbind_prompt
     if sha256sum -c --quiet "$W/sha" >/dev/null 2>&1 \
-       && ! findmnt -rn -o TARGET | grep -qxE "$SECCTX|$WAYPIPE|$BRIDGE"; then
-        pass "secctx-exec, waypipe, bridge, dbus-send, pkexec unchanged and not overmounted"
+       && ! findmnt -rn -o TARGET | grep -qxE "$SECCTX|$WAYPIPE|$BRIDGE|$PROMPT"; then
+        pass "secctx-exec, waypipe, bridge, agent prompt, dbus-send, pkexec unchanged and not overmounted"
     else
         fail "fixed executables changed or overmounted: $(sha256sum -c "$W/sha" 2>&1 | grep -v ': OK' | tr '\n' ' ')"
     fi
     left=$(new_chain_procs)
     [ -z "$left" ] && pass "no tier-5 bridge chain process (root or admin) survives the file" \
                    || fail "surviving chain processes: $(tr '\n' ';' <<<"$left")"
-    rootf=$(find /home/admin "$RT" /tmp /var/tmp -xdev \
+    # -mindepth 1: the scanned roots themselves (root-owned /tmp, /var/tmp,
+    # whose mtime any file churn bumps) are not files this chain created.
+    rootf=$(find /home/admin "$RT" /tmp /var/tmp -mindepth 1 -xdev \
               \( -path '/tmp/systemd-private-*' -o -path '/var/tmp/systemd-private-*' \) -prune -o \
               -newer "$W/mark" \( -user root -o -group root \) -print 2>/dev/null | head -20)
     [ -z "$rootf" ] && pass "no root-owned file created in admin-writable paths (/home/admin, $RT, /tmp, /var/tmp)" \
@@ -976,11 +1033,11 @@ postconditions)
 
 teardown)
     unbind_all
+    unbind_prompt
     rm -rf "$FAKES"
     pkill -f '^sleep 6[0-9]{3}$' 2>/dev/null || true
     pkill -u admin -f 'qdistro-test-window --title s65-' 2>/dev/null || true
-    rm -f "$AUTH_RULE" "$LOG_RULE" "$DROPIN"
-    systemctl daemon-reload
+    rm -f "$AUTH_RULE" "$PROBE_POLICY"
     systemctl restart "$AGENT" 2>/dev/null || true
     systemctl stop "$LOGIN_UNIT" 2>/dev/null || true
     systemctl unmask --runtime "$BROKER" >/dev/null 2>&1 || true

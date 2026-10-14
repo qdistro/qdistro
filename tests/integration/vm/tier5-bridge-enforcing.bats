@@ -11,9 +11,12 @@
 # exercised with NO cached grant and WITHOUT the YES polkit test rule the
 # other tier-5 drivers install. Authentication goes through the shipped
 # polkit action (org.qdistro.tier5.bridge) and the qdistro polkit agent's
-# forced PAM route; the password reaches the agent through its
-# QDISTRO_POLKIT_NONINTERACTIVE seam (replaces only the Qt prompt — PAM still
-# verifies it). The two CI-VM adaptations (a tty6 logind login session for the
+# forced PAM route, and its verdict is relayed through the broker's peer
+# checks. The password reaches the unmodified agent through a root stand-in
+# bind-mounted over its Qt prompt executable (qdistro-polkit-prompt) — only
+# the dialog is replaced; PAM verifies the password. The agent's
+# QDISTRO_POLKIT_NONINTERACTIVE seam is not used: the broker refuses to relay
+# for an agent carrying it. The two CI-VM adaptations (a tty6 logind login session for the
 # agent; an AUTH_ADMIN_KEEP rule because that session is not the foreground
 # VT, introduced only AFTER the shipped allow_inactive=no refusal is proven)
 # are documented in the guest driver s65-tier5-bridge-boundary.sh.
