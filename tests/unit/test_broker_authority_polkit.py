@@ -343,4 +343,3 @@ def test_selinux_module_lets_the_broker_ask_polkit():
 def test_agent_forces_pam_for_the_action():
     import qdistro_polkit_agent as A
     assert B.BROKER_APPROVE_ACTION in A.FORCED_PAM_ACTIONS
-
