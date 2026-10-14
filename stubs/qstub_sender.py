@@ -80,9 +80,8 @@ class Sender(QMainWindow):
         self._btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._btn.customContextMenuRequested.connect(self._on_right_click)
         # Left-click also opens the menu so the app is discoverable
-        # without needing to right-click, which matters when driving
-        # via xdotool where right-click on XWayland under the GUI harness is
-        # flakier than left-click.
+        # without needing to right-click (a plain left click is the
+        # simplest input for a GUI test driver to inject).
         self._btn.clicked.connect(
             lambda: self._open_menu(self._btn.rect().bottomLeft()))
         self.setCentralWidget(self._btn)

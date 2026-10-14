@@ -91,11 +91,12 @@ Removing it kept the protocol surface small enough for one author.
 
 ## Wayland-only sessions
 
-Test VMs run Wayland sessions. Xorg + xfce was removed from the
-bootstrap. XWayland is kept as a pragmatic compatibility bridge for
-apps that don't yet speak Wayland (and for tests that drive
-xdotool, which cannot inject under labwc / qdwin without an X11
-bridge).
+Test VMs run Wayland sessions: the product session, the qdwin
+compositor + qdshell. Xorg + xfce was removed from the bootstrap, and
+the labwc/LXQt GUI test harness was retired (2026-10-14). XWayland is
+kept as a pragmatic compatibility bridge for apps that don't yet speak
+Wayland; tests do not drive the desktop through it (no xdotool) — input
+goes through QEMU (QMP / `virsh send-key`) to the compositor.
 
 ## D-Bus over ad-hoc IPC
 
@@ -196,10 +197,12 @@ Driver tools live in `scripts/vm/`:
   wraps `runuser -l admin -c '…'` — the `-l` login form; plain
   `runuser -u` gives the uid only), or
   `systemctl --user --machine=admin@.host` inside the guest.
-- `vm-gui <name> <action>` — input injection: ydotool for typing and
-  key chords where available, xdotool through XWayland otherwise.
-  For anything the in-guest tools don't cover, use
-  `virsh send-key --codeset linux`.
+- `vm-gui <name> <action>` — attested screenshots, QMP pointer input
+  with the click preview/confirm handshake, ydotool typing and key
+  chords (it fails loudly without ydotool; there is no X11 fallback).
+  For keys to the focused client, use the QMP helpers
+  (`qdwin_send_key` / `qdwin_chord` in `qdwin/tests/gui/qdwin-helpers.sh`)
+  or `virsh send-key --codeset linux`.
 - `vm-start-and-wait <name>` — boot and block until qemu-guest-agent
   answers.
 

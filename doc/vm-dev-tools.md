@@ -7,8 +7,8 @@ integration testing.
 
 - **`vm-exec`** — run a shell command inside the VM; capture stdout,
  stderr, exit code.
-- **`vm-gui`** — GUI automation: screenshot, click, type, activate
- windows, scroll, drag.
+- **`vm-gui`** — GUI automation: attested screenshots, click
+ preview/confirm, click, type, key, scroll, drag.
 - **`vm-start-and-wait`** — start a VM and block until the QEMU guest
  agent is ready.
 - **`vm-resize-display`** / **`vm-resize-display-loop`** — auto-resize the
@@ -91,11 +91,11 @@ into a test harness for the guest:
 # typical integration test
 vm-start-and-wait qdistro-dev
 
-vm-exec qdistro-dev "systemctl --user restart qdistro-admin-broker"
-vm-gui qdistro-dev start "python3 -m qdistro.permission_test"
+vm-exec qdistro-dev "systemctl restart qdistro-admin-broker"
+vm-exec qdistro-dev "source /tmp/qci-gui-waiters.sh && qdwin_start_admin_app"
 
 vm-gui qdistro-dev screenshot /tmp/before.png
-vm-gui qdistro-dev activate 'qdistro — admin approvals'
+vm-exec qdistro-dev "source /tmp/qci-gui-waiters.sh && qdwin_focus_window 'admin approvals.*'"
 vm-gui qdistro-dev click 450 320 # Approve button
 vm-gui qdistro-dev screenshot /tmp/after.png
 
@@ -108,8 +108,9 @@ vm-* tools drive **full-stack integration tests** from the host.
 
 ## Input automation under Wayland
 
-Direct `xdotool`-based input only works against XWayland sessions. For
-qdistro compositor sessions the right surface is the
+There is no `xdotool` path: the GUI VMs run the qdwin compositor and
+input goes through QEMU (QMP pointer, `virsh send-key`, ydotool). For
+asserting on app state the right surface is the
 `org.qdistro.App1.UIModel` D-Bus interface — tests reference buttons by
 stable widget ID ("approve-button") rather than pixel coordinates.
 Survives layout changes, resolution changes, and theme changes.
