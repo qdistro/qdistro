@@ -238,7 +238,7 @@ teardown_file() {
     ensures "the boundary left no root-owned files where admin writes, no root or waypipe helper, and the fixed executables intact"
     s65 postconditions
     assert_success
-    assert_output_contains "PASS: secctx-exec, waypipe, bridge, dbus-send, pkexec unchanged and not overmounted"
+    assert_output_contains "PASS: secctx-exec, waypipe, bridge, agent prompt, dbus-send, pkexec unchanged and not overmounted"
     assert_output_contains "PASS: no tier-5 bridge chain process (root or admin) survives the file"
     assert_output_contains "PASS: no root-owned file created in admin-writable paths"
     assert_output_contains "PASS: no root-run tier-5 lifecycle state"
