@@ -1,8 +1,7 @@
 #!/bin/bash
-# Desktop launcher for the installed approval UI. The labwc GUI test lane uses
-# the separate start-admin-app.sh launcher because its XWayland display is
-# driven by xdotool; the installed qdwin session runs native Wayland, and so
-# does the qdwin GUI test lane, which calls THIS launcher.
+# Desktop launcher for the installed approval UI. The installed qdwin session
+# runs native Wayland, and so do the GUI test scenarios, which call THIS
+# launcher (qdwin_start_admin_app in ci/lib/guest/gui-waiters.sh).
 set -euo pipefail
 
 if [ "$(id -u)" != 1000 ]; then
@@ -23,16 +22,14 @@ fi
 export QT_QPA_PLATFORM=wayland
 
 # QDISTRO_ADMIN_APP_WAIT_PAINTED=1: return only once the window has painted
-# its first frame, printing the app's pid. This is the same contract as the
-# GUI test lane's X11 launcher (start-admin-app.sh): a caller that captures the
-# screen right after launching must not get the bare desktop or a half-drawn
-# window. A created, titled xdg_toplevel says nothing about a painted frame, so
+# its first frame, printing the app's pid: a caller that captures the screen
+# right after launching must not get the bare desktop or a half-drawn window. A created, titled xdg_toplevel says nothing about a painted frame, so
 # the app itself reports it: it creates QDISTRO_ADMIN_APP_READY_FILE after the
 # first paint of its exposed window, whose backing-store flush is the
 # wl_surface commit of that frame (_FirstPaintMarker in the app).
 #
 # What the app cannot report on Wayland is that the COMPOSITOR has processed
-# that commit: QGuiApplication.sync(), the X11 launcher's round trip, is a
+# that commit: QGuiApplication.sync(), an X11 round trip, is a
 # no-op on Qt's Wayland platform (checked with WAYLAND_DEBUG on Qt 6.11), and
 # PyQt6 exposes no handle to the app's wl_display. The compositor itself can:
 # qdwin logs `mapped handle=` while processing a window's first buffer. The

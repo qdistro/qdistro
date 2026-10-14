@@ -14,8 +14,10 @@ that references it.
 
 The legacy tty4 LXQt+labwc escape hatch has been **removed** (a passwordless
 graphical admin VT would bypass the locked tty3 greeter). Production recovery is
-via GRUB — see `doc/recovery.md`. The LXQt+labwc stack now survives ONLY as the
-GUI **test harness** (`scripts/vm/spin-test-vm-gui.sh`), not on any production VT.
+via GRUB — see `doc/recovery.md`. The LXQt+labwc stack is gone from the GUI test
+harness too: `scripts/vm/spin-test-vm-gui.sh` runs the product qdwin session
+only. (Upgrade cleanup of old tty4 installs stays in `image/config.sh`,
+`qdistro-bootstrap.sh` and `enable-qdgreeter.sh`.)
 
 ## qdistro session target
 
@@ -40,9 +42,7 @@ crash loop.
 | `qdwin-compositor.service`        | `/etc/systemd/user/qdwin-compositor.service` | systemd --user (admin) |
 | `qdshell.service`                 | `/etc/systemd/user/qdshell.service`      | systemd --user (admin) |
 | `qdwin-session-launcher.sh`       | `/usr/local/bin/qdwin-session-launcher`  | run by greetd as admin |
-| `qdistro-startlxqtwayland.sh`     | `/usr/local/bin/startlxqtwayland` (by the harness) | GUI test harness only (`spin-test-vm-gui.sh`) |
-| `qdistro-lxqt-session-wrap.sh`    | `/usr/local/bin/qdistro-lxqt-session-wrap` | GUI test harness only (labwc -S wrapper) |
-| `lxqt-session.conf`               | `/etc/xdg/lxqt/session.conf`             | GUI test harness only (labwc) |
+| `start-admin-app-wayland.sh`      | `/usr/local/bin/qdistro-start-admin-app` (`install-admin-app-for-vm.sh`) | shipped admin approvals launcher; the GUI scenarios start the app through it |
 
 ## Modifying this directory
 

@@ -287,9 +287,9 @@ fi
 # every base and golden checked, 2026-09-23). No test uses it: screenshots go
 # through virsh / the qdshell capture socket, input through ydotool + qemu-ga,
 # and the clipboard tests exercise Wayland data-device, not SPICE. Its resize
-# path needs Mutter, so under labwc it loops ("failed to call GetCurrentState
-# from mutter") at ~500k journal lines per 3 min and journald drops the admin
-# session's evidence; under qdwin it fails at every login. Remove it and lock
+# path needs Mutter, so under the retired labwc lane it looped ("failed to call
+# GetCurrentState from mutter") at ~500k journal lines per 3 min and journald
+# dropped the admin session's evidence; under qdwin it fails at every login. Remove it and lock
 # it, so the later GUI-lane installs (spin-test-vm-gui.sh) cannot bring it
 # back. Test VMs only; the product image does not ship it.
 if rpm -q spice-vdagent >/dev/null 2>&1; then
@@ -718,9 +718,8 @@ zypper -n install --no-recommends seatd >/dev/null 2>&1 \
 
 # xwayland provides /usr/bin/Xwayland, which weston's xwayland.so module
 # (loaded via the qdwin weston.ini modules= line) execs to serve X11
-# clients. The labwc gui profile installs this in spin-test-vm-gui.sh, but
-# the qdwin profile builds its own session here, so install it on this path
-# too — without it qdwin starts with no working XWayland and every X11 app
+# clients. qdwin's XWayland support is product behaviour (the image ships it);
+# without the binary qdwin starts with no working XWayland and every X11 app
 # test fails.
 log "installing xwayland (Xwayland binary for qdwin's xwayland.so module)..."
 zypper -n install --no-recommends xwayland >/dev/null 2>&1 \
@@ -787,7 +786,7 @@ fi
 # real desktop apps — firefox, thunar, vlc, chromium, audacity, feh,
 # tk/fltk/swing. OPT-IN (QDWIN_APP_DEPS=1, which `QCI_GUI_APPS=1` sets for
 # the periodic gui-apps lane), DEFAULT OFF: this bootstrap is shared by EVERY
-# golden (bats, gui-admin, gui-qdwin), so installing these heavy packages
+# golden (bats, gui-qdwin), so installing these heavy packages
 # unconditionally bloated all goldens. With deps absent those scenarios SKIP.
 # The marker file written below is what the GUI gate probes to decide that
 # this golden carries the app set (foot alone no longer says so: it is a core
@@ -1168,13 +1167,13 @@ if [ ! -S /run/user/1000/wayland-1 ]; then
 fi
 
 # qdlocker.sock is created by a successfully running qdlocker by default
-# (QDLOCKER_CTRL_SOCKET=1). This admin-test harness starts the lxqt/labwc
-# path, not the qdwin compositor session, so qdlocker may retry-crash before
-# binding qdwin_locker_v1 and before creating the ctrl socket. The
+# (QDLOCKER_CTRL_SOCKET=1). A qdwin session that is slow to come up can
+# leave qdlocker retry-crashing before it binds qdwin_locker_v1 and creates
+# the ctrl socket. The
 # /etc/qdistro/locker-ctrl-introspection marker gates only the diagnostic
 # commands (status/unlock-result/prompt-text); it does not gate socket
 # creation or the production `lock` command. Warn-and-continue — do NOT fail
-# the bootstrap on this harness; only flag the case that signals a real
+# the bootstrap on it; only flag the case that signals a real
 # regression (qdlocker active but no socket).
 log "  waiting for /run/user/1000/qdlocker.sock (best-effort)..."
 for _ in $(seq 1 30); do

@@ -122,8 +122,8 @@ def test_unwritable_runtime_dir_does_not_raise(monkeypatch):
 
 def test_bare_metal_keeps_hardware_cursor(monkeypatch, clean_env):
     """On real hardware the eglfs hardware cursor works and is cheaper —
-    mirror the wlroots precedent (deploy/qdistro-startlxqtwayland.sh) and
-    only force the software cursor under virtualization."""
+    mirror the wlroots precedent (the retired qdistro-startlxqtwayland.sh)
+    and only force the software cursor under virtualization."""
     monkeypatch.setenv("QT_QPA_PLATFORM", "eglfs")
     monkeypatch.setattr(app, "_running_virtualized", lambda: False)
 

@@ -4,9 +4,10 @@
 #
 # Unlike the rest of tests/integration/vm/*.bats, this file does NOT need
 # a live VM (no `load helpers`, no VM_NAME). It asserts — by inspecting
-# the script SOURCE — that the permissions-gui GUI bootstrap installs
-# every helper path, user, and config file the permissions-gui scenarios
-# (and tests/integration/permissions-gui/AGENTS.md) assume exist.
+# the script SOURCE — that the GUI golden bootstrap installs every helper
+# path and config the GUI scenarios (and
+# tests/integration/permissions-gui/AGENTS.md) assume exist, on the one
+# (qdwin) profile, and that it leaves the INSTALLED admin TUI alone.
 #
 # Modelled on the s40-tier-hardening static-invariant style: catch a
 # regression where someone deletes/renames an install line during a
@@ -56,19 +57,21 @@ in_file() {
     [ "$status" -eq 0 ]
 }
 
-@test "gui-spin: provisions work fixtures as durable active silos" {
+@test "gui-spin: work fixtures are durable active silos, provisioned per scenario" {
     # The session manager owns the Linux-account creation.  A bare useradd
     # creates no silos.yaml row, so the first reconcile purges the relay grant
-    # required by the cross-user GUI scenarios.
-    # Both the labwc golden and native-Wayland scenarios use this helper.
-    # Validate the call site as well as every original durable-silo check.
-    in_file 'bash "$SRC/scripts/vm/lib/gui-silo-fixtures.sh" --prove-restart' "$GUI_SPIN"
-    in_file 'ERROR: work/work2 silo fixtures failed' "$GUI_SPIN"
+    # required by the cross-user GUI scenarios. The golden does not bake them
+    # (Active silos change the qdlocker lock screen); the scenarios that need
+    # them run the same helper at Setup through qdwin_admin_lane_setup --silos.
+    in_file 'bash /root/qdistro-src/scripts/vm/lib/gui-silo-fixtures.sh' \
+        "$REPO_ROOT/ci/lib/guest/gui-waiters.sh"
     in_file "sm_call CreateSilo" "$SILO_FIXTURES"
     in_file '"work:2000" "work2:3000"' "$SILO_FIXTURES"
     in_file "sm_call StartSilo" "$SILO_FIXTURES"
     in_file "silo_matches" "$SILO_FIXTURES"
     in_file "silo_state" "$SILO_FIXTURES"
+    run grep -F 'gui-silo-fixtures.sh' "$GUI_SPIN"
+    [ "$status" -ne 0 ] || [[ "$output" != *'bash "$SRC/scripts/vm/lib/gui-silo-fixtures.sh"'* ]]
 }
 
 @test "gui-spin: enables linger for both work users" {
@@ -91,57 +94,38 @@ in_file() {
     in_file "/usr/local/bin/qdistro-start-admin-app" "$GUI_SPIN"
 }
 
-@test "gui-spin: installs qdistro-start-admin-tui launcher" {
-    in_file "/usr/local/bin/qdistro-start-admin-tui" "$GUI_SPIN"
+@test "gui-spin: installs the admin app as the image does (shipped Wayland launcher)" {
+    in_file 'bash "$SRC/scripts/install/install-admin-app-for-vm.sh" "$SRC/admin_app"' "$GUI_SPIN"
+    in_file "grep -qx 'export QT_QPA_PLATFORM=wayland' /usr/local/bin/qdistro-start-admin-app" "$GUI_SPIN"
+    in_file "/usr/local/bin/qdistro-admin-approval-app" "$GUI_SPIN"
 }
 
-@test "gui-spin: installs the qdistro-admin-tui wrapper (scenario 35)" {
-    # The 1-liner that was the headline 'still open' item: without it,
-    # qterminal falls back to /bin/sh and scenario 35 ERRORs.
-    in_file "/usr/local/bin/qdistro-admin-tui" "$GUI_SPIN"
-    # ...and it must actually exec the TUI module, not just touch a path.
-    in_file "qdistro_admin_tui.py" "$GUI_SPIN"
+@test "gui-spin: never overwrites the installed admin TUI or deploys dev copies" {
+    # The retired step 4 ran `cat > /usr/local/bin/qdistro-admin-tui`, which
+    # FOLLOWS the installer's symlink and replaced the root-owned module with a
+    # wrapper around an admin-writable /home/admin copy: the TUI then never
+    # had the broker's authority shape on any GUI golden.
+    run grep -nE '(>|install[^#]*|cp[^#]*|ln[^#]*)[[:space:]]*/usr/local/bin/qdistro-admin-tui([[:space:]]|$)' "$GUI_SPIN"
+    [ "$status" -ne 0 ] || { echo "writes the TUI entry point: $output" >&2; return 1; }
+    run grep -n '/home/admin/qdistro' "$GUI_SPIN"
+    [ "$status" -ne 0 ] || { echo "deploys dev copies: $output" >&2; return 1; }
+    # It VERIFIES the installed TUI instead, on the bake and on every clone.
+    in_file 'verify_installed_tui() {' "$GUI_SPIN"
+    in_file '[ "$(readlink /usr/local/bin/qdistro-admin-tui)" = "$lib" ]' "$GUI_SPIN"
+    in_file "'#!/usr/bin/python3 -I'" "$GUI_SPIN"
+    in_file "/usr/bin/python3 -I -c 'import textual, rich'" "$GUI_SPIN"
+    [ "$(grep -c '^ *verify_installed_tui$' "$GUI_SPIN")" -ge 2 ]
 }
 
-@test "gui-spin: deploys the PyQt admin app onto admin's home" {
-    in_file "/home/admin/qdistro/admin_app/qdistro_admin_app.py" "$GUI_SPIN"
-}
-
-@test "gui-spin: deploys the Textual TUI sources onto admin's home" {
-    in_file "/home/admin/qdistro/tui/" "$GUI_SPIN"
-    in_file "qdistro_admin_tui.py" "$GUI_SPIN"
-    in_file "broker_client.py" "$GUI_SPIN"
-    in_file "silo_colors.py" "$GUI_SPIN"
-}
-
-@test "gui-spin: installs qterminal + qterminal.ini pinned geometry" {
-    in_file "qterminal" "$GUI_SPIN"
-    in_file "/home/admin/.config/qterminal.org/qterminal.ini" "$GUI_SPIN"
-    in_file "size=@Size(1200 700)" "$GUI_SPIN"
-}
-
-@test "gui-spin: installs XWayland + fonts for compositor-enabled admin scenarios" {
-    in_file "xwayland" "$GUI_SPIN"
-    in_file "dejavu-fonts" "$GUI_SPIN"
-}
-
-@test "gui-spin: supports separate labwc and qdwin session profiles" {
-    in_file "QDISTRO_VM_GUI_SESSION:-labwc" "$GUI_SPIN"
-    in_file "labwc|qdwin" "$GUI_SPIN"
+@test "gui-spin: one profile, the product qdwin session" {
+    run grep -nE 'labwc|lxqt|qterminal|xdotool|QDISTRO_VM_GUI_SESSION|start-admin-tui|start-user-app' "$GUI_SPIN"
+    [ "$status" -ne 0 ] || { echo "$output" >&2; return 1; }
     in_file "systemctl --user start qdwin-session.target" "$GUI_SPIN"
     in_file "wayland-1 socket up" "$GUI_SPIN"
     in_file "qdwin clone session up (wayland-1)" "$GUI_SPIN"
-}
-
-@test "gui-spin: installs perl-Net-DBus" {
-    in_file "perl-Net-DBus" "$GUI_SPIN"
-}
-
-@test "gui-spin: starts labwc from admin's lingering user manager" {
     in_file "systemctl mask greetd.service" "$GUI_SPIN"
-    in_file "qdistro-labwc.service" "$GUI_SPIN"
-    in_file "UnsetEnvironment=WAYLAND_DISPLAY DISPLAY" "$GUI_SPIN"
-    in_file "systemctl --user enable --now qdistro-labwc.service" "$GUI_SPIN"
+    in_file "renderer=pixman" "$GUI_SPIN"
+    in_file "mode=1280x800@60" "$GUI_SPIN"
 }
 
 # --- display-resolution fix (item 2) -----------------------------------
