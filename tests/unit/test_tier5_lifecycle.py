@@ -154,6 +154,23 @@ def test_client_that_never_listens_fails_before_any_vm_work(host):
     assert not host.clients_alive()
 
 
+def test_foreign_listener_named_like_the_client_is_not_readiness(host):
+    # ensures: readiness is proved by socket ownership, not by a name — a
+    #          competing listener on the client's port whose process name
+    #          is "pid=<client pid>," (what a name-matching `ss` parse
+    #          accepted) does not make the launch ready
+    host.flag("foreign-listener")
+    rc, _out, err = finish(host.spawn(VM, APP))
+    assert rc == 9, err
+    assert "never listened on vsock port" in err
+    assert "vsock listener ready" not in err
+    assert "STARTED" not in host.log() and "DEFINED" not in host.log()
+    client = int((host.state / "clients").read_text().split()[0])
+    foreign = int((host.state / "foreign").read_text().split()[0])
+    assert Path(f"/proc/{foreign}/comm").read_text().strip() == f"pid={client},"
+    assert not host.clients_alive()
+
+
 # -- cold start, reuse, refusal ---------------------------------------------
 
 def test_cold_start_then_app_exit_tears_everything_down(host):

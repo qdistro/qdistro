@@ -13,8 +13,12 @@ replaced, by small programs on PATH that keep their state in one directory:
               bridge path with bounded args, prints READY, and holds the
               "waypipe client" until its stdin reaches EOF.
   waypipe     loopback server stand-in: runs the app.
-  ss          lists each live "waypipe client" as a vsock LISTEN row
-              (flag no-listen: the client never binds its port).
+  vsock_diag  (sitecustomize) the sock_diag netlink dump answers with the
+              LISTEN sockets recorded in state/listeners ("<port> <inode>");
+              each "waypipe client" holds a real socket whose inode it
+              records (flag no-listen: it records none; flag
+              foreign-listener: a separate process named "pid=<client>,"
+              holds the recorded socket instead).
 
 Knobs are files under the state dir (see FakeHost.flag).
 """
@@ -207,7 +211,7 @@ elif a[0] == "info":
 '''
 
 _PKEXEC = r'''#!{py}
-import os, select, sys, time
+import ctypes, os, select, socket, subprocess, sys, time
 S = os.environ["T5FAKE"]
 argv = sys.argv[1:]
 with open(f"{S}/bridge.log", "a") as f:
@@ -217,17 +221,38 @@ if os.path.exists(f"{S}/auth-cancel"):
     sys.exit(126)
 if argv[0] != "{bridge}" or len(argv) != 7:
     sys.exit(127)
+# the client's "listening" socket: a real socket, so /proc/<pid>/fd shows
+# its inode exactly as it would show a vsock listener's
+lsock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 pid = os.fork()
 if pid == 0:
     # the "waypipe client": lives until the bridge tears it down
     os.setsid()
     while True:
         time.sleep(3600)
+ino = os.fstat(lsock.fileno()).st_ino
+lsock.close()
 with open(f"{S}/clients", "a") as f:
     f.write(f"{pid}\n")
-if not os.path.exists(f"{S}/no-listen"):
+if os.path.exists(f"{S}/foreign-listener"):
+    # another admin process on the client's port, named to look like it
+    fp = subprocess.Popen([sys.executable, "-c", (
+        "import ctypes, os, socket, sys, time\n"
+        "ctypes.CDLL(None).prctl(15, sys.argv[1].encode())\n"
+        "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+        "open(sys.argv[2], 'w').write(str(os.fstat(s.fileno()).st_ino))\n"
+        "time.sleep(3600)\n"), f"pid={pid},", f"{S}/foreign-ino"],
+        start_new_session=True)
+    with open(f"{S}/foreign", "a") as f:
+        f.write(f"{fp.pid}\n")
+    while not os.path.exists(f"{S}/foreign-ino") \
+            or not open(f"{S}/foreign-ino").read():
+        time.sleep(0.02)
     with open(f"{S}/listeners", "a") as f:
-        f.write(f"{pid} {argv[4]}\n")
+        f.write(f"{argv[4]} {open(f'{S}/foreign-ino').read()}\n")
+elif not os.path.exists(f"{S}/no-listen"):
+    with open(f"{S}/listeners", "a") as f:
+        f.write(f"{argv[4]} {ino}\n")
 sys.stdout.write(f"READY {pid}\n")
 sys.stdout.flush()
 reason = "eof"
@@ -272,25 +297,47 @@ def _guarded(file, *a, **kw):
 
 
 builtins.open = _guarded
-'''
 
-# `ss -Hlnp --vsock`: one LISTEN row per live fake waypipe client.
-_SS = r'''#!{py}
-import os
-S = os.environ["T5FAKE"]
-try:
-    rows = open(f"{S}/listeners").read().splitlines()
-except OSError:
-    rows = []
-for row in rows:
-    if not row:
-        continue
-    pid, port = row.split()
-    try:
-        os.kill(int(pid), 0)
-    except ProcessLookupError:
-        continue
-    print(f'v_str LISTEN 0 0 *:{port} *:* users:(("waypipe",pid={pid},fd=4))')
+# vsock_diag stand-in: the sock_diag netlink dump answers with the LISTEN
+# sockets recorded in state/listeners ("<port> <inode>").
+if _S:
+    import socket as _socket
+    import struct as _struct
+
+    class _FakeSockDiag:
+        def __init__(self):
+            self._out = []
+
+        def sendto(self, data, addr):
+            msgs = b""
+            try:
+                rows = _open(os.path.join(_S, "listeners")).read().splitlines()
+            except OSError:
+                rows = []
+            for row in rows:
+                if not row.strip():
+                    continue
+                port, ino = (int(x) for x in row.split())
+                body = _struct.pack("=BBBBIIIII2I", _socket.AF_VSOCK, 1, 10, 0,
+                                    0xFFFFFFFF, port, 0, 0, ino, 0, 0)
+                msgs += _struct.pack("=IHHII", 16 + len(body), 20, 2, 1, 0) + body
+            done = _struct.pack("=IHHIIi", 20, 3, 2, 1, 0, 0)
+            self._out = [msgs + done] if msgs else [done]
+
+        def recv(self, n):
+            return self._out.pop(0) if self._out else b""
+
+        def close(self):
+            pass
+
+    _RealSocket = _socket.socket
+
+    def _socket_factory(family=-1, type=-1, proto=-1, fileno=None):
+        if family == _socket.AF_NETLINK:
+            return _FakeSockDiag()
+        return _RealSocket(family, type, proto, fileno)
+
+    _socket.socket = _socket_factory
 '''
 
 _WAYPIPE = r'''#!/bin/sh
@@ -322,7 +369,6 @@ class FakeHost:
         py = sys.executable
         for name, body in (("virsh", _VIRSH), ("qemu-img", _QEMU_IMG),
                            ("pkexec", _PKEXEC), ("waypipe", _WAYPIPE),
-                           ("ss", _SS),
                            ("qemu-system-x86_64", _QEMU)):
             p = self.bin / name
             p.write_text(body.replace("{py}", py)
@@ -435,6 +481,12 @@ class FakeHost:
                 p.wait()
         for pid in self.clients_alive():
             os.kill(pid, signal.SIGKILL)
+        foreign = self.state / "foreign"
+        for line in (foreign.read_text().split() if foreign.exists() else []):
+            try:
+                os.kill(int(line), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         running = self.state / "running"
         if running.exists():
             for f in running.iterdir():

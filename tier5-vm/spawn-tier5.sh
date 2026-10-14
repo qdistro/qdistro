@@ -160,7 +160,7 @@ if [ "$(id -u)" -eq 0 ]; then
     echo "        step is the pkexec'd qdistro-tier5-bridge" >&2
     exit 2
 fi
-for tool in waypipe pkexec flock python3 ss; do
+for tool in waypipe pkexec flock python3; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "[tier5] FAIL: $tool not installed" >&2
         exit 2
@@ -798,13 +798,54 @@ start_bridge() {
 
 # vsock_listening — rc 0 once OUR waypipe client (CLIENT_PID) listens on
 # PORT. READY means the client exec'd and is registered, not that it has
-# bound its socket yet. ss reads vsock_diag; -p resolves only our own
-# processes, so another uid's listener on the port never matches.
+# bound its socket yet. Ownership is proved by socket INODE, never by a
+# process name: the kernel's vsock_diag dump (sock_diag netlink) lists each
+# listening AF_VSOCK socket with its port and inode, and the listener counts
+# only if that inode is one of CLIENT_PID's own open sockets. (ss prints the
+# owner as `("<comm>",pid=N,fd=M)` with the comm unescaped, so a foreign
+# listener can name itself to look like ours; ss -e shows no inode for vsock.)
 vsock_listening() {
-    ss -Hlnp --vsock 2>/dev/null | awk -v port=":$PORT" -v pid="pid=$CLIENT_PID," '
-        $2 == "LISTEN" && substr($5, length($5) - length(port) + 1) == port \
-            && index($0, pid) { found = 1 }
-        END { exit !found }'
+    T5PID="$CLIENT_PID" T5PORT="$PORT" python3 - <<'PY'
+import os, socket, struct, sys
+pid, port = int(os.environ["T5PID"]), int(os.environ["T5PORT"])
+ours = set()
+try:
+    for fd in os.listdir(f"/proc/{pid}/fd"):
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{fd}")
+        except OSError:
+            continue
+        if target.startswith("socket:[") and target.endswith("]"):
+            ours.add(int(target[8:-1]))
+except OSError:
+    sys.exit(1)
+NETLINK_SOCK_DIAG, SOCK_DIAG_BY_FAMILY = 4, 20
+NLMSG_ERROR, NLMSG_DONE, TCP_LISTEN = 2, 3, 10
+try:
+    nl = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM, NETLINK_SOCK_DIAG)
+    # struct vsock_diag_req: family, protocol, pad, states, ino, show, cookie[2]
+    req = struct.pack("=BBHIII2I", socket.AF_VSOCK, 0, 0, 1 << TCP_LISTEN,
+                      0, 0, 0xFFFFFFFF, 0xFFFFFFFF)
+    nl.sendto(struct.pack("=IHHII", 16 + len(req), SOCK_DIAG_BY_FAMILY,
+                          0x301, 1, 0) + req, (0, 0))   # REQUEST|DUMP
+    while True:
+        data, off = nl.recv(65536), 0
+        if not data:
+            sys.exit(1)
+        while off + 16 <= len(data):
+            ln, typ = struct.unpack_from("=IH", data, off)
+            if typ in (NLMSG_DONE, NLMSG_ERROR) or ln < 16:
+                sys.exit(1)
+            # struct vsock_diag_msg: family, type, state, shutdown,
+            # src_cid, src_port, dst_cid, dst_port, ino, cookie[2]
+            _f, _t, st, _s, _sc, sport, _dc, _dp, ino = struct.unpack_from(
+                "=BBBBIIIII", data, off + 16)
+            if st == TCP_LISTEN and sport == port and ino in ours:
+                sys.exit(0)
+            off += (ln + 3) & ~3
+except OSError:
+    sys.exit(1)
+PY
 }
 
 # bridge_alive — rc 0 while the bridge (and so the waypipe client) runs.
