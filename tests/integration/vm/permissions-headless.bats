@@ -8,8 +8,9 @@
 # sqlite rows in the broker's approvals/audit stores, signals and rules.d
 # files. Where a scenario's GUI step was only "admin presses Approve/Deny in
 # the admin app", the drivers make the identical broker call the app makes
-# (DecideRequest as the admin uid). Everything goes to the REAL broker on the
-# system bus of a disposable VM.
+# (DecideRequest), as root: the broker refuses authority methods from
+# admin-uid inline Python/busctl/dbus-send, so audit approver_uid is 0 there.
+# Everything goes to the REAL broker on the system bus of a disposable VM.
 #
 # Each @test name starts with the permissions-gui scenario id it replaces.
 # Drivers (run inside the VM as root, staged over the bats HTTP stager):
@@ -119,6 +120,7 @@ refute_fail_lines() {
 
 @test "pg23-revoke-all-for-uid: one ApprovalRevoked per row, other uid survives, 3 revoke audit rows" {
     run_case s122-perm-cache.sh pg23
+    assert_output_contains "PASS: pg23: admin-uid dbus-send RevokeAllForUid refused with AccessDenied"
     assert_output_contains "PASS: pg23: exactly three ApprovalRevoked signals"
     assert_output_contains "survive, no uid"
     assert_output_contains "PASS: pg23: three source=revoke audit rows"
@@ -233,7 +235,7 @@ refute_fail_lines() {
 @test "pg11-cross-user-sendto-headless: work->work2 stub notepad via relays, approve once, audit both uids, no cache" {
     run_case s125-sendto-xuser.sh pg11
     assert_output_contains "PASS: pg11: work2's notepad document contains"
-    assert_output_contains "PASS: pg11: audit row 2000|app.send-to:3000:...|1|once|prompt|1000"
+    assert_output_contains "PASS: pg11: audit row 2000|app.send-to:3000:...|1|once|prompt|0"
     assert_output_contains "PASS: pg11: one-shot send-to persisted no cache row"
 }
 

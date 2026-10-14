@@ -189,7 +189,10 @@ broker_restart() {
         || die "qdistro-admin-broker.service failed to restart"
     broker_ready || die "broker did not answer GetPending after restart"
 }
-reload_rules() { broker_call_as admin ReloadRules '[]'; }
+# Authority methods (DecideRequest, SaveRule, DeleteRule, ReloadRules,
+# Revoke*) run as root: the broker refuses them from admin-uid inline
+# Python / busctl / dbus-send (only the installed admin app/TUI/qdshell).
+reload_rules() { broker_call_as root ReloadRules '[]'; }
 
 # Every driver starts from a live broker (a previous case's failure must not
 # cascade into this one as NameHasNoOwner).
@@ -273,9 +276,10 @@ set_lineage_enforce() {
     return 1
 }
 
-# save_rule <filename> <yaml> — SaveRule as admin; prints the reply line.
+# save_rule <filename> <yaml> — SaveRule as root (an authority method);
+# prints the reply line.
 save_rule() {
-    runuser -u admin -- python3 - "$1" "$2" <<'PY'
+    python3 - "$1" "$2" <<'PY'
 import sys, dbus
 iface = dbus.Interface(dbus.SystemBus().get_object(
     "org.qdistro.AdminBroker1", "/org/qdistro/AdminBroker1"),

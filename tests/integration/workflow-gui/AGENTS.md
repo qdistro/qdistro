@@ -31,8 +31,10 @@ broker start or on a reload.
    the loader also reads `~/.config/qdistro/workflows/`). After writing a
    YAML, make the broker pick it up with either:
    - `systemctl restart qdistro-admin-broker.service` (drains runs too), or
-   - `systemctl reload`/`kill -HUP` / a `ReloadRules` D-Bus call — the
-     broker reloads workflows on the same trigger as rules.
+   - `systemctl reload`/`kill -HUP` / a `ReloadRules` D-Bus call (as
+     root: the broker refuses it from an admin-uid busctl/dbus-send/
+     inline Python) — the broker reloads workflows on the same trigger
+     as rules.
    Prefix scenario-authored files with `wfgui-` so the drain/teardown can
    `rm -f /etc/qdistro/workflows/wfgui-*.yaml` without touching
    hand-authored workflows.

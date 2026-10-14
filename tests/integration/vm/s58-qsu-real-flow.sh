@@ -8,8 +8,12 @@
 # socket-activated service, and the broker's RequestPermissionAs path.
 #
 # Test users:
-#   admin  uid 1000 — already present (broker DecideRequest authz)
+#   admin  uid 1000 — already present (pg51 qsu caller; read-only probes)
 #   work   uid 1001 — created here if missing (non-admin qsu caller)
+#
+# Authority calls (DecideRequest, SaveRule, DeleteRule, RevokeAllForUid) run
+# as root: the broker refuses them from admin-uid inline Python (only the
+# installed admin app/TUI/qdshell may exercise authority as admin).
 #
 # Since 2026-10-02 it also carries the headless ports of
 # permissions-gui 44/45/46 (forever_argv/basename/prefix hit+miss),
@@ -39,7 +43,7 @@ cleanup() {
         kill -TERM "$pid" 2>/dev/null || true
     done
     # Drain anything left pending so a re-run starts clean.
-    runuser -u admin -- python3 -c '
+    python3 -c '
 import dbus
 try:
     bus = dbus.SystemBus()
@@ -115,7 +119,7 @@ WORK_UID=$(id -u "$WORK_USER")
 pass "non-admin caller present: $WORK_USER (uid=$WORK_UID)"
 
 # Clean slate: revoke any cache rows for the work uid from a prior run.
-runuser -u admin -- python3 -c "
+python3 -c "
 import dbus
 bus = dbus.SystemBus()
 obj = bus.get_object('org.qdistro.AdminBroker1',
@@ -164,9 +168,9 @@ print(found_rid if found_rid is not None else "")
 PYEOF
 }
 
-decide_as_admin() {
+decide_as_root() {
     local rid="$1" decision="$2" scope="$3"
-    runuser -u admin -- python3 -c "
+    python3 -c "
 import dbus, sys
 bus = dbus.SystemBus()
 obj = bus.get_object('org.qdistro.AdminBroker1',
@@ -196,7 +200,7 @@ else
 fi
 
 # --- Step 2: admin allows forever_argv → qsu unblocks rc=0 ---
-if decide_as_admin "$RID1" "allow" "forever_argv" 2>/tmp/s58-decide1.err; then
+if decide_as_root "$RID1" "allow" "forever_argv" 2>/tmp/s58-decide1.err; then
     :
 else
     fail "DecideRequest(rid=$RID1, allow, forever_argv) failed: $(cat /tmp/s58-decide1.err 2>/dev/null)"
@@ -291,7 +295,7 @@ else
 fi
 
 # --- Step 5: admin one-shot allow → echo runs, captures stdout ---
-if decide_as_admin "$RID3" "allow" "once" 2>/tmp/s58-decide3.err; then
+if decide_as_root "$RID3" "allow" "once" 2>/tmp/s58-decide3.err; then
     :
 else
     fail "DecideRequest(rid=$RID3, allow, once) failed: $(cat /tmp/s58-decide3.err 2>/dev/null)"
@@ -322,9 +326,10 @@ fi
 # permissions-gui 44, 45, 46, 49, 50, 51, 52, 53, 54. Those scenarios drove
 # the decision through the labwc/XWayland admin app; every load-bearing
 # assertion was a qsu exit/stdout, a broker GetPending/ListHistory reply, or
-# a cache/audit sqlite row. Here the admin decision is a DecideRequest as
-# the admin uid (the call the admin app's Ctrl+Y makes), everything else is
-# the real /usr/local/bin/qsu -> qdistro-root-exec -> broker path.
+# a cache/audit sqlite row. Here the admin decision is a root DecideRequest
+# (the same broker call the admin app's Ctrl+Y makes; admin-uid inline
+# Python may not exercise authority), everything else is the real
+# /usr/local/bin/qsu -> qdistro-root-exec -> broker path.
 # ===========================================================================
 
 QSU=/usr/local/bin/qsu
@@ -355,7 +360,7 @@ con = sqlite3.connect(sys.argv[1], timeout=10)
 con.execute("DELETE FROM approvals WHERE action LIKE 'qsu.exec:%'")
 con.commit()
 PYEOF
-    runuser -u admin -- python3 -c '
+    python3 -c '
 import dbus
 bus = dbus.SystemBus()
 iface = dbus.Interface(bus.get_object("org.qdistro.AdminBroker1",
@@ -458,7 +463,7 @@ expect_prompt() {
 # and exit nonzero.
 deny_prompt() {
     local label=$1 tag=$2
-    decide_as_admin "$PROMPT_RID" deny once 2>/dev/null \
+    decide_as_root "$PROMPT_RID" deny once 2>/dev/null \
         || { fail "$label: DecideRequest(deny) failed"; return 1; }
     if ! qsu_wait "$tag" 20; then fail "$label: qsu did not exit after deny"; return 1; fi
     if [ "$(qsu_rc "$tag")" != 0 ] && qsu_err "$tag" | grep -q 'request denied'; then
@@ -473,7 +478,7 @@ deny_prompt() {
 # ---------------------------------------------------------------------------
 qsu_reset
 if expect_prompt "pg44 S1" p44a "$WORK_USER" /bin/echo hello \
-   && decide_as_admin "$PROMPT_RID" allow forever_argv 2>/dev/null \
+   && decide_as_root "$PROMPT_RID" allow forever_argv 2>/dev/null \
    && qsu_wait p44a 20; then
     if [ "$(qsu_rc p44a)" = 0 ] && [ "$(qsu_out p44a)" = hello ]; then
         pass "pg44: qsu /bin/echo hello ran after admin forever_argv"
@@ -510,7 +515,7 @@ if [ ! -e /usr/local/bin/python3 ]; then
     ln -s /usr/bin/python3 /usr/local/bin/python3 && MADE_LOCAL_PY=1
 fi
 if expect_prompt "pg45 S1" p45a "$WORK_USER" /usr/bin/python3 -c 'print("py1")' \
-   && decide_as_admin "$PROMPT_RID" allow forever_basename 2>/dev/null \
+   && decide_as_root "$PROMPT_RID" allow forever_basename 2>/dev/null \
    && qsu_wait p45a 20 && [ "$(qsu_out p45a)" = py1 ]; then
     pass "pg45: python3 ran after admin forever_basename"
 else
@@ -542,7 +547,7 @@ expect_prompt "pg45 S5" p45d "$WORK_USER" /usr/bin/perl -e 'print qq(perl1\n)' \
 # ---------------------------------------------------------------------------
 qsu_reset
 if expect_prompt "pg46 S1" p46a "$WORK_USER" /usr/bin/systemctl status \
-   && decide_as_admin "$PROMPT_RID" allow forever_prefix 2>/dev/null \
+   && decide_as_root "$PROMPT_RID" allow forever_prefix 2>/dev/null \
    && qsu_wait p46a 30 && [ -n "$(qsu_out p46a)$(qsu_err p46a)" ]; then
     pass "pg46: systemctl status ran after admin forever_prefix"
 else
@@ -569,7 +574,7 @@ expect_prompt "pg46 S5" p46d "$WORK_USER" /usr/bin/systemctl restart sshd \
 # ---------------------------------------------------------------------------
 qsu_reset
 if expect_prompt "pg49 S2" p49a "$WORK_USER" /usr/bin/echo "hello world" \
-   && decide_as_admin "$PROMPT_RID" allow forever_argv 2>/dev/null \
+   && decide_as_root "$PROMPT_RID" allow forever_argv 2>/dev/null \
    && qsu_wait p49a 20 && [ "$(qsu_out p49a)" = "hello world" ]; then
     pass "pg49: qsu echo 'hello world' streamed after forever_argv"
 else
@@ -618,7 +623,7 @@ esac
 # ---------------------------------------------------------------------------
 qsu_reset
 RULE50=s58-allow-systemctl-status.yaml
-SAVED=$(runuser -u admin -- python3 -c '
+SAVED=$(python3 -c '
 import dbus, sys
 bus = dbus.SystemBus()
 iface = dbus.Interface(bus.get_object("org.qdistro.AdminBroker1",
@@ -654,7 +659,7 @@ ROW=$(sql "$AUDIT_DB" "SELECT decision, source FROM audit WHERE id>$CUR AND acti
 [ "$ROW" = "0|prompt,1|rule" ] \
     && pass "pg50: newest audit rows 0|prompt,1|rule" \
     || fail "pg50: newest audit rows expected 0|prompt,1|rule, got [$ROW]"
-runuser -u admin -- python3 -c '
+python3 -c '
 import dbus, sys
 bus = dbus.SystemBus()
 iface = dbus.Interface(bus.get_object("org.qdistro.AdminBroker1",
@@ -673,7 +678,7 @@ if expect_prompt "pg51 S1" p51a admin -u "$WORK_USER" /usr/bin/id; then
     else
         fail "pg51: expected action qsu.exec:$WORK_USER target $WORK_USER, got $PROMPT_ACTION / $PROMPT_TARGET"
     fi
-    decide_as_admin "$PROMPT_RID" allow forever_argv 2>/dev/null || fail "pg51: DecideRequest(allow, forever_argv) failed"
+    decide_as_root "$PROMPT_RID" allow forever_argv 2>/dev/null || fail "pg51: DecideRequest(allow, forever_argv) failed"
     if qsu_wait p51a 20 && qsu_out p51a | grep -q "^uid=$WORK_UID($WORK_USER) gid=$(id -g "$WORK_USER")("; then
         pass "pg51: id ran as $WORK_USER (uid=$WORK_UID), not root"
     else
@@ -706,7 +711,7 @@ ROW=$(sql "$AUDIT_DB" "SELECT action, decision FROM audit WHERE id>$CUR AND acti
 qsu_reset
 QSU_ENV=(LD_PRELOAD=/tmp/evil.so PYTHONPATH=/tmp/poison LD_LIBRARY_PATH=/tmp/lib-evil PATH=/tmp/evilbin:/bin)
 expect_prompt "pg54 S1" p54 "$WORK_USER" /usr/bin/env \
-    && decide_as_admin "$PROMPT_RID" allow once 2>/dev/null
+    && decide_as_root "$PROMPT_RID" allow once 2>/dev/null
 QSU_ENV=()
 if qsu_wait p54 20 && [ "$(qsu_rc p54)" = 0 ]; then
     ENV_OUT=$(qsu_out p54)
@@ -841,7 +846,7 @@ fi
 # sure every client has exited (their handlers release the in-flight slot).
 quiet=0
 for _ in $(seq 1 60); do
-    n=$(runuser -u admin -- python3 -c '
+    n=$(python3 -c '
 import dbus
 bus = dbus.SystemBus()
 iface = dbus.Interface(bus.get_object("org.qdistro.AdminBroker1",

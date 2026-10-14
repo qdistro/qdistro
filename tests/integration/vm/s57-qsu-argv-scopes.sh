@@ -11,8 +11,9 @@
 #      pending qsu.exec request with a specific argv tuple. This is
 #      what qdistro-root-exec does end-to-end; here we replay it from
 #      root.
-#   2. Admin uid (1000) calls DecideRequest(rid, allow, <scope>) — the
-#      broker writes a cache row with the appropriate match_kind.
+#   2. Root calls DecideRequest(rid, allow, <scope>) — the broker writes
+#      a cache row with the appropriate match_kind. (Admin-uid inline
+#      Python may no longer exercise authority methods; root may.)
 #   3. A second RequestPermissionAs at the same uid is issued for the
 #      "should-hit" argv. We verify it never lands in GetPending (cache
 #      hit decided it synchronously) and WaitForDecision returns True.
@@ -78,15 +79,12 @@ PROBE_OUT=/tmp/s57-probe.out
 python3 - <<'PYEOF' >"$PROBE_OUT" 2>&1
 """s57 argv-scope round-trip probe.
 
-Runs as root (so the system-bus policy permits RequestPermissionAs +
-DecideRequest is invoked under uid 1000 via setresuid). The broker
-authenticates the *bus peer* uid via SO_PEERCRED, so we have to fork
-a child that drops to admin (uid 1000) for DecideRequest while the
-parent keeps the root identity for RequestPermissionAs.
-
-Simpler alternative: every D-Bus call here is a separate dbus
-connection. We `os.setresuid` to admin only for the DecideRequest
-call by spawning a subprocess that does so — see _decide_as_admin.
+Runs as root (so the system-bus policy permits RequestPermissionAs).
+Every control call is a separate `python3 -c` subprocess with its own
+D-Bus connection. DecideRequest/RevokeAllForUid run as root: the broker
+refuses those authority methods from admin-uid inline Python, and
+accepts root inline Python. The read-only GetPending still runs as the
+admin uid (runuser) — see _get_pending_ids / _decide_as_root.
 """
 from __future__ import annotations
 import atexit, json, os, pwd, subprocess, sys, time
@@ -201,7 +199,7 @@ def _get_pending_ids():
     return set(json.loads(out.stdout.strip() or "[]"))
 
 
-def _decide_as_admin(rid, decision, scope):
+def _decide_as_root(rid, decision, scope):
     # Broker can return DBus.Error.NoReply under load even when the method
     # eventually applies (observed mid forever_basename drain). Retry a few
     # times on NoReply / timeout before treating as a real scope failure.
@@ -209,8 +207,7 @@ def _decide_as_admin(rid, decision, scope):
     for attempt in range(3):
         try:
             out = subprocess.run(
-                ["runuser", "-u", "admin", "--",
-                 "python3", "-c",
+                ["python3", "-c",
                  f"import dbus; bus=dbus.SystemBus(); "
                  f"obj=bus.get_object('org.qdistro.AdminBroker1', "
                  f"'/org/qdistro/AdminBroker1'); "
@@ -241,8 +238,7 @@ def _revoke_cache_for_uid(uid):
     for attempt in range(3):
         try:
             out = subprocess.run(
-                ["runuser", "-u", "admin", "--",
-                 "python3", "-c",
+                ["python3", "-c",
                  f"import dbus; bus=dbus.SystemBus(); "
                  f"obj=bus.get_object('org.qdistro.AdminBroker1', "
                  f"'/org/qdistro/AdminBroker1'); "
@@ -262,7 +258,7 @@ def _drain_pending_deny():
     """Deny anything left pending so the queue is empty between phases."""
     for rid in list(_get_pending_ids()):
         try:
-            _decide_as_admin(rid, "deny", "once")
+            _decide_as_root(rid, "deny", "once")
         except Exception as e:  # noqa: BLE001
             print(f"  (drain) deny rid={rid} failed: {e}", file=sys.stderr)
 
@@ -282,7 +278,7 @@ def _round_trip(install_argv, scope, *, hit_argv, miss_argv,
         raise RuntimeError(
             f"install rid={rid} for argv={install_argv!r} did not "
             f"appear in GetPending (pending={pending})")
-    _decide_as_admin(rid, "allow", scope)
+    _decide_as_root(rid, "allow", scope)
 
     # --- hit probe ---
     rid_hit = _request_as(CLAIM_UID, CLAIM_PID, CLAIM_EXE, hit_argv)
@@ -297,10 +293,10 @@ def _round_trip(install_argv, scope, *, hit_argv, miss_argv,
     miss_ok = (rid_miss in pending_after_miss)
     # Deny the miss to clean up (was never auto-decided).
     if rid_miss in pending_after_miss:
-        _decide_as_admin(rid_miss, "deny", "once")
+        _decide_as_root(rid_miss, "deny", "once")
     # If the hit was wrongly pending, drain it.
     if rid_hit in pending_after_hit:
-        _decide_as_admin(rid_hit, "deny", "once")
+        _decide_as_root(rid_hit, "deny", "once")
 
     return hit_ok, miss_ok, rid_hit, rid_miss
 
@@ -336,7 +332,7 @@ try:
     rid = _request_as(CLAIM_UID, CLAIM_PID, CLAIM_EXE,
                       ["/usr/bin/python3", "foo.py"])
     time.sleep(0.1)
-    _decide_as_admin(rid, "allow", "forever_basename")
+    _decide_as_root(rid, "allow", "forever_basename")
 
     # Hit 1: same exact argv → hit.
     rid_hit = _request_as(CLAIM_UID, CLAIM_PID, CLAIM_EXE,
@@ -346,7 +342,7 @@ try:
         print("PASS: forever_basename same")
     else:
         print("FAIL: forever_basename same — expected hit, got pending")
-        _decide_as_admin(rid_hit, "deny", "once")
+        _decide_as_root(rid_hit, "deny", "once")
 
     # Hit 2: different argv[0] path, same basename → hit.
     rid_hit2 = _request_as(CLAIM_UID, CLAIM_PID, CLAIM_EXE,
@@ -357,7 +353,7 @@ try:
     else:
         print("FAIL: forever_basename different argv[0] same basename — "
               "expected hit, got pending")
-        _decide_as_admin(rid_hit2, "deny", "once")
+        _decide_as_root(rid_hit2, "deny", "once")
 
     # Miss: different basename → pending.
     rid_miss = _request_as(CLAIM_UID, CLAIM_PID, CLAIM_EXE,
@@ -365,7 +361,7 @@ try:
     time.sleep(0.2)
     if rid_miss in _get_pending_ids():
         print("PASS: forever_basename different basename")
-        _decide_as_admin(rid_miss, "deny", "once")
+        _decide_as_root(rid_miss, "deny", "once")
     else:
         print("FAIL: forever_basename different basename — "
               "expected pending, got hit")
@@ -379,7 +375,7 @@ try:
     rid = _request_as(CLAIM_UID, CLAIM_PID, CLAIM_EXE,
                       ["/usr/bin/systemctl", "restart"])
     time.sleep(0.1)
-    _decide_as_admin(rid, "allow", "forever_prefix")
+    _decide_as_root(rid, "allow", "forever_prefix")
 
     # Exact prefix.
     rid_h1 = _request_as(CLAIM_UID, CLAIM_PID, CLAIM_EXE,
@@ -389,7 +385,7 @@ try:
         print("PASS: forever_prefix exact prefix")
     else:
         print("FAIL: forever_prefix exact prefix — expected hit, got pending")
-        _decide_as_admin(rid_h1, "deny", "once")
+        _decide_as_root(rid_h1, "deny", "once")
 
     # Prefix + one trailing arg.
     rid_h2 = _request_as(CLAIM_UID, CLAIM_PID, CLAIM_EXE,
@@ -399,7 +395,7 @@ try:
         print("PASS: forever_prefix one trailing arg")
     else:
         print("FAIL: forever_prefix one trailing arg — expected hit, got pending")
-        _decide_as_admin(rid_h2, "deny", "once")
+        _decide_as_root(rid_h2, "deny", "once")
 
     # Different argv[0] but rest matches prefix. The broker's
     # forever_prefix is a list-equality match on argv[:len(prefix)],
@@ -411,7 +407,7 @@ try:
     time.sleep(0.2)
     if rid_h3 in _get_pending_ids():
         print("PASS: forever_prefix different argv[0]")
-        _decide_as_admin(rid_h3, "deny", "once")
+        _decide_as_root(rid_h3, "deny", "once")
     else:
         # Soft: broker treated argv[0] as path-insensitive for prefix
         # mode. Surface either way — the bats wrapper accepts the
@@ -444,14 +440,14 @@ try:
                       ["/bin/true"])
     time.sleep(0.1)
     try:
-        _decide_as_admin(rid, "allow", "forever_exe")
+        _decide_as_root(rid, "allow", "forever_exe")
         guard_active = False
     except RuntimeError as exc:
         if "ScopeNotPermitted" in str(exc) or "not permitted for delegated" in str(exc):
             guard_active = True
             # Drain the pending request so the next phase starts clean.
             try:
-                _decide_as_admin(rid, "deny", "once")
+                _decide_as_root(rid, "deny", "once")
             except Exception:  # noqa: BLE001
                 pass
         else:
@@ -474,7 +470,7 @@ try:
             print("PASS: forever_exe — same caller_exe any argv")
         else:
             print("FAIL: forever_exe — same caller_exe any argv — expected hit, got pending")
-            _decide_as_admin(rid_h1, "deny", "once")
+            _decide_as_root(rid_h1, "deny", "once")
 
         # Same caller_exe, very different argv[0] basename → still hit.
         rid_h2 = _request_as(CLAIM_UID, CLAIM_PID, CLAIM_EXE,
@@ -484,7 +480,7 @@ try:
             print("PASS: forever_exe — same caller_exe even with very different argv[0]")
         else:
             print("FAIL: forever_exe — different argv[0] — expected hit, got pending")
-            _decide_as_admin(rid_h2, "deny", "once")
+            _decide_as_root(rid_h2, "deny", "once")
 except Exception as e:  # noqa: BLE001
     print(f"FAIL: forever_exe round-trip raised: {e}")
 

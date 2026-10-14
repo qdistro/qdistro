@@ -20,10 +20,54 @@ import sys
 import time as _time
 from datetime import datetime
 
+# Re-exec the installed approval app into the broker's authority environment
+# before any toolkit loads. The broker lets an admin-uid peer approve only
+# as this installed script, run `python3 -I` with no arguments and an
+# environment inside its allowlist (_ADMIN_CONTROL_ENV_ALLOW in
+# broker/qdistro_admin_broker.py; a unit test keeps the two aligned):
+# libraries below honour their own plugin/module variables (QT_PLUGIN_PATH,
+# GTK_MODULES, GIO_EXTRA_MODULES, GCONV_PATH, …), and Qt parses
+# -platformpluginpath from argv. Every launcher's environment is session
+# noise; this makes each legitimate launch conform. Dev copies are not
+# trusted with authority and run as started.
+_INSTALLED_PATH = "/usr/local/bin/qdistro-admin-approval-app"
+_AUTHORITY_ENV_ALLOW = frozenset((
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ",
+    "TERM", "COLORTERM", "NO_COLOR", "COLUMNS", "LINES",
+    "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_SESSION_ID", "XDG_SESSION_TYPE", "XDG_SESSION_CLASS", "XDG_SEAT",
+    "XDG_VTNR", "QT_QPA_PLATFORM", "QDISTRO_ADMIN_APP_READY_FILE",
+))
+_AUTHORITY_QPA_VALUES = frozenset(("wayland", "offscreen"))
+
+
+def _authority_env(environ) -> dict:
+    env = {k: v for k, v in environ.items()
+           if k in _AUTHORITY_ENV_ALLOW or k.startswith("LC_")}
+    if env.get("QT_QPA_PLATFORM", "wayland") not in _AUTHORITY_QPA_VALUES:
+        del env["QT_QPA_PLATFORM"]
+    env["PATH"] = "/usr/bin:/bin"
+    return env
+
+
+def _reexec_for_authority() -> None:
+    if sys.argv[0] != _INSTALLED_PATH:
+        return
+    env = _authority_env(os.environ)
+    if (sys.flags.isolated and len(sys.argv) == 1
+            and env == dict(os.environ)):
+        return
+    os.execve("/usr/bin/python3",
+              ["/usr/bin/python3", "-I", _INSTALLED_PATH], env)
+
+
+if __name__ == "__main__":
+    _reexec_for_authority()
+
 import dbus
 import dbus.mainloop.glib
 import dbus.service
-from PyQt6.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QEventLoop, QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -71,6 +115,57 @@ from PyQt6.QtWidgets import (
 
 BUS_NAME = "org.qdistro.AdminBroker1"
 OBJ_PATH = "/org/qdistro/AdminBroker1"
+
+# Admin authority (approve/deny, rules, revocations, workflow approval)
+# needs the polkit action org.qdistro.broker.approve on top of the
+# broker's /proc identity checks (BROKER_APPROVE_ACTION in
+# broker/qdistro_admin_broker.py). The broker only checks it, never
+# interactively, and answers .AuthRequired; the app then obtains it for ITS
+# OWN process (AllowUserInteraction: polkitd asks the session agent, which
+# shows its password dialog) and retries once. auth_admin_keep keeps it
+# for this process for polkit's retention window, so a run of approvals
+# prompts once. Same contract as tui/broker_client.py.
+POLKIT_BUS = "org.freedesktop.PolicyKit1"
+POLKIT_OBJ = "/org/freedesktop/PolicyKit1/Authority"
+POLKIT_IFACE = "org.freedesktop.PolicyKit1.Authority"
+BROKER_APPROVE_ACTION = "org.qdistro.broker.approve"
+POLKIT_ALLOW_USER_INTERACTION = 1
+# The agent's password prompt times out at 120 s; leave headroom.
+POLKIT_INTERACTIVE_TIMEOUT_S = 300
+AUTH_REQUIRED = BUS_NAME + ".AuthRequired"
+# Client-side outcome (never sent by the broker): the admin cancelled the
+# password prompt, polkit refused, or an authentication is already running.
+AUTH_NOT_GRANTED = BUS_NAME + ".AuthNotGranted"
+_AUTHORITY_METHODS = frozenset((
+    "ApproveWorkflowRun", "DecideRequest", "DeleteRule", "ReloadRules",
+    "RevokeAllForUid", "RevokeApproval", "RunAuditGc", "SaveRule",
+))
+
+
+def _proc_start_time(stat_text: str) -> int:
+    """Field 22 (starttime) of /proc/<pid>/stat; split after the LAST ')'
+    since comm may contain one."""
+    return int(stat_text.rsplit(")", 1)[1].split()[19])
+
+
+def _own_polkit_subject():
+    """polkit unix-process subject for THIS process: pid + start-time, so
+    a recycled pid never inherits the grant, and uid."""
+    with open("/proc/self/stat", encoding="ascii", errors="replace") as fh:
+        start = _proc_start_time(fh.read())
+    return dbus.Struct(
+        ("unix-process", dbus.Dictionary(
+            {"pid": dbus.UInt32(os.getpid()),
+             "start-time": dbus.UInt64(start),
+             "uid": dbus.Int32(os.getuid())}, signature="sv")),
+        signature="sa{sv}")
+
+
+def _is_auth_required(exc: Exception) -> bool:
+    try:
+        return exc.get_dbus_name() == AUTH_REQUIRED
+    except Exception:  # noqa: BLE001
+        return False
 
 SESSION_MANAGER_BUS_NAME = "org.qdistro.SessionManager1"
 SESSION_MANAGER_OBJ_PATH = "/org/qdistro/SessionManager1"
@@ -164,6 +259,16 @@ _FRIENDLY_BROKER_ERRORS: dict[str, tuple[str, str]] = {
     f"{_BUS_NAME}.AccessDenied": (
         "Access denied",
         "The broker denied this operation for the current admin identity.",
+    ),
+    f"{_BUS_NAME}.AuthRequired": (
+        "Authentication required",
+        ("Approving needs the admin password. The request is still "
+         "pending — try again and enter the password when asked."),
+    ),
+    f"{_BUS_NAME}.AuthNotGranted": (
+        "Not authorized",
+        ("Authentication was cancelled or not accepted, so nothing was "
+         "changed. The request is still pending."),
     ),
     f"{_BUS_NAME}.Denied": (
         "Denied",
@@ -814,6 +919,7 @@ class BrokerBridge(QObject):
 
     def __init__(self):
         super().__init__()
+        self._authorizing = False
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
         self._proxy = self.bus.get_object(BUS_NAME, OBJ_PATH)
@@ -874,6 +980,11 @@ class BrokerBridge(QObject):
     ))
 
     def _call(self, name, *args):
+        if name in _AUTHORITY_METHODS:
+            return self._with_authority(lambda: self._call_once(name, *args))
+        return self._call_once(name, *args)
+
+    def _call_once(self, name, *args):
         method = getattr(self._proxy, name)
         try:
             return method(*args, dbus_interface=BUS_NAME)
@@ -885,6 +996,69 @@ class BrokerBridge(QObject):
             self._reconnect()
             method = getattr(self._proxy, name)
             return method(*args, dbus_interface=BUS_NAME)
+
+    def _with_authority(self, call):
+        """Run an authority call; on .AuthRequired authenticate this
+        process (org.qdistro.broker.approve) and retry ONCE. A cancelled
+        or refused authentication raises .AuthNotGranted and leaves the
+        request untouched; a second .AuthRequired propagates."""
+        try:
+            return call()
+        except dbus.DBusException as exc:
+            if not _is_auth_required(exc):
+                raise
+        self._authorize()
+        return call()
+
+    def _polkit_authority(self):
+        return dbus.Interface(
+            self.bus.get_object(POLKIT_BUS, POLKIT_OBJ), POLKIT_IFACE)
+
+    def _authorize(self) -> None:
+        """Interactive polkit CheckAuthorization for this process. The
+        call is asynchronous and a nested QEventLoop waits for it, so the
+        window keeps painting and handling input while the agent's
+        password dialog is up (a blocking call would freeze the app for
+        as long as the admin takes to type). Re-entry — a second approve
+        clicked meanwhile — is refused rather than opening a second
+        prompt."""
+        if self._authorizing:
+            raise dbus.DBusException(
+                "an authentication is already in progress",
+                name=AUTH_NOT_GRANTED)
+        self._authorizing = True
+        outcome: dict = {}
+        loop = QEventLoop()
+
+        def _reply(result):
+            outcome["granted"] = bool(result[0])
+            loop.quit()
+
+        def _error(exc):
+            outcome["error"] = exc
+            loop.quit()
+
+        try:
+            self._polkit_authority().CheckAuthorization(
+                _own_polkit_subject(), BROKER_APPROVE_ACTION,
+                dbus.Dictionary({}, signature="ss"),
+                dbus.UInt32(POLKIT_ALLOW_USER_INTERACTION), "",
+                reply_handler=_reply, error_handler=_error,
+                timeout=POLKIT_INTERACTIVE_TIMEOUT_S)
+            if not outcome:
+                loop.exec()
+        finally:
+            self._authorizing = False
+        if "error" in outcome:
+            _log.warning("polkit authentication failed: %s",
+                         outcome["error"])
+            raise dbus.DBusException(
+                f"polkit could not authorize {BROKER_APPROVE_ACTION}",
+                name=AUTH_NOT_GRANTED)
+        if not outcome.get("granted"):
+            raise dbus.DBusException(
+                f"{BROKER_APPROVE_ACTION} not granted (cancelled or "
+                f"refused)", name=AUTH_NOT_GRANTED)
 
     def _current_owner(self) -> str:
         """The unique bus name of BUS_NAME's current owner (":1.NN") —
@@ -941,9 +1115,10 @@ class BrokerBridge(QObject):
         refused as "instance-changed" before anything is sent."""
         if not owner or self._current_owner() != owner:
             return "instance-changed"
-        return str(self._owner_proxy(owner).DecideRequest(
-            int(rid), str(decision), str(scope),
-            dbus_interface=BUS_NAME))
+        proxy = self._owner_proxy(owner)
+        return str(self._with_authority(
+            lambda: proxy.DecideRequest(int(rid), str(decision), str(scope),
+                                        dbus_interface=BUS_NAME)))
 
     def list_cache(self) -> list[dict]:
         raw = self._call("ListCache")
@@ -2459,6 +2634,9 @@ class MainWindow(QMainWindow):
                     f"this decision. The request is still pending — you "
                     f"can retry with a different scope.\n\n{label}"
                 )
+            elif dbus_name in (AUTH_NOT_GRANTED, AUTH_REQUIRED):
+                # Authentication cancelled/refused: nothing was decided.
+                body = f"{title}: {label}"
             else:
                 body = (
                     f"{title}: the broker could not record this decision "
@@ -3019,6 +3197,10 @@ class MainWindow(QMainWindow):
                     f"[admin_app] bulk-{decision} rid={rid} failed: {e}",
                     file=sys.stderr,
                 )
+                if (e.get_dbus_name() or "") == AUTH_NOT_GRANTED:
+                    # The admin cancelled the password prompt: stop the
+                    # batch instead of prompting once per remaining row.
+                    state["cancelled"] = True
             else:
                 if result in ("applied", "applied-uncached"):
                     state["ok"] += 1
@@ -4149,7 +4331,8 @@ def main():
         format="[admin_app] %(levelname)s: %(message)s",
         stream=sys.stderr,
     )
-    app = QApplication(sys.argv)
+    # Qt never sees caller arguments (-platformpluginpath loads code).
+    app = QApplication(sys.argv[:1])
     attach_presentation(app)
     broker = BrokerBridge()
     session = _maybe_session_bridge()

@@ -1126,7 +1126,7 @@ setup() {
 
 @test "phase7-qsu-enforcing: qsu end to end under Enforcing — zero qdistro-domain AVCs" {
     # Headless port of permissions-gui/55 (+ its host runner run-55): real
-    # `qsu /usr/bin/id` as the non-admin user, admin approve over D-Bus, the
+    # `qsu /usr/bin/id` as the non-admin user, root approve over D-Bus, the
     # command must run and no new qdistro_root_exec_t / qsu_child_t /
     # qdistro_broker_t / qdistro_tier1_t / qdistro_pwd_t AVC may appear.
     # qga cannot setenforce, so this needs the SSH transport
@@ -1141,7 +1141,7 @@ setup() {
     fi
     assert_success
     assert_output_contains "PASS: SELinux mode now Enforcing"
-    assert_output_contains "PASS: admin approved the qsu request over D-Bus under Enforcing"
+    assert_output_contains "PASS: qsu request found by admin and approved by root over D-Bus under Enforcing"
     assert_output_contains "PASS: qsu /usr/bin/id ran under Enforcing (uid=0(root))"
     assert_output_contains "PASS: 0 new denials — qsu policy covers the enforcing qsu flow"
 }
@@ -1200,7 +1200,7 @@ setup() {
     # End-to-end through the actual qsu CLI (RequestPermissionAs,
     # delegated path) rather than s57's RequestPermission probe:
     #
-    #   1. admin DecideRequest('forever_argv') for `qsu /bin/true`
+    #   1. DecideRequest('forever_argv') (as root) for `qsu /bin/true`
     #   2. second `qsu /bin/true` cache-hits (no admin)
     #   3. `qsu /bin/echo hello` re-prompts (different argv)
     #

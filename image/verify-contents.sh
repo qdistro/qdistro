@@ -669,6 +669,11 @@ check_req "[broker] unit"              /etc/systemd/system/qdistro-admin-broker.
 check_req "[broker] dbus-reload unit"  /etc/systemd/system/qdistro-dbus-reload.service
 check_req "[broker] bus policy"        /etc/dbus-1/system.d/org.qdistro.AdminBroker1.conf
 check_req "[broker] daemon module"     /usr/libexec/qdistro/qdistro_admin_broker.py
+# Admin-uid approvals need org.qdistro.broker.approve (a typed admin
+# password); without the action every admin approval is refused. The qci
+# GUI gate's test-only grant for it must never reach an image.
+check_req "[broker] polkit action"     /usr/share/polkit-1/actions/org.qdistro.broker.policy
+check_absent "[broker] no test grant of the approve action" /etc/polkit-1/rules.d/10-qci-broker-approve-test.rules
 check_link "[broker] enabled"          /etc/systemd/system/multi-user.target.wants/qdistro-admin-broker.service
 check_link "[broker] dbus-reload enabled" /etc/systemd/system/multi-user.target.wants/qdistro-dbus-reload.service
 check_link "[broker] dbus-reload wanted by broker" /etc/systemd/system/qdistro-admin-broker.service.wants/qdistro-dbus-reload.service
@@ -680,7 +685,7 @@ check_line "[admin-app] desktop entry launches installed UI" \
 check_line "[admin-app] launcher uses native Wayland" \
     /usr/local/bin/qdistro-start-admin-app '^export QT_QPA_PLATFORM=wayland$'
 check_line "[admin-app] launcher runs installed script" \
-    /usr/local/bin/qdistro-start-admin-app '^exec /usr/bin/python3 /usr/local/bin/qdistro-admin-approval-app "\$@"$'
+    /usr/local/bin/qdistro-start-admin-app '^exec /usr/bin/python3 -I /usr/local/bin/qdistro-admin-approval-app "\$@"$'
 # The non-graphical approval path (install-admin-cli-for-vm.sh, run by the
 # admin-app step). Both paths are the broker's trusted control-plane paths;
 # the broker binds a Python peer through its argv, so the files must sit at

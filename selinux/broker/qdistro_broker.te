@@ -97,10 +97,18 @@
 ##   qdistro_broker_t neverallow violations and the broker still resolves
 ##   caller identity under enforcing with auth_read_passwd alone.
 ##
+##   0.7.0 (broker self-approval fix): policykit_dbus_chat. An admin-uid
+##   authority call (DecideRequest, SaveRule, …) now needs the polkit
+##   action org.qdistro.broker.approve, so the broker asks polkitd
+##   CheckAuthorization on the system bus — the same chat the pwd daemon
+##   has for its unlock gate (and the one the polkit relay's
+##   AuthenticationAgentResponse2 already uses). Optional, D-Bus only: it
+##   joins no network attribute, so the 0.6.0 neverallow ratchet holds.
+##
 ##   Spec refs: doc/selinux.md §"Broker module split-out";
 ##   doc/threat-model.md "TCB process discipline".
 ## </desc>
-policy_module(qdistro_broker, 0.6.0)
+policy_module(qdistro_broker, 0.7.0)
 
 ########################################
 #
@@ -253,6 +261,14 @@ allow qdistro_broker_t qdistro_pwd_audit_t:file manage_file_perms;
 # self:{tcp,udp,netlink_route}_socket create, which would defeat the
 # no-network neverallow below (and made the 0.5.0 ratchet unsatisfiable).
 auth_read_passwd(qdistro_broker_t)
+
+# (0.7.0) polkitd chat: CheckAuthorization for org.qdistro.broker.approve
+# on every admin-uid authority call, and the polkit relay's
+# AuthenticationAgentResponse2. Failure here fails closed (the broker
+# refuses the call), so a missing grant shows as approvals refused.
+optional_policy(`
+    policykit_dbus_chat(qdistro_broker_t)
+')
 
 # (0.6.0) The 0.5.0 module also carried optional systemd_dbus_chat_logind() and
 # fprintd_dbus_chat() blocks "for the admin-approval auth path". The broker has

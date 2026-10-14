@@ -102,4 +102,4 @@ class TestSelinuxRatchet:
         assert any("auth_read_passwd(qdistro_broker_t)" in ln for ln in active)
 
     def test_module_version_bumped(self):
-        assert "policy_module(qdistro_broker, 0.6.0)" in BROKER_TE.read_text()
+        assert "policy_module(qdistro_broker, 0.7.0)" in BROKER_TE.read_text()

@@ -7,7 +7,7 @@ name = "qdbrowser"
 version = "0.1.0"
 description = "Qt-based feature-rich web browser, sibling of qterminator"
 license = "GPL-3.0-only"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 dependencies = [
     "PyQt6>=6.5",
     "PyQt6-WebEngine>=6.5",

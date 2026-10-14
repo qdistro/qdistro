@@ -57,7 +57,7 @@ if [ "${QDISTRO_ADMIN_APP_WAIT_PAINTED:-0}" = 1 ]; then
     if [ -z "$READY_DIR" ] || [ ! -d "$READY_DIR" ]; then
         # Never fall back to a fixed marker path such as /painted.
         unset QDISTRO_ADMIN_APP_READY_FILE
-        setsid /usr/bin/python3 /usr/local/bin/qdistro-admin-approval-app "$@" \
+        setsid /usr/bin/python3 -I /usr/local/bin/qdistro-admin-approval-app "$@" \
             </dev/null >>"$LOG" 2>&1 &
         APP_PID=$!
         echo "qdistro admin approvals: no private directory for the first-paint marker; app (pid $APP_PID) started without the readiness wait" >&2
@@ -66,7 +66,7 @@ if [ "${QDISTRO_ADMIN_APP_WAIT_PAINTED:-0}" = 1 ]; then
     fi
     READY_FILE=$READY_DIR/painted
     QDISTRO_ADMIN_APP_READY_FILE=$READY_FILE \
-        setsid /usr/bin/python3 /usr/local/bin/qdistro-admin-approval-app "$@" \
+        setsid /usr/bin/python3 -I /usr/local/bin/qdistro-admin-approval-app "$@" \
         </dev/null >>"$LOG" 2>&1 &
     APP_PID=$!
     READY_TIMEOUT=${QDISTRO_ADMIN_APP_READY_TIMEOUT:-60}
@@ -91,4 +91,4 @@ if [ "${QDISTRO_ADMIN_APP_WAIT_PAINTED:-0}" = 1 ]; then
     exit "$ready_rc"
 fi
 
-exec /usr/bin/python3 /usr/local/bin/qdistro-admin-approval-app "$@"
+exec /usr/bin/python3 -I /usr/local/bin/qdistro-admin-approval-app "$@"

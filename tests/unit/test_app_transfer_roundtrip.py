@@ -28,6 +28,11 @@ class _Broker(_StubBroker):
             return B.ADMIN_UID, 100, "/usr/bin/admin", 1
         return 2000, _CALLER_PID, _CALLER_EXE, _CALLER_START
 
+    # The ":admin" approver has authenticated (org.qdistro.broker.approve;
+    # pinned in test_broker_authority_polkit.py).
+    def _polkit_peer_authorized(self, sender, action):
+        return sender == ":admin"
+
 
 def _stub_proc_identity(pid):
     # DecideRequest re-reads /proc/<pid> to catch a recycled caller. The

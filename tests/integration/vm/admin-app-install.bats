@@ -25,7 +25,7 @@ setup() {
     grep -qx 'Exec=/usr/local/bin/qdistro-start-admin-app' "$desktop"
     grep -qx 'TryExec=/usr/local/bin/qdistro-start-admin-app' "$desktop"
     grep -qx 'export QT_QPA_PLATFORM=wayland' "$launcher"
-    grep -qx 'exec /usr/bin/python3 /usr/local/bin/qdistro-admin-approval-app "$@"' "$launcher"
+    grep -qx 'exec /usr/bin/python3 -I /usr/local/bin/qdistro-admin-approval-app "$@"' "$launcher"
     ! grep -Eq 'QT_QPA_PLATFORM=xcb|/home/admin/qdistro|/root/qdistro-src' "$launcher" "$desktop"
 }
 
@@ -71,13 +71,13 @@ EOF
     # reaches its final command and reports its environment and argv.
     run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/runtime" \
         WAYLAND_DISPLAY=wayland-test QT_QPA_PLATFORM=xcb TEST_SOCKET="$socket" \
-        bash -c 'function [ { if [[ "$1" == ! && "$2" == -S && "$3" == "$TEST_SOCKET" ]]; then return 1; else builtin [ "$@"; fi; }; export -f "["; exec() { printf "MOCK_EXEC=%s|%s|%s|%s|%s\n" "$QT_QPA_PLATFORM" "$WAYLAND_DISPLAY" "$1" "$2" "$3"; }; export -f exec; bash "$1" approval-test' _ "$launcher"
+        bash -c 'function [ { if [[ "$1" == ! && "$2" == -S && "$3" == "$TEST_SOCKET" ]]; then return 1; else builtin [ "$@"; fi; }; export -f "["; exec() { printf "MOCK_EXEC=%s|%s|%s|%s|%s|%s\n" "$QT_QPA_PLATFORM" "$WAYLAND_DISPLAY" "$1" "$2" "$3" "$4"; }; export -f exec; bash "$1" approval-test' _ "$launcher"
     [ "$status" -eq 0 ]
-    [ "$output" = 'MOCK_EXEC=wayland|wayland-test|/usr/bin/python3|/usr/local/bin/qdistro-admin-approval-app|approval-test' ]
+    [ "$output" = 'MOCK_EXEC=wayland|wayland-test|/usr/bin/python3|-I|/usr/local/bin/qdistro-admin-approval-app|approval-test' ]
 
     run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/runtime" \
         WAYLAND_DISPLAY="$socket" QT_QPA_PLATFORM=xcb TEST_SOCKET="$socket" \
-        bash -c 'function [ { if [[ "$1" == ! && "$2" == -S && "$3" == "$TEST_SOCKET" ]]; then return 1; else builtin [ "$@"; fi; }; export -f "["; exec() { printf "MOCK_EXEC=%s|%s|%s|%s|%s\n" "$QT_QPA_PLATFORM" "$WAYLAND_DISPLAY" "$1" "$2" "$3"; }; export -f exec; bash "$1" approval-test' _ "$launcher"
+        bash -c 'function [ { if [[ "$1" == ! && "$2" == -S && "$3" == "$TEST_SOCKET" ]]; then return 1; else builtin [ "$@"; fi; }; export -f "["; exec() { printf "MOCK_EXEC=%s|%s|%s|%s|%s|%s\n" "$QT_QPA_PLATFORM" "$WAYLAND_DISPLAY" "$1" "$2" "$3" "$4"; }; export -f exec; bash "$1" approval-test' _ "$launcher"
     [ "$status" -eq 0 ]
-    [ "$output" = "MOCK_EXEC=wayland|$socket|/usr/bin/python3|/usr/local/bin/qdistro-admin-approval-app|approval-test" ]
+    [ "$output" = "MOCK_EXEC=wayland|$socket|/usr/bin/python3|-I|/usr/local/bin/qdistro-admin-approval-app|approval-test" ]
 }

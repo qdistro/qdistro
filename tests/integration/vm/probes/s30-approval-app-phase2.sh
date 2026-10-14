@@ -72,7 +72,8 @@ pending = iface.GetPending()
 if pending: print(int(pending[0]['id']))
 ")
 if [ -n "$DRAIN_ID" ]; then
-    runuser -u admin -- python3 -c "
+    # Root: admin-uid inline Python may not call DecideRequest.
+    python3 -c "
 import dbus
 bus = dbus.SystemBus()
 proxy = bus.get_object('com.qdistro.AdminBroker1',
@@ -168,7 +169,7 @@ if [ -z "$URGENT_ID" ]; then
     kill "$APP_PID" 2>/dev/null || true
     exit 5
 fi
-runuser -u admin -- python3 -c "
+python3 -c "
 import dbus
 bus = dbus.SystemBus()
 proxy = bus.get_object('com.qdistro.AdminBroker1',

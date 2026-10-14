@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-"""Run as admin (admin uid 1000) to approve or deny a pending request by id.
-Equivalent to clicking the Approve/Deny buttons in the admin app — both
-ultimately call DecideRequest on the broker. Used in Phase 1 because
-wlroots virtual-keyboard input injection isn't reliable on labwc yet.
+"""Approve or deny a pending request by id. Equivalent to clicking the
+Approve/Deny buttons in the admin app — both ultimately call DecideRequest
+on the broker. Used in Phase 1 because wlroots virtual-keyboard input
+injection isn't reliable on labwc yet.
+
+Run it as ROOT, feeding the script on stdin. The broker refuses
+DecideRequest from any admin-uid process other than the installed admin
+app/TUI/qdshell, and trusts a root Python peer only as `python3 -` /
+`python3 -c` (or the root CLI /usr/local/sbin/qdistro-approvals, the
+supported way to decide from a shell):
+
+    python3 - <id> <allow|deny> [once|session] < admin-decide.py
 
 Usage: admin-decide.py <id> <allow|deny> [once|session]
 """

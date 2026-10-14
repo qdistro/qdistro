@@ -174,15 +174,16 @@ sys.exit(0 if ok else 1)' "$rid" 2>/dev/null; then
     else
         fail "pg28: expected one pending row for the dbus-send caller; got: $row"
     fi
-    # The waiter is the same exe/uid; admin denies; the waiter sees false.
+    # The waiter is the same exe/uid; root denies (admin-uid inline Python
+    # may not call DecideRequest); the waiter sees false.
     ( dsend_as "$WORKU" WaitForDecision int32:"$rid" >"$WORK/28-wait.out" 2>&1 ) &
     local wpid=$!
     sleep 1
-    r=$(broker_call_as admin DecideRequest "[$rid, \"deny\", \"once\"]")
+    r=$(broker_call_as root DecideRequest "[$rid, \"deny\", \"once\"]")
     # DecideRequest returns its atomic outcome ("applied" = THIS call
     # decided the request; "already-*"/"deciding"/"unknown" would mean it
     # did not). Contract: broker DecideRequest out_signature "s".
-    expect_eq "pg28: admin DecideRequest(deny) accepted" "$r" 'OK "applied"'
+    expect_eq "pg28: root DecideRequest(deny) accepted" "$r" 'OK "applied"'
     wait "$wpid"
     wout=$(cat "$WORK/28-wait.out")
     if printf '%s' "$wout" | grep -qE 'boolean false|AdminBroker1\.Denied'; then

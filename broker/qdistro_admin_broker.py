@@ -190,7 +190,8 @@ _ARGV_REQUIRED_SCOPES = frozenset((
 ))
 
 _PYTHON_EXE_BASENAMES = frozenset((
-    "python", "python3", "python3.11", "python3.12", "python3.14",
+    "python", "python3", "python3.11", "python3.12", "python3.13",
+    "python3.14",
 ))
 
 _ADMIN_CONTROL_DIRECT_EXES = frozenset((
@@ -205,6 +206,59 @@ _ADMIN_CONTROL_SCRIPT_PATHS = frozenset((
     "/usr/local/bin/qdistro-admin-approval-app",
     "/usr/local/bin/qdistro-admin-tui",
 ))
+
+# Control-plane methods that grant, remove or reshape authority (an
+# approval, a rule, a revocation). An admin-uid peer may call these only as
+# an installed admin control program: a generic D-Bus CLI or inline Python
+# run as admin is any admin-session process — approving its own qsu root
+# request that way was an unauthenticated admin->root path (fable
+# 2026-10-13). An admin-uid caller that passes that identity check must also
+# hold the polkit action BROKER_APPROVE_ACTION (a typed admin password;
+# _require_authority_authorization). Root keeps its maintenance paths.
+_ADMIN_CONTROL_AUTHORITY_METHODS = frozenset((
+    "ApproveWorkflowRun",
+    "DecideRequest",
+    "DeleteRule",
+    "ReloadRules",
+    "RevokeAllForUid",
+    "RevokeApproval",
+    "RunAuditGc",
+    "SaveRule",
+))
+
+# Installed (root-owned) admin control scripts. The /home/admin copies in
+# _ADMIN_CONTROL_SCRIPT_PATHS are admin-writable dev installs: they may read
+# control-plane state but never exercise authority.
+_ADMIN_CONTROL_INSTALLED_SCRIPT_PATHS = frozenset((
+    "/usr/local/bin/qdistro-admin-approval-app",
+    "/usr/local/bin/qdistro-admin-tui",
+))
+
+# Interpreter flags an installed admin script may be started with before its
+# path; anything else (-c, -m, -, a different script) is not that program.
+# -I is REQUIRED: without it python runs admin-writable user-site code
+# (.pth, usercustomize) inside the trusted app before it says a word.
+_ADMIN_CONTROL_PYTHON_FLAGS = frozenset(("-I", "-s", "-E", "-B", "-u"))
+
+# The ONLY environment an authority-exercising admin script may carry. -I
+# shuts out Python's own injection, but the libraries under the app honour
+# their own (QT_PLUGIN_PATH, QML2_IMPORT_PATH, GTK_MODULES, GIO_EXTRA_MODULES,
+# GCONV_PATH, OPENSSL_CONF, LD_*, …) and that list has no end — so this is
+# an allowlist, not a denylist (sol bsa r2). The installed app and TUI
+# re-exec themselves into exactly this environment before importing any
+# toolkit (_AUTHORITY_ENV_ALLOW in each; a unit test keeps the three
+# aligned), so every legitimate launch conforms whatever its launcher passed.
+_ADMIN_CONTROL_ENV_ALLOW = frozenset((
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ",
+    "TERM", "COLORTERM", "NO_COLOR", "COLUMNS", "LINES",
+    "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_SESSION_ID", "XDG_SESSION_TYPE", "XDG_SESSION_CLASS", "XDG_SEAT",
+    "XDG_VTNR", "QT_QPA_PLATFORM", "QDISTRO_ADMIN_APP_READY_FILE",
+))
+_ADMIN_CONTROL_ENV_ALLOW_PREFIX = "LC_"
+# QT_QPA_PLATFORM names a platform plugin from Qt's root-owned plugin dir;
+# the value may also carry platform options, so it is pinned outright.
+_ADMIN_CONTROL_QPA_VALUES = frozenset(("wayland", "offscreen"))
 
 _ADMIN_CONTROL_STDIN_METHODS = frozenset((
     "DecideRequest",
@@ -419,6 +473,18 @@ POLKIT_AUTHORITY_IFACE = "org.freedesktop.PolicyKit1.Authority"
 # The response call is quick; bound it so a wedged polkitd cannot park
 # the broker's main loop inside a decision path.
 POLKIT_RESPOND_TIMEOUT_S = 15
+
+# The polkit action an admin-uid peer must hold to call an authority
+# method (_ADMIN_CONTROL_AUTHORITY_METHODS). Shipped as
+# broker/org.qdistro.broker.policy with allow_active=auth_admin_keep, and
+# forced onto the agent's PAM route (polkit/qdistro_polkit_agent.py
+# FORCED_PAM_ACTIONS), so only a typed admin password creates it: no
+# /proc identity check can stop a same-uid process forging the installed
+# app's argv (sol bsa r4). The broker only ASKS, never interactively —
+# the admin app/TUI obtain the authorization for their own process and
+# retry. A non-interactive check answers at once; bound it anyway.
+BROKER_APPROVE_ACTION = "org.qdistro.broker.approve"
+POLKIT_CHECK_TIMEOUT_S = 5
 
 # When set, _silo_state errors (manager offline, timeout, parse error)
 # stop falling through to the legacy trust-the-uid path. Instead they
@@ -785,6 +851,23 @@ def _read_proc_cmdline(pid: int) -> list[str]:
         if part:
             out.append(part.decode("utf-8", "replace"))
     return out
+
+
+def _read_proc_environ(pid: int) -> dict[str, str] | None:
+    """/proc/<pid>/environ as a dict, or None when unreadable (fail
+    closed). Only the authority predicate uses it, and it compares values
+    of allowlisted names only; nothing is logged."""
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    env: dict[str, str] = {}
+    for part in raw.split(b"\x00"):
+        if part:
+            k, _, v = part.partition(b"=")
+            env[k.decode("utf-8", "replace")] = v.decode("utf-8", "replace")
+    return env
 
 
 def _read_proc_environ_names(pid: int) -> set[str] | None:
@@ -1763,6 +1846,9 @@ class Broker(dbus.service.Object):
     def _peer_environ_names(self, pid: int) -> set[str] | None:
         return _read_proc_environ_names(pid)
 
+    def _peer_environ(self, pid: int) -> dict[str, str] | None:
+        return _read_proc_environ(pid)
+
     def _peer_ppid(self, pid: int) -> int | None:
         return _read_proc_ppid(pid)
 
@@ -1858,6 +1944,11 @@ class Broker(dbus.service.Object):
             if base in _PYTHON_EXE_BASENAMES:
                 if set(argv) & _ROOT_ADMIN_CONTROL_EXES:
                     return True, "trusted root admin-control Python helper"
+                # Root is the TCB: root maintenance and test harnesses use
+                # inline Python for the control methods.
+                if (method in _ADMIN_CONTROL_STDIN_METHODS
+                        and argv[1:2] in (["-"], ["-c"])):
+                    return True, "trusted root inline Python control script"
             return False, f"root admin-control helper exe {exe_s!r} is not trusted"
         if int(uid) != ADMIN_UID:
             return False, f"uid {uid} is not admin uid {ADMIN_UID}"
@@ -1867,10 +1958,14 @@ class Broker(dbus.service.Object):
             return False, f"SELinux type {typ!r} is not an admin peer"
 
         exe_s = str(exe or "")
+        argv = self._peer_cmdline(pid)
+        # Authority is checked before any other admin-uid identity: only an
+        # isolated installed admin script exercises it (qdshell calls no
+        # authority method).
+        if method in _ADMIN_CONTROL_AUTHORITY_METHODS:
+            return self._peer_is_installed_admin_script(pid, exe_s, argv)
         if exe_s in _ADMIN_CONTROL_DIRECT_EXES:
             return True, "trusted direct admin-control exe"
-
-        argv = self._peer_cmdline(pid)
         if (exe_s in _ROOT_DBUS_CLIENT_EXES
                 and _argv_names_broker_call(argv, method)):
             return True, "trusted admin-control D-Bus helper"
@@ -1896,6 +1991,59 @@ class Broker(dbus.service.Object):
             return False, f"untrusted admin-control exe={exe_s!r} type={typ!r}"
         return False, f"untrusted admin-control exe={exe_s!r}"
 
+    def _peer_is_installed_admin_script(self, pid: int, exe_s: str,
+                                        argv: list[str]
+                                        ) -> tuple[bool, str]:
+        """An admin-uid peer exercising authority must BE an installed
+        admin control script: a python interpreter started isolated (-I)
+        whose script argument (after plain interpreter flags) is the
+        root-owned installed path and its LAST argument (trailing args
+        reach Qt's own -platformpluginpath parsing), with an environment
+        inside _ADMIN_CONTROL_ENV_ALLOW. A path
+        merely present somewhere in argv (`python3 -c CODE <path>`) or an
+        admin-writable dev copy does not qualify.
+
+        Same-uid identity is defence in depth only: a same-uid process can
+        rewrite its own argv to match (sol bsa r4) or ptrace the real app.
+        The structural control is _require_authority_authorization — the
+        peer must also hold BROKER_APPROVE_ACTION, which only a typed
+        admin password creates."""
+        # The interpreter must be the root-owned system binary: an
+        # admin-owned native client merely NAMED python3 ignores argv and
+        # environment entirely (sol bsa r3; same rule as the polkit agent,
+        # sol r167).
+        if not (os.path.basename(exe_s) in _PYTHON_EXE_BASENAMES
+                and os.path.dirname(exe_s) in _POLKIT_AGENT_EXE_DIRS
+                and " (deleted)" not in exe_s):
+            return False, (f"untrusted admin-control exe={exe_s!r} for an "
+                           f"authority method")
+        i = 1
+        while i < len(argv) and argv[i] in _ADMIN_CONTROL_PYTHON_FLAGS:
+            i += 1
+        script = argv[i] if i < len(argv) else ""
+        if script not in _ADMIN_CONTROL_INSTALLED_SCRIPT_PATHS:
+            return False, ("Python peer is not an installed admin control "
+                           "script")
+        if "-I" not in argv[1:i]:
+            return False, ("installed admin control script not run isolated "
+                           "(python3 -I)")
+        if len(argv) != i + 1:
+            return False, ("installed admin control script started with "
+                           "arguments")
+        env = self._peer_environ(pid)
+        if env is None:
+            return False, "admin control script environment unreadable"
+        bad = sorted(k for k in env
+                     if k not in _ADMIN_CONTROL_ENV_ALLOW
+                     and not k.startswith(_ADMIN_CONTROL_ENV_ALLOW_PREFIX))
+        if bad:
+            return False, (f"admin control script environment outside the "
+                           f"allowlist {bad}")
+        if ("QT_QPA_PLATFORM" in env
+                and env["QT_QPA_PLATFORM"] not in _ADMIN_CONTROL_QPA_VALUES):
+            return False, "admin control script QT_QPA_PLATFORM not allowed"
+        return True, "trusted installed admin control script"
+
     def _require_admin_control_peer(self, sender, conn, method: str
                                     ) -> tuple[int, int, str, int]:
         uid, pid, exe, st = self._peer_info(sender, conn)
@@ -1915,7 +2063,59 @@ class Broker(dbus.service.Object):
                 f"peers; {reason}",
                 name=BUS_NAME + ".AccessDenied",
             )
+        self._require_authority_authorization(uid, sender, method)
         return uid, pid, exe, st
+
+    def _polkit_peer_authorized(self, sender, action: str) -> bool:
+        """polkitd's verdict on `action` for the bus peer `sender`, asked
+        WITHOUT user interaction (flags 0): the broker must never wait on
+        a human. The system-bus-name subject is resolved by polkitd itself
+        to the connection's process, so a temporary authorization the
+        admin app/TUI obtained for its own process (auth_admin_keep)
+        answers here and nothing else's does. Raises on any polkit
+        failure; the caller fails closed."""
+        obj = dbus.SystemBus().get_object(POLKIT_BUS, POLKIT_AUTHORITY_OBJ)
+        subject = dbus.Struct(
+            ("system-bus-name",
+             dbus.Dictionary({"name": dbus.String(str(sender))},
+                             signature="sv")),
+            signature="sa{sv}")
+        authorized, _challenge, _details = dbus.Interface(
+            obj, POLKIT_AUTHORITY_IFACE).CheckAuthorization(
+                subject, dbus.String(action),
+                dbus.Dictionary({}, signature="ss"), dbus.UInt32(0),
+                dbus.String(""), timeout=POLKIT_CHECK_TIMEOUT_S)
+        return bool(authorized)
+
+    def _require_authority_authorization(self, uid: int, sender,
+                                         method: str) -> None:
+        """An authority method called by a non-root peer additionally
+        needs BROKER_APPROVE_ACTION — a password-backed polkit
+        authorization — on top of the /proc identity checks, which a
+        same-uid process can forge. Root maintenance paths and the
+        in-process workflow sender are not polkit subjects and keep
+        their own gates. Not authorized raises .AuthRequired (the client
+        authenticates and retries); a polkit failure raises .AccessDenied
+        (fail closed, nothing to retry)."""
+        if (int(uid) == 0 or sender is _WORKFLOW_SENDER
+                or method not in _ADMIN_CONTROL_AUTHORITY_METHODS):
+            return
+        try:
+            ok = self._polkit_peer_authorized(sender, BROKER_APPROVE_ACTION)
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] {method}: polkit check for {sender} failed: "
+                  f"{e!r}; refusing", flush=True)
+            raise dbus.DBusException(
+                f"{method} refused: polkit could not confirm "
+                f"{BROKER_APPROVE_ACTION}",
+                name=BUS_NAME + ".AccessDenied",
+            ) from e
+        if not ok:
+            raise dbus.DBusException(
+                f"{method} needs the admin's authentication "
+                f"({BROKER_APPROVE_ACTION}); authenticate and retry",
+                name=BUS_NAME + ".AuthRequired",
+            )
 
     def _peer_matches_polkit_agent(self, *, uid: int, pid: int,
                                    exe: str, sender: str = ""
@@ -5809,6 +6009,13 @@ class Broker(dbus.service.Object):
                 f"peers; {reason}",
                 name=BUS_NAME + ".AccessDenied",
             )
+        try:
+            self._require_authority_authorization(admin_uid, sender,
+                                                  "DeleteRule")
+        except dbus.DBusException as e:
+            _audit(False, reason=f"refused: {e.get_dbus_name()}",
+                   path=source_path or None)
+            raise
 
         if not source_path:
             _audit(False, reason="refused: empty source_path", path=None)
