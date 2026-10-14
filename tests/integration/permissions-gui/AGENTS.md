@@ -105,7 +105,9 @@ silences only the success announcement, never a timeout. Set it per call, never
  (`/etc/polkit-1/rules.d/10-qci-broker-approve-test.rules`,
  `grant_broker_approve_for_tests` in `ci/lib/gates/gui.sh`), so scenarios
  approve without a prompt. A scenario that tests the real prompt declares
- `<!-- qci:polkit-test-grant: none -->` (see 62). Driving a scenario by hand
+ `<!-- qci:polkit-test-grant: none -->` (see 62; 63 opts out too and
+ also removes the tier-5 bridge YES rule 19–21 install, because it tests the
+ tier-5 launch password prompt). Driving a scenario by hand
  outside `qci gui`, write that rule yourself (copy it from `gui.sh`), or
  every app/TUI approval fails "Not authorized". The rule never ships:
  `image/verify-contents.sh` asserts it is absent.
@@ -114,7 +116,7 @@ silences only the success announcement, never a timeout. Set it per call, never
 
 The admin-app scenarios 03, 04, 06, 08, 10, 12, 13, 14, 34, 43, 47 and 62 run on
 the **qdwin lane** (`gui_scenario_requires_qdwin` in `ci/lib/gates/gui.sh`),
-like 18–21: the product session (qdwin compositor + qdshell on `wayland-1`),
+like 18–21 and 63: the product session (qdwin compositor + qdshell on `wayland-1`),
 with the admin app started through the **shipped** native-Wayland launcher
 `/usr/local/bin/qdistro-start-admin-app` (`deploy/start-admin-app-wayland.sh`).
 There is no X server, so nothing in those scenarios may use `xdotool`,
