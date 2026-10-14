@@ -317,10 +317,18 @@ continue.
 
 ### S2/S3 (continued) — the guest boots; windows are tagged and registered
 
+Run this only after any S3 dialog was cancelled. Wait for as many tagged
+clients and windows as launches whose bridge came up since S2
+(`launches=`): 2 when S3 launched without a prompt, 1 when its dialog was
+cancelled. (The waiters' third argument is a poll interval, not a count, so
+the count is checked explicitly; a cancelled S3 must not stall the wait and a
+passed S3 must not be graded on its first window alone.)
+
 ```bash
+$VMEXEC "$VM" 'c=$(cat /run/qci-63/s2.cur); n=$(journalctl _UID=1000 --after-cursor "$c" --no-pager -o cat | grep -c "bridge ready: waypipe client pid="); echo "$n" > /run/qci-63/launches; echo "launches=$n"'
 # Up to ~6 min for the nested cold boot + publisher.
-$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; N=$(cat /run/qci-63/vmname); c=$(cat /run/qci-63/s2.cur); await_journal_line_after_cursor "$c" "qdwin/secctx: client accepted engine=qdistro.tier5 app_id=qdistro.tier5.$N instance_id=" 360 2 _SYSTEMD_USER_UNIT=qdwin-compositor.service'
-$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; N=$(cat /run/qci-63/vmname); await_qdwin_window_title "\[tier5:$N\] .*" 120 2'
+$VMEXEC "$VM" 'N=$(cat /run/qci-63/vmname); n=$(cat /run/qci-63/launches); c=$(cat /run/qci-63/s2.cur); for _ in $(seq 1 180); do a=$(journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor "$c" --no-pager -o cat | grep -c "qdwin/secctx: client accepted engine=qdistro.tier5 app_id=qdistro.tier5.$N instance_id="); [ "$a" -ge "$n" ] && break; sleep 2; done; echo "accepted-wait=$a/$n"; [ "$a" -ge "$n" ]'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; N=$(cat /run/qci-63/vmname); n=$(cat /run/qci-63/launches); for _ in $(seq 1 60); do w=$(qdwin_windows 2>/dev/null | awk -F"\t" -v p="^\\[tier5:$N\\] " "\$5 ~ p" | wc -l); [ "$w" -ge "$n" ] && break; sleep 2; done; echo "windows-wait=$w/$n"; [ "$w" -ge "$n" ]'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; qdwin_windows'
 $VMEXEC "$VM" 'bash /run/qci-63/probe.sh accepted s2; bash /run/qci-63/probe.sh counts; bash /run/qci-63/probe.sh rows'
 qdwin_screenshot "$ART/63-s2-app-running.png"
@@ -333,8 +341,7 @@ qdwin_screenshot "$ART/63-s2-app-running.png"
 - The compositor logged `client accepted engine=qdistro.tier5
   app_id=qdistro.tier5.<VMNAME>`; the window list has a toplevel titled
   `[tier5:<VMNAME>] …`.
-- `records=` equals the number of `bridge ready` launches (1 if S3 was
-  refused, 2 otherwise) and each printed register row reads
+- `launches=` is 1 or 2 (2 only when S3 passed); `records=` equals it and each printed register row reads
   `engine='qdistro.tier5' app='qdistro.tier5.<VMNAME>'`; `running=1`,
   `qemu=1` (one shared guest), each listed bridge has `uid=0`.
 - OPEN `63-s2-app-running.png`: a foot terminal window is visible at full
