@@ -139,13 +139,34 @@ cat > "$S/probe.sh" <<'PROBE'
 S=/run/qci-63; N=$(cat "$S/vmname"); IMG=/home/admin/.local/share/libvirt/images
 DB=/var/lib/qdistro/audit/audit.sqlite; A0=$(cat "$S/audit-id")
 vsh() { runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 virsh -c qemu:///session "$@"; }
+# chain_roots — every process whose argv names the bridge for $N, classified.
+# A pkexec still waiting on authentication carries the bridge path in its
+# argv and, being setuid, has euid 0 — but its REAL uid is the caller's
+# (1000) and its exe is pkexec. A bridge exists only after pkexec has
+# authorized and exec'd it: exe = the python interpreter, real uid 0.
+chain_roots() {
+    local p exe ruid euid
+    for p in $(pgrep -f "[q]distro-tier5-bridge --vm $N"); do
+        exe=$(readlink "/proc/$p/exe" 2>/dev/null) || continue
+        read -r ruid euid < <(awk '/^Uid:/ {print $2, $3}' "/proc/$p/status" 2>/dev/null)
+        case "$exe" in
+            */pkexec) echo "pkexec pid=$p ruid=$ruid euid=$euid exe=$exe" ;;
+            /usr/bin/python3*) [ "$ruid" = 0 ] && echo "bridge pid=$p ruid=$ruid euid=$euid exe=$exe" \
+                                              || echo "other pid=$p ruid=$ruid euid=$euid exe=$exe" ;;
+            *) echo "other pid=$p ruid=$ruid euid=$euid exe=$exe" ;;
+        esac
+    done
+}
 case "$1" in
 wrapper)
     w=$(pgrep -u admin -f "[s]pawn-tier5.sh --vm $N --policy-key tier5/foot" | head -1)
     echo "wrapper=$w parent=$(ps -o comm= -p "$(ps -o ppid= -p "${w:-1}" | tr -d ' ')")" ;;
 counts)
     echo "wrappers=$(pgrep -u admin -fc "[s]pawn-tier5.sh --vm $N")"
-    echo "bridges=$(pgrep -fc "[q]distro-tier5-bridge --vm $N")"
+    roots=$(chain_roots)
+    echo "bridges=$(grep -c '^bridge ' <<<"$roots")"
+    echo "pkexec-pending=$(grep -c '^pkexec ' <<<"$roots")"
+    echo "bridge-other=$(grep -c '^other ' <<<"$roots")"
     echo "defined=$(vsh list --all --name | grep -cx "$N")"
     echo "running=$(vsh list --name | grep -cx "$N")"
     echo "qemu=$(pgrep -u admin -fc "[g]uest=$N,")"
@@ -153,7 +174,7 @@ counts)
     echo "records=$(sqlite3 "$DB" "SELECT count(*) FROM audit WHERE id > $A0 AND action='qdistro.lineage.register:vm-$N';")"
     echo "new-waypipe=$(for p in $(pgrep -x waypipe); do grep -qx "$p" "$S/chain-before" || echo "$p"; done | wc -l)"
     echo "root-files=$(find /home/admin/.local/share/libvirt /run/user/1000 -xdev -user root -newer "$S/vmname" 2>/dev/null | wc -l)"
-    for b in $(pgrep -f "[q]distro-tier5-bridge --vm $N"); do echo "bridge pid=$b uid=$(stat -c %u "/proc/$b")"; done ;;
+    [ -n "$roots" ] && printf '%s\n' "$roots" ;;
 rows)
     sqlite3 "$DB" "SELECT source FROM audit WHERE id > $A0 AND action='qdistro.lineage.register:vm-$N' ORDER BY id;" ;;
 accepted)   # accepted <cursor-file>
@@ -236,7 +257,10 @@ $VMEXEC "$VM" 'bash /run/qci-63/probe.sh wrapper; bash /run/qci-63/probe.sh coun
   desktop", an `Action: org.qdistro.tier5.bridge` line, a `Password:` field
   and OK/Cancel buttons. No foot window is on screen.
 - `wrapper=<pid>` is non-empty and its parent is qdshell's `qs` process;
-  `bridges=0`, `defined=0`, `qemu=0`, `records=0`.
+  `bridges=0` — no uid-0 bridge exists before authentication — with
+  `pkexec-pending=1` (the setuid pkexec waiting on the dialog: its listed
+  line shows `ruid=1000 euid=0 exe=…/pkexec`), `bridge-other=0`,
+  `defined=0`, `qemu=0`, `records=0`.
 
 Click the dialog's **Cancel** button using coordinates read from that frame
 (`qdwin_mouse_move X Y`, `sleep 0.5`, `qdwin_click X Y`). Then:
@@ -252,7 +276,7 @@ qdwin_screenshot "$ART/63-s1-cancelled.png"
 **Assert (S1, cancel):**
 - The agent logged `-> deny (prompt-cancelled)` for the action.
 - The wrapper logged (through qdshell's journal) that the bridge did not start.
-- `wrappers=0`, `bridges=0`, `defined=0`, `qemu=0`, `overlay=0`, `records=0`,
+- `wrappers=0`, `bridges=0`, `pkexec-pending=0`, `defined=0`, `qemu=0`, `overlay=0`, `records=0`,
   `new-waypipe=0`.
 - OPEN `63-s1-cancelled.png`: no dialog, no foot window.
 
@@ -360,7 +384,8 @@ qdwin_screenshot "$ART/63-s2-app-running.png"
   `[tier5:<VMNAME>] …`.
 - `launches=2` and `records=2`; each printed register row reads
   `engine='qdistro.tier5' app='qdistro.tier5.<VMNAME>'`; `running=1`,
-  `qemu=1` (one shared guest), each listed bridge has `uid=0`.
+  `qemu=1` (one shared guest), `bridges=2` with each `bridge` line showing
+  `ruid=0` and a python exe, `pkexec-pending=0`.
 - OPEN `63-s2-app-running.png`: a foot terminal window is visible at full
   opacity, no dialog.
 - (S3) a SECOND foot window is listed and visible (`accepted=2`,
@@ -377,7 +402,7 @@ qdwin_screenshot "$ART/63-s4-closed.png"
 ```
 
 **Assert (S4):**
-- `wrappers=0`, `bridges=0`, `defined=0`, `qemu=0`, `overlay=0`,
+- `wrappers=0`, `bridges=0`, `pkexec-pending=0`, `defined=0`, `qemu=0`, `overlay=0`,
   `new-waypipe=0`, `root-files=0`.
 - OPEN `63-s4-closed.png`: no foot window and no dialog remain.
 
