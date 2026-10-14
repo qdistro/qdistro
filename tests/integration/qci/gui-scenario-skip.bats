@@ -211,8 +211,19 @@ reason_full_stack() {
 @test "agent_scenarios: workflow-gui is enumerated, deleted scenarios are not" {
     WORKSPACE=$REPO_ROOT QDISTRO_REPO=$REPO_ROOT run agent_scenarios
     [ "$status" -eq 0 ]
-    [[ "$output" == *"/tests/integration/workflow-gui/01-one-trigger-one-run-audit-row.md"* ]]
-    [[ "$output" == *"/tests/integration/workflow-gui/03-failure-mid-step-scrub-failed-run.md"* ]]
+    [[ "$output" == *"/tests/integration/workflow-gui/04-admin-workflowstab-list-run-view.md"* ]]
+    [[ "$output" == *"/tests/integration/workflow-gui/05-approval-queue-gated-run.md"* ]]
+    [[ "$output" == *"/tests/integration/permissions-gui/01-tui-approver-visual.md"* ]]
+    [[ "$output" == *"/tests/integration/permissions-gui/35-tui-and-qt-concurrent.md"* ]]
+    [[ "$output" == *"/tests/integration/permissions-gui/40-tui-survives-broker-restart.md"* ]]
+    # Merged into 01/40/12/workflow-gui-04, or replaced by qsu-enforcing.bats
+    # (2026-10-14, labwc lane retired).
+    local gone
+    for gone in permissions-gui/02-tui-scope-picker permissions-gui/05-tui-help-overlay \
+        permissions-gui/09-tui-broker-offline permissions-gui/16-realapp-sendto-visual \
+        permissions-gui/55-qsu-selinux-enforcing workflow-gui/01- workflow-gui/02- workflow-gui/03-; do
+        [[ "$output" != *"/tests/integration/$gone"* ]] || { echo "still enumerated: $gone"; return 1; }
+    done
     [[ "$output" != *"/qdwin/tests/gui/01-"* ]]
     [[ "$output" != *"06-taskbar-isolation-menu"* ]]
     [[ "$output" != *"48-qsu-tui-argv-rendering"* ]]

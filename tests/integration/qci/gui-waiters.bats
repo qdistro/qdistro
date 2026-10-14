@@ -1902,11 +1902,16 @@ _call() {  # _call <time> <sender> <member> <args...>
     [[ "$output" == *"OK: RequestDecided(1,allow)"*"TUI made no DecideRequest"* ]]
 }
 
-@test "TUI removed by signal: a poll refresh, a TUI decision, or no signal all FAIL" {
+@test "TUI removed by signal: a poll is INCONCLUSIVE; a stray refresh, a TUI decision, or no signal FAIL" {
     _bus_fake_trace < <(_sig 1014.100000 RequestDecided 'int32 1' 'string "allow"'
       _call 1030.000000 :1.40 GetPending)
     run qdwin_admin_tui_removed_by_signal 1013
-    [ "$status" -ne 0 ]; [[ "$output" == *"not explained by a broker signal"* ]]
+    [ "$status" -eq 3 ]; [[ "$output" == *"INCONCLUSIVE: the TUI safety poll ran"* ]]
+
+    _bus_fake_trace < <(_sig 1014.100000 RequestDecided 'int32 1' 'string "allow"'
+      _call 1020.000000 :1.40 GetPending)
+    run qdwin_admin_tui_removed_by_signal 1013
+    [ "$status" -eq 1 ]; [[ "$output" == *"explained by neither a broker signal nor the safety poll"* ]]
 
     _bus_fake_trace < <(_sig 1014.100000 RequestDecided 'int32 1' 'string "allow"'
       _call 1014.500000 :1.40 DecideRequest 'int32 1' 'string "deny"')
@@ -1927,4 +1932,58 @@ _call() {  # _call <time> <sender> <member> <args...>
     [ "$status" -ne 0 ]
     run qdwin_start_admin_tui 'bad tag'
     [ "$status" -eq 2 ]
+}
+
+@test "TUI decision evidence: the TUI's own DecideRequest, the broker signal and the audit row agree" {
+    _bus_fake_trace < <(_sig 1012.000000 RequestPending 'int32 7'
+        _call 1020.000000 :1.40 DecideRequest 'int32 7' 'string "deny"' 'string "once"'
+        _sig 1020.100000 RequestDecided 'int32 7' 'string "deny"')
+    printf '900\n' > "$QCI_BUS_TRACE_DIR/admin-tui.t0"
+    qci_sqlite() { [[ "$2" == *"request_id=7 AND action='test.action' AND ts >= 900"* ]] && echo '0|once|prompt|1000|2000'; }
+    run qdwin_admin_tui_decision_evidence test.action deny once
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"TUI DecideRequest(7,deny,once)"*"OK: the TUI decided request 7"* ]]
+    # The same DENIED from a timeout has no TUI call behind it.
+    _bus_fake_trace < <(_sig 1012.000000 RequestPending 'int32 7')
+    run qdwin_admin_tui_decision_evidence test.action deny once
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"want exactly one request id"* ]]
+    # Another client's decision is not the TUI's.
+    _bus_fake_trace < <(_call 1020.000000 :1.50 DecideRequest 'int32 7' 'string "deny"' 'string "once"'
+        _sig 1020.100000 RequestDecided 'int32 7' 'string "deny"')
+    run qdwin_admin_tui_decision_evidence test.action deny once
+    [ "$status" -ne 0 ]
+    # An audit row that is not the admin's prompt decision fails.
+    _bus_fake_trace < <(_call 1020.000000 :1.40 DecideRequest 'int32 7' 'string "deny"' 'string "once"'
+        _sig 1020.100000 RequestDecided 'int32 7' 'string "deny"')
+    qci_sqlite() { echo '0||timeout||2000'; }
+    run qdwin_admin_tui_decision_evidence test.action deny once
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"expected audit row 0|once|prompt|1000|2000"* ]]
+}
+
+@test "TUI refresh readiness: any GetPending after the RequestPending counts, a poll too" {
+    _bus_fake_trace < <(_sig 1029.500000 RequestPending 'int32 1'; _call 1030.010000 :1.40 GetPending)
+    run qdwin_admin_tui_await_refresh 1010 2
+    [ "$status" -eq 0 ]
+    _bus_fake_trace < <(_call 1011.000000 :1.40 GetPending; _sig 1012.000000 RequestPending 'int32 1')
+    run qdwin_admin_tui_await_refresh 1010 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no TUI GetPending after it yet"* ]]
+}
+
+@test "TUI clear of poll: waits out the edges of the 30 s safety-poll grid" {
+    _bus_fake_trace < /dev/null
+    date() { [ "$1" = +%s.%N ] && echo 1031.000000; }   # phase 1.0 s
+    run qdwin_admin_tui_clear_of_poll
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"poll phase 2.0s after a tick, 28.0s before the next (waited 1.0s)"* ]]
+    date() { [ "$1" = +%s.%N ] && echo 1010.000000; }   # phase 10 s
+    run qdwin_admin_tui_clear_of_poll
+    [[ "$output" == *"waited 0.0s"* ]]
+    # A 25 s budget only fits at phases 2-5 s; at 29.5 s wait for tick + 2 s.
+    date() { [ "$1" = +%s.%N ] && echo 1029.500000; }
+    run qdwin_admin_tui_clear_of_poll 25
+    [[ "$output" == *"poll phase 2.0s after a tick, 28.0s before the next (waited 2.5s)"* ]]
+    unset -f date
 }

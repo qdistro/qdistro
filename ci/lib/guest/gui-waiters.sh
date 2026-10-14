@@ -870,7 +870,7 @@ qci_bus_trace_start() {
     _qci_bus_trace_tag_ok "$tag" || return 2
     install -d -m 0700 "$d" || return 1
     qci_bus_trace_stop "$tag" >/dev/null 2>&1 || true
-    rm -f -- "$d/$tag.log" "$d/$tag.pid" "$d/$tag.start"
+    rm -f -- "$d/$tag.log" "$d/$tag.pid" "$d/$tag.start" "$d/$tag.t0"
     # shellcheck disable=SC2016 # $$ and $1.. expand in the inner shell
     setsid -f /bin/sh -c 'echo $$ >"$1"; exec dbus-monitor --system "$2" "$3" "$4" >"$5" 2>&1 </dev/null' \
         _ "$d/$tag.pid" \
@@ -885,6 +885,7 @@ qci_bus_trace_start() {
         if grep -q -- "$tok" "$d/$tag.log" 2>/dev/null; then
             p=$(cat "$d/$tag.pid" 2>/dev/null)
             _qci_proc_starttime "$p" > "$d/$tag.start" 2>/dev/null || true
+            date +%s > "$d/$tag.t0"
             printf 'bus trace %s attached (dbus-monitor pid %s, log %s)\n' "$tag" "$p" "$d/$tag.log"
             return 0
         fi
@@ -1338,6 +1339,52 @@ _probe_admin_tui_signal_refresh() {
     qci_bus_trace_events admin-tui | _qdwin_admin_tui_analyse refresh "$1" "$2"
 }
 
+# qdwin_admin_tui_clear_of_poll [budget-s] — return at a moment that is at
+# least 2 s after a tick of the TUI's 30 s safety poll and leaves <budget-s>
+# (default 10, max 26) before the next one (phase taken from its first
+# GetPending in the trace), sleeping at most ~28 s. Call it right before the
+# action whose SIGNAL-driven effect a step asserts, so no poll can run inside
+# the budget (otherwise the signal evidence helpers must call the result
+# inconclusive). Prints the phase it left at.
+qdwin_admin_tui_clear_of_poll() {
+    local budget=${1:-10} names m now
+    case "$budget" in ''|*[!0-9]*) budget=10 ;; esac
+    [ "$budget" -gt 26 ] && budget=26
+    names=$(_qdwin_admin_tui_state tui.bus) || return 1
+    m=$(qci_bus_trace_events admin-tui | awk -F'\t' -v n=" $names " '$2 == "call" && $4 == "GetPending" && index(n, " " $3 " ") { print $1; exit }')
+    [ -n "$m" ] || { printf 'ERROR: no TUI GetPending in the trace to phase the poll from\n' >&2; return 1; }
+    now=$(date +%s.%N)
+    "$QCI_GUEST_PYTHON" -I -c '
+import sys, time
+m, now, budget = float(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3])
+phase = (now - m) % 30.0
+latest = 30.0 - budget
+wait = 0.0
+if phase < 2.0:
+    wait = 2.0 - phase
+elif phase > latest:
+    wait = 32.0 - phase
+time.sleep(wait)
+print("poll phase %.1fs after a tick, %.1fs before the next (waited %.1fs)"
+      % ((phase + wait) % 30.0, 30.0 - (phase + wait) % 30.0, wait))
+' "$m" "$now" "$budget"
+}
+
+# qdwin_admin_tui_await_refresh <since-epoch> [timeout] — readiness only: wait
+# until the TUI fetched its queue (GetPending) after a broker RequestPending
+# sent at or after <since>, by signal OR safety poll. Use it before capturing a
+# state that needs the new row; use qdwin_admin_tui_await_signal_refresh where
+# the SIGNAL path itself is the assertion.
+qdwin_admin_tui_await_refresh() {
+    local since=${1:?usage: qdwin_admin_tui_await_refresh <since-epoch> [timeout]} timeout=${2:-30} names
+    names=$(_qdwin_admin_tui_state tui.bus) || return 1
+    _await "admin TUI refreshed its queue after a RequestPending since $since" "$timeout" 0.5 \
+        _probe_admin_tui_any_refresh "$names" "$since"
+}
+_probe_admin_tui_any_refresh() {
+    qci_bus_trace_events admin-tui | _qdwin_admin_tui_analyse any "$1" "$2"
+}
+
 # qdwin_admin_tui_removed_by_signal <since-epoch>
 # After a decision made ELSEWHERE (the admin app), prove the TUI's empty queue
 # came from the broker's RequestDecided signal and not from a poll: a
@@ -1345,11 +1392,59 @@ _probe_admin_tui_signal_refresh() {
 # DecideRequest of its own, and every TUI GetPending since <since> (the TUI's
 # cheap path removes a known row without one) followed a broker signal within
 # 2 s away from a poll tick. Call it AFTER capturing the frame that shows the
-# empty queue, so "no poll refresh until now" covers that frame.
+# empty queue, so "no poll refresh until now" covers that frame. Exit 0 =
+# proven, 1 = FAIL, 3 = INCONCLUSIVE (a safety poll ran in between: ERROR,
+# re-run; precede the decision with qdwin_admin_tui_clear_of_poll).
 qdwin_admin_tui_removed_by_signal() {
     local since=${1:?usage: qdwin_admin_tui_removed_by_signal <since-epoch>} names
     names=$(_qdwin_admin_tui_state tui.bus) || return 1
     qci_bus_trace_events admin-tui | _qdwin_admin_tui_analyse removed "$names" "$since"
+}
+
+# qdwin_admin_tui_decision_evidence <action> <allow|deny> <scope> [caller-uid]
+# Prove that THE TUI made the decision the scenario drove with a key, not a
+# timeout or another client: the trace holds a DecideRequest(rid, decision,
+# scope) from the TUI's own connection (one rid), the broker's RequestDecided
+# for that rid follows it, and the permission audit DB records that rid --
+# for <action>, since the trace started -- as an admin prompt decision
+# (`<0|1>|<scope>|prompt|1000|<caller-uid>`). DENIED alone at the requester
+# also means a timeout; this correlation is what ties it to the keypress.
+qdwin_admin_tui_decision_evidence() {
+    local action=$1 decision=$2 scope=$3 caller=${4:-2000} names rid t0 want row
+    case "$decision" in allow) want=1 ;; deny) want=0 ;; *) printf 'usage: qdwin_admin_tui_decision_evidence <action> <allow|deny> <scope> [caller-uid]\n' >&2; return 2 ;; esac
+    names=$(_qdwin_admin_tui_state tui.bus) || return 1
+    t0=$(cat "$QCI_BUS_TRACE_DIR/admin-tui.t0" 2>/dev/null) || t0=0
+    rid=$(qci_bus_trace_events admin-tui | "$QCI_GUEST_PYTHON" -I -c '
+import sys
+names, decision, scope = set(sys.argv[1].split()), sys.argv[2], sys.argv[3]
+ev = [l.rstrip("\n").split("\t") for l in sys.stdin]
+ev = [e for e in ev if len(e) == 5]
+calls = [e for e in ev if e[1] == "call" and e[3] == "DecideRequest" and e[2] in names]
+mine = [e for e in calls if e[4].split(",")[1:3] == [decision, scope]]
+rids = sorted({e[4].split(",")[0] for e in mine})
+if len(rids) != 1:
+    print("FAIL: TUI DecideRequest(%s, %s) calls: %s (want exactly one request id); all TUI DecideRequest: %s"
+          % (decision, scope, rids, [e[4] for e in calls]), file=sys.stderr)
+    sys.exit(1)
+rid = rids[0]
+t_call = min(float(e[0]) for e in mine if e[4].split(",")[0] == rid)
+sig = [e for e in ev if e[1] == "signal" and e[3] == "RequestDecided"
+       and e[4].split(",")[:2] == [rid, decision] and float(e[0]) >= t_call]
+if not sig:
+    print("FAIL: no RequestDecided(%s, %s) after the TUI call at %.3f" % (rid, decision, t_call), file=sys.stderr)
+    sys.exit(1)
+print("TUI DecideRequest(%s,%s,%s) at %.3f; broker RequestDecided(%s,%s) at %s"
+      % (rid, decision, scope, t_call, rid, decision, sig[0][0]), file=sys.stderr)
+print(rid)
+' "$names" "$decision" "$scope") || return 1
+    case "$rid" in ''|*[!0-9]*) printf 'FAIL: no request id\n' >&2; return 1 ;; esac
+    row=$(qci_sqlite audit "SELECT decision, scope, source, approver_uid, caller_uid FROM audit WHERE request_id=$rid AND action='$action' AND ts >= $t0 ORDER BY id DESC LIMIT 1;") || return 1
+    printf 'audit(request_id=%s, action=%s): %s\n' "$rid" "$action" "${row:-<none>}"
+    if [ "$row" != "$want|$scope|prompt|1000|$caller" ]; then
+        printf 'FAIL: expected audit row %s|%s|prompt|1000|%s\n' "$want" "$scope" "$caller" >&2
+        return 1
+    fi
+    printf 'OK: the TUI decided request %s (%s, %s); audited as an admin prompt decision\n' "$rid" "$decision" "$scope"
 }
 
 # _qdwin_admin_tui_analyse <report|refresh|removed> <tui-bus-names> <since>
@@ -1400,6 +1495,15 @@ if mode == "refresh":
                 notes.append("TUI GetPending at %.3f follows RequestPending(%s) but is %.1fs from a safety-poll tick: INCONCLUSIVE" % (g, s[4], tick_dist(g)))
     print("; ".join(notes) or "RequestPending at %s but no TUI GetPending within %ss after it" % ([round(s[0], 3) for s in seen], AFTER))
     sys.exit(1)
+if mode == "any":
+    seen = [s for s in sigs if s[3] == "RequestPending" and s[0] >= since]
+    if not seen:
+        print("no RequestPending signal since %.3f" % since); sys.exit(1)
+    after = [g for g in gets if g >= seen[0][0]]
+    if not after:
+        print("RequestPending(%s) at %.3f; no TUI GetPending after it yet" % (seen[0][4], seen[0][0])); sys.exit(1)
+    print("TUI GetPending at %.3f after RequestPending(%s) at %.3f" % (after[0], seen[0][4], seen[0][0]))
+    sys.exit(0)
 if mode == "removed":
     dec = [s for s in sigs if s[3] == "RequestDecided" and s[0] >= since]
     if not dec:
@@ -1409,8 +1513,11 @@ if mode == "removed":
         print("FAIL: the TUI itself called DecideRequest: %s" % [(round(e[0], 3), e[4]) for e in own]); sys.exit(1)
     late = [g for g in gets if g >= since]
     unexplained = [g for g in late if driven(g) is None]
+    polls = [g for g in unexplained if tick_dist(g) <= NEAR]
+    if unexplained and len(polls) == len(unexplained):
+        print("INCONCLUSIVE: the TUI safety poll ran at %s, after %.3f and before this check; it, not the signal, may have emptied the queue (re-run with less delay between the decision and the frame)" % ([round(g, 3) for g in polls], since)); sys.exit(3)
     if unexplained:
-        print("FAIL: TUI GetPending at %s since %.3f not explained by a broker signal (safety poll?)" % ([round(g, 3) for g in unexplained], since)); sys.exit(1)
+        print("FAIL: TUI GetPending at %s since %.3f explained by neither a broker signal nor the safety poll" % ([round(g, 3) for g in unexplained], since)); sys.exit(1)
     print("OK: RequestDecided(%s) at %.3f; TUI made no DecideRequest; TUI GetPending since then: %s (each within %ss of a broker signal, away from poll ticks)" % (dec[0][4], dec[0][0], [round(g, 3) for g in late] or "none", AFTER))
     sys.exit(0)
 print("unknown mode " + mode); sys.exit(2)
