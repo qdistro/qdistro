@@ -39,7 +39,7 @@ and then calls the broker's `RequestPermission` to get a decision.
 
 A real `org.qdistro.*` polkit namespace does exist, but it is **narrow and
 per-subsystem**, and it does not cover the cross-silo verbs this page used to
-advertise. Twenty-one action IDs exist in the tree:
+advertise. Twenty action IDs exist in the tree:
 
 | Source | Actions |
 |---|---|
@@ -47,10 +47,10 @@ advertise. Twenty-one action IDs exist in the tree:
 | `pwd/org.qdistro.pwd.policy` | 1 — `org.qdistro.pwd.unlock` |
 | `print/org.qdistro.print.policy` | 5 — `print.{access,attach-usb,detach-usb,cancel-job,purge-jobs}` |
 | generated inline by `install-tier3-for-vm.sh` | 2 — `tier3.{spawn,cleanup}` |
-| generated inline by `install-tier5-for-vm.sh` | 2 — `tier5.{spawn,cleanup}` |
+| generated inline by `install-tier5-for-vm.sh` | 1 — `tier5.bridge` |
 | `qdbrowser/polkit/org.qdistro.qdbrowser.policy` | 10 — tabs/downloads/cookies/history/bookmarks/page-extract. **Present in the repo but installed by nothing**: no script copies it to `/usr/share/polkit-1/actions`, and `qdbrowser`'s `pyproject.toml` packages only the Python package. |
 
-So **eleven actions ship and ten do not**. Each is scoped to a single subsystem;
+So **ten actions ship and ten do not**. Each is scoped to a single subsystem;
 none is a cross-silo policy verb. They are not all the same shape:
 only the tier-3 and tier-5 actions carry an
 `org.freedesktop.policykit.exec.path` annotation, i.e. are true `pkexec` helper
@@ -70,14 +70,25 @@ authentication agent is registered whenever its applicable default is
 | `print.{attach-usb,detach-usb,cancel-job,purge-jobs}` | `auth_admin` | `auth_admin_keep` |
 | `print.access` | `auth_admin` | `yes` |
 | `tier3.{spawn,cleanup}` | `auth_admin_keep` | `auth_admin_keep` |
-| `tier5.{spawn,cleanup}` | `auth_admin_keep` | `yes` |
+| `tier5.bridge` | `auth_admin` | `auth_admin_keep` (`allow_inactive=no`) |
 
-So for an active admin session, seven of the other ten prompt through the
-agent and therefore land in the broker's queue (`broker.approve` prompts too,
-but the agent forces it onto its PAM route: a typed password, never the
-queue); `print.access` and the two tier5 actions
-are allowed outright for the active session and only prompt for a non-active or
-other-uid caller.
+So for an active admin session, nine of the ten prompt through the agent;
+`print.access` is allowed outright for the active session and only prompts for
+a non-active or other-uid caller. Seven of the nine land in the broker's
+queue. `broker.approve` and `tier5.bridge` do not: the agent forces the PAM
+route for them (`FORCED_PAM_ACTIONS` in `polkit/qdistro_polkit_agent.py`) ahead
+of its user config and test overrides — a typed admin password, never the
+queue. `broker.approve` is the authority to decide that queue, so its broker
+route would file the request into the queue it unlocks; `tier5.bridge`
+authorizes a root launcher parent and a broker launch record — authority a
+broker yes/no vote from an admin-session process must not grant. Every tier-5
+launch authenticates: pkexec's polkit subject is the launching
+`spawn-tier5.sh` process, and each launch is a fresh one, so the
+`auth_admin_keep` grant is reused only when that same caller process runs
+pkexec again (`tier5-bridge-enforcing.bats`, `keep-same-caller`) — never
+across launches, and no long-lived helper carries it. The tier-5 VM
+lifecycle itself runs as admin and has no polkit action (see
+`tier5-vm/README.md`, "Privilege split").
 
 Three `.rules` files ship. None of them is what wires an action to the agent —
 two **grant**, and the third mostly bypasses the agent for admin:

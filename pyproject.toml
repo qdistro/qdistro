@@ -50,6 +50,7 @@ pythonpath = [
   "admin_app",
   "session_manager",
   "tier4-vm",
+  "tier5-vm",
   "workflow",
   "templates",
 ]

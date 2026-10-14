@@ -461,10 +461,16 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
                 `# weston provides weston-terminal (the tier-5 cold-start app);` \
                 `# dejavu-fonts gives it a monospace face. Without these the` \
                 `# in-guest publisher cannot launch a renderable client` \
-                `# (perm-gui 20/21). build-guest-image.sh installs the full set;` \
-                `# the baked base only needs weston + a font.` \
-                --run-command 'zypper -n install --no-recommends waypipe wayland-utils qemu-guest-agent kbd alsa-utils weston dejavu-fonts fontconfig' \
+                `# (perm-gui 20/21). foot is the product's guaranteed guest app:` \
+                `# VMApps' fallback catalogue row and the scanner's escape hatch` \
+                `# (tier5/foot) launch it, so a base without it offers a launcher` \
+                `# row whose app exits at once (perm-gui 63: waypipe "Failed to` \
+                `# run program foot"). build-guest-image.sh installs the full set;` \
+                `# the baked base needs weston, foot and a font.` \
+                --run-command 'zypper -n install --no-recommends waypipe wayland-utils qemu-guest-agent kbd alsa-utils weston foot dejavu-fonts fontconfig' \
                 --run-command 'fc-cache -f || true' \
+                `# Fail the bake, not a later scenario, if a guaranteed app is missing.` \
+                --run-command 'test -x /usr/bin/foot && test -x /usr/bin/weston-terminal' \
                 --run-command 'systemctl enable qemu-guest-agent.service' \
                 `# The host launches the publisher via qga guest-exec; current TW` \
                 `# ships qemu-ga 11.x with guest-exec BLOCKED + UMask=0077, so the` \

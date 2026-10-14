@@ -50,15 +50,19 @@ in `spec/29` . Reasons:
 
 ## Files
 
-- `spawn-tier5.sh` — host-side wrapper. Starts a libvirt domain
- (with `<vsock>` device), waits for guest readiness, runs
- waypipe-client on vsock CID/port, triggers waypipe-server inside
- the guest via SSH or qemu-guest-agent, and runs the user app.
- Mirrors `tier3/spawn-tier3.sh` shape.
+- `spawn-tier5.sh` — host-side wrapper, run **as admin** (root is
+ refused). Owns the whole VM lifecycle in admin's `qemu:///session`:
+ overlay + sidecar, domain define/start, the hold locks, the
+ qemu-guest-agent trigger of the in-guest waypipe server, the session
+ watch and teardown. Its one privileged step is the bridge below.
+- `qdistro_tier5_bridge.py` — the root bridge, installed as a root-owned
+ copy at `/usr/libexec/qdistro/qdistro-tier5-bridge` and run only via
+ `pkexec` (polkit `org.qdistro.tier5.bridge`). See
+ [Privilege split](#privilege-split).
 - `domain-template.xml` — libvirt domain template with
  `<vsock model='virtio'/>` and assigned CID. Linux-only guest
  per spec/00.
-- `qdistro-tier5-cleanup.sh` — destroy + undefine helper.
+- `qdistro-tier5-cleanup.sh` — destroy + undefine helper, run as admin.
 - `vmapps-scan.py` — guest-base .desktop scanner. Reads
   `usr/{local/,}share/applications` inside the base qcow2 via
   libguestfs (read-only), applies XDG precedence/filtering, maps
@@ -125,7 +129,9 @@ The wrapper supports two modes:
  listens on vsock:1:PORT; the inner app's waypipe-server is spawned
  on the same machine and connects to vsock:1:PORT. Same kernel,
  same uid space. Used by `phase7-tier5-loopback` bats. **No
- isolation** — purely an exercise of the data path.
+ isolation** — purely an exercise of the data path. Needs the
+ `vsock_loopback` module, which test setup loads (loading a module is
+ privileged; the admin-run wrapper only checks for it).
 
 2. **`--vm <vm_name>`** (production): CID=NNN guest VM. waypipe-
  client listens on vsock:NNN:PORT bound to the host side of the
@@ -135,6 +141,98 @@ The wrapper supports two modes:
  direction is guest→host. waypipe semantics: server connects to
  client. So inside guest, `waypipe server -s 2:PORT --vsock`
  reaches the host's listener.
+
+## Privilege split
+
+```
+spawn-tier5.sh                          admin   (VM lifecycle, all files)
+└─ pkexec → qdistro-tier5-bridge         root    (polkit auth_admin_keep)
+   └─ runuser -u admin                   root    (direct root parent)
+      └─ qdistro-secctx-exec             admin   (tags the Wayland connection)
+         └─ waypipe … client             admin   (the host-side listener)
+```
+
+Nothing in the VM lifecycle needs root: libvirt is admin's
+`qemu:///session`, and the overlays, sidecars, locks, logs and lifecycle
+config all live in admin-owned directories. The lifecycle therefore runs
+entirely as admin and never performs a root file operation on an
+admin-writable path.
+
+Two things do need root, and the bridge does exactly those:
+
+- **A uid-0 direct launcher parent.** `qdistro-secctx-exec` accepts its
+  trusted-launcher marker, and qdwin admits an admin-uid secctx helper,
+  only under a live root direct parent. `runuser` is that parent; the
+  bridge supervises it.
+- **RegisterLaunch.** The broker accepts launch records only from root
+  helpers. The bridge calls the existing accepted path — root
+  `/usr/bin/dbus-send` naming `org.qdistro.AdminBroker1.RegisterLaunch` —
+  with typed, fixed arguments. Registration failure aborts the launch.
+
+The bridge starts under `python3 -I`, builds the chain's whole
+environment itself (`env -i`), executes only fixed absolute paths it has
+checked are root-owned, and targets the fixed user `admin`. Its caller
+supplies three bounded tokens and nothing else:
+`--vm <name>|--loopback loopback-<n>`, `--port 1024..65535`,
+`--token <32 hex>`. Everything else is derived: engine `qdistro.tier5`,
+app-id `qdistro.tier5.<name>`, broker silo `vm-<name>` (the key qdshell's
+`ClipboardSilo.js` derives from that app-id; the broker compares them
+exactly), instance-id = the launch token, host listener CID 2 —
+CID 1 (`VMADDR_CID_LOCAL`) only in the explicit loopback mode.
+
+The waypipe client's pid is learned over a pipe the bridge creates and
+passes through runuser (`QDISTRO_LAUNCH_REPORT_FD`). secctx-exec marks it
+close-on-exec at once, writes `<pid>` only after the exec of waypipe
+succeeded (an exec-status pipe tells it), and writes nothing if the exec
+failed. The bridge then verifies the pid against `/proc` — child of a
+`qdistro-secctx-exec` that is the child of *its* runuser, all uids
+admin, exe the installed `/usr/bin/waypipe`, nonzero starttime stable
+across the checks — pins it with a pidfd, and registers the verified exe
+and starttime. Only then does it print `READY <pid>` on stdout.
+
+The bridge's stdin is the caller's liveness pipe. EOF — the wrapper
+exiting, being killed, or a cancelled launch — makes it SIGTERM the
+chain's process group (runuser leads it, so this also reaches the child
+waypipe forks per guest connection, which is not the registered pid) and
+the pinned waypipe, escalate to SIGKILL after a grace, and exit; runuser
+also carries a parent-death SIGTERM. runuser is reaped only once its
+group is empty, so the group id cannot be recycled under the signal.
+When the chain exits on its own the bridge ends whatever is left of the
+group and exits with its status. The wrapper treats the bridge's exit as
+the end of the session.
+
+`READY` means the client is exec'd and registered, not that it has bound
+its vsock port. The wrapper reports `vsock listener ready` only once the
+kernel's vsock_diag dump (sock_diag netlink) shows a LISTEN socket on the
+port whose inode is one of that pid's own open sockets — ownership by
+inode, never by process name, which another admin process could imitate.
+A loopback server that connects earlier is refused, so the launch fails
+if the client never listens within 10 s.
+
+Authentication: `org.qdistro.tier5.bridge` is `allow_active=auth_admin_keep`,
+`allow_inactive=no`, `allow_any=auth_admin`, with `exec.path` pinned to
+the installed bridge. The qdistro polkit agent forces the PAM (password)
+route for this action ahead of its user config and test overrides — a
+broker yes/no vote, which an admin-session process can cast, does not
+authorize it. Every launch authenticates: pkexec's polkit subject is the
+`spawn-tier5.sh` process that launched it, and each launch is a fresh
+process, so polkit's `auth_admin_keep` grant is reused only when that same
+process runs pkexec again (`tier5-bridge-enforcing.bats`,
+`keep-same-caller`). No long-lived helper exists to carry a grant across
+launches; a second app launch prompts again (permissions-gui/63, S3).
+
+Upgrade from the root-run lifecycle: its locks (`/run/qdistro-tier5`),
+boot bind mounts (`/run/qdistro-tier5-boot`) and root ownership registry
+(`/var/lib/qdistro/tier5-owned`) are retired by `install-tier5-for-vm.sh`
+only when that lifecycle is quiescent — no old lock held, no root-run
+spawn/cleanup process, no guest booted from the old mount dir
+(`scripts/install/lib/tier5-legacy.sh`). Otherwise the migration is
+deferred and nothing is deleted: removing the locks under a live old
+wrapper would hide its hold from the new admin-run locks, so a new launch
+could adopt and then destroy its guest. While either `/run` dir exists,
+`spawn-tier5.sh --vm` and `qdistro-tier5-cleanup.sh` refuse to run;
+re-running the installer after the old sessions end, or rebooting, clears
+it.
 
 ## Per-app guests: adoption, not pooling
 
@@ -148,238 +246,93 @@ silently merge:
 - At catalogue load, `_dropDomainCollisions` drops BOTH rows whose
   derived names collide, and `launch()` has no manifest-supplied name
   path — the appId is the only identity.
-- The domain records its bound appId in `<metadata>` at define time,
-  and the overlay gets an owner record in a `<disk>.appid` sidecar
-  stamped as `<appId> <dev> <ino>` — bound to the inode it names, so
-  a leftover or planted sidecar can never authorize a different file
-  at the same path. The create itself goes through a
-  `<disk>.partial.XXXXXX` name claimed by mktemp's O_EXCL (the
-  sidecar temp gets the same treatment, so a foreign file at a
-  predictable temp path is never overwritten or unlinked by our
-  create): the clone is built, stamped (the record write runs as
-  admin, so a swapped temp name can never make the root wrapper
-  truncate a foreign file through a symlink), then
-  hard-linked into place with `ln -T` — a directory or symlink at the
-  destination is never a sink and link(2) never clobbers an existing
-  path — so crash residue is always provable — a
-  partial whose inode the sidecar binds is recovered (the create is
-  finished, then the installed disk is re-verified against the bound
-  dev/ino and its backing — a scan→link swap can never slide a
-  substituted inode into place), a bare partial is a harmless leak,
-  and a file AT the
-  disk path without its record is never our residue. If the
-  definition is ever lost the disk still proves its owner.
-  Adoption verifies bound == `--policy-key`: a
-  LIVE domain bound to another (or no) app is refused (the wrapper
-  exits with REAP=0 — it never tears down a guest it does not own), a
-  defined foreign domain is refused outright rather than reclaimed,
-  and an existing overlay is used only when its sidecar
-  names our appId, records the disk's own dev/ino, AND its backing
-  file is our base — in every domain state, since the domain's
-  binding vouches for the path, not the inode, and a file swapped in
-  while the domain was stopped must refuse the same way. The sidecar
-  alone is not enough to prove origin, though: it lives in the
-  admin-writable image dir, so anyone who can stat their own
-  base-backed qcow2 can write the same plain-text record beside it.
-  The create therefore ALSO stamps a matching
-  `<appId> <dev> <ino>` record into a root-owned 0700 registry at
-  `/var/lib/qdistro/tier5-owned/<vm>` (persistent, so ownership
-  survives reboot), and every accept/recover/reap/delete decision
-  requires BOTH records to bind the same inode — a planted
-  disk+sidecar can satisfy the sidecar but can never mint the
-  registry entry (sol r33). The registry also vouches at the domain
-  layer: the XML `appId` tag is admin-writable session metadata
-  anyone in the libvirt session can forge, so adoption of a running
-  domain, teardown of a defined one, and the cleanup helper's
-  destroy each require the registry to agree independently — a
-  forged guest is refused, never adopted or destroyed (sol r34). And
-  because the record binds the DISK pair rather than whichever domain
-  currently holds the name, a same-tag domain replacement on a
-  different disk must still be refused: a RUNNING guest is only ours
-  when an argv-verified `-name guest=<name>,` qemu holds the recorded
-  inode open
-  on the fd that names the declared source (a post-boot path swap
-  cannot fake an open fd), while a STOPPED one must declare our
-  pinned boot path or the recorded inode itself; an unreliable qemu
-  scan is ambiguity, never a stopped-domain proof (sol r35/r36). Every
-  unproven disk at our name — missing
-  sidecar, foreign appId, inode mismatch, wrong provenance — is
-  refused AND preserved, never booted and never deleted by the
-  launch path (the teardown unlink needs the same inode-bound record,
-  a lone sidecar is removed only when it is OUR regular-file record,
-  a foreign, symlinked, or unreadable sidecar is never
-  overwritten — every record read site requires a regular,
-  non-symlink file read through an open fd that binds the record's
-  contents to its own inode — and a symlinked or non-regular `$DISK`
-  itself is foreign construction even when it points at the bound
-  inode, so it is preserved rather than unlinked. Every final unlink
-  captures the entry by rename into a private root-owned 0700 dir and
-  removes only the inode that passed the checks — the dir is created
-  AND opened through the parent's dir fd and the opened fd is
-  verified as ours (euid + mode) before anything moves in, so no
-  create→open swap can redirect the capture (sol r28), and once
-  bound the chamber is unreachable to a co-admin so the captured
-  name cannot be replaced between stat and unlink (sol r29); a
-  swapped replacement is restored via link(2) or
-  renameat2(RENAME_NOREPLACE) (atomic no-clobber), never deleted) —
-  confirmed qemu
-  death proves no live guest is killed, but it does not make a
-  foreign definition or disk ours; the owner relaunches under its own
-  name and an admin removes a genuinely stale squatter deliberately.
-  The domain also never opens the disk through its DISK_DIR path:
-  every component under that admin-writable dir can be renamed
-  between the provenance gate and qemu's open() at start, so the
-  verified inode is bind-mounted at
-  `/run/qdistro-tier5-boot/<vm>.qcow2` — a root-owned path admin can
-  traverse but never redirect — and the domain XML names the mount.
-  The mount's own inode is re-verified against the provenance-bound
-  dev/ino after mount(8), so a swap that lands between the gate and
-  the mount refuses the launch; teardown, the orphan reaper, and the
-  cleanup helper each drop the mount with the overlay. The mounted
-  path is also the only read surface a name-swap cannot redirect:
-  backing provenance (`qemu-img info`) is read there, never on the
-  mutable `$DISK` path — a racer cannot show the right backing for a
-  different inode — and the startup reaper reads an overlay's inode
-  and backing through one open fd (`/proc/$$/fd`) for the same
-  reason. The started domain always runs a freshly rendered
-  definition — a defined-ours domain is re-defined, so a leftover or
-  forged XML under our name+appId can never point its disk source
-  around the mount.
-  The teardown unlink applies the same rule when the domain was
-  already absent at claim time, and the orphan reaper reaps only
-  retired-app disks — retirement
-  needs an exact appId parse of a manifest that is non-stale,
-  schema-current, fully row-valid (the scanner's own `_row_ok`
-  strictness — an empty `apps` list or a malformed row is a
-  transient catalogue, not a verdict), recorded against the CURRENT
-  base down to nanosecond mtime, and no older than the base's last
-  write. The scanner samples that identity BEFORE reading base
-  contents and re-stats after the scan, so a mid-scan rewrite
-  either invalidates the recorded identity or refuses to publish —
-  a manifest can never describe torn contents (a base swap between
-  scans leaves a manifest that omits the new base's apps);
-  anything less is ambiguity, not proof an app retired. An owned
-  orphan is preserved for its app's next launch.
-  The reaper also only considers names in the tier-5 namespace —
-  `t5-<stub>-<16-hex>` as `VMApps._vmNameForApp` derives them — so a
-  manually created overlay of our base in the shared image dir is
-  never reaped merely because its backing file matches. The shape
-  alone is not proof either: a reaped disk must carry an `.appid`
-  sidecar that RE-DERIVES to its own name AND binds the file's own
-  dev/ino — a record copied beside a different disk is not proof —
-  (`tier5_derived_name` is a byte-exact port of `_vmNameForApp`,
-  pinned by a parity test against the real JS function) — a missing
-  or incoherent owner record is preserved, not treated as "no
-  owner" — and every verdict (defined-state, owner record) is
-  re-checked after the settle window before the unlink. The
-  standalone cleanup helper applies the same coherence: a defined
-  domain under a t5 name is destroyed only when its binding
-  re-derives to that name, and an orphan disk needs a sidecar that
-  does the same plus the inode match — a missing sidecar refuses
-  unless the operator
-  deliberately opts in with `TIER5_CLEANUP_ALLOW_OWNERLESS=1`.
-  "Live" is decided by `qemu_pids_for_domain` alone —
-  a LITERAL substring scan of the ps table for libvirt's
-  `-name guest=<vm>` argv token narrowed to real qemu via
-  `/proc/<pid>/comm` AND `/proc/<pid>/cmdline` — the `guest=<name>,`
-  token must be the argument right after `-name` in the pid's own
-  argv, and the argv is walked on its NUL separators (the only
-  delimiter an argument cannot contain — newline-folding would let
-  one crafted arg manufacture the fake pair), so a foreign qemu
-  carrying the string inside another argument never matches — with a
-  distinct cannot-determine rc. A
-  regex scan would let a manual name like `t5.a` match `t5xa`, and
-  a raw substring would match inside a foreign argument; both
-  would misjudge liveness on a foreign qemu. Teardown never signals
-  a qemu by pid: when `virsh destroy` no-ops (nested-KVM domstate can
-  lie), nothing else is killed — the confirmed-dead gate preserves the
-  overlay and the next launch adopts the still-running guest.
-  `domstate` is not consulted for liveness at all: nested-virt libvirt
-  can lie in both directions — "shut off" for a live qemu and stale
-  "running" for a dead one — and no backing qemu process means death,
-  since libvirt cannot run a VM without one. The same oracle guards
-  the startup orphan-overlay reaper, the adopt/create decision, the
-  idle-keep-warm window, the session wait loop, and the standalone
-  `qdistro-tier5-cleanup.sh` helper. This covers collisions ACROSS
-  catalogue reloads, where the running guest outlives the manifest
-  that created it.
-
-  Every destructive step fails closed on that oracle's third state:
-  cannot-determine NEVER counts as dead. A scan candidate whose
-  `/proc/<pid>/comm` is unreadable, a failed `virsh undefine`, and a
-  failed defined-state query are all ambiguity, and ambiguity
-  preserves the guest, the definition, and the overlay. Defined-state
-  is decided by `virsh list --all --name` — an enumeration that
-  SUCCEEDS is authoritative (name absent = confirmed absent); any
-  query failure is unverifiable. It deliberately does not parse
-  `dominfo` stderr: absence phrasing drifts across libvirt versions
-  and loose substrings match outage text like "libvirt socket not
-  found".
-  Concretely: the wait loop consults the oracle every iteration and
-  ends only on a confirmed-dead verdict (the app-exit watch remains
-  the primary session-end signal); `create_domain` re-verifies the
-  domain binding before `virsh start` and refuses on an unverifiable
-  scan or a foreign binding; the orphan reaper takes the target's own
-  hold before judging, touches only overlays whose domain is
-  CONFIRMED ABSENT (it never undefines — a defined-but-dead domain
-  has an owner record the reaper cannot adjudicate) AND whose disk
-  carries no live owner record (a sidecar that re-derives to its
-  name and whose appId the current valid manifest still publishes
-  keeps it), and re-verifies death plus every ownership verdict
-  after a settle; and every
-  overlay `rm` — in teardown, reaper, and
-  `qdistro-tier5-cleanup.sh` — is preceded by confirmed-absent
-  definition + confirmed-dead qemu, in that order. The cleanup helper
-  additionally claims the domain's hold exclusively for its whole
-  run, so it cannot destroy a guest a live wrapper owns or race a
-  spawn between its checks and the unlink.
 - `launch()` also requires the row's appId to be in the CURRENT
   catalogue, so a stale provider row cannot adopt a guest it no longer
   owns.
+- The domain records its bound appId in `<metadata>` at define time, and
+  the overlay carries a `<disk>.appid` sidecar `<appId> <dev> <ino>` that
+  binds it to the app and to the very inode created. A running domain is
+  adopted only when its binding equals `--policy-key`; a live or defined
+  domain bound to another app is refused (and a refusing wrapper never
+  tears anything down); an existing overlay is booted only when its
+  sidecar binds it, and is otherwise refused and preserved. The sidecar
+  is written before the new overlay is linked into place, so a crash
+  between the two leaves our own record without a disk, which the next
+  create (under the create lock) replaces.
 - The key itself is validated, not rewritten: an explicit
   `--policy-key`/`TIER5_POLICY_KEY` outside
-  `[A-Za-z0-9][A-Za-z0-9._/-]{0,127}` is a hard error (silently
-  falling back to the app basename would let two distinct bad appIds
-  share one binding). The scanner drops out-of-charset appIds before
-  publication and `_validRow` re-checks at load, so the wrapper only
-  ever sees keys it can honor. Unkeyed direct/`--loopback` use derives
-  a sanitized key from the app basename.
+  `[A-Za-z0-9][A-Za-z0-9._/-]{0,127}` is a hard error. Unkeyed
+  direct/`--loopback` use derives a sanitized key from the app basename.
 
-Ownership is a
-flock(2) protocol on `/run/qdistro-tier5/hold-<vm_name>` — no daemon:
+These checks protect against confused or racing wrappers and stale
+catalogue rows, not against a hostile admin-uid process: everything here
+— qemu, virtqemud, the overlays — already belongs to admin. The
+privileged boundary is the bridge, above.
 
-- Each wrapper carries a **shared session hold** (fd9) for its whole
-  lifetime, so concurrent sessions of the same app share the guest —
-  same appId, same trust domain, same silo tag. A spawn that would be
-  refused (running foreign domain) exits BEFORE taking the hold, so a
-  mismatched launch can never starve the true owner's teardown.
-- A launch that finds the domain **running adopts it** under its own
-  session hold (no cold start); a missing/stopped domain is (re)created
-  under a short **exclusive create lock** (`create-<vm>`) that
-  serializes racing creators — the loser re-checks and adopts. The
-  creator keeps its shared session hold throughout, which alone
-  excludes teardown claims, the orphan reaper and the cleanup tool.
-- On app exit the wrapper drops its hold and runs the idle window
-  (`IDLE_SHUTDOWN_SECS`, low-mem early end): a relaunch adopting during
-  the window cancels teardown. The **last lock holder** wins a
-  *bounded* exclusive teardown claim (waits out transient holds, gives
-  up on a genuine live session) — then **re-verifies the domain's
-  appId binding** before destroying: the claim proves no wrapper holds
-  the name, not that the domain is still ours, and a replacement bound
-  to another app is left alone. Only then does it run destroy +
-  undefine + overlay unlink.
+**Liveness.** "Live" is decided by `qemu_pids_for_domain` alone: one of
+our processes with a `qemu-system-*`/`qemu-kvm` comm whose argv carries
+`guest=<name>,` as the argument right after `-name` (split on NUL, so no
+crafted argument fakes the pair, and literal, so `t5.a` never matches
+`t5xa`). `domstate` lies in both directions under nested virt — "shut
+off" for a live qemu, stale "running" for a dead one — so it is never
+the liveness authority. The oracle has a third answer, cannot-determine,
+and that is never treated as dead: ambiguity keeps the guest, the
+definition and the overlay. Defined-state comes from `virsh list --all
+--name` (a successful enumeration is authoritative; any failure is
+unverifiable). Teardown never signals a qemu by pid: when `virsh
+destroy` no-ops, the overlay is kept and the next launch adopts the
+still-running guest. The overlay is removed only after the definition
+is confirmed gone AND qemu is confirmed dead.
+
+**Orphan reaper.** At startup a wrapper reaps overlays left by crashed
+wrappers — only `t5-<stub>-<16-hex>` names backed by our base, whose
+hold it can take exclusively, whose qemu is confirmed dead and domain
+confirmed absent, whose sidecar binds the file and re-derives to its
+name (`tier5_derived_name`, a byte-exact port of `_vmNameForApp` pinned
+by a parity test), and whose app a valid, current catalogue has retired.
+A published app's orphan is kept for its next launch.
+
+**Cleanup tool.** `qdistro-tier5-cleanup.sh <vm>` (admin) claims the
+domain's hold exclusively (refusing while a session holds it), destroys
+and undefines a domain whose binding re-derives to its t5 name, and
+removes the overlay under the same proofs as teardown; an overlay
+without a sidecar needs `TIER5_CLEANUP_ALLOW_OWNERLESS=1`.
+
+### Ownership protocol
+
+flock(2) on files in `$XDG_RUNTIME_DIR/qdistro-tier5/` (admin's runtime
+dir) — no daemon:
+
+- **hold-`<vm>`, shared** for a wrapper's whole session, from before its
+  adopt/create decision to its exit. Concurrent sessions of the same app
+  share the guest. Every exclusive actor — teardown claim, orphan
+  reaper, cleanup tool — conflicts with it. A spawn that would be
+  refused for a live foreign domain exits before taking it.
+- **create-`<vm>`, exclusive** around the dead-guest re-check and the
+  create, so racing creators serialize; the loser re-checks and adopts.
+- **live-`<vm>`, shared** once a session is ESTABLISHED — it adopted or
+  created a guest bound to its app. This is the positive adoption signal.
+- **Teardown**: an exiting wrapper releases its locks and claims
+  hold-`<vm>` exclusively. Winning means no wrapper holds the domain;
+  the winner re-verifies the binding, then destroys, undefines and
+  removes the overlay. Losing the claim is not proof of adoption — the
+  holder may be a relaunch still deciding, one that may yet refuse — so
+  the wrapper keeps retrying until either the claim wins or an
+  established session exists (every decision's own waits are bounded).
+- **Idle keep-warm** (`IDLE_SHUTDOWN_SECS`, low-mem early end): after
+  the app exits the wrapper keeps the guest for a relaunch and hands
+  off only to an ESTABLISHED session; hold contention alone keeps it
+  waiting, then the teardown rule above applies.
+- **Relaunch during teardown**: the tearing-down wrapper holds the hold
+  exclusively through its graceful shutdown. A relaunch waits for the
+  decision budget (`TIER5_DECISION_WAIT_SECS`, 120 s) plus the worst-case
+  teardown budget (maximum grace 300 s + agent fallback + destroy and
+  undefine retries), then cold-starts after the teardown instead of
+  failing on a fixed timeout.
 - Locks are fd-bound, so a crashed wrapper releases everything; a
   leftover running/defined domain is adopted or reaped by the next
-  spawn. `TIER5_KEEP_DOMAIN=1` still leaves the domain untouched for
+  spawn. `TIER5_KEEP_DOMAIN=1` leaves the domain untouched for
   debugging — the next launch then adopts it.
-
-Threat scope of the ownership protocol: libvirt here is
-`qemu:///session`, so qemu, virtqemud and every lifecycle actor run as
-the admin uid — which [doc/threat-model.md](../doc/threat-model.md)
-places inside the TCB. The protocol defends against confused or racing
-wrappers, guest-supplied data, and any root-side action authorized by
-an admin-writable input; it does not try to defeat a hostile process
-already running as admin.
 
 Deliberately out of scope: cross-APP pooling (a shared guest for
 different appIds would break the appId==silo identity) and longest-idle

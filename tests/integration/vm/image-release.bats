@@ -641,7 +641,11 @@ chain_root() {
     ln -sfn /root/qdistro-src/tier3/spawn-tier3.sh "$T/root/usr/local/bin/qdistro-tier3-spawn"
     ln -sfn /root/qdistro-src/tier3/qdistro-tier3-cleanup.sh "$T/root/usr/local/bin/qdistro-tier3-cleanup"
     : > "$T/root/usr/local/lib/qdistro/spawn-common.sh"; : > "$T/root/etc/tmpfiles.d/qdistro-tier3.conf"
-    : > "$T/root/usr/share/polkit-1/actions/org.qdistro.tier3.policy"; : > "$T/root/usr/share/polkit-1/actions/org.qdistro.tier5.policy"
+    : > "$T/root/usr/share/polkit-1/actions/org.qdistro.tier3.policy"
+    sed -n "/^cat > \"\$POLKIT_DIR\/org.qdistro.tier5.policy\" <<'EOF'$/,/^EOF$/p" \
+        "$REPO/scripts/install/install-tier5-for-vm.sh" | sed '1d;$d' \
+        > "$T/root/usr/share/polkit-1/actions/org.qdistro.tier5.policy"
+    cp "$REPO/tier5-vm/qdistro_tier5_bridge.py" "$T/root/usr/libexec/qdistro/qdistro-tier5-bridge"
     printf 'qdistro-tier3:x:499:admin,user1,user2\n' > "$T/root/etc/group"
     printf 'user1:x:1002:100::/home/user1:/bin/bash\nuser2:x:1003:100::/home/user2:/bin/bash\n' > "$T/root/etc/passwd"
     printf 'user1:!:20000::::::\nuser2:!:20000::::::\n' > "$T/root/etc/shadow"
@@ -664,6 +668,11 @@ chain_root() {
     [[ "$output" == *"OK   [tier3] admin in group"* ]]
     [[ "$output" == *"OK   [tier4-host] control script"* ]]
     [[ "$output" == *"OK   [tier5] polkit action"* ]]
+    [[ "$output" == *"OK   [tier5] launch bridge"* ]]
+    [[ "$output" == *"OK   [tier5] bridge action"* ]]
+    [[ "$output" == *"OK   [tier5] bridge needs the admin password"* ]]
+    [[ "$output" == *"OK   [tier5] bridge exec.path pinned"* ]]
+    [[ "$output" == *"OK   [tier5] root ownership registry retired: absent as required"* ]]
     [[ "$output" == *"OK   [tier5b] domain template"* ]]
     [[ "$output" == *"OK   [qemu-ga] guest-exec allowed"* ]]
     [[ "$output" == *"OK   [qemu-ga] unit reads the override"* ]]

@@ -66,12 +66,16 @@ def test_spawn_scripts_mark_trusted_secctx_launches():
         ROOT / "tier2/spawn-tier2.sh",
         ROOT / "tier3/spawn-tier3.sh",
         ROOT / "tier4-vm/spawn-tier4.sh",
-        ROOT / "tier5-vm/spawn-tier5.sh",
         ROOT / "tier5b-vm/spawn-tier5b.sh",
     ]
     for script in scripts:
         text = script.read_text(encoding="utf-8")
         assert "QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1" in text, script
+    # tier-5's root launcher is the bridge; its exact chain environment
+    # (marker included) is pinned by test_tier5_bridge.py
+    bridge = (ROOT / "tier5-vm/qdistro_tier5_bridge.py").read_text(
+        encoding="utf-8")
+    assert '"QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER": "1"' in bridge
 
 
 def test_trusted_marker_is_scoped_to_secctx_wrapper():
@@ -79,7 +83,6 @@ def test_trusted_marker_is_scoped_to_secctx_wrapper():
         ROOT / "selinux/tier1/spawn-tier1.sh",
         ROOT / "tier3/spawn-tier3.sh",
         ROOT / "tier4-vm/spawn-tier4.sh",
-        ROOT / "tier5-vm/spawn-tier5.sh",
         ROOT / "tier5b-vm/spawn-tier5b.sh",
     ]
     for script in wrapped_scripts:

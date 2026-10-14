@@ -60,6 +60,32 @@ fi
 pass "outer admin compositor up"
 pass "tier-5 base image present at $BASE"
 
+# --- tier-5 runs as admin; its one root step is the pkexec'd bridge --------
+# spawn-tier5.sh refuses root. Its waypipe client starts through
+# `pkexec /usr/libexec/qdistro/qdistro-tier5-bridge` (org.qdistro.tier5.bridge,
+# auth_admin_keep). No polkit agent serves this headless driver, so it grants
+# the action to admin through a temporary rules file for its own duration —
+# a test-only route; authenticated launches are the GUI scenarios' business.
+T5_POLKIT_RULE=/etc/polkit-1/rules.d/10-qdistro-tier5-bridge-test.rules
+t5_grant_bridge() {
+    install -d -m 0755 /etc/polkit-1/rules.d
+    cat >"$T5_POLKIT_RULE" <<'RULE'
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.qdistro.tier5.bridge" && subject.user == "admin") {
+        return polkit.Result.YES;
+    }
+});
+RULE
+    sleep 1  # polkitd reloads rules.d on change
+}
+t5_revoke_bridge() { rm -f "$T5_POLKIT_RULE"; }
+# t5_as_admin [VAR=VAL...] cmd... — admin's uid with its session paths.
+t5_as_admin() {
+    runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin \
+        PATH=/usr/local/bin:/usr/bin:/bin "$@"
+}
+t5_grant_bridge
+
 VM_NAME="qdistro-tier5-test-$$"
 OVERLAY="/home/admin/.local/share/libvirt/images/$VM_NAME.qcow2"
 
@@ -75,6 +101,7 @@ rm -f "$SERIAL_LOG"
 # was too tight for the guest kernel + compositor + app stack and could kill the
 # nested guest mid-boot. Keep the explicit value aligned with the GUI tier-5
 # scenarios and sibling lifecycle probes.
+t5_as_admin \
 TIER5_MEM_KIB=2097152 \
 TIER5_QGA_TIMEOUT_SECS=180 \
 TIER5_SERIAL_LOG="$SERIAL_LOG" \
@@ -89,7 +116,8 @@ cleanup_vm() {
     # Belt-and-braces — spawn-tier5.sh's trap normally handles these.
     runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
     runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
-    rm -f "$OVERLAY" 2>/dev/null || true
+    rm -f "$OVERLAY" "$OVERLAY.appid" 2>/dev/null || true
+    t5_revoke_bridge
 }
 trap cleanup_vm EXIT
 
