@@ -29,7 +29,7 @@ EOF
     EXIT_VM_PROVISION=40
     EXIT_OK=0
     VIRSH=(true)
-    RUN_GOLDEN_BATS=""; RUN_GOLDEN_GUI_ADMIN=""; RUN_GOLDEN_GUI_QDWIN=""
+    RUN_GOLDEN_BATS=""; RUN_GOLDEN_GUI_QDWIN=""
     RUN_GOLDEN_DISKS=(); GOLDEN_INFLIGHT_VMS=()
     CALLS="$TMP/calls.txt"; : > "$CALLS"
 
@@ -48,7 +48,7 @@ teardown() {
 }
 
 @test "ensure_run_golden: a wedged build times out and classifies golden-build infra" {
-    QCI_GOLDEN_BUILD_TIMEOUT_S=1 run ensure_run_golden gui-admin
+    QCI_GOLDEN_BUILD_TIMEOUT_S=1 run ensure_run_golden gui-qdwin
     [ "$status" -eq 40 ]           # EXIT_VM_PROVISION
     # An attempt row was recorded for the golden build, classified golden-build.
     grep -q "^ATTEMPT" "$CALLS"

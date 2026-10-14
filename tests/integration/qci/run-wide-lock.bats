@@ -115,7 +115,7 @@ teardown() {
     # VM, hit this lock, then waited on its own codex pid. The refusal must
     # come first (exit 2, not 98) and tell the agent to drive the scenario.
     local command
-    for command in full bats gui gui-admin image cleanup; do
+    for command in full bats gui image cleanup; do
         QCI_GUI_SCENARIO_AGENT=apps_13 run "$REPO/ci/bin/qci" "$command"
         [ "$status" -eq 2 ]
         [[ "$output" == *"refused inside GUI scenario agent"* ]]
@@ -146,7 +146,7 @@ teardown() {
 
 @test "all qci VM commands and kiwi teardown share the same lock" {
     local command
-    for command in bats gui gui-admin image cleanup; do
+    for command in bats gui image cleanup; do
         run "$REPO/ci/bin/qci" "$command"
         [ "$status" -eq 98 ]
         [ ! -e "$QCI_RUNS_DIR" ]

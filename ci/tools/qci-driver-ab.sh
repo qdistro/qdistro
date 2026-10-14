@@ -34,7 +34,9 @@
 #     -h | --help
 #
 # CONTRACT NOTES (kept in lockstep with ci/lib/gates/gui.sh + ci/lib/run.sh):
-#   * Each scenario is run in its OWN `qci gui-admin --scenario <abs>` invocation,
+#   * Each scenario is run in its OWN `qci gui --scenario <abs>` invocation (one
+#     fresh worker of the qdwin GUI profile; the session VM's smokes and the
+#     qdshell-ui harness are skipped with QCI_GUI_REPLAY_ONLY=1),
 #     serially, with QCI_GUI_JOBS=1 and QCI_GUI_RETRY=0 (a false-pass reached on
 #     retry must still reject — so retries are disabled, not parsed away).
 #   * The per-run results dir is parsed from qci's own `artifacts -> <dir>` line
@@ -152,8 +154,8 @@ run_one() {
     abs=$(ab_scenario_abs "$1")
     local logf rc=0
     logf="$WORKDIR/$(printf '%s' "$rel" | tr '/.' '__').$$.log"
-    QCI_AGENT_CMD="$agent_cmd" QCI_GUI_JOBS=1 QCI_GUI_RETRY=0 \
-        "$QCI" gui-admin --scenario "$abs" > "$logf" 2>&1 || rc=$?
+    QCI_AGENT_CMD="$agent_cmd" QCI_GUI_JOBS=1 QCI_GUI_RETRY=0 QCI_GUI_REPLAY_ONLY=1 \
+        "$QCI" gui --scenario "$abs" > "$logf" 2>&1 || rc=$?
 
     local rdir
     rdir=$(grep -a 'artifacts ->' "$logf" | tail -1 | sed -E 's/.*artifacts -> //') || true
