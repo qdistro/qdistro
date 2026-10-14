@@ -1026,7 +1026,7 @@ qdwin_admin_tui_check_install() {
     local target f st uid mode first
     target=$(readlink -- "$entry" 2>/dev/null) || target=""
     if [ "$target" != "$lib" ]; then
-        printf 'ERROR: %s is not the installer'\''s symlink to %s (readlink: %s)\n' \
+        printf "ERROR: %s is not the installer's symlink to %s (readlink: %s)\n" \
             "$entry" "$lib" "${target:-not a symlink}" >&2
         return 1
     fi
@@ -1237,7 +1237,7 @@ qdwin_start_admin_tui() {
     if [ "$(cat "/proc/$fpid/comm" 2>/dev/null)" != foot ] \
             || [ "$(stat -c %u "/proc/$fpid" 2>/dev/null)" != 1000 ] \
             || [[ "$argv" != *"--title=$title "* ]]; then
-        printf 'ERROR: window %s (pid %s) is not this launch'\''s foot (argv: %s)\n' "$h" "$fpid" "$argv" >&2
+        printf "ERROR: window %s (pid %s) is not this launch's foot (argv: %s)\n" "$h" "$fpid" "$argv" >&2
         return 1
     fi
     QCI_AWAIT_QUIET=1 await_qdwin_window_mapped_pid "$fpid" 30 0.2 >/dev/null || return 1

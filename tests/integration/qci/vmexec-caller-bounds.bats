@@ -255,26 +255,25 @@ EOF
     fi
 }
 
-@test "caller audit: the scanner's UNPARSEABLE files are exactly the three audited by hand" {
+@test "caller audit: the scanner's UNPARSEABLE files are exactly the two audited by hand" {
     # The scanner prints `UNPARSEABLE: <path>` for a file whose quoting it
     # could not follow to the end -- its `2>&1` sites were NOT checked, so a
     # clean exit does not cover it. Those files must be enumerated, not
-    # ignored. All three below were read by hand during the round-9 audit and
+    # ignored. Both below were read by hand during the round-9 audit and
     # carry no host-side hazard:
     #   * scripts/vm/build-baked-baseweed.sh -- defeats the scanner with
     #     `` `# comment` `` continuation markers; it only MENTIONS vm-exec in
     #     comments and every `2>&1` there follows a `>` to a file or /dev/null.
     #   * tests/integration/permissions-gui/AGENTS.md -- prose plus heredocs
     #     opened inside `$( )`; its single `2>&1` is in a prose sentence.
-    #   * tests/integration/workflow-gui/05-approval-queue-gated-run.md -- same
-    #     heredoc-inside-`$( )` shape; its single `2>&1` is inside a heredoc
-    #     body that runs in the GUEST.
+    # (tests/integration/workflow-gui/05-approval-queue-gated-run.md was a
+    # third until its 2026-10-14 rewrite; the scanner now parses it, so its
+    # sites are checked instead of hand-audited.)
     # A NEW blind spot fails this test rather than silently exempting a file.
     run --separate-stderr python3 "$REPO_ROOT/ci/bin/vmexec-fd2-scan.py" \
         "$REPO_ROOT"
     local expected="UNPARSEABLE: scripts/vm/build-baked-baseweed.sh
-UNPARSEABLE: tests/integration/permissions-gui/AGENTS.md
-UNPARSEABLE: tests/integration/workflow-gui/05-approval-queue-gated-run.md"
+UNPARSEABLE: tests/integration/permissions-gui/AGENTS.md"
     if [ "$stderr" != "$expected" ]; then
         echo "the scanner's blind spots changed." >&2
         echo "expected:" >&2; echo "$expected" >&2
