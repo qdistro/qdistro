@@ -579,12 +579,14 @@ def test_layer_popup_nested_grab_routed(display_name):
     seat grab (an owner-events grab that would hand the popup client's
     other surfaces input and orphan the root popup's grab).
 
-    Discriminator: with serial=0 the stock path posts no error (the seat
-    grab start fails and the popup is simply dismissed); the routed path
-    is refused by qdwin and libweston posts INVALID_GRAB with the
-    "nested layer-chain grab refused" message. The live lane
-    qdwin/tests/gui/agent-layer-popup-nested-grab-smoke.sh drives a real
-    serial through the chain.
+    Discriminator: P1 never took a grab. The stock path posts no error
+    (with serial=0 the seat grab start fails and the popup is simply
+    dismissed); the routed path answers per xdg_popup.grab ("if the parent
+    is a popup that did not take an explicit grab, an error will be
+    raised") with xdg_wm_base.invalid_popup_parent (3). The D9 follow-up
+    tests below (layer_chain_*) drive real grabs through the chain with the
+    test input seat; the live lane
+    qdwin/tests/gui/agent-layer-popup-nested-grab-smoke.sh does it on a VM.
     """
     label = "layer_popup_nested_grab_routed"
     if not _vendored_libweston_active():
@@ -655,8 +657,8 @@ def test_layer_popup_nested_grab_routed(display_name):
     routed = False
     for m in _WL_ERR_RE.finditer(captured):
         iface, code, msg = m.group(1), int(m.group(3)), m.group(4)
-        if (iface == "xdg_popup" and code == 0
-                and "nested layer-chain grab refused" in msg):
+        if (iface == "xdg_wm_base" and code == 3
+                and "without an explicit grab" in msg):
             routed = True
             break
     del p1
@@ -665,11 +667,12 @@ def test_layer_popup_nested_grab_routed(display_name):
     except: pass
 
     if routed:
-        print(f"  PASS [{label}] nested grab reached the layer-grab handler")
+        print(f"  PASS [{label}] nested grab under an ungrabbed layer popup "
+              f"refused invalid_popup_parent on the layer-chain route")
         return True
-    print(f"  FAIL [{label}] expected xdg_popup INVALID_GRAB \"nested "
-          f"layer-chain grab refused\" for a nested popup in a layer "
-          f"chain; got: {captured.strip()[:200]}")
+    print(f"  FAIL [{label}] expected xdg_wm_base error 3 "
+          f"(invalid_popup_parent) for a grab under an ungrabbed layer "
+          f"popup; got: {captured.strip()[:200]}")
     return False
 
 
@@ -1028,6 +1031,113 @@ def test_layer_chain_grab_live(display_name):
         s.close()
 
 
+def _admission(label, display_name, build, want):
+    """Run build(s) on a fresh session and require exactly `want`: an
+    (iface, code) protocol error, or ("popup_done", name) with no error."""
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        start = _stderr_size()
+        m = build(s)
+        errs = _errors_since(start)
+        if want[0] == "popup_done":
+            done = [e[1] for e in s.since(m, "popup_done")]
+            if done == [want[1]] and not errs:
+                return True
+            print(f"  FAIL [{label}] want popup_done on {want[1]} and no "
+                  f"error; got popup_done {done}, errors {errs}")
+            return False
+        if any(e[0] == want[0] and e[1] == want[1] for e in errs):
+            return True
+        print(f"  FAIL [{label}] want {want[0]} error {want[1]}; got "
+              f"{errs}")
+        return False
+    finally:
+        s.close()
+
+
+def test_layer_chain_admission(display_name):
+    """D9 follow-up 3: a submenu grab in a layer chain is answered per
+    xdg_popup.grab, as the desktop seat grab answers it on a toplevel
+    chain:
+      not_topmost   parent grabbed but a submenu already joined above it
+                    -> xdg_wm_base.not_the_topmost_popup (2)
+      ungrabbed     parent is a popup that never took a grab
+                    -> xdg_wm_base.invalid_popup_parent (3)
+      nonchain      parent is an ungrabbed submenu of a grabbed root (the
+                    stock path would install an owner-events grab here)
+                    -> xdg_wm_base.invalid_popup_parent (3)
+      dismissed     parent grabbed but already dismissed
+                    -> the popup is dismissed at once (popup_done, no error)
+      stale         parent topmost and live, stale serial
+                    -> the layer-grab handler refuses: xdg_popup.invalid_grab
+    """
+    label = "layer_chain_admission"
+
+    def not_topmost(s):
+        _l1, p1, p2 = _open_chain(s)
+        s.click(120, 20)
+        m = s.mark()
+        s.popup("P3", 0, 40, parent=p1, grab=s.serial, wait=False)
+        return m
+
+    def ungrabbed(s):
+        l1 = s.layer("L1", 50, 50)
+        p1 = s.popup("P1", 60, 0, layer=l1)
+        s.click(80, 20)
+        m = s.mark()
+        s.popup("P2", 40, 0, parent=p1, grab=s.serial, wait=False)
+        return m
+
+    def nonchain(s):
+        _l1, p1, _ = _open_chain(s, nested=False)
+        s.click(80, 20)
+        serial = s.serial
+        p2 = s.popup("P2", 40, 0, parent=p1)
+        m = s.mark()
+        s.popup("P3", 0, 0, parent=p2, grab=serial, wait=False)
+        return m
+
+    def dismissed(s):
+        l1, p1, _ = _open_chain(s, nested=False)
+        s.click(600, 300)
+        s.click(10, 10)
+        m = s.mark()
+        s.popup("P2", 40, 0, parent=p1, grab=s.serial, wait=False)
+        return m
+
+    def stale(s):
+        _l1, p1, _ = _open_chain(s, nested=False)
+        m = s.mark()
+        s.popup("P2", 40, 0, parent=p1, grab=0, wait=False)
+        return m
+
+    cases = [
+        ("not_topmost", not_topmost, ("xdg_wm_base", 2)),
+        ("ungrabbed", ungrabbed, ("xdg_wm_base", 3)),
+        ("nonchain", nonchain, ("xdg_wm_base", 3)),
+        ("dismissed", dismissed, ("popup_done", "P2")),
+        ("stale", stale, ("xdg_popup", 0)),
+    ]
+    if _d9_session_probe(label, display_name) is None:
+        return True
+    ok = True
+    for name, build, want in cases:
+        if _admission(f"{label}:{name}", display_name, build, want):
+            print(f"  PASS [{label}:{name}] -> {want[0]} {want[1]}")
+        else:
+            ok = False
+    return ok
+
+
+def _d9_session_probe(label, display_name):
+    s = _d9_session(label, display_name)
+    if s is not None:
+        s.close()
+    return s
+
+
 def test_layer_popup_grab_handler_registered(display_name):
     """plan3 post-review: positive discriminator for H1.
 
@@ -1209,6 +1319,7 @@ def main():
         ("layer_popup_nested_grab_routed", test_layer_popup_nested_grab_routed),
         ("popup_double_construct_refused", test_popup_double_construct_refused),
         ("layer_chain_grab_live",       test_layer_chain_grab_live),
+        ("layer_chain_admission",       test_layer_chain_admission),
         ("layer_popup_reposition",      test_layer_popup_reposition),
         ("v19_register_hotkey_live",    test_v19_register_hotkey_live),
     ]

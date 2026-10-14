@@ -142,6 +142,14 @@ struct weston_desktop_xdg_popup {
 	 * grab, so the topmost-destroy rule is kept here: chain_child is the
 	 * popup that joined this one's grab, chain_parent the reverse link. */
 	bool in_layer_chain;
+	/* layer_grabbed: a layer-parented root whose grab the handler took.
+	 * layer_dismissed: popup_done was sent through the layer-grab dismiss
+	 * (or the popup was refused as the child of a dismissed one). Together
+	 * they tell a submenu's grab apart per xdg_popup.grab: a dismissed
+	 * grabbing parent dismisses the child, a parent that never grabbed is
+	 * a protocol error. */
+	bool layer_grabbed;
+	bool layer_dismissed;
 	struct weston_desktop_xdg_popup *chain_parent;
 	struct weston_desktop_xdg_popup *chain_child;
 	struct wl_list parent_link;	/* parent->popup_children */
@@ -1466,6 +1474,70 @@ weston_desktop_xdg_popup_layer_chain_parent(struct weston_desktop_xdg_popup *pop
 	return NULL;
 }
 
+/* qdistro patch (D9): the popup's chain ends at a layer-parented root.
+ * Parent pointers are nulled when a parent is destroyed (popup_children),
+ * so the walk never reads a freed popup. */
+static bool
+weston_desktop_xdg_popup_layer_rooted(struct weston_desktop_xdg_popup *popup)
+{
+	while (popup->parent != NULL) {
+		if (popup->parent->role != WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP)
+			return false;
+		popup = wl_container_of(popup->parent, popup, base);
+	}
+	return popup->layer_parent_surface != NULL;
+}
+
+/* qdistro patch (D9): admission of a grab whose parent popup lies in a
+ * layer-rooted chain, before the layer-grab handler sees it. Returns true
+ * when the grab was answered here (dismissed, or a protocol error posted).
+ * Per xdg_popup.grab:
+ *  - parent is a grabbing popup that was already dismissed: this popup is
+ *    immediately dismissed (popup_done, no error);
+ *  - parent did not take an explicit grab: "an error will be raised" —
+ *    xdg_wm_base.invalid_popup_parent, the error for an invalid popup
+ *    parent (xdg_popup.invalid_grab means "grab after being mapped");
+ *  - parent grabbed but is not the topmost popup (a submenu already joined
+ *    above it): xdg_wm_base.not_the_topmost_popup, as the desktop seat
+ *    grab path below posts for the same request on a toplevel chain. */
+static bool
+weston_desktop_xdg_popup_layer_chain_refuse(struct weston_desktop_xdg_popup *popup)
+{
+	struct weston_desktop_xdg_popup *parent;
+	struct weston_desktop_client *client =
+		weston_desktop_surface_get_client(popup->base.desktop_surface);
+	struct wl_resource *client_resource =
+		weston_desktop_client_get_resource(client);
+
+	if (popup->parent == NULL ||
+	    popup->parent->role != WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP)
+		return false;
+	parent = wl_container_of(popup->parent, parent, base);
+	if (!weston_desktop_xdg_popup_layer_rooted(parent))
+		return false;
+
+	if (parent->layer_dismissed) {
+		popup->layer_dismissed = true;
+		weston_desktop_surface_popup_dismiss(popup->base.desktop_surface);
+		return true;
+	}
+	if (!parent->in_layer_chain && !parent->layer_grabbed) {
+		if (client_resource)
+			wl_resource_post_error(client_resource,
+					       XDG_WM_BASE_ERROR_INVALID_POPUP_PARENT,
+					       "xdg_popup grab parent is a popup without an explicit grab");
+		return true;
+	}
+	if (parent->chain_child != NULL) {
+		if (client_resource)
+			wl_resource_post_error(client_resource,
+					       XDG_WM_BASE_ERROR_NOT_THE_TOPMOST_POPUP,
+					       "xdg_popup was not created on the topmost popup");
+		return true;
+	}
+	return false;
+}
+
 static void
 weston_desktop_xdg_popup_protocol_grab(struct wl_client *wl_client,
 				       struct wl_resource *resource,
@@ -1503,7 +1575,10 @@ weston_desktop_xdg_popup_protocol_grab(struct wl_client *wl_client,
 					XDG_POPUP_ERROR_INVALID_GRAB,
 					"xdg_popup layer-parent grab refused (serial=%u)",
 					serial);
+				return;
 			}
+			/* qdistro patch (D9): a submenu may now join it. */
+			popup->layer_grabbed = true;
 			return;
 		}
 		wl_resource_post_error(popup->resource,
@@ -1532,7 +1607,13 @@ weston_desktop_xdg_popup_protocol_grab(struct wl_client *wl_client,
 	 * client's other surfaces input) and leave the root popup with no
 	 * grab once it ends. Hand it to the layer-grab handler with the
 	 * immediate parent popup's surface as the parent argument; the
-	 * handler validates the serial and the chain. */
+	 * handler validates the serial and the chain. A parent in a
+	 * layer-rooted chain that is dismissed, never grabbed, or not the
+	 * topmost popup is answered first (and never reaches the stock path,
+	 * which would install the owner-events grab this patch removes). */
+	if (weston_desktop_xdg_popup_layer_grab.func != NULL &&
+	    weston_desktop_xdg_popup_layer_chain_refuse(popup))
+		return;
 	struct weston_desktop_xdg_popup *chain_parent =
 		weston_desktop_xdg_popup_layer_chain_parent(popup);
 	if (weston_desktop_xdg_popup_layer_grab.func != NULL &&
@@ -1768,6 +1849,8 @@ weston_desktop_xdg_popup_dismiss_layer_grab(struct wl_resource *popup_resource)
 	if (!popup ||
 	    popup->base.role != WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP)
 		return;
+	/* qdistro patch (D9): a later submenu grab on it is dismissed. */
+	popup->layer_dismissed = true;
 	xdg_popup_send_popup_done(popup->resource);
 }
 
