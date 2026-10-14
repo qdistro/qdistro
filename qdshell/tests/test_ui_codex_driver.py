@@ -47,6 +47,9 @@ def test_ui_codex_driver_pins_luna_and_keeps_rollout(monkeypatch, with_image):
         ("panel_sessionmenu.png", "corner keybind badge"),
         ("panel_brightness.png", "icon before the slider"),
         ("panel_tray_degraded.png", "separate tray drawer surface"),
+        ("settings_connections.png", "LEFT or RIGHT end of its track"),
+        ("settings_connections-click1.png", "LEFT or RIGHT end of its track"),
+        ("settings_desktopicons.png", "Checked and dimmed are independent"),
     ],
 )
 def test_ui_describer_details_are_scoped_to_surface(image_name, expected_detail):
@@ -93,3 +96,44 @@ def test_visual_panel_confirmation_requires_independent_evidence(
         assert evidence.read_text().count("Observation ") == len(votes)
         if expected == "FAIL":
             assert "required content missing" in result.missing
+
+
+def test_describe_view_fails_loud_on_empty_with_backend(monkeypatch, tmp_path):
+    frame = tmp_path / "settings_connections.png"
+    monkeypatch.setattr(runner, "describe", lambda _frame: "  ")
+    monkeypatch.setattr(runner, "_describe_backend_available", lambda: True)
+    with pytest.raises(RuntimeError, match="settings_connections.png"):
+        runner.describe_view(frame)
+
+
+def test_describe_view_without_backend_keeps_judge_skip_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(runner, "describe", lambda _frame: "")
+    monkeypatch.setattr(runner, "_describe_backend_available", lambda: False)
+    assert runner.describe_view(tmp_path / "x.png") == ""
+
+
+def test_capture_never_judges_a_subtab_view_whose_describe_was_empty(
+        monkeypatch, tmp_path):
+    """2026-10-13: the Wi-Fi frame's describe timed out twice and the empty
+    text was stitched silently, so only the Bluetooth view was judged.
+    Drive the real capture_surface_vm with the real connections surface."""
+    from tests.ui.manifests import SETTINGS_SURFACES
+
+    surface = next(s for s in SETTINGS_SURFACES if s.id == "settings_connections")
+    assert surface.post_open_clicks, "connections must also capture Bluetooth"
+    monkeypatch.setattr(runner, "ARTIFACTS_DIR", tmp_path)
+    for name in ("ipc_vm", "mouse_wheel", "mouse_click", "mouse_move",
+                 "tap_key"):
+        monkeypatch.setattr(runner, name, lambda *a, **k: None)
+    monkeypatch.setattr(runner, "screenshot_vm",
+                        lambda _s, out, **k: out.write_bytes(b"frame"))
+    monkeypatch.setattr(runner, "_frames_identical", lambda *a, **k: True)
+    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(runner, "_describe_backend_available", lambda: True)
+    monkeypatch.setattr(
+        runner, "describe",
+        lambda frame: "" if frame.name == "settings_connections.png"
+        else "Bluetooth subtab: switch thumb left, dimmed")
+
+    with pytest.raises(RuntimeError, match="settings_connections.png"):
+        runner.capture_surface_vm(object(), surface)

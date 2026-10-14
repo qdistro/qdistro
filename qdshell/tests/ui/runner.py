@@ -1532,7 +1532,7 @@ def _describe_scrolled_vm(session: VMSession, surface, first_png: Path,
                 with contextlib.suppress(OSError):
                     page_png.unlink()
                 break
-        pages.append((page_png, describe(page_png)))
+        pages.append((page_png, describe_view(page_png)))
         prev = page_png
     if len(pages) == 1:
         return first_desc
@@ -1582,12 +1582,12 @@ def _capture_mouse_override_vm(session: VMSession) -> str:
 
         first = ARTIFACTS_DIR / "settings_mouse-override.png"
         screenshot_vm(session, first)
-        first_desc = describe(first)
+        first_desc = describe_view(first)
         mouse_wheel(session, wheel_x, wheel_y, 5, "down")
         time.sleep(0.7)
         second = ARTIFACTS_DIR / "settings_mouse-override-p2.png"
         screenshot_vm(session, second)
-        second_desc = describe(second)
+        second_desc = describe_view(second)
         return (f"\n\n=== mouse override enabled ({first.name}) ===\n"
                 f"{first_desc}\n\n=== mouse override scrolled ({second.name}) ===\n"
                 f"{second_desc}")
@@ -1668,7 +1668,7 @@ def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
             time.sleep(0.5)
 
         screenshot_vm(session, png_path)
-        description = describe(png_path)
+        description = describe_view(png_path)
         if surface.kind == "settings":
             description = _describe_scrolled_vm(session, surface, png_path,
                                               description)
@@ -1695,7 +1695,7 @@ def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
             time.sleep(2.5)
             page_png = ARTIFACTS_DIR / f"{surface.id}-click{idx + 1}.png"
             screenshot_vm(session, page_png)
-            page_desc = describe(page_png)
+            page_desc = describe_view(page_png)
             description += (f"\n\n=== after click {idx + 1} "
                             f"({page_png.name}) ===\n" + page_desc)
     finally:
@@ -1934,6 +1934,23 @@ _DESCRIBE_SURFACE_HINTS = {
         "still visible below the right side of the bar. Distinguish an "
         "unobstructed desktop background from an empty, dimmed drawer."
     ),
+    # 2026-10-13 full run: the describer called the Bluetooth master switch
+    # "thumb on the right (on)" while the frame shows the thumb at the left
+    # end of an unfilled track. Ask for the measured evidence per switch.
+    "settings_connections": (
+        "Report which subtab is selected. For every switch row (Airplane "
+        "Mode, Wi-Fi, Bluetooth), state whether its round thumb sits at "
+        "the LEFT or RIGHT end of its track and whether the track is "
+        "filled or unfilled, then separately whether the row is dimmed."
+    ),
+    # Same run: "Arrange folders first" was described only as "toggle on",
+    # without its dimmed state, and the judge read checked as enabled.
+    "settings_desktopicons": (
+        "For EVERY row below Enable desktop icons (toggles, Sort by, spin "
+        "boxes, button), report its value or thumb position AND whether "
+        "its label and control are dimmed, row by row. Checked and "
+        "dimmed are independent: report both."
+    ),
 }
 
 
@@ -1966,6 +1983,36 @@ def describe(image_path: Path) -> str:
             return desc
         time.sleep(2)
     return ""
+
+
+def _describe_backend_available() -> bool:
+    """True when describe() has a vision backend it would actually call."""
+    if shutil.which("codex") and os.environ.get("QDSHELL_UI_NO_CODEX") != "1":
+        return True
+    return bool(shutil.which("pi")) and os.environ.get("QDSHELL_UI_NO_PI") != "1"
+
+
+def describe_view(image_path: Path) -> str:
+    """describe() for one view of a multi-view VM capture; fail loudly on "".
+
+    capture_surface_vm stitches several views (default subtab, scrolled
+    pages, post-click subtabs) into one description. An empty describe of a
+    single view used to be concatenated silently, so the judge saw only the
+    OTHER views and reported that view's controls as MISSING — the
+    2026-10-13 full run's settings_connections "WiFi section missing" was a
+    describe that timed out twice on the Wi-Fi frame (00:59 -> 01:05 click
+    frame = 2 x 180 s), not a product regression. With a backend present,
+    an empty description is an unobserved view: raise, naming the frame,
+    instead of letting the judge grade a partial surface. With no backend at
+    all, keep returning "" so judge() reports its existing SKIP.
+    """
+    desc = describe(image_path)
+    if not desc.strip() and _describe_backend_available():
+        raise RuntimeError(
+            f"vision describe returned no description for {image_path} "
+            "after its retry; this view is unobserved and cannot be judged"
+        )
+    return desc
 
 
 def _run_codex(prompt: str, image_path: Optional[Path] = None) -> str:
