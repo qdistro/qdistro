@@ -201,6 +201,12 @@ When the chain exits on its own the bridge ends whatever is left of the
 group and exits with its status. The wrapper treats the bridge's exit as
 the end of the session.
 
+`READY` means the client is exec'd and registered, not that it has bound
+its vsock port. The wrapper reports `vsock listener ready` only once
+`ss --vsock` shows that pid listening on the port (a loopback server that
+connects earlier is refused), and fails the launch if it never does
+within 10 s.
+
 Authentication: `org.qdistro.tier5.bridge` is `allow_active=auth_admin_keep`,
 `allow_inactive=no`, `allow_any=auth_admin`, with `exec.path` pinned to
 the installed bridge. The qdistro polkit agent forces the PAM (password)

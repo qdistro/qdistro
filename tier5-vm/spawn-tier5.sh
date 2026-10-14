@@ -160,7 +160,7 @@ if [ "$(id -u)" -eq 0 ]; then
     echo "        step is the pkexec'd qdistro-tier5-bridge" >&2
     exit 2
 fi
-for tool in waypipe pkexec flock python3; do
+for tool in waypipe pkexec flock python3 ss; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "[tier5] FAIL: $tool not installed" >&2
         exit 2
@@ -772,6 +772,7 @@ idle_keep_warm() {
 BRIDGE_PID=""
 BRIDGE_IN=""
 BRIDGE_OUT=""
+CLIENT_PID=""
 start_bridge() {
     local mode_arg=$1 name=$2 line=""
     coproc TIER5_BRIDGE_PROC {
@@ -791,7 +792,19 @@ start_bridge() {
         sed 's/^/[tier5]   /' "$CLIENT_LOG" >&2 2>/dev/null || true
         exit 9
     fi
-    echo "[tier5] bridge ready: waypipe client pid=${line#READY } silo=vm-$name" >&2
+    CLIENT_PID=${line#READY }
+    echo "[tier5] bridge ready: waypipe client pid=$CLIENT_PID silo=vm-$name" >&2
+}
+
+# vsock_listening — rc 0 once OUR waypipe client (CLIENT_PID) listens on
+# PORT. READY means the client exec'd and is registered, not that it has
+# bound its socket yet. ss reads vsock_diag; -p resolves only our own
+# processes, so another uid's listener on the port never matches.
+vsock_listening() {
+    ss -Hlnp --vsock 2>/dev/null | awk -v port=":$PORT" -v pid="pid=$CLIENT_PID," '
+        $2 == "LISTEN" && substr($5, length($5) - length(port) + 1) == port \
+            && index($0, pid) { found = 1 }
+        END { exit !found }'
 }
 
 # bridge_alive — rc 0 while the bridge (and so the waypipe client) runs.
@@ -893,10 +906,19 @@ if [ "$MODE" = "loopback" ]; then
 else
     start_bridge --vm "$VM_NAME"
 fi
-for _ in $(seq 1 50); do
-    grep -q 'Starting client main process' "$CLIENT_LOG" 2>/dev/null && break
-    sleep 0.2
+# A loopback server connecting before the listener exists is refused, and a
+# client that never listens can publish nothing — fail the launch.
+LISTENING=0
+for _ in $(seq 1 100); do
+    vsock_listening && { LISTENING=1; break; }
+    bridge_alive || break
+    sleep 0.1
 done
+if [ "$LISTENING" != "1" ]; then
+    echo "[tier5] FAIL: waypipe client pid=$CLIENT_PID never listened on vsock port $PORT" >&2
+    sed 's/^/[tier5]   /' "$CLIENT_LOG" >&2 2>/dev/null || true
+    exit 9
+fi
 echo "[tier5] vsock listener ready cid=$([ "$MODE" = loopback ] && echo 1 || echo 2) port=$PORT" >&2
 
 # --- 2. silo-side waypipe server (loopback) ---------------------------

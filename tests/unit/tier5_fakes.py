@@ -13,6 +13,8 @@ replaced, by small programs on PATH that keep their state in one directory:
               bridge path with bounded args, prints READY, and holds the
               "waypipe client" until its stdin reaches EOF.
   waypipe     loopback server stand-in: runs the app.
+  ss          lists each live "waypipe client" as a vsock LISTEN row
+              (flag no-listen: the client never binds its port).
 
 Knobs are files under the state dir (see FakeHost.flag).
 """
@@ -221,12 +223,13 @@ if pid == 0:
     os.setsid()
     while True:
         time.sleep(3600)
-sys.stderr.write("waypipe: Starting client main process\n")
-sys.stderr.flush()
-sys.stdout.write(f"READY {pid}\n")
-sys.stdout.flush()
 with open(f"{S}/clients", "a") as f:
     f.write(f"{pid}\n")
+if not os.path.exists(f"{S}/no-listen"):
+    with open(f"{S}/listeners", "a") as f:
+        f.write(f"{pid} {argv[4]}\n")
+sys.stdout.write(f"READY {pid}\n")
+sys.stdout.flush()
 reason = "eof"
 while True:
     r, _, _ = select.select([0], [], [], 0.2)
@@ -271,6 +274,25 @@ def _guarded(file, *a, **kw):
 builtins.open = _guarded
 '''
 
+# `ss -Hlnp --vsock`: one LISTEN row per live fake waypipe client.
+_SS = r'''#!{py}
+import os
+S = os.environ["T5FAKE"]
+try:
+    rows = open(f"{S}/listeners").read().splitlines()
+except OSError:
+    rows = []
+for row in rows:
+    if not row:
+        continue
+    pid, port = row.split()
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        continue
+    print(f'v_str LISTEN 0 0 *:{port} *:* users:(("waypipe",pid={pid},fd=4))')
+'''
+
 _WAYPIPE = r'''#!/bin/sh
 # loopback server stand-in: waypipe ... server -- app args
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
@@ -300,6 +322,7 @@ class FakeHost:
         py = sys.executable
         for name, body in (("virsh", _VIRSH), ("qemu-img", _QEMU_IMG),
                            ("pkexec", _PKEXEC), ("waypipe", _WAYPIPE),
+                           ("ss", _SS),
                            ("qemu-system-x86_64", _QEMU)):
             p = self.bin / name
             p.write_text(body.replace("{py}", py)

@@ -141,6 +141,19 @@ def test_cancelled_authentication_aborts_before_any_vm_work(host):
     assert not host.overlay(VM).exists()
 
 
+def test_client_that_never_listens_fails_before_any_vm_work(host):
+    # ensures: "vsock listener ready" is reported from the client's actual
+    #          LISTEN socket (not a fixed wait); a client that never binds its
+    #          port fails the launch, starts no guest and keeps no client
+    host.flag("no-listen")
+    rc, _out, err = finish(host.spawn(VM, APP))
+    assert rc == 9, err
+    assert "never listened on vsock port" in err
+    assert "vsock listener ready" not in err
+    assert "STARTED" not in host.log() and "DEFINED" not in host.log()
+    assert not host.clients_alive()
+
+
 # -- cold start, reuse, refusal ---------------------------------------------
 
 def test_cold_start_then_app_exit_tears_everything_down(host):
