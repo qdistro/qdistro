@@ -1,6 +1,7 @@
 #!/bin/bash
-# In-VM driver for workflow-headless.bats — headless equivalents of
-# tests/integration/workflow-gui/01, 02, 03 and 05.
+# In-VM driver for workflow-headless.bats — headless equivalents of the
+# workflow-gui scenarios 01, 02, 03 (their rendered rows now live in
+# workflow-gui/04) and 05.
 #
 # Usage: s130-workflow-headless.sh <wf01|wf02|wf03|wf05>
 #
