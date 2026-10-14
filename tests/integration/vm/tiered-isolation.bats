@@ -697,7 +697,9 @@ setup() {
     # verifies it and registers it, so the broker persists
     # qdistro.lineage.register:vm-<name>. Loopback (vsock CID=1) needs no
     # guest VM / nested KVM. Companion to s60 (tier-3), s61/s62 (tier-2); tier-5
-    # has no broker spawn gate so no allow rule is authored.
+    # has no broker spawn gate so no spawn allow rule is authored. The driver
+    # runs the broker under `lineage_enforce = true` (a broker.conf flag, NOT
+    # SELinux enforcing) and restores the prior posture in its own trap.
     stage_vm_driver "s63-tier5-loopback-lineage-register.sh"
     vm_run "curl -fsS -o /tmp/s63.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s63-tier5-loopback-lineage-register.sh && chmod +x /tmp/s63.sh && bash /tmp/s63.sh 2>/dev/null"
     assert_success
@@ -709,6 +711,19 @@ setup() {
     assert_output_contains "PASS: spawn-tier5 (loopback) logged the launch-record registration for silo="
     assert_output_contains "PASS: tier-5 loopback silo identity is this spawn's pid (vm-loopback-"
     assert_output_contains "PASS: broker recorded qdistro.lineage.register:"
+    # Decision record step 10: under lineage_enforce=true the record DECIDES
+    # the cross-silo gate — matching-silo success AND forged/mismatched
+    # identity denial, not just registration/audit presence.
+    assert_output_contains "PASS: broker restarted under lineage_enforce=true"
+    assert_output_contains "PASS: enforce: attested tier-5 source, no rule -> deny (enforce never bypasses rules)"
+    assert_output_contains "PASS: enforce: matching silo — the attested tier-5 client"
+    assert_output_contains "PASS: enforce: forged identity — an unregistered admin pid claiming vm-loopback-"
+    assert_output_contains "PASS: enforce: the registered pid with a drifted starttime -> deny"
+    assert_output_contains "PASS: enforce: no relayed source pid -> deny"
+    assert_output_contains "PASS: enforce: mismatched identity — the tier-5 client claiming vm-s63other cannot use its rule -> deny"
+    assert_output_contains "PASS: enforce: broker logged the forged claim overridden with the attested silo vm-loopback-"
+    assert_output_contains "PASS: enforce: source-deny audit rows recorded"
+    assert_output_contains "PASS: lineage_enforce restored"
     assert_output_contains "PASS: §02/S3e tier-5 (loopback/vsock) permission-lineage register end-to-end"
 }
 
