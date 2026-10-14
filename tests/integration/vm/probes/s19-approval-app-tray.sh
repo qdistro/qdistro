@@ -211,7 +211,8 @@ pending = iface.GetPending()
 if pending: print(int(pending[0]['id']))
 ")
 if [ -n "$FIRST_ID" ]; then
-    runuser -u admin -- python3 -c "
+    # Root, not admin: admin-uid inline Python may not call DecideRequest.
+    python3 -c "
 import dbus
 bus = dbus.SystemBus()
 proxy = bus.get_object('com.qdistro.AdminBroker1',

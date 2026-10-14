@@ -111,9 +111,10 @@ pending = iface.GetPending()
 if pending: print(int(pending[0]['id']))
 ")
 if [ -n "$FIRST_ID" ]; then
-    # DecideRequest is admin-gated by the broker (ADMIN_UID=admin/1000),
-    # so run the decide call as admin.
-    runuser -u admin -- python3 -c "
+    # DecideRequest is an authority method: the broker refuses it from
+    # admin-uid inline Python (only the installed admin app/TUI/qdshell
+    # may approve as admin), so the clean-up decide runs as root.
+    python3 -c "
 import dbus
 bus = dbus.SystemBus()
 proxy = bus.get_object('com.qdistro.AdminBroker1',

@@ -4,8 +4,9 @@
 # Headless port of tests/integration/permissions-gui/55-qsu-selinux-enforcing.md
 # (formerly driven from the host by permissions-gui/run-55-qsu-selinux-enforcing.sh).
 # The scenario never needed the GUI: it flips SELinux to Enforcing, runs the
-# real `qsu /usr/bin/id` as the non-admin user, approves it over D-Bus as the
-# admin uid, and asserts
+# real `qsu /usr/bin/id` as the non-admin user, finds it over D-Bus as the
+# admin uid and approves it as root (admin-uid inline Python may not call
+# DecideRequest), and asserts
 #   (A) the command ran as that user (id reports uid=<work>(work)), and
 #   (B) zero new AVC / USER_AVC denials with a qdistro source context
 #       (qdistro_root_exec_t / qdistro_tier1_t / qdistro_broker_t /
@@ -76,7 +77,11 @@ rm -f /tmp/s54.out /tmp/s54.rc
   echo $? >/tmp/s54.rc ) &
 QSU_PID=$!
 
-DECIDE=$(runuser -u admin -- python3 -c '
+# The admin uid finds the pending row (read-only GetPending: keeps the
+# admin-domain -> broker D-Bus path under Enforcing covered); root approves
+# it, because the broker refuses DecideRequest from admin-uid inline Python
+# (only the installed admin app/TUI/qdshell may exercise authority).
+RID=$(runuser -u admin -- python3 -c '
 import dbus, sys, time
 bus = dbus.SystemBus()
 iface = dbus.Interface(bus.get_object("org.qdistro.AdminBroker1",
@@ -86,15 +91,25 @@ deadline = time.monotonic() + 20
 while time.monotonic() < deadline:
     for r in iface.GetPending():
         if int(r["uid"]) == uid and str(r.get("action", "")) == "qsu.exec:root":
-            iface.DecideRequest(int(r["id"]), "allow", "once")
-            print("decided rid=%d" % int(r["id"]))
+            print(int(r["id"]))
             sys.exit(0)
     time.sleep(0.2)
 print("no qsu pending row")
 ' "$WORK_UID" 2>&1)
+case "$RID" in
+    ''|*[!0-9]*) DECIDE="admin GetPending: $RID" ;;
+    *) DECIDE=$(python3 -c '
+import dbus, sys
+bus = dbus.SystemBus()
+iface = dbus.Interface(bus.get_object("org.qdistro.AdminBroker1",
+        "/org/qdistro/AdminBroker1"), "org.qdistro.AdminBroker1")
+iface.DecideRequest(int(sys.argv[1]), "allow", "once")
+print("decided rid=%d" % int(sys.argv[1]))
+' "$RID" 2>&1) ;;
+esac
 case "$DECIDE" in
-    "decided rid="*) pass "admin approved the qsu request over D-Bus under Enforcing ($DECIDE)" ;;
-    *) fail "admin D-Bus approve failed under Enforcing: $DECIDE" ;;
+    "decided rid="*) pass "qsu request found by admin and approved by root over D-Bus under Enforcing ($DECIDE)" ;;
+    *) fail "D-Bus approve (admin GetPending, root DecideRequest) failed under Enforcing: $DECIDE" ;;
 esac
 
 for _ in $(seq 1 100); do [ -s /tmp/s54.rc ] && break; sleep 0.2; done

@@ -159,6 +159,16 @@ install -m 0644 "$BROKER_SRC/qdistro-admin-broker.service" "$UNIT"
 RELOAD_UNIT=/etc/systemd/system/qdistro-dbus-reload.service
 install -m 0644 "$BROKER_SRC/qdistro-dbus-reload.service" "$RELOAD_UNIT"
 
+# 3b. polkit action org.qdistro.broker.approve. An admin-uid authority
+#     call (DecideRequest, SaveRule, …) needs it, and the broker refuses
+#     the call fail-closed while polkitd does not know the action — so
+#     this is a required file, not an optional extra. Explicit 0644:
+#     polkitd cannot read a file created under root's 077 umask.
+install -d -m 0755 /usr/share/polkit-1/actions
+install -m 0644 -o root -g root "$BROKER_SRC/org.qdistro.broker.policy" \
+    /usr/share/polkit-1/actions/org.qdistro.broker.policy
+sd_reload_polkit
+
 # 4. Reload dbus so the new policy takes effect. System bus uses
 #    dbus-broker.service on modern Tumbleweed, fall back to dbus.service
 #    on older variants.

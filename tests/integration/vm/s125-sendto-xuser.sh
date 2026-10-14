@@ -5,14 +5,15 @@
 #
 #   bash s125-sendto-xuser.sh pg11|pg15|pg17
 #
-#   pg11  work(2000) -> work2(3000) qstub-notepad, admin approves `once`:
+#   pg11  work(2000) -> work2(3000) qstub-notepad, approved `once` (by a root
+#         DecideRequest: admin-uid inline Python may not approve):
 #         delivery into the stub's document, audit row with both uids, no
 #         cache row (one-shot action).
 #   pg15  two REAL qnotebook instances (offscreen), one per uid, each with its
 #         built-in qdistro send-to receiver: both discoverable via
 #         ListReceivers, delivery both directions, audit rows, no cache.
 #   pg17  the deny leg on the real qnotebooks (the GUI scenario clicked Deny;
-#         here admin calls DecideRequest(deny)): sender gets .Denied, the
+#         here root calls DecideRequest(deny)): sender gets .Denied, the
 #         receiver never sees the payload (after a positive-control delivery),
 #         this request's audit row is caller 2000 / decision 0.
 #
@@ -75,7 +76,8 @@ sys.exit(0 if ok else 1)' "$@"
 
 # relay_and_decide <from_user> <to_uid> <service> <payload> <decision>
 # Runs RelayMessage as <from_user> in the background (its own child of THIS
-# shell), waits for the request to reach GetPending, decides as admin, then
+# shell), waits for the request to reach GetPending, decides as root (the
+# broker refuses DecideRequest from admin-uid inline Python), then
 # waits for the sender. Leaves the sender output in $WORK/relay.out and the
 # request id in RELAY_RID.
 RELAY_RID=""
@@ -89,7 +91,7 @@ relay_and_decide() {
     wait_pending "$action" 160 || { kill "$spid" 2>/dev/null; die "send-to request $action never reached GetPending"; }
     rid=$(pending_ids_for "$action" | head -1)
     RELAY_RID=$rid
-    r=$(broker_call_as admin DecideRequest "[$rid, \"$decision\", \"once\"]")
+    r=$(broker_call_as root DecideRequest "[$rid, \"$decision\", \"once\"]")
     # DecideRequest's outcome string: "applied" = this call decided it;
     # anything else ("already-*", "deciding", "unknown") is a failure here.
     [ "$r" = 'OK "applied"' ] || fail "DecideRequest($rid, $decision, once) failed: $r"
@@ -151,9 +153,11 @@ pg11() {
           /org/qdistro/App1 org.qdistro.App1.GetDocument 2>&1)
     check "pg11: work2's notepad document contains '[text/plain] $payload'" \
         grep -qF "[text/plain] $payload" <<<"$out"
-    expect_eq "pg11: audit row 2000|app.send-to:3000:...|1|once|prompt|1000" \
+    # approver_uid is the deciding peer's uid: 0, since the decision is a
+    # root DecideRequest (admin-uid inline Python may not approve).
+    expect_eq "pg11: audit row 2000|app.send-to:3000:...|1|once|prompt|0" \
         "$(sql_audit "SELECT caller_uid||'|'||action||'|'||decision||'|'||scope||'|'||source||'|'||approver_uid FROM audit WHERE request_id=$RELAY_RID ORDER BY id DESC LIMIT 1")" \
-        "2000|app.send-to:3000:$s3|1|once|prompt|1000"
+        "2000|app.send-to:3000:$s3|1|once|prompt|0"
     expect_eq "pg11: one-shot send-to persisted no cache row" \
         "$(sql_approvals "SELECT count(*) FROM approvals WHERE action LIKE 'app.send-to:%'")" 0
 }
@@ -182,9 +186,9 @@ pg15() {
           /org/qdistro/App1 org.qdistro.App1.GetLastReceived 2>&1)
     check "pg15: work's qnotebook GetLastReceived = [text/plain] echo_reverse_$TAG" \
         grep -qF "string \"[text/plain] echo_reverse_$TAG\"" <<<"$out"
-    expect_eq "pg15: audit rows for both directions (uid|action|1|once|prompt|1000)" \
+    expect_eq "pg15: audit rows for both directions (uid|action|1|once|prompt|0)" \
         "$(sql_audit "SELECT group_concat(x, ' ') FROM (SELECT caller_uid||'|'||action||'|'||decision||'|'||scope||'|'||source||'|'||approver_uid AS x FROM audit WHERE request_id IN ($r1,$r2) AND action LIKE 'app.send-to:%' ORDER BY id DESC)")" \
-        "3000|app.send-to:2000:$q2|1|once|prompt|1000 2000|app.send-to:3000:$q3|1|once|prompt|1000"
+        "3000|app.send-to:2000:$q2|1|once|prompt|0 2000|app.send-to:3000:$q3|1|once|prompt|0"
     expect_eq "pg15: no send-to cache row was ever persisted" \
         "$(sql_approvals "SELECT count(*) FROM approvals WHERE action LIKE 'app.send-to:%'")" 0
 }

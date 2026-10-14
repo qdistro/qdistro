@@ -18,10 +18,16 @@ methods depending on configuration:
 
 Method selection (highest priority first):
 
+  0. ``FORCED_PAM_ACTIONS`` — actions that must verify the admin's
+     credential (``org.qdistro.broker.approve``,
+     ``org.qdistro.tier5.bridge``): always ``pam``, ahead of every
+     override below; the ``QDISTRO_POLKIT_NONINTERACTIVE=allow`` shortcut
+     does not apply and an empty password is refused.
   1. ``QDISTRO_POLKIT_METHOD``   — env override (tests).
   2. ``QDISTRO_POLKIT_NONINTERACTIVE`` — bypass prompts entirely
      (``allow`` / ``deny`` / ``password=<pw>``). Tests only.
-  3. /etc/qdistro/polkit-agent.conf  — fnmatch glob → method.
+  3. ~/.config/qdistro/polkit-agent.conf, then
+     /etc/qdistro/polkit-agent.conf — fnmatch glob → method.
   4. default ``broker``.
 
 polkitd accepts
@@ -124,6 +130,23 @@ DEFAULT_PROMPT_BIN = "/usr/local/bin/qdistro-polkit-prompt"
 PROMPT_INTERPRETER = "/usr/bin/python3"
 
 VALID_METHODS = ("pam", "fprint", "broker")
+
+# Actions whose authorization must come from the admin's credential, never
+# from a yes/no vote an admin-session process can cast, a user-writable
+# config line or a test env override. org.qdistro.tier5.bridge runs the root
+# half of a tier-5 launch (a uid-0 launcher parent plus RegisterLaunch);
+# its polkit default is auth_admin_keep, and this is the route that makes
+# that "auth" mean a verified password. org.qdistro.broker.approve is the
+# authority to decide the broker's own approval queue: its broker route
+# would file the request into the very queue it is meant to unlock, so a
+# password is the only route that means anything. For these actions the
+# password is verified for the fixed admin account (not QDISTRO_POLKIT_USER)
+# and an empty one is refused before PAM sees it.
+FORCED_PAM_ACTIONS = frozenset({
+    "org.qdistro.broker.approve",
+    "org.qdistro.tier5.bridge",
+})
+FORCED_PAM_USER = "admin"
 
 _FPRINTD_BUS_NAME = "net.reactivated.Fprint"
 _FPRINTD_MGR_PATH = "/net/reactivated/Fprint/Manager"
@@ -292,10 +315,13 @@ def select_method(action_id: str,
     """Pick an auth method for a polkit action.
 
     Priority:
+      0. ``FORCED_PAM_ACTIONS`` → ``pam``, regardless of anything below
       1. env ``QDISTRO_POLKIT_METHOD`` (test override)
       2. config glob match (first-match-wins)
       3. ``DEFAULT_METHOD``
     """
+    if action_id in FORCED_PAM_ACTIONS:
+        return "pam"
     if env is None:
         env = os.environ
     forced = env.get("QDISTRO_POLKIT_METHOD", "").strip().lower()
@@ -763,14 +789,21 @@ class QdistroPolkitAgent(dbus.service.Object):
 
     def _auth_pam(self, action_id: str,
                   message: str) -> tuple[bool, str]:
-        user = _admin_user()
+        forced = action_id in FORCED_PAM_ACTIONS
+        user = FORCED_PAM_USER if forced else _admin_user()
         pw = _prompt_password(action_id, message)
         if pw is None:
             return False, "prompt-cancelled"
+        # A forced-PAM action never authenticates on an empty password: a
+        # passwordless admin account (pam_unix nullok) or the "allow" test
+        # seam would otherwise turn the credential check into a no-op.
+        if forced and pw == "":
+            return False, "empty-password"
         # For "allow" non-interactive shortcut (empty pw + bypass mode),
-        # don't run PAM — let the caller treat it as a test pass.
+        # don't run PAM — let the caller treat it as a test pass. Never for
+        # a forced-PAM action: its empty password was refused above.
         nonint = os.environ.get("QDISTRO_POLKIT_NONINTERACTIVE", "")
-        if nonint == "allow" and pw == "":
+        if nonint == "allow" and pw == "" and not forced:
             return True, "noninteractive-allow"
         ok, reason = _pam_authenticate(user, pw)
         return ok, reason

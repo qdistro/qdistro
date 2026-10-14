@@ -132,8 +132,10 @@ qdwin_screenshot "$ART/34-s3b-third-selected.png"
 # Default scope is "once" -> no cache row, just a decide. Use the broker
 # API for the decision so this scenario remains focused on the admin app's
 # multi-row navigation and refresh behavior rather than Qt shortcut delivery.
+# The decision runs as ROOT: the broker refuses DecideRequest from admin-uid
+# inline Python (only the installed admin app/TUI/qdshell may approve).
 B64=$(base64 -w0 <<'EOF'
-runuser -u admin -- python3 - <<'PYEOF'
+python3 - <<'PYEOF'
 import dbus
 
 bus = dbus.SystemBus()
@@ -178,7 +180,7 @@ $VMEXEC "$VM" 'dbus-send --system --print-reply \
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-runuser -u admin -- python3 - <<'PYEOF'
+python3 - <<'PYEOF'
 import dbus
 
 bus = dbus.SystemBus()
@@ -254,17 +256,20 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | bash"
 - If S4's "two rows remain" check fails with three rows, S4's
   approve never took effect in the app. S3 only navigates (no
   decision is sent there). Find which of three steps failed, in
-  order: the admin API call was refused (typically `python3`
-  run without the `-`, see the next note), `DecideRequest`
+  order: the API call was refused (typically `python3` run
+  without the `-`, or as admin instead of root — see the next
+  note), `DecideRequest`
   itself raised, or the decision landed but the app never
   refreshed (`GetPending` shows two rows while the title wait
   timed out with the title still `(3 pending)`).
-- Run the S4/S5 decision scripts exactly as written, as
-  `runuser -u admin -- python3 -`. The `-` is required: the broker
-  trusts an admin Python peer that reads its script from stdin only
-  when argv says so (`-` or `-c`), and refuses a bare `python3` with
-  "Python peer is not an installed admin script" (2026-09-24: a
-  driver dropped the `-`, GetPending was refused, S4 never decided).
+- Run the S4/S5 decision scripts exactly as written: as root,
+  `python3 -`. Root is required: the broker refuses DecideRequest
+  from admin-uid inline Python ("Python peer is not an installed
+  admin control script"). The `-` is required too: the broker trusts
+  a root Python control peer that reads its script from stdin only
+  when argv says so (`-` or `-c`), and refuses a bare `python3`
+  (2026-09-24: a driver dropped the `-`, the call was refused, S4
+  never decided).
 - If a decision script or a title wait fails, that step has
   failed: record it with the command's stderr, and do not release
   the next guest gate before you have. Releasing the guest early let

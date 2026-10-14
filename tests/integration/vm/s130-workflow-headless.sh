@@ -269,16 +269,25 @@ case "$NONADMIN" in
         pass "wf05: non-admin ApproveWorkflowRun (even with the right digest) denied" ;;
     *) fail "wf05: non-admin approve was NOT denied: [$NONADMIN]" ;;
 esac
-WRONG=$(runuser -u admin -- gdbus call --system --dest $BUS --object-path $OBJ \
+# ApproveWorkflowRun is an authority method: an admin-uid D-Bus CLI is any
+# admin-session process and is refused; root (the TCB) approves below.
+ADMINCLI=$(runuser -u admin -- gdbus call --system --dest $BUS --object-path $OBJ \
+    --method $BUS.ApproveWorkflowRun "$RUN_ID" "$DIGEST" 2>&1)
+case "$ADMINCLI" in
+    *AccessDenied*|*"restricted to"*)
+        pass "wf05: admin-uid gdbus ApproveWorkflowRun refused" ;;
+    *) fail "wf05: admin-uid gdbus approve was NOT refused: [$ADMINCLI]" ;;
+esac
+WRONG=$(gdbus call --system --dest $BUS --object-path $OBJ \
     --method $BUS.ApproveWorkflowRun "$RUN_ID" "$(printf '0%.0s' $(seq 1 64))" 2>&1)
-[ "$WRONG" = "(false,)" ] && pass "wf05: admin approve with a wrong digest returns false" \
+[ "$WRONG" = "(false,)" ] && pass "wf05: root approve with a wrong digest returns false" \
     || fail "wf05: wrong-digest approve returned [$WRONG]"
 STILL=$(runs_of wfhl-approval | awk -F'|' -v id="$RUN_ID" '$1 == id {print $2}')
 [ "$STILL" = pending ] && pass "wf05: run $RUN_ID still pending after the refused approvals" \
     || fail "wf05: run state after refused approvals [$STILL]"
-OK=$(runuser -u admin -- gdbus call --system --dest $BUS --object-path $OBJ \
+OK=$(gdbus call --system --dest $BUS --object-path $OBJ \
     --method $BUS.ApproveWorkflowRun "$RUN_ID" "$DIGEST" 2>&1)
-[ "$OK" = "(true,)" ] && pass "wf05: admin ApproveWorkflowRun(run, previewed digest) accepted" \
+[ "$OK" = "(true,)" ] && pass "wf05: root ApproveWorkflowRun(run, previewed digest) accepted" \
     || fail "wf05: admin approve returned [$OK]"
 DONE=""
 for _ in $(seq 1 80); do

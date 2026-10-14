@@ -7,11 +7,12 @@
 #
 # Self-elevating: if invoked as root (e.g. directly via `vm-exec`),
 # re-exec under the uid-1000 user via runuser so the spawned TUI
-# connects to the broker with the admin uid the broker enforces
-# (DecideRequest is restricted to uid 1000). Why this matters: a
-# common test mistake is to call the launcher from a root shell and
-# see the TUI come up but every approve/deny rejected with
-# `DecideRequest restricted to admin uid 1000; got 0`. Detecting the
+# connects to the broker as the admin uid running the installed
+# /usr/local/bin/qdistro-admin-tui — the only admin-uid shape (besides
+# the installed admin app and qdshell) the broker accepts for
+# DecideRequest and the other authority methods. Why this matters: a
+# root-run TUI is not a trusted control peer, so the TUI would come up
+# but every approve/deny would be refused (AccessDenied). Detecting the
 # uid here keeps the scenario robust regardless of whether the OS
 # account is named `admin` or `jan`.
 set -u

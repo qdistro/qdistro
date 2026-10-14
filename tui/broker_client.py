@@ -16,6 +16,7 @@ False in tests that verify the async contract).
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -23,6 +24,26 @@ from typing import Protocol
 
 BUS_NAME = "org.qdistro.AdminBroker1"
 OBJ_PATH = "/org/qdistro/AdminBroker1"
+
+# Admin authority (approve/deny, rules) needs the polkit action
+# org.qdistro.broker.approve on top of the broker's /proc identity checks
+# (broker/qdistro_admin_broker.py BROKER_APPROVE_ACTION). The broker only
+# checks it — never interactively — and answers .AuthRequired; the TUI then
+# obtains it for ITS OWN process (AllowUserInteraction: polkitd asks the
+# session agent, which prompts for the admin password) and retries once.
+# auth_admin_keep keeps it for this process for polkit's retention window,
+# so a run of approvals prompts once.
+POLKIT_BUS = "org.freedesktop.PolicyKit1"
+POLKIT_OBJ = "/org/freedesktop/PolicyKit1/Authority"
+POLKIT_IFACE = "org.freedesktop.PolicyKit1.Authority"
+BROKER_APPROVE_ACTION = "org.qdistro.broker.approve"
+POLKIT_ALLOW_USER_INTERACTION = 1
+# The agent's password prompt times out at 120 s; leave headroom.
+POLKIT_INTERACTIVE_TIMEOUT_S = 300
+AUTH_REQUIRED = BUS_NAME + ".AuthRequired"
+# Client-side outcome (never sent by the broker): the admin cancelled the
+# password prompt, or polkit refused. The request stays pending.
+AUTH_NOT_GRANTED = BUS_NAME + ".AuthNotGranted"
 
 _log = logging.getLogger("qdistro.tui.broker")
 
@@ -45,6 +66,8 @@ _log = logging.getLogger("qdistro.tui.broker")
 _BROKER_ERROR_LABELS: dict[str, str] = {
     "AccessDenied":            "Access denied by broker policy",
     "AuditUnavailable":        "Audit log unavailable — decision refused",
+    "AuthNotGranted":          "Authentication cancelled or not authorized — request left pending",
+    "AuthRequired":            "Admin authentication required",
     "BadArgument":             "Broker rejected the request (bad argument)",
     "CacheGcFailed":           "Cache cleanup failed",
     "CallerGone":              "The requesting process is no longer present",
@@ -123,6 +146,54 @@ def log_broker_error(context: str, exc: BaseException) -> None:
     name = _dbus_error_name(exc) or type(exc).__name__
     _log.warning("broker error during %s: name=%s detail=%s",
                  context, name, exc)
+
+
+class AuthNotGranted(Exception):
+    """The admin did not authenticate (cancelled the password prompt) or
+    polkit refused org.qdistro.broker.approve. Duck-types a D-Bus error
+    name so broker_error_label maps it like a broker error."""
+
+    def get_dbus_name(self) -> str:
+        return AUTH_NOT_GRANTED
+
+
+def is_auth_required(exc: BaseException) -> bool:
+    return _dbus_error_name(exc) == AUTH_REQUIRED
+
+
+def proc_start_time(stat_text: str) -> int:
+    """Field 22 (starttime, clock ticks since boot) of /proc/<pid>/stat.
+    The comm field may contain spaces and ')', so split after the LAST
+    ')': the field after it is field 3."""
+    return int(stat_text.rsplit(")", 1)[1].split()[19])
+
+
+def own_polkit_subject() -> tuple[str, dict[str, int]]:
+    """polkit unix-process subject for THIS process. pid + start-time
+    (not pid alone) so a recycled pid can never inherit the grant; uid
+    pins the identity polkitd checks the caller against."""
+    with open("/proc/self/stat", encoding="ascii",
+              errors="replace") as fh:
+        start = proc_start_time(fh.read())
+    return ("unix-process",
+            {"pid": os.getpid(), "start-time": start, "uid": os.getuid()})
+
+
+def call_with_authority(call: Callable[[], object],
+                        authorize: Callable[[], bool]):
+    """Run a broker authority call; on .AuthRequired obtain the polkit
+    authorization interactively and retry ONCE. `authorize` returns True
+    when polkit granted it; a False raises AuthNotGranted (the request is
+    untouched). Any other error, or a second .AuthRequired, propagates."""
+    try:
+        return call()
+    except Exception as exc:  # noqa: BLE001 — dbus may not be importable
+        if not is_auth_required(exc):
+            raise
+    if not authorize():
+        raise AuthNotGranted(
+            f"{BROKER_APPROVE_ACTION} not granted (cancelled or refused)")
+    return call()
 
 
 @dataclass
@@ -366,14 +437,41 @@ class DBusBrokerClient:
                 "DBusBrokerClient.decide_request called before start()")
         if not owner or self._current_owner() != owner:
             return "instance-changed"
-        return str(self._owner_proxy(owner).DecideRequest(
-            int(rid), str(decision), str(scope),
-            dbus_interface=BUS_NAME))
+        proxy = self._owner_proxy(owner)
+        return str(call_with_authority(
+            lambda: proxy.DecideRequest(int(rid), str(decision), str(scope),
+                                        dbus_interface=BUS_NAME),
+            self._polkit_authorize))
 
     def save_rule(self, filename: str, yaml_body: str) -> str:
         """SaveRule on the broker. Returns the absolute path of the
         saved YAML."""
-        return str(self._call("SaveRule", str(filename), str(yaml_body)))
+        return str(call_with_authority(
+            lambda: self._call("SaveRule", str(filename), str(yaml_body)),
+            self._polkit_authorize))
+
+    def _polkit_authorize(self) -> bool:
+        """Ask polkitd for org.qdistro.broker.approve for this process,
+        WITH user interaction: polkitd hands it to the admin session's
+        agent, which shows its password dialog on the compositor. Blocks
+        this (Textual) thread until the admin answers — the dialog is
+        modal for the decision anyway. True when granted."""
+        dbus = self._dbus
+        kind, fields = own_polkit_subject()
+        subject = dbus.Struct(
+            (kind, dbus.Dictionary(
+                {"pid": dbus.UInt32(fields["pid"]),
+                 "start-time": dbus.UInt64(fields["start-time"]),
+                 "uid": dbus.Int32(fields["uid"])}, signature="sv")),
+            signature="sa{sv}")
+        authority = dbus.Interface(
+            self._bus.get_object(POLKIT_BUS, POLKIT_OBJ), POLKIT_IFACE)
+        authorized, _challenge, _details = authority.CheckAuthorization(
+            subject, BROKER_APPROVE_ACTION,
+            dbus.Dictionary({}, signature="ss"),
+            dbus.UInt32(POLKIT_ALLOW_USER_INTERACTION), "",
+            timeout=POLKIT_INTERACTIVE_TIMEOUT_S)
+        return bool(authorized)
 
     def start(self, on_pending: PendingCallback,
               on_decided: DecidedCallback) -> None:

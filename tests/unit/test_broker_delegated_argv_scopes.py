@@ -73,11 +73,21 @@ class _StubBroker(Broker):
 @pytest.fixture
 def broker(tmp_path: Path) -> _StubBroker:
     rd = tmp_path / "rules"; rd.mkdir()
-    return _StubBroker(
+    b = _StubBroker(
         str(tmp_path / "approvals.sqlite"),
         str(tmp_path / "audit.sqlite"),
         str(rd),
     )
+    # The admin-uid caller here stands for the installed admin app; that
+    # identity (python3 -I + installed path, no injection env) is pinned in
+    # test_broker_control_plane_identity.py. These tests cover rule/scope
+    # logic, so trust is injected at the predicate, not via the env.
+    b._peer_is_installed_admin_script = (
+        lambda _pid, _exe, _argv: (True, "test: installed admin app"))
+    # ... which has authenticated (org.qdistro.broker.approve; the polkit
+    # layer is pinned in test_broker_authority_polkit.py).
+    b._polkit_peer_authorized = lambda _sender, _action: True
+    return b
 
 
 def _enqueue_delegated(broker: _StubBroker, *, claim_uid: int,

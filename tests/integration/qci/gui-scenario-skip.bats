@@ -67,6 +67,7 @@ setup() {
         qdistro/tests/integration/permissions-gui/34-admin-app-multi-pending-nav.md \
         qdistro/tests/integration/permissions-gui/43-qsu-admin-app-argv-prompt.md \
         qdistro/tests/integration/permissions-gui/47-qsu-delegated-guard-forever-exe-rejected.md \
+        qdistro/tests/integration/permissions-gui/62-admin-approval-password-prompt.md \
         qdistro/tests/integration/workflow-gui/04-admin-workflowstab-list-run-view.md; do
         gui_scenario_requires_qdwin "$rel" || { echo "not qdwin-routed: $rel"; return 1; }
         run gui_scenario_labwc_lane_skip_reason "$rel" 0 0

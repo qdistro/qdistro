@@ -230,6 +230,7 @@ gui_scenario_requires_qdwin() {
         tests/integration/permissions-gui/34-admin-app-multi-pending-nav.md|\
         tests/integration/permissions-gui/43-qsu-admin-app-argv-prompt.md|\
         tests/integration/permissions-gui/47-qsu-delegated-guard-forever-exe-rejected.md|\
+        tests/integration/permissions-gui/62-admin-approval-password-prompt.md|\
         tests/integration/workflow-gui/04-admin-workflowstab-list-run-view.md)
             return 0 ;;
     esac
@@ -2551,6 +2552,53 @@ runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user try-rest
     "$VM_TOOLS/vm-exec" "$vm" "printf '%s' '$b64' | base64 -d | bash" >/dev/null 2>&1 || true
 }
 
+# TEST-ONLY polkit grant of org.qdistro.broker.approve to admin, written into
+# every agent GUI VM before its scenario runs. An admin-uid approval in the
+# admin app/TUI needs that action, and on a product system only a typed admin
+# password creates it (auth_admin_keep, forced onto qdistro-polkit-agent's PAM
+# route). An agent-driven scenario cannot type a password, and on the CI VMs
+# the admin session is a lingering user manager, not a logind seat session,
+# so the polkit agent is not even registered (presentation-gui/03). Scenarios
+# that approve through the app/TUI test the queue, not authentication: this
+# rule answers YES for the admin user, exactly what the pre-polkit broker
+# allowed. The password path itself is covered by
+# permissions-gui/62-admin-approval-password-prompt.md, which opts out with
+# `<!-- qci:polkit-test-grant: none -->` and removes the rule defensively.
+#
+# Never on an image: the file is written only into disposable qci VMs, its
+# name says so, and image/verify-contents.sh asserts it is absent. polkitd
+# watches rules.d and reloads on change. Best-effort: a failure here makes an
+# approval scenario fail loudly (AuthNotGranted in the app), never pass.
+QCI_BROKER_APPROVE_TEST_RULE=/etc/polkit-1/rules.d/10-qci-broker-approve-test.rules
+gui_scenario_wants_polkit_test_grant() {
+    local file=$1
+    [ -f "$file" ] || return 0
+    ! grep -qiE '<!--[[:space:]]*qci:polkit-test-grant[[:space:]]*[:=][[:space:]]*none[[:space:]]*-->' "$file"
+}
+grant_broker_approve_for_tests() {
+    local vm=$1 scenario=${2:-} b64 script
+    if [ -n "$scenario" ] && ! gui_scenario_wants_polkit_test_grant "$scenario"; then
+        script="rm -f -- '$QCI_BROKER_APPROVE_TEST_RULE'"
+    else
+        script="set -e
+id admin >/dev/null 2>&1 || exit 0
+install -d -m 0755 /etc/polkit-1/rules.d
+cat >'$QCI_BROKER_APPROVE_TEST_RULE' <<'EOF'
+// qci GUI gate, TEST-ONLY (ci/lib/gates/gui.sh grant_broker_approve_for_tests).
+// Lets agent-driven scenarios approve as admin without typing a password.
+// Must never exist on a product image (image/verify-contents.sh).
+polkit.addRule(function(action, subject) {
+    if (action.id == \"org.qdistro.broker.approve\" && subject.user == \"admin\") {
+        return polkit.Result.YES;
+    }
+});
+EOF
+chmod 0644 '$QCI_BROKER_APPROVE_TEST_RULE'"
+    fi
+    b64=$(printf '%s' "$script" | base64 -w0 2>/dev/null) || b64=$(printf '%s' "$script" | base64 | tr -d '\n')
+    "$VM_TOOLS/vm-exec" "$vm" "printf '%s' '$b64' | base64 -d | bash" >/dev/null 2>&1 || true
+}
+
 # Host-side waiter: retry a guest command over vm-exec until it exits 0 or the
 # deadline passes — the host equivalent of the guest await_* helpers, for
 # host-driven readiness gates. Returns 0 on success, 1 on timeout; on timeout
@@ -3637,6 +3685,7 @@ gui_run_scenario() {
     install_gui_waiters "$vm" || log "agent scenario $rel: waiter-lib delivery failed (continuing)"
     prepare_guest_scratch "$vm" "$slug" || log "agent scenario $rel: guest scratch prep failed (continuing)"
     suppress_idle_lock "$vm"
+    grant_broker_approve_for_tests "$vm" "$scenario"
     log "agent scenario $rel on $vm"
     record_host_load gui "$rel" start
     ta0=$(date +%s)
@@ -3826,6 +3875,7 @@ gui_run_scenario() {
                 install_gui_waiters "$vmN" || log "agent scenario $rel: waiter-lib delivery failed (continuing)"
                 prepare_guest_scratch "$vmN" "$slug" || log "agent scenario $rel: guest scratch prep failed (continuing)"
                 suppress_idle_lock "$vmN"
+                grant_broker_approve_for_tests "$vmN" "$scenario"
                 record_host_load gui "$rel" start
                 tsa=$(date +%s)
                 VMNAME="$vmN" QCI_SCENARIO_TMPDIR="$scratchN" QCI_SCENARIO_SLUG="$slug" \

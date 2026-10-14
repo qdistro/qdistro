@@ -396,9 +396,14 @@ def test_concurrent_decision_is_not_reported_as_ours(real, capsys, verb, other):
     as_peer(argv)
 
     def competing(_rid):
+        # The competitor is the installed TUI in its trusted shape
+        # (python3 -I, allowlisted env) whose admin has authenticated
+        # (org.qdistro.broker.approve) — both layers pinned elsewhere.
         broker.set_peer(uid=B.ADMIN_UID, pid=4322, exe="/usr/bin/python3.14")
-        B._read_proc_cmdline = lambda _p: ["/usr/bin/python3",
+        B._read_proc_cmdline = lambda _p: ["/usr/bin/python3", "-I",
                                            "/usr/local/bin/qdistro-admin-tui"]
+        broker._peer_environ = lambda _pid: {}
+        broker._polkit_peer_authorized = lambda _s, _a: True
         try:
             broker.DecideRequest(rid, other, "once")
         finally:

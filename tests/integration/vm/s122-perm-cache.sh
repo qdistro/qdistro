@@ -109,8 +109,13 @@ PY
         "$(sql_approvals "SELECT count(*) FROM approvals WHERE caller_uid IN ($u1,$u2)")" 5
     start_signal_monitor ApprovalRevoked "$log" \
         || die "pg23: dbus-monitor never proved its ApprovalRevoked subscription"
+    # RevokeAllForUid is an authority method: an admin-uid dbus-send is any
+    # admin-session process, so the broker refuses it; root may call it.
     out=$(dsend_as admin RevokeAllForUid int32:$u1)
-    check "pg23: RevokeAllForUid($u1) as admin returns int32 3" \
+    check "pg23: admin-uid dbus-send RevokeAllForUid refused with AccessDenied" \
+        grep -q "org.qdistro.AdminBroker1.AccessDenied" <<<"$out"
+    out=$(dsend_as root RevokeAllForUid int32:$u1)
+    check "pg23: RevokeAllForUid($u1) as root returns int32 3" \
         grep -q "int32 3$" <<<"$out"
     sleep 1
     stop_signal_monitor "$log"
@@ -133,9 +138,9 @@ PY
     expect_eq "pg23: uid $u2 rows survive, no uid $u1 row left" \
         "$(sql_approvals "SELECT group_concat(caller_uid||'|'||action, ' ') FROM (SELECT caller_uid, action FROM approvals WHERE caller_uid IN ($u1,$u2) ORDER BY caller_uid, action)")" \
         "$u2|act.x.$TAG $u2|act.y.$TAG"
-    expect_eq "pg23: three source=revoke audit rows, uid $u1, approver 1000" \
+    expect_eq "pg23: three source=revoke audit rows, uid $u1, approver 0 (root)" \
         "$(sql_audit "SELECT group_concat(r, ' ') FROM (SELECT caller_uid||'|'||action||'|'||approver_uid AS r FROM audit WHERE source='revoke' AND action LIKE 'act._.$TAG' ORDER BY action)")" \
-        "$u1|act.a.$TAG|1000 $u1|act.b.$TAG|1000 $u1|act.c.$TAG|1000"
+        "$u1|act.a.$TAG|0 $u1|act.b.$TAG|0 $u1|act.c.$TAG|0"
     sql_approvals "DELETE FROM approvals WHERE caller_uid IN ($u1,$u2)"
 }
 
@@ -201,11 +206,11 @@ pg31() {
         || die "pg31: dbus-monitor never proved its RequestDecided subscription"
     expect_eq "pg31: monitor up BEFORE the approval (request still pending)" \
         "$(pending_ids_for "$act")" "$rid"
-    r=$(broker_call_as admin DecideRequest "[$rid, \"allow\", \"1h\"]")
+    r=$(broker_call_as root DecideRequest "[$rid, \"allow\", \"1h\"]")
     # "applied" is the only outcome where THIS call applied the decision
     # (and, for a cached scope, wrote the row asserted below); a silent
     # "already-*"/"unknown" must fail here, not pass as a void return.
-    expect_eq "pg31: admin DecideRequest(allow, 1h)" "$r" 'OK "applied"'
+    expect_eq "pg31: root DecideRequest(allow, 1h)" "$r" 'OK "applied"'
     sleep 1
     stop_signal_monitor "$log"
     check "pg31: one RequestDecided signal carrying (int32 $rid, \"allow\")" \
@@ -232,8 +237,8 @@ pg32() {
     wait_pending "$act" || die "pg32: python request never reached GetPending"
     id=$(pending_ids_for "$act")
     pyexe=$(pending_row_json "$act" | python3 -c 'import json,sys; print(json.load(sys.stdin)["exe"])')
-    r=$(broker_call_as admin DecideRequest "[$id, \"allow\", \"forever_exe\"]")
-    expect_eq "pg32: admin DecideRequest(allow, forever_exe)" "$r" 'OK "applied"'
+    r=$(broker_call_as root DecideRequest "[$id, \"allow\", \"forever_exe\"]")
+    expect_eq "pg32: root DecideRequest(allow, forever_exe)" "$r" 'OK "applied"'
     wait "$p1"
     expect_eq "pg32: first python request ALLOWED" "$(cat "$WORK/32-py1.out")/$(cat "$WORK/32-py1.rc")" "ALLOWED/0"
     case $pyexe in /usr/bin/python*) pass "pg32: caller exe is the python interpreter ($pyexe)" ;;
@@ -254,8 +259,8 @@ pg32() {
     ( dsend_as "$WORKU" WaitForDecision int32:"$id" >"$WORK/32-wait.out" 2>&1 ) &
     local p2=$!
     sleep 1
-    r=$(broker_call_as admin DecideRequest "[$id, \"deny\", \"once\"]")
-    expect_eq "pg32: admin denies the other-exe request" "$r" 'OK "applied"'
+    r=$(broker_call_as root DecideRequest "[$id, \"deny\", \"once\"]")
+    expect_eq "pg32: root denies the other-exe request" "$r" 'OK "applied"'
     wait "$p2"
     check "pg32: the other-exe caller sees the deny" \
         grep -qE 'boolean false|AdminBroker1\.Denied' "$WORK/32-wait.out"

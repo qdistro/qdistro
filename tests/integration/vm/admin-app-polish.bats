@@ -31,11 +31,12 @@ teardown_file() {
 
     # Every load-bearing PASS string of the driver.
     assert_output_contains "PASS: broker ListRules returns an on-disk YAML rule"
-    assert_output_contains "PASS: broker SaveRule (as admin) writes a rule that ListRules returns"
+    assert_output_contains "PASS: broker SaveRule (as root) writes a rule that ListRules returns"
     assert_output_contains "PASS: broker ListHistory(100) returns the audit row of a decided request"
     assert_output_contains "PASS: broker GetPending counts a newly queued request"
-    assert_output_contains "PASS: broker DecideRequest(allow) as admin removes the request from GetPending"
-    assert_output_contains "PASS: broker DecideRequest(deny) as admin removes the request from GetPending"
+    assert_output_contains "PASS: broker DecideRequest(allow) as root removes the request from GetPending"
+    assert_output_contains "PASS: broker refuses DecideRequest from admin-uid inline Python (AccessDenied)"
+    assert_output_contains "PASS: broker DecideRequest(deny) as root removes the request from GetPending"
     assert_output_contains "PASS: broker SaveRule of a rule-from-request YAML is returned by ListRules"
     assert_output_contains "PASS: broker DecideRequest rejects an unknown scope with a D-Bus error"
 }

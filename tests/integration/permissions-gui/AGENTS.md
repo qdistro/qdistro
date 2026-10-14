@@ -96,10 +96,23 @@ silences only the success announcement, never a timeout. Set it per call, never
  Screenshots use virsh; raw pointer clicks use QEMU input events; window
  activation and some keyboard fallbacks use xdotool in XWayland (`DISPLAY=:0`).
 - VM user password is `Pa_ssw0rd45` for `admin` and `work`.
+- **Approving as admin needs a polkit grant.** The broker refuses an
+ admin-uid authority call (approve/deny, rules, revoke, workflow approve)
+ with `AuthRequired` unless the caller holds `org.qdistro.broker.approve`,
+ which on a product system only the admin's typed password creates (the
+ app/TUI then show the polkit agent's password dialog). `qci gui` writes a
+ TEST-ONLY rule granting it to admin into every scenario VM
+ (`/etc/polkit-1/rules.d/10-qci-broker-approve-test.rules`,
+ `grant_broker_approve_for_tests` in `ci/lib/gates/gui.sh`), so scenarios
+ approve without a prompt. A scenario that tests the real prompt declares
+ `<!-- qci:polkit-test-grant: none -->` (see 62). Driving a scenario by hand
+ outside `qci gui`, write that rule yourself (copy it from `gui.sh`), or
+ every app/TUI approval fails "Not authorized". The rule never ships:
+ `image/verify-contents.sh` asserts it is absent.
 
 ## qdwin lane: the admin app as the image ships it
 
-The admin-app scenarios 03, 04, 06, 08, 10, 12, 13, 14, 34, 43 and 47 run on
+The admin-app scenarios 03, 04, 06, 08, 10, 12, 13, 14, 34, 43, 47 and 62 run on
 the **qdwin lane** (`gui_scenario_requires_qdwin` in `ci/lib/gates/gui.sh`),
 like 18–21: the product session (qdwin compositor + qdshell on `wayland-1`),
 with the admin app started through the **shipped** native-Wayland launcher
