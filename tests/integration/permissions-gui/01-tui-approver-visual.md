@@ -111,10 +111,9 @@ sleep 2
 qdwin_screenshot "$ART/01-s2-help.png"
 ```
 
-If this frame still shows the main view, the key may not have been rendered
-yet: wait 2 more seconds, capture ONCE more to a new name
-(`qdwin_screenshot "$ART/01-s2-help-late.png"`) and judge S2 from that frame.
-Record FAIL only if the late frame shows no modal either.
+This frame is the verdict: the qdwin lane has no late re-capture allowance
+(the labwc-era one is retired). A frame showing the main view after the 2 s
+settle is a FAIL.
 
 **Assert:**
 - A bordered modal panel covers most of the content area (the main view's
@@ -147,7 +146,7 @@ sleep 2
 qdwin_screenshot "$ART/01-s3-dismissed.png"
 ```
 
-Same single late re-capture rule as S2 (`01-s3-dismissed-late.png`).
+As in S2, this frame is the verdict; there is no late re-capture.
 
 **Assert:**
 - The modal is gone; the main view is visible again with the same header,
@@ -230,7 +229,8 @@ qdwin_screenshot "$ART/01-s7-once.png"
 ```
 
 **Assert:**
-- Right pane: `Scope: Just this once`.
+- Right pane: `Scope: Just this once` (bold "Just this once" after the
+  `Scope:` prefix).
 - Subtitle: `scope: Just this once` with the `⚠` gone — pressing `1`
   returns to the default, non-warned state.
 

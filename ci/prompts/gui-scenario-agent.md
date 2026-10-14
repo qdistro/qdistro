@@ -80,8 +80,8 @@ Procedure:
    wait-for-state check the scenario lists, exactly as written, between the
    input and the capture. Do not add waits or re-captures the scenario does not
    authorize, and never past a deadline it states: a frame taken at a
-   scenario's deadline stands. Where a scenario authorizes a late re-capture
-   (permissions-gui/01 does), take it once, to a NEW name, and judge from it.
+   scenario's deadline stands. Where a scenario authorizes a late re-capture,
+   take it once, to a NEW name, and judge from it.
 7. Drive keys and clicks through the harness.
    A hotkey asserted by typing into a focused field is not evidence the
    binding fired. Modifier chords go through `virsh send-key`.

@@ -155,9 +155,7 @@ It renders the compositor's current scene from the clients' committed
 buffers, so the XWayland stale/half-drawn frame of the retired labwc lane
 does not exist here, and the labwc-era "recapture up to N frames" allowances
 are gone: a partly drawn or stale admin window on this lane is a FAIL
-(product or compositor), not harness noise. (A TUI scenario may still allow
-ONE late re-capture after a key, where it says so: that waits for Textual to
-process the key, not for a stale compositor frame.) Model-targeted clicks keep the
+(product or compositor), not harness noise. Model-targeted clicks keep the
 `vm-gui click-preview` / `click-confirm` handshake (it drives the QEMU pointer,
 which qdwin receives like a mouse); grade the RESULT from a `qdwin_screenshot`
 taken after the state wait, not from the click-confirm post frame.

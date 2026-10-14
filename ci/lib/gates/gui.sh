@@ -1012,8 +1012,8 @@ Rules:
   exactly as written, between the input and the capture. Do not add waits or
   re-captures the scenario does not authorize, and never past a deadline it
   states: a frame taken at a scenario's deadline stands. Where a scenario
-  authorizes a late re-capture (permissions-gui/01 does), take it once, to a
-  NEW name, and judge from it.
+  authorizes a late re-capture, take it once, to a NEW name, and judge from
+  it.
 - NEVER kill a running \`vm-exec\` and re-issue the same driver. Its periodic
   \`[vm-exec] Waiting... (polls=Ns elapsed=Ns)\` lines mean the TRANSPORT IS
   HEALTHY and your guest command is still running; they are progress, not a
