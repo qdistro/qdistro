@@ -72,8 +72,11 @@ per-user auth) only make sense once the model is clear.
  boundary: passwordless sudo is dev-only, and the tier-5 bridge
  (`org.qdistro.tier5.bridge`, `auth_admin_keep`) requires the admin's
  password — the qdistro polkit agent forces the PAM route for that one
- action, ahead of user configuration and test overrides, and polkit's keep
- window may retain it across launches. That is not yet true of every
+ action, ahead of user configuration and test overrides. Every launch
+ authenticates: the grant `auth_admin_keep` keeps belongs to the launching
+ wrapper process alone (pkexec's polkit subject), each launch is a fresh
+ wrapper, and no long-lived helper carries a grant across launches. That is
+ not yet true of every
  privileged helper: other actions, tier-3 spawn among them, still go to the
  agent's configurable broker approval, which an admin-session process can
  answer. Closing those remaining root-entry paths is a prerequisite for

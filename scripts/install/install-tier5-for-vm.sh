@@ -99,8 +99,9 @@ echo "[install-tier5] installed $BRIDGE"
 # --- polkit policy ---
 # One action, for the bridge only. auth_admin_keep: an admin-session
 # process cannot start a root launcher parent or mint a launch record
-# without the admin's password (retained for polkit's keep window — a
-# fresh prompt per launch is not promised). Inactive sessions are refused;
+# without the admin's password. Every launch authenticates: the keep grant
+# belongs to the launching spawn-tier5 process alone (pkexec's subject),
+# and each launch is a fresh one. Inactive sessions are refused;
 # a caller outside a session must authenticate as admin every time.
 POLKIT_DIR=/usr/share/polkit-1/actions
 install -d "$POLKIT_DIR"

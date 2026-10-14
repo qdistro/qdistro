@@ -214,8 +214,12 @@ Authentication: `org.qdistro.tier5.bridge` is `allow_active=auth_admin_keep`,
 the installed bridge. The qdistro polkit agent forces the PAM (password)
 route for this action ahead of its user config and test overrides — a
 broker yes/no vote, which an admin-session process can cast, does not
-authorize it. polkit's keep window still applies: a fresh prompt per
-launch is not promised.
+authorize it. Every launch authenticates: pkexec's polkit subject is the
+`spawn-tier5.sh` process that launched it, and each launch is a fresh
+process, so polkit's `auth_admin_keep` grant is reused only when that same
+process runs pkexec again (`tier5-bridge-enforcing.bats`,
+`keep-same-caller`). No long-lived helper exists to carry a grant across
+launches; a second app launch prompts again (permissions-gui/63, S3).
 
 Upgrade from the root-run lifecycle: its locks (`/run/qdistro-tier5`),
 boot bind mounts (`/run/qdistro-tier5-boot`) and root ownership registry

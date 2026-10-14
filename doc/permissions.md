@@ -81,7 +81,12 @@ of its user config and test overrides — a typed admin password, never the
 queue. `broker.approve` is the authority to decide that queue, so its broker
 route would file the request into the queue it unlocks; `tier5.bridge`
 authorizes a root launcher parent and a broker launch record — authority a
-broker yes/no vote from an admin-session process must not grant. The tier-5 VM
+broker yes/no vote from an admin-session process must not grant. Every tier-5
+launch authenticates: pkexec's polkit subject is the launching
+`spawn-tier5.sh` process, and each launch is a fresh one, so the
+`auth_admin_keep` grant is reused only when that same caller process runs
+pkexec again (`tier5-bridge-enforcing.bats`, `keep-same-caller`) — never
+across launches, and no long-lived helper carries it. The tier-5 VM
 lifecycle itself runs as admin and has no polkit action (see
 `tier5-vm/README.md`, "Privilege split").
 
