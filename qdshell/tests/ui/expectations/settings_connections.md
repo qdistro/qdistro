@@ -5,9 +5,14 @@ What must be visible when this tab is open:
 - Tab header text: "Connections" (i18n key `panels.connections.title`).
 - Subtab bar with at least: "WiFi" and "Bluetooth".
 - A WiFi networks section: enable toggle and (if any) network list with signal indicators.
+  The Wi-Fi subtab is the default view and is captured BEFORE the harness
+  clicks Bluetooth; it also shows an "Airplane Mode" toggle above the Wi-Fi
+  toggle (`WifiSubTab.qml`).
 - A master Bluetooth control: a "Bluetooth" toggle (off and disabled when no
   Bluetooth adapter is present — `bluetoothAvailable` gates it), using a
-  bluetooth-off icon when disabled.
+  bluetooth-off icon when disabled. "Off" means the switch thumb sits at the
+  LEFT end of its track (the shared NToggle convention); the dimming is the
+  separate disabled state.
 - Device and pairing lists ("Connected", "Paired", "Available") render only
   when a Bluetooth adapter exists and is enabled
   (`visible: ... && BluetoothService.enabled` in BluetoothSubTab.qml). On a
