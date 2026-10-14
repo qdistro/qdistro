@@ -137,3 +137,195 @@ def test_capture_never_judges_a_subtab_view_whose_describe_was_empty(
 
     with pytest.raises(RuntimeError, match="settings_connections.png"):
         runner.capture_surface_vm(object(), surface)
+
+
+# --- zoomed, contrast-stretched crops (settings_connections Bluetooth switch) ---
+
+_CARD = (7, 7, 34)        # #070722, measured on the 2026-10-13 frame
+_OUTLINE = (22, 22, 69)   # #161645, the disabled off-state track outline
+_KNOB = (150, 150, 110)   # dimmed knob
+
+
+def _connections_surface():
+    from tests.ui.manifests import SETTINGS_SURFACES
+    return next(s for s in SETTINGS_SURFACES if s.id == "settings_connections")
+
+
+def _switch_frame(path, *, knob_left=True, size=(1280, 800)):
+    """A 1280x800 frame shaped like the live Bluetooth subtab: a near-black
+    card, a #161645 track outline at x 977-1020 / y 176-201 and a dimmed
+    knob at its left (x 982-996) or right (x 1005-1019) end."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", size, _CARD)
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((977, 176, 1020, 201), radius=12, outline=_OUTLINE,
+                        width=1)
+    kx = 982 if knob_left else 1001
+    d.ellipse((kx, 182, kx + 14, 196), fill=_KNOB)
+    img.save(path)
+    return path
+
+
+def _luma_columns(img):
+    lum = img.convert("L")
+    w, h = lum.size
+    px = lum.load()
+    return [sum(px[x, y] for y in range(h)) for x in range(w)]
+
+
+def _track_mid_col(crop):
+    x0 = runner._crop_box_px(crop.box, 1280, 800)[0]
+    return int(((977 + 1020) / 2 - x0) * crop.scale)
+
+
+def test_connections_surface_crops_the_bluetooth_switch_after_the_subtab_click():
+    surface = _connections_surface()
+    assert len(surface.zoom_crops) == 1
+    crop = surface.zoom_crops[0]
+    # view 1 = the frame after post_open_clicks[0], the Bluetooth subtab.
+    assert crop.view == 1 and len(surface.post_open_clicks) >= 1
+    x0, y0, x1, y1 = runner._crop_box_px(crop.box, 1280, 800)
+    # The whole measured track (x 977-1020, y 176-201) lies inside the crop.
+    assert x0 <= 977 and x1 >= 1021 and y0 <= 176 and y1 >= 202
+    assert crop.scale >= 4
+
+
+def test_zoom_crop_makes_a_dim_off_track_and_knob_position_observable(tmp_path):
+    from PIL import Image
+    crop = _connections_surface().zoom_crops[0]
+    src = _switch_frame(tmp_path / "settings_connections-click1.png")
+    out = runner.make_zoom_crop(src, tmp_path / "z.png", crop, {(1280, 800)})
+
+    x0, y0, x1, y1 = runner._crop_box_px(crop.box, 1280, 800)
+    raw_w, raw_h = (x1 - x0) * crop.scale, (y1 - y0) * crop.scale
+    fields = Path(f"{out}.raw").read_text().split()
+    assert fields[:3] == [str(raw_w), str(raw_h), "1"]
+    assert fields[4] == f"crop:{x1 - x0}x{y1 - y0}+{x0}+{y0}"
+    assert fields[5] == src.name
+    with Image.open(out) as im:
+        im.load()
+        assert im.size == (raw_w + 1, raw_h + 1)        # unique-size padding
+        raw = im.crop((0, 0, raw_w, raw_h))
+    # Sidecar identity is the canonical raw-pixel digest (view-geometry I6).
+    assert fields[3] == runner._view_pix_sha(raw)
+
+    # The #161645 outline (luma ~25 on a ~9 card) is stretched to clearly
+    # visible: sample the track's top edge in the middle of the track.
+    lum = raw.convert("L")
+    mid_x = (998 - x0) * crop.scale + crop.scale // 2
+    top_y = (176 - y0) * crop.scale + crop.scale // 2
+    with Image.open(src) as im:
+        assert im.convert("L").getpixel((998, 176)) < 40   # dim at source
+    assert lum.getpixel((mid_x, top_y)) > 150
+    assert lum.getpixel((mid_x, top_y - 3 * crop.scale)) < 40   # card stays dark
+    # Brightness ordering survives: the knob mass is in the LEFT half of the
+    # track, so the crop shows what the full frame did not.
+    cols = _luma_columns(raw)
+    mid = _track_mid_col(crop)
+    assert sum(cols[:mid]) > sum(cols[mid:]) * 1.5
+
+
+def test_zoom_crop_of_a_right_knob_is_not_a_left_knob(tmp_path):
+    """The crop is evidence, not a constant: a switch drawn ON must yield a
+    crop whose knob mass is on the right."""
+    from PIL import Image
+    crop = _connections_surface().zoom_crops[0]
+    src = _switch_frame(tmp_path / "on.png", knob_left=False)
+    out = runner.make_zoom_crop(src, tmp_path / "z.png", crop, set())
+    raw_w, raw_h = map(int, Path(f"{out}.raw").read_text().split()[:2])
+    with Image.open(out) as im:
+        cols = _luma_columns(im.crop((0, 0, raw_w, raw_h)))
+    mid = _track_mid_col(crop)
+    assert sum(cols[mid:]) > sum(cols[:mid]) * 1.5
+
+
+def test_zoom_crops_never_reuse_a_view_size_and_compare_by_raw_pixels(tmp_path):
+    from PIL import Image
+    crop = _connections_surface().zoom_crops[0]
+    src = _switch_frame(tmp_path / "f.png")
+    issued = {(1280, 800)}
+    a = runner.make_zoom_crop(src, tmp_path / "a.png", crop, issued)
+    b = runner.make_zoom_crop(src, tmp_path / "b.png", crop, issued)
+    with Image.open(a) as ia, Image.open(b) as ib:
+        assert ia.size != ib.size                 # never the same (W, H) twice
+    sa, sb = (Path(f"{p}.raw").read_text().split() for p in (a, b))
+    assert (sa[2], sb[2]) == ("1", "2")
+    assert sa[3] == sb[3]                         # same raw pixels, by identity
+    assert a.read_bytes() != b.read_bytes()       # file bytes are not identity
+
+
+def test_zoom_crop_of_a_flat_region_fails_loud(tmp_path):
+    from PIL import Image
+    crop = _connections_surface().zoom_crops[0]
+    src = tmp_path / "blank.png"
+    Image.new("RGB", (1280, 800), _CARD).save(src)
+    with pytest.raises(RuntimeError, match="flat color"):
+        runner.make_zoom_crop(src, tmp_path / "z.png", crop, set())
+
+
+def _drive_connections_capture(monkeypatch, tmp_path, describe):
+    surface = _connections_surface()
+    monkeypatch.setattr(runner, "ARTIFACTS_DIR", tmp_path)
+    for name in ("ipc_vm", "mouse_wheel", "mouse_click", "mouse_move",
+                 "tap_key"):
+        monkeypatch.setattr(runner, name, lambda *a, **k: None)
+
+    def fake_shot(_s, out, **_k):
+        # The Wi-Fi view has its knob on the RIGHT, the Bluetooth view
+        # (click1) on the LEFT: a crop of the wrong view is detectable.
+        _switch_frame(out, knob_left=out.name.endswith("-click1.png"))
+        return out
+
+    monkeypatch.setattr(runner, "screenshot_vm", fake_shot)
+    monkeypatch.setattr(runner, "_frames_identical", lambda *a, **k: True)
+    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(runner, "_describe_backend_available", lambda: True)
+    monkeypatch.setattr(runner, "describe", describe)
+    return runner.capture_surface_vm(object(), surface)
+
+
+def test_capture_describes_the_bluetooth_switch_crop_as_an_extra_view(
+        monkeypatch, tmp_path):
+    seen = []
+
+    def describe(frame, prompt=None):
+        seen.append((frame.name, prompt))
+        if "-zoom" in frame.name:
+            return "pill outline; round knob at the LEFT end; empty outline"
+        return f"full view {frame.name}"
+
+    _png, actual = _drive_connections_capture(monkeypatch, tmp_path, describe)
+
+    names = [n for n, _ in seen]
+    assert names[-1] == "settings_connections-zoom1.png"
+    assert "settings_connections-click1.png" in names     # full views kept
+    zoom_prompt = seen[-1][1]
+    assert "MAGNIFIED" in zoom_prompt and "LEFT end" in zoom_prompt
+    assert all(p is None for _, p in seen[:-1])           # full views unchanged
+    assert "=== zoomed crop 1: Bluetooth master switch" in actual
+    assert "round knob at the LEFT end" in actual
+    assert "full view settings_connections-click1.png" in actual
+    side = (tmp_path / "settings_connections-zoom1.png.raw").read_text().split()
+    assert side[5] == "settings_connections-click1.png"   # cropped from view 1
+    # Raw-pixel proof it came from the Bluetooth frame (knob LEFT), not the
+    # Wi-Fi frame (knob RIGHT) cropped at the same box.
+    crop = _connections_surface().zoom_crops[0]
+    wifi = runner.make_zoom_crop(tmp_path / "settings_connections.png",
+                                 tmp_path / "wifi-zoom.png", crop, set())
+    assert Path(f"{wifi}.raw").read_text().split()[3] != side[3]
+
+
+def test_capture_fails_loud_when_the_switch_crop_is_not_observed(
+        monkeypatch, tmp_path):
+    def describe(frame, prompt=None):
+        return "" if "-zoom" in frame.name else "full view"
+
+    with pytest.raises(RuntimeError, match="settings_connections-zoom1.png"):
+        _drive_connections_capture(monkeypatch, tmp_path, describe)
+
+
+def test_connections_expectation_requires_the_crop_to_show_a_left_knob():
+    text = (runner.EXPECTATIONS_DIR / "settings_connections.md").read_text()
+    assert "zoomed crop of the Bluetooth master switch" in text
+    assert "knob at the LEFT end of that track" in text
+    assert "A crop showing the knob at the RIGHT end, or no switch," in text

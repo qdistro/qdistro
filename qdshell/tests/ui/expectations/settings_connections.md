@@ -13,6 +13,15 @@ What must be visible when this tab is open:
   bluetooth-off icon when disabled. "Off" means the switch thumb sits at the
   LEFT end of its track (the shared NToggle convention); the dimming is the
   separate disabled state.
+- The zoomed crop of the Bluetooth master switch (the "=== zoomed crop" view,
+  taken from the Bluetooth subtab frame) shows a switch track outline with the
+  round knob at the LEFT end of that track. That crop is magnified and
+  contrast-stretched specifically so the knob position is observable; it is
+  the evidence for the switch's position (the full-frame view at 1280x800
+  cannot resolve the dim off-state outline reliably). Its colors are
+  stretched, so judge dimming/disabled state from the full-frame view, not
+  from the crop. A crop showing the knob at the RIGHT end, or no switch,
+  fails this bullet.
 - Device and pairing lists ("Connected", "Paired", "Available") render only
   when a Bluetooth adapter exists and is enabled
   (`visible: ... && BluetoothService.enabled` in BluetoothSubTab.qml). On a
@@ -23,3 +32,6 @@ What must be visible when this tab is open:
 Notes:
 - The harness additionally clicks the "Bluetooth" subtab after opening so the
   judged description covers both subtabs.
+- It then crops the Bluetooth master switch out of that Bluetooth frame,
+  magnifies it 8x and stretches its contrast (`ZoomCrop` in manifests.py),
+  and describes that crop as one more view.
