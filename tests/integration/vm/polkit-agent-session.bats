@@ -150,10 +150,12 @@ POL"
              fail_loud "no broker request for the probe action appeared"; }
     rid="$(awk '/agentsession/{print $1; exit}' <<<"$output")"
     check_pass "agent filed a broker request" "id=$rid ($output)"
-    # Decide as root through busctl naming the method: the broker trusts
-    # only fixed root helpers (busctl/dbus-send/gdbus naming the call, or
-    # qdistro-approvals) — root inline Python is refused like admin's.
-    vm_run "busctl --system call org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1 DecideRequest iss $rid deny once"
+    # Decide as root: the broker refuses DecideRequest from admin-uid
+    # inline Python (only the installed admin app/TUI/qdshell may). The
+    # broker trusts root inline Python only as argv `python3 -c CODE`: keep
+    # the space after -c, or the shell glues it into one `-cCODE` word that
+    # the broker (correctly) refuses as an unknown root helper shape.
+    vm_run "python3 -c 'import dbus; b=dbus.SystemBus(); o=b.get_object(\"org.qdistro.AdminBroker1\",\"/org/qdistro/AdminBroker1\"); o.DecideRequest($rid, \"deny\", \"once\", dbus_interface=\"org.qdistro.AdminBroker1\")'"
     assert_success
     wait_until_succeeds "grep -q PKCHECK_RC= /run/qci-pkcheck.out" 30 \
         || fail_loud "pkcheck did not complete after the broker decision"
@@ -241,7 +243,7 @@ POL"
         || { vm_run "cat /run/qci-pkcheck2.out; journalctl -b --no-pager -o cat -t qdistro-polkit-agent -u polkit | tail -20"; echo "$output" >&2; \
              fail_loud "no broker request for the re-registered session"; }
     rid="$(awk '/agentsession/{print $1; exit}' <<<"$output")"
-    vm_run "busctl --system call org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1 DecideRequest iss $rid deny once"
+    vm_run "python3 -c 'import dbus; b=dbus.SystemBus(); o=b.get_object(\"org.qdistro.AdminBroker1\",\"/org/qdistro/AdminBroker1\"); o.DecideRequest($rid, \"deny\", \"once\", dbus_interface=\"org.qdistro.AdminBroker1\")'"
     assert_success
     wait_until_succeeds "grep -q PKCHECK_RC= /run/qci-pkcheck2.out" 30 \
         || fail_loud "pkcheck did not complete after the broker decision"

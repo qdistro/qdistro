@@ -53,11 +53,40 @@ if ! runuser -u admin -- test -S "/run/user/$ADMIN_UID/wayland-1"; then
 fi
 virsh_admin() { runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh "$@"; }
 
+# --- tier-5 runs as admin; its one root step is the pkexec'd bridge --------
+# spawn-tier5.sh refuses root. Its waypipe client starts through
+# `pkexec /usr/libexec/qdistro/qdistro-tier5-bridge` (org.qdistro.tier5.bridge,
+# auth_admin_keep). No polkit agent serves this headless driver, so it grants
+# the action to admin through a temporary rules file for its own duration —
+# a test-only route; authenticated launches are the GUI scenarios' business.
+T5_POLKIT_RULE=/etc/polkit-1/rules.d/10-qdistro-tier5-bridge-test.rules
+t5_grant_bridge() {
+    install -d -m 0755 /etc/polkit-1/rules.d
+    cat >"$T5_POLKIT_RULE" <<'RULE'
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.qdistro.tier5.bridge" && subject.user == "admin") {
+        return polkit.Result.YES;
+    }
+});
+RULE
+    sleep 1  # polkitd reloads rules.d on change
+}
+t5_revoke_bridge() { rm -f "$T5_POLKIT_RULE"; }
+# t5_as_admin [VAR=VAL...] cmd... — admin's uid with its session paths.
+t5_as_admin() {
+    runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin \
+        PATH=/usr/local/bin:/usr/bin:/bin "$@"
+}
+t5_grant_bridge
+trap t5_revoke_bridge EXIT
+
 VM_NAME="qdistro-tier5-graceful-$$"
 OVERLAY="/home/admin/.local/share/libvirt/images/$VM_NAME.qcow2"
 POLICY_KEY="tier5/s49graceful"
 # Hermetic, root-owned (accepted) lifecycle config: global=force, per-app=graceful
 # so a correct per-app resolution is unambiguously distinguishable from global.
+# 0644: the admin-run wrapper must be able to read it (still not group/other
+# writable, which the wrapper would refuse).
 CONF=/tmp/s49-lifecycle.conf
 cat >"$CONF" <<EOF
 SHUTDOWN_METHOD=force
@@ -68,7 +97,7 @@ LOWMEM_MB=0
 [app:$POLICY_KEY]
 SHUTDOWN_METHOD=graceful
 EOF
-chmod 600 "$CONF"
+chmod 644 "$CONF"
 
 SPAWN_LOG=/tmp/s49-spawn.log
 : >"$SPAWN_LOG"
@@ -77,9 +106,9 @@ SPAWN_LOG=/tmp/s49-spawn.log
 # inherited lifecycle env vars: env has HIGHER precedence than the config file,
 # so an ambient TIER5_SHUTDOWN_METHOD (etc.) would mask the per-app resolution
 # this test is asserting and false-fail it.
-env -u TIER5_SHUTDOWN_METHOD -u TIER5_SHUTDOWN_GRACE_SECS \
-    -u TIER5_IDLE_SHUTDOWN_SECS -u TIER5_LOWMEM_MB -u TIER5_POLICY_KEY \
-    TIER5_MEM_KIB=2097152 TIER5_LIFECYCLE_CONF="$CONF" \
+unset TIER5_SHUTDOWN_METHOD TIER5_SHUTDOWN_GRACE_SECS \
+    TIER5_IDLE_SHUTDOWN_SECS TIER5_LOWMEM_MB TIER5_POLICY_KEY
+t5_as_admin TIER5_MEM_KIB=2097152 TIER5_LIFECYCLE_CONF="$CONF" \
     bash "$SPAWN" --vm "$VM_NAME" --policy-key "$POLICY_KEY" \
     -- weston-terminal >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
@@ -154,7 +183,7 @@ wait "$SPAWN_PID" 2>/dev/null || true
 kill -TERM "$SPAWN_PID" 2>/dev/null || true
 virsh_admin destroy "$VM_NAME" >/dev/null 2>&1 || true
 virsh_admin undefine "$VM_NAME" >/dev/null 2>&1 || true
-rm -f "$OVERLAY" "$SPAWN_LOG" "$CONF"
+rm -f "$OVERLAY" "$OVERLAY.appid" "$SPAWN_LOG" "$CONF"
 
 if [ "$FAILCOUNT" -eq 0 ]; then
     pass "§Phase-7 tier-5 per-app graceful shutdown resolves + reclaims all resources"

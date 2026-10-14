@@ -65,7 +65,23 @@ per-user auth) only make sense once the model is clear.
  isolation).
 - **Admin is the trusted computing base.** Admin's compositor, session manager,
  polkit agent, and locker all run with full trust. If admin is compromised,
- the whole machine is.
+ the whole machine is. That trust is in those designated components and in
+ the authenticated human acting through them — it does not authorize every
+ process running as the admin uid to exercise root capabilities. On
+ daily-driver/release profiles, admin→root is designed as a protected
+ boundary: passwordless sudo is dev-only, and the tier-5 bridge
+ (`org.qdistro.tier5.bridge`, `auth_admin_keep`) requires the admin's
+ password — the qdistro polkit agent forces the PAM route for that one
+ action, ahead of user configuration and test overrides. Every launch
+ authenticates: the grant `auth_admin_keep` keeps belongs to the launching
+ wrapper process alone (pkexec's polkit subject), each launch is a fresh
+ wrapper, and no long-lived helper carries a grant across launches. That is
+ not yet true of every
+ privileged helper: other actions, tier-3 spawn among them, still go to the
+ agent's configurable broker approval, which an admin-session process can
+ answer. Closing those remaining root-entry paths is a prerequisite for
+ claiming the boundary holds system-wide; until then they are defects to
+ close, not design.
 - **VMs exist for the real adversarial case.** The VM tiers on the
  [isolation ladder](isolation-tiers.md) are where containment hardens to
  actually-adversarial levels.

@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -1529,7 +1530,7 @@ def _describe_scrolled_vm(session: VMSession, surface, first_png: Path,
                 with contextlib.suppress(OSError):
                     page_png.unlink()
                 break
-        pages.append((page_png, describe(page_png)))
+        pages.append((page_png, describe_view(page_png)))
         prev = page_png
     if len(pages) == 1:
         return first_desc
@@ -1579,12 +1580,12 @@ def _capture_mouse_override_vm(session: VMSession) -> str:
 
         first = ARTIFACTS_DIR / "settings_mouse-override.png"
         screenshot_vm(session, first)
-        first_desc = describe(first)
+        first_desc = describe_view(first)
         mouse_wheel(session, wheel_x, wheel_y, 5, "down")
         time.sleep(0.7)
         second = ARTIFACTS_DIR / "settings_mouse-override-p2.png"
         screenshot_vm(session, second)
-        second_desc = describe(second)
+        second_desc = describe_view(second)
         return (f"\n\n=== mouse override enabled ({first.name}) ===\n"
                 f"{first_desc}\n\n=== mouse override scrolled ({second.name}) ===\n"
                 f"{second_desc}")
@@ -1607,6 +1608,211 @@ def _capture_mouse_override_vm(session: VMSession) -> str:
                 restored = _mouse_overrides_vm(session)
                 if restored != before:
                     raise RuntimeError("mouse Customize override was not restored")
+
+
+_ZOOM_PROMPT = """You are looking at a MAGNIFIED crop ({scale}x) of a small
+region of a desktop UI screenshot, not a whole screen. Its contrast has been
+stretched per color channel so faint outlines become visible, so do NOT judge
+colors, brightness, opacity or dimming from this image: report only shapes and
+their positions. A thin black strip along the right and bottom edges is padding
+added by the test harness, not part of the UI.
+
+Answer, using only what is visible:
+{question}
+
+Be concise (under ~80 words). Do not guess what the control is expected to show.
+"""
+
+
+def _view_pix_sha(img) -> str:
+    """Canonical pixel digest of a decoded image (PIL).
+
+    Same stream as scripts/vm/lib/view-geometry.sh's qci_view_pix_sha: the
+    header `qci-rgb8 <w> <h>\\n` followed by 8-bit RGB (alpha dropped). Frames
+    are compared by this raw-pixel identity, never by encoded file bytes.
+    """
+    rgb = img.convert("RGB")
+    h = hashlib.sha256(f"qci-rgb8 {rgb.width} {rgb.height}\n".encode())
+    h.update(rgb.tobytes())
+    return h.hexdigest()
+
+
+def _crop_box_px(box: tuple, width: int, height: int) -> tuple[int, int, int, int]:
+    """Screen-fraction box -> integer pixel box inside a width x height frame."""
+    x0, y0, x1, y1 = (int(round(box[0] * width)), int(round(box[1] * height)),
+                      int(round(box[2] * width)), int(round(box[3] * height)))
+    if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
+        raise ValueError(f"zoom crop box {box} -> {(x0, y0, x1, y1)} is "
+                         f"outside a {width}x{height} frame")
+    return x0, y0, x1, y1
+
+
+def make_zoom_crop(src: Path, out: Path, crop, issued: set) -> Path:
+    """Write a magnified, contrast-stretched crop of `src` to `out`.
+
+    The region is autocontrasted then histogram-equalized so a
+    #161645-on-#070722 outline becomes plainly visible, and magnified
+    `crop.scale` times. Both steps remap each RGB channel on its own through
+    a non-decreasing lookup table: within one channel two levels never swap
+    order, but neighbouring levels can merge, and because R, G and B are
+    stretched independently the overall brightness (luma) order and hue of
+    differently coloured pixels is NOT guaranteed to survive. The crop is
+    shape-and-position evidence only; anything about light/dark order is
+    measured from the unstretched frame (measure_switch_knob), never read
+    off this image. Then the vision-repeat-region rule applies (vision
+    models read a region repeated from an earlier same-size image as
+    BLACK): the result is padded with a black right/bottom margin of the
+    smallest k >= 1 whose (W, H) is not yet in `issued` (which the caller
+    seeds with every view size already issued), and a `.raw` sidecar
+    records `raw_w raw_h k raw_pix_sha kind source` like
+    scripts/vm/lib/view-geometry.sh, so the crop is identified by its raw
+    pixels, never by file bytes. A flat region (no contrast at all) has
+    nothing to observe: that is a wrong box or a blank frame, so raise.
+    """
+    from PIL import Image, ImageOps
+    with Image.open(src) as im:
+        im.load()
+        rgb = im.convert("RGB")
+    x0, y0, x1, y1 = _crop_box_px(crop.box, rgb.width, rgb.height)
+    region = rgb.crop((x0, y0, x1, y1))
+    if all(lo == hi for lo, hi in region.getextrema()):
+        raise RuntimeError(
+            f"zoom crop '{crop.label}' of {src.name} at "
+            f"{x1 - x0}x{y1 - y0}+{x0}+{y0} is a flat color; nothing to observe")
+    scale = int(crop.scale)
+    if scale < 1:
+        raise ValueError(f"zoom crop '{crop.label}' scale must be >= 1")
+    enhanced = ImageOps.equalize(ImageOps.autocontrast(region))
+    zoomed = enhanced.resize((region.width * scale, region.height * scale),
+                             Image.LANCZOS)
+    raw_w, raw_h = zoomed.size
+    k = 1
+    while (raw_w + k, raw_h + k) in issued:
+        k += 1
+    issued.add((raw_w + k, raw_h + k))
+    padded = Image.new("RGB", (raw_w + k, raw_h + k), (0, 0, 0))
+    padded.paste(zoomed, (0, 0))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    padded.save(out, format="PNG")
+    kind = f"crop:{x1 - x0}x{y1 - y0}+{x0}+{y0}"
+    Path(f"{out}.raw").write_text(
+        f"{raw_w} {raw_h} {k} {_view_pix_sha(zoomed)} {kind} {src.name}\n")
+    return out
+
+
+def measure_switch_knob(src: Path, crop) -> dict:
+    """Measure which end of a toggle switch's track its knob sits at.
+
+    Deterministic, from the UNSTRETCHED pixels of `crop.box` in `src` (the
+    zoom crop's per-channel stretch does not preserve luma order, so it is
+    never measured). Polarity-free, because NToggle inverts it with state:
+    unchecked = dark track + bright knob at the left, checked = bright
+    filled track + dark knob at the right. So the knob is found as the
+    columns of the track interior that deviate most from the interior's
+    median, not as "the bright part" (a filled track with a dark knob at the
+    right has its bright mass LEFT of centre).
+
+      1. track = bounding box of pixels whose luma differs from the region
+         median (the card) by >= 6 (the dim off-state outline is ~+15);
+      2. interior = the middle third of the track's rows, its columns
+         inset 2 px from the outline; per-column mean luma;
+      3. knob columns = those deviating >= half the maximum deviation from
+         the interior median; centre = deviation-weighted mean column;
+      4. side = left if centre < 40 % of the track width, right if > 60 %,
+         otherwise middle. No track, no contrast inside it (< 10 luma), or a
+         "knob" wider than 60 % of the track is "undetermined".
+
+    Returns {side, frac, track: (x0, x1) frame px, knob: (x0, x1) frame px,
+    contrast}; never raises on a recognisable crop box.
+    """
+    from PIL import Image
+    with Image.open(src) as im:
+        im.load()
+        lum = im.convert("L")
+    bx0, by0, bx1, by1 = _crop_box_px(crop.box, lum.width, lum.height)
+    region = lum.crop((bx0, by0, bx1, by1))
+    w, h = region.size
+    px = region.load()
+    vals = sorted(region.tobytes())          # mode "L": one byte per pixel
+    card = vals[len(vals) // 2]
+    marked = [(x, y) for y in range(h) for x in range(w)
+              if abs(px[x, y] - card) >= 6]
+    result = {"side": "undetermined", "frac": None, "track": None,
+              "knob": None, "contrast": 0}
+    if not marked:
+        return result
+    tx0 = min(x for x, _ in marked)
+    tx1 = max(x for x, _ in marked)
+    ty0 = min(y for _, y in marked)
+    ty1 = max(y for _, y in marked)
+    result["track"] = (bx0 + tx0, bx0 + tx1)
+    track_w, track_h = tx1 - tx0 + 1, ty1 - ty0 + 1
+    if track_w < 12 or track_h < 6:
+        return result
+    ry0 = ty0 + track_h // 3
+    ry1 = max(ry0 + 1, ty1 - track_h // 3)
+    cols = list(range(tx0 + 2, tx1 - 1))
+    profile = [sum(px[x, y] for y in range(ry0, ry1)) / (ry1 - ry0)
+               for x in cols]
+    median = sorted(profile)[len(profile) // 2]
+    dev = [abs(v - median) for v in profile]
+    peak = max(dev)
+    result["contrast"] = round(peak)
+    if peak < 10:
+        return result
+    knob = [(x, d) for x, d in zip(cols, dev) if d >= peak / 2]
+    kx0, kx1 = knob[0][0], knob[-1][0]
+    result["knob"] = (bx0 + kx0, bx0 + kx1)
+    if (kx1 - kx0 + 1) > 0.6 * track_w:
+        return result
+    centre = sum(x * d for x, d in knob) / sum(d for _, d in knob)
+    frac = (centre - tx0) / (tx1 - tx0)
+    result["frac"] = round(frac, 3)
+    result["side"] = ("left" if frac < 0.4
+                      else "right" if frac > 0.6 else "middle")
+    return result
+
+
+def _describe_zoom_crops_vm(surface, views: dict, issued: set) -> str:
+    """Crop, enhance and describe each of `surface.zoom_crops`.
+
+    `views` maps a view index (0 = first capture, n = after click n) to its
+    saved frame. Every crop is an additional described view, appended after
+    the full-frame views; describe_view makes an empty description fail loud.
+    """
+    out = ""
+    for idx, crop in enumerate(surface.zoom_crops, 1):
+        if crop.view not in views:
+            raise RuntimeError(
+                f"zoom crop '{crop.label}' of {surface.id} names view "
+                f"{crop.view}, but only views {sorted(views)} were captured")
+        crop_png = ARTIFACTS_DIR / f"{surface.id}-zoom{idx}.png"
+        make_zoom_crop(views[crop.view], crop_png, crop, issued)
+        prompt = _ZOOM_PROMPT.format(scale=crop.scale, question=crop.question)
+        desc = describe_view(crop_png, prompt=prompt)
+        out += (f"\n\n=== zoomed crop {idx}: {crop.label} "
+                f"({crop.scale}x, contrast-stretched, of "
+                f"{views[crop.view].name}; {crop_png.name}) ===\n{desc}")
+        if crop.knob_must_be is None:
+            continue
+        m = measure_switch_knob(views[crop.view], crop)
+        line = (f"Harness pixel measurement of {crop.label} (deterministic, "
+                f"from the unstretched {views[crop.view].name}): knob at the "
+                f"{m['side'].upper()} end (knob centre at "
+                f"{m['frac'] if m['frac'] is not None else 'n/a'} of the "
+                f"track width; track x {m['track']}, knob x {m['knob']}, "
+                f"interior contrast {m['contrast']}).")
+        out += f"\n{line}"
+        if m["side"] != crop.knob_must_be:
+            # Fail closed: a switch at the wrong end, in the middle, or not
+            # measurable is a FAIL whatever any vision description says.
+            raise AssertionError(
+                f"{surface.id}: {crop.label} must have its knob at the "
+                f"{crop.knob_must_be.upper()} end, but the pixels say "
+                f"{m['side'].upper()}.\n  {line}\n  frame: "
+                f"{views[crop.view]}\n  crop:  {crop_png}\n"
+                f"  crop described as: {desc}")
+    return out
 
 
 def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
@@ -1665,7 +1871,8 @@ def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
             time.sleep(0.5)
 
         screenshot_vm(session, png_path)
-        description = describe(png_path)
+        views = {0: png_path}
+        description = describe_view(png_path)
         if surface.kind == "settings":
             description = _describe_scrolled_vm(session, surface, png_path,
                                               description)
@@ -1692,9 +1899,20 @@ def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
             time.sleep(2.5)
             page_png = ARTIFACTS_DIR / f"{surface.id}-click{idx + 1}.png"
             screenshot_vm(session, page_png)
-            page_desc = describe(page_png)
+            views[idx + 1] = page_png
+            page_desc = describe_view(page_png)
             description += (f"\n\n=== after click {idx + 1} "
                             f"({page_png.name}) ===\n" + page_desc)
+
+        if surface.zoom_crops:
+            # Seed the issued sizes with the full views so no crop can share
+            # a (W, H) with any frame of this capture.
+            from PIL import Image
+            issued = {(VM_SCREEN_W, VM_SCREEN_H)}
+            for view_png in views.values():
+                with Image.open(view_png) as im:
+                    issued.add(im.size)
+            description += _describe_zoom_crops_vm(surface, views, issued)
     finally:
         if surface.close_cmd is not None and surface.close_cmd is not NO_IPC:
             with contextlib.suppress(Exception):
@@ -1931,6 +2149,23 @@ _DESCRIBE_SURFACE_HINTS = {
         "still visible below the right side of the bar. Distinguish an "
         "unobstructed desktop background from an empty, dimmed drawer."
     ),
+    # 2026-10-13 full run: the describer called the Bluetooth master switch
+    # "thumb on the right (on)" while the frame shows the thumb at the left
+    # end of an unfilled track. Ask for the measured evidence per switch.
+    "settings_connections": (
+        "Report which subtab is selected. For every switch row (Airplane "
+        "Mode, Wi-Fi, Bluetooth), state whether its round thumb sits at "
+        "the LEFT or RIGHT end of its track and whether the track is "
+        "filled or unfilled, then separately whether the row is dimmed."
+    ),
+    # Same run: "Arrange folders first" was described only as "toggle on",
+    # without its dimmed state, and the judge read checked as enabled.
+    "settings_desktopicons": (
+        "For EVERY row below Enable desktop icons (toggles, Sort by, spin "
+        "boxes, button), report its value or thumb position AND whether "
+        "its label and control are dimmed, row by row. Checked and "
+        "dimmed are independent: report both."
+    ),
 }
 
 
@@ -1942,7 +2177,7 @@ def _describe_prompt_for(image_path: Path) -> str:
     return _DESCRIBE_PROMPT
 
 
-def describe(image_path: Path) -> str:
+def describe(image_path: Path, prompt: Optional[str] = None) -> str:
     """Send PNG to a vision LLM; return the textual description.
 
     Uses the local Codex CLI, unless QDSHELL_UI_NO_CODEX=1 is set. Falls
@@ -1952,7 +2187,8 @@ def describe(image_path: Path) -> str:
     A single bounded retry covers transient codex failures (empty output is
     an observability gap, never a pass — a second failure still returns "").
     """
-    prompt = _describe_prompt_for(image_path)
+    if prompt is None:
+        prompt = _describe_prompt_for(image_path)
     for _ in range(2):
         desc = ""
         if shutil.which("codex") and os.environ.get("QDSHELL_UI_NO_CODEX") != "1":
@@ -1963,6 +2199,38 @@ def describe(image_path: Path) -> str:
             return desc
         time.sleep(2)
     return ""
+
+
+def _describe_backend_available() -> bool:
+    """True when describe() has a vision backend it would actually call."""
+    if shutil.which("codex") and os.environ.get("QDSHELL_UI_NO_CODEX") != "1":
+        return True
+    return bool(shutil.which("pi")) and os.environ.get("QDSHELL_UI_NO_PI") != "1"
+
+
+def describe_view(image_path: Path, prompt: Optional[str] = None) -> str:
+    """describe() for one view of a multi-view VM capture; fail loudly on "".
+
+    capture_surface_vm stitches several views (default subtab, scrolled
+    pages, post-click subtabs) into one description. An empty describe of a
+    single view used to be concatenated silently, so the judge saw only the
+    OTHER views and reported that view's controls as MISSING — the
+    2026-10-13 full run's settings_connections "WiFi section missing" was a
+    describe that timed out twice on the Wi-Fi frame (00:59 -> 01:05 click
+    frame = 2 x 180 s), not a product regression. With a backend present,
+    an empty description is an unobserved view: raise, naming the frame,
+    instead of letting the judge grade a partial surface. With no backend at
+    all, keep returning "" so judge() reports its existing SKIP.
+    """
+    # A view-specific prompt (zoom crops) is passed through; the default
+    # call keeps describe()'s one-argument form.
+    desc = describe(image_path) if prompt is None else describe(image_path, prompt)
+    if not desc.strip() and _describe_backend_available():
+        raise RuntimeError(
+            f"vision describe returned no description for {image_path} "
+            "after its retry; this view is unobserved and cannot be judged"
+        )
+    return desc
 
 
 def _run_codex(prompt: str, image_path: Optional[Path] = None) -> str:

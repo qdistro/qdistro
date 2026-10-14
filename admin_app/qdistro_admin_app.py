@@ -64,11 +64,13 @@ def _reexec_for_authority() -> None:
 if __name__ == "__main__":
     _reexec_for_authority()
 
-import dbus
-import dbus.mainloop.glib
-import dbus.service
-from PyQt6.QtCore import QEvent, QEventLoop, QObject, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import (
+# The toolkit imports below deliberately follow the re-exec above (it must run
+# before dbus/Qt load and read their plugin/module variables), hence E402.
+import dbus  # noqa: E402
+import dbus.mainloop.glib  # noqa: E402
+import dbus.service  # noqa: E402
+from PyQt6.QtCore import QEvent, QEventLoop, QObject, Qt, QTimer, pyqtSignal  # noqa: E402
+from PyQt6.QtGui import (  # noqa: E402
     QColor,
     QFont,
     QFontDatabase,
@@ -82,7 +84,7 @@ from PyQt6.QtGui import (
     QStandardItem,
     QStandardItemModel,
 )
-from PyQt6.QtWidgets import (
+from PyQt6.QtWidgets import (  # noqa: E402
     QApplication,
     QButtonGroup,
     QCheckBox,

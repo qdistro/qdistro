@@ -1,5 +1,11 @@
 #!/bin/bash
-# In-VM driver for tiered-isolation.bats:phase7-tier4-tier5-lifecycle-stress.
+# In-VM driver for tiered-isolation.bats:phase7-tier4-lifecycle-stress.
+#
+# Moved verbatim from s111-tier4-tier5-lifecycle-stress.sh when s111 became
+# the tier-5 concurrency/crash stress driver (tier-5 decision record step 10:
+# s111's tier-4-only churn and PENDING-LIVE-BOOT passes were not tier-5
+# acceptance). Its tier-4 checks are kept unchanged here; the
+# PENDING-LIVE-BOOT pass lines below still record gaps, not evidence.
 #
 # Implements the §5 "Nested VM and tier lifecycle stress" gaps from
 # todo/codex-testing/under-tested-areas.md. The success contracts (s42,
@@ -255,10 +261,10 @@ fi
 
 # ---- summary --------------------------------------------------------
 if [ "$FAILCOUNT" -eq 0 ]; then
-    pass "§5 tier-4/tier-5 lifecycle stress end-to-end (no leaked resources)"
-    echo "[s111] $PASSCOUNT passes, 0 failures"
+    pass "§5 tier-4 lifecycle stress end-to-end (no leaked resources)"
+    echo "[s113] $PASSCOUNT passes, 0 failures"
     exit 0
 else
-    echo "[s111] $PASSCOUNT passes, $FAILCOUNT failures"
+    echo "[s113] $PASSCOUNT passes, $FAILCOUNT failures"
     exit 1
 fi
