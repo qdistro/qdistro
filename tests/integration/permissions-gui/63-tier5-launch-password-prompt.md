@@ -214,7 +214,11 @@ mark() { $VMEXEC "$VM" "journalctl -n0 --show-cursor 2>/dev/null | sed -n 's/^--
 launch_foot_vm() {
     $VMGUI "$VM" key ctrl+space
     sleep 1
-    $VMGUI "$VM" type "foot"
+    # Filter by the catalogue appId: "foot" also lists the admin's own Foot,
+    # Foot Client and Foot Server ahead of the VM row; "tier5/foot" matches
+    # only the VM row (VMAppsProvider matches appIds), so it is the single,
+    # highlighted result.
+    $VMGUI "$VM" type "tier5/foot"
     sleep 1
 }
 ```
@@ -239,14 +243,23 @@ OPEN `63-s1-launcher.png`. The launcher lists the guest's foot as a VM
 catalogue row (appId `tier5/foot`): **Foot** with a `[VM]` description when
 the boot-time scan published the guest base's catalogue, or **Foot Terminal
 (VM)** when VMApps fell back to its built-in row. Either is the same launch
-(`--policy-key tier5/foot -- foot`); the guest base ships foot either way. If it is not the highlighted row, press
-Down (`$VMGUI "$VM" key Down`) and re-capture until it is. Then start it:
+(`--policy-key tier5/foot -- foot`); the guest base ships foot either way.
+It must be the ONLY row ("1 result") — the `tier5/foot` filter guarantees
+that; any other row is a setup ERROR, not something to navigate around.
+
+Start it with exactly ONE activation: the Return below. Do not also click
+the row — a click launches it as well, and the following Return then lands
+in the freshly focused password dialog and submits an empty password (the
+agent logs `-> deny (empty-password)` and the dialog is gone before the
+screenshot):
 
 ```bash
 $VMGUI "$VM" key Return
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; c=$(cat /run/qci-63/s1.cur); await_journal_line_after_cursor "$c" "polkit BeginAuth: action=org.qdistro.tier5.bridge method=pam\$" 60 1 -u qdistro-polkit-agent.service'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_qdwin_window_title "Authentication Required" 30'
 qdwin_screenshot "$ART/63-s1-password-dialog.png"
+# Nothing may have answered the dialog yet (a stray key would show here).
+$VMEXEC "$VM" 'c=$(cat /run/qci-63/s1.cur); echo "s1-verdicts=$(journalctl -u qdistro-polkit-agent.service --after-cursor "$c" --no-pager -o cat | grep -c "action=org.qdistro.tier5.bridge method=pam -> ")"'
 # Ground truth while the dialog is up: the wrapper was started BY qdshell, and
 # nothing privileged runs yet — no bridge, no guest.
 $VMEXEC "$VM" 'bash /run/qci-63/probe.sh wrapper; bash /run/qci-63/probe.sh counts'
@@ -255,6 +268,7 @@ $VMEXEC "$VM" 'bash /run/qci-63/probe.sh wrapper; bash /run/qci-63/probe.sh coun
 **Assert (S1, dialog):**
 - The agent logged `polkit BeginAuth: action=org.qdistro.tier5.bridge method=pam`
   (method `pam`, never `broker`).
+- `s1-verdicts=0`: the dialog was still unanswered when captured.
 - OPEN `63-s1-password-dialog.png`: an "Authentication Required" dialog with the
   message "Authentication required to show an isolated VM app on your
   desktop", an `Action: org.qdistro.tier5.bridge` line, a `Password:` field
@@ -293,8 +307,8 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_qdwin_window_title "Authent
 qdwin_screenshot "$ART/63-s2-password-dialog-again.png"
 ```
 
-(Select the VM row as in S1 before Return if the filter highlights another
-row.) Click into the **Password:** field using coordinates read from that frame
+(As in S1: one activation only — the Return above; never click the row too.)
+Click into the **Password:** field using coordinates read from that frame
 (`qdwin_mouse_move X Y`, `sleep 0.5`, `qdwin_click X Y`), then type
 `Pa_ssw0rd45` and press Enter:
 
