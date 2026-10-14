@@ -911,20 +911,22 @@ setup() {
     assert_output_contains "[s110] 14 passes, 0 failures"
 }
 
-@test "phase7-tier4-tier5-lifecycle-stress: crash/restart/churn leaves no orphaned resources" {
-    # §5 lifecycle stress — failure + churn paths must reap every qemu,
-    # waypipe, socat, domain, overlay, and socket. Observable resource
-    # ABSENCE, not "didn't crash". Live nested boot is opt-in; the driver
-    # marks PENDING-LIVE-BOOT steps and the wrapper skips on minimal bakes.
+@test "phase7-tier4-lifecycle-stress: crash/restart/churn leaves no orphaned resources" {
+    # §5 lifecycle stress, tier-4 half — moved unchanged from the former
+    # s111-tier4-tier5-lifecycle-stress.sh (now s113) when s111 became the
+    # tier-5 concurrency/crash stress below. Failure + churn paths must reap
+    # every qemu, waypipe, socat, domain, overlay, and socket. Live nested
+    # boot is opt-in; the driver marks PENDING-LIVE-BOOT steps and the wrapper
+    # skips on minimal bakes.
     vm_run "command -v virsh >/dev/null && [ -e /dev/kvm ]"
     if [[ "$status" -ne 0 ]]; then
-        skip "tier-4/5 stack (virsh/kvm) absent on this VM (opt-in bake)"
+        skip "tier-4 stack (virsh/kvm) absent on this VM (opt-in bake)"
     fi
-    stage_vm_driver "s111-tier4-tier5-lifecycle-stress.sh"
-    vm_run "curl -fsS -o /tmp/s111.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s111-tier4-tier5-lifecycle-stress.sh && chmod +x /tmp/s111.sh && bash /tmp/s111.sh 2>/dev/null"
+    stage_vm_driver "s113-tier4-lifecycle-stress.sh"
+    vm_run "curl -fsS -o /tmp/s113.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s113-tier4-lifecycle-stress.sh && chmod +x /tmp/s113.sh && bash /tmp/s113.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "tier-4/5 stack / kvm absent on this VM (opt-in bake)"
+        skip "tier-4 stack / kvm absent on this VM (opt-in bake)"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: guest crash during startup"
@@ -934,7 +936,62 @@ setup() {
     assert_output_contains "PASS: host qdshell crash/restart: display client is setsid-detached"
     assert_output_contains "PASS: qdwin disconnect cleanup: client exit triggers domain destroy via EXIT trap"
     assert_output_contains "PASS: denied nested-proxy: broker denies the cross-silo proxy (verdict=deny)"
-    assert_output_contains "PASS: §5 tier-4/tier-5 lifecycle stress end-to-end (no leaked resources)"
+    assert_output_contains "PASS: §5 tier-4 lifecycle stress end-to-end (no leaked resources)"
+}
+
+@test "phase7-tier5-lifecycle-stress: concurrent cold starts, shared reuse, cross-app refusal, crashes leave no resources" {
+    # Tier-5 decision record step 10: genuine tier-5 concurrency/crash stress
+    # against real nested guests, executed WITHOUT skips — a missing base
+    # disk, kvm, compositor or installed tool is a FAIL (the tier-5 base is
+    # baked into every --from-baked overlay by build-baked-baseweed.sh).
+    # Driven through the installed qdistro-tier5-spawn/-cleanup as qdshell
+    # drives them; asserts process/domain/file ABSENCE after each scenario.
+    stage_vm_driver "s111-tier5-lifecycle-stress.sh"
+    vm_run "curl -fsS -o /tmp/s111.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s111-tier5-lifecycle-stress.sh && chmod +x /tmp/s111.sh && bash /tmp/s111.sh 2>&1"
+    printf '%s\n' "$output" | sed 's/^/# /' >&3
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "s111 must not skip: $(driver_skip_reason)"
+    fi
+    assert_success
+    assert_output_contains "PASS: tier-5 stress preconditions present"
+    # A. simultaneous cold starts
+    assert_output_contains "PASS: A: both simultaneous launches published their app"
+    assert_output_contains "PASS: A: exactly one wrapper created"
+    assert_output_contains "PASS: A: one domain, one qemu, one overlay for"
+    assert_output_contains "PASS: A: overlay sidecar binds"
+    assert_output_contains "PASS: A: each session runs its own registered waypipe client"
+    # C. different-app refusal
+    assert_output_contains "PASS: C: different-app launch refused (exit 3, 'refusing cross-app adoption')"
+    assert_output_contains "PASS: C: the running guest (qemu"
+    assert_output_contains "PASS: C: sidecar still binds"
+    assert_output_contains "PASS: C: the refused launch left no waypipe client"
+    # B. shared-guest reuse
+    assert_output_contains "PASS: B: first session closed"
+    assert_output_contains "PASS: B: closing wrapper handed the guest to the remaining session"
+    assert_output_contains "PASS: B: guest still running for the other session"
+    assert_output_contains "PASS: B: the closed session's waypipe client is gone, the other's lives"
+    assert_output_contains "PASS: B: last session closed"
+    assert_output_contains "PASS: B: last close reaped"
+    assert_output_contains "PASS: B: no waypipe client survives the last close"
+    # D. wrapper crash
+    assert_output_contains "PASS: D: launch up"
+    assert_output_contains "PASS: D: wrapper SIGKILL — the bridge reaped its waypipe client"
+    assert_output_contains "PASS: D: the root bridge"
+    assert_output_contains "PASS: D: qdistro-tier5-cleanup reaped the orphan (no domain, qemu, overlay, sidecar)"
+    # E. qemu crash
+    assert_output_contains "PASS: E: launch up"
+    assert_output_contains "PASS: E: qemu SIGKILL — the wrapper noticed and exited"
+    assert_output_contains "PASS: E: dead guest reaped (no domain, qemu, overlay, sidecar)"
+    assert_output_contains "PASS: E: its waypipe client"
+    # postconditions
+    assert_output_contains "PASS: no bridge, runuser, secctx-exec or waypipe client from this driver survives"
+    assert_output_contains "PASS: no domain, qemu or overlay named"
+    assert_output_contains "PASS: no root-owned file in admin's image or lock directories"
+    assert_output_contains "PASS: no root-run tier-5 lifecycle state"
+    assert_output_contains "PASS: §5 tier-5 concurrency/crash stress end-to-end (no leaked resources)"
+    if grep -q "PENDING-LIVE-BOOT" <<<"$output"; then
+        fail_loud "s111 must not report PENDING-LIVE-BOOT passes"
+    fi
 }
 
 @test "phase7-cross-tier-clipboard: large + multi-MIME clipboard between tier-1/3/4/5b" {
