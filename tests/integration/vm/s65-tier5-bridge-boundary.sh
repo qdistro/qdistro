@@ -552,8 +552,11 @@ auth-success)
     # Close the app's session: the bridge must take its whole chain down.
     # SIGTERM to the admin wrapper (what closing the app does): its trap
     # closes the bridge's stdin.
-    kill -TERM "$CP" 2>/dev/null
-    wait_for 20 sh -c "! kill -0 $CP 2>/dev/null"
+    # CP is unset when no chain came up; the postcondition below still runs.
+    if [ -n "${CP:-}" ]; then
+        kill -TERM "$CP" 2>/dev/null
+        wait_for 20 sh -c "! kill -0 $CP 2>/dev/null"
+    fi
     pkill -u admin -f 'qdistro-test-window --title s65-t5' 2>/dev/null || true
     assert_chain_gone auth-success 20
     finish ;;
