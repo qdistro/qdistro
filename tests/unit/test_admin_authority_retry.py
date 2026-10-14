@@ -20,7 +20,7 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT / "tui"))
 
-import broker_client as BC  # noqa: E402
+import broker_client as BC
 
 AUTH_REQUIRED = "org.qdistro.AdminBroker1.AuthRequired"
 AUTH_NOT_GRANTED = "org.qdistro.AdminBroker1.AuthNotGranted"
@@ -202,6 +202,7 @@ def test_tui_bulk_decide_stops_at_a_cancelled_prompt(action):
     remaining row."""
     pytest.importorskip("textual")
     import types
+
     from qdistro_admin_tui import AdminTuiApp
 
     reqs = [BC.Request(id=i, uid=2000, pid=100 + i, exe="/usr/bin/x",
@@ -240,8 +241,8 @@ def _bridge(polkit_reply):
     are fakes. `polkit_reply(reply_handler, error_handler)` answers the
     asynchronous CheckAuthorization."""
     import dbus
-    from PyQt6.QtCore import QObject
     import qdistro_admin_app as APP
+    from PyQt6.QtCore import QObject
 
     class _Authority:
         def __init__(self):
@@ -309,7 +310,7 @@ def test_gui_cancel_or_polkit_error_leaves_request(qapp, answer):
         b._with_authority(call)
     assert ei.value.get_dbus_name() == APP.AUTH_NOT_GRANTED
     assert seen == [1] and b._authorizing is False
-    title, label = APP._friendly_broker_error(ei.value)
+    _title, label = APP._friendly_broker_error(ei.value)
     assert "pending" in label
 
 

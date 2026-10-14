@@ -262,13 +262,13 @@ _FRIENDLY_BROKER_ERRORS: dict[str, tuple[str, str]] = {
     ),
     f"{_BUS_NAME}.AuthRequired": (
         "Authentication required",
-        "Approving needs the admin password. The request is still "
-        "pending — try again and enter the password when asked.",
+        ("Approving needs the admin password. The request is still "
+         "pending — try again and enter the password when asked."),
     ),
     f"{_BUS_NAME}.AuthNotGranted": (
         "Not authorized",
-        "Authentication was cancelled or not accepted, so nothing was "
-        "changed. The request is still pending.",
+        ("Authentication was cancelled or not accepted, so nothing was "
+         "changed. The request is still pending."),
     ),
     f"{_BUS_NAME}.Denied": (
         "Denied",

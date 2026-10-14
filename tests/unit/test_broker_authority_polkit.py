@@ -17,9 +17,9 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("dbus")
-import dbus  # noqa: E402
-import qdistro_admin_broker as B  # noqa: E402
-from test_broker_check_permission import (  # noqa: E402
+import dbus
+import qdistro_admin_broker as B
+from test_broker_check_permission import (
     ADMIN_UID,
     NON_ADMIN_UID,
     PEER_EXE,
