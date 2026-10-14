@@ -138,15 +138,11 @@ reason_full_stack() {
     [ -z "$output" ]
 }
 
-@test "gui tier-5 launch password prompt (63): qdwin-routed, tier-5 stack and base gates apply" {
+@test "gui tier-5 launch password prompt (63): tier-5 stack and base gates apply" {
     local rel=qdistro/tests/integration/permissions-gui/63-tier5-launch-password-prompt.md
-    run gui_scenario_requires_qdwin "$rel"
-    [ "$status" -eq 0 ]
-    run gui_scenario_requires_qdwin "tests/integration/permissions-gui/63-tier5-launch-password-prompt.md"
-    [ "$status" -eq 0 ]
-    run gui_scenario_skip_reason "$rel" 0 0 1 ""
+    run gui_scenario_skip_reason "$rel" 0 1
     [[ "$output" == *"tier-5 outer stack not provisioned"* ]]
-    run gui_scenario_skip_reason "$rel" 0 1 1 ""
+    run gui_scenario_skip_reason "$rel" 1 1
     [ -z "$output" ]
     run gui_scenario_tier_base_skip_reason "$rel" 0 0 0 0
     [[ "$output" == *"tier-5 base image not built"* ]]

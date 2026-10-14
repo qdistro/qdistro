@@ -3950,7 +3950,8 @@ gui_scenario_tier_base_skip_reason() {
     local rel=$1 tier5_base=${2:-1} tier4_base=${3:-1} tier5_optin=${4:-0} tier4_optin=${5:-0}
     case "$rel" in
         qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md|\
-        qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md)
+        qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md|\
+        qdistro/tests/integration/permissions-gui/63-tier5-launch-password-prompt.md)
             [ "$tier5_base" != 1 ] && [ "$tier5_optin" != 1 ] && \
                 printf '%s\n' "tier-5 base image not built (opt-in: QDISTRO_BUILD_TIER5_BASE=1 on a nested-KVM host)" ;;
         qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md|\
@@ -4019,7 +4020,8 @@ gui_scenario_skip_reason() {
             [ "$qdshell_active" != 1 ] && \
                 printf '%s\n' "qdshell session not active in this VM profile" ;;
         qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md|\
-        qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md)
+        qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md|\
+        qdistro/tests/integration/permissions-gui/63-tier5-launch-password-prompt.md)
             # Tier-5 OUTER stack: the qdwin/qdshell compositor on wayland-1 +
             # nested KVM. Absent => the opt-in tier-5 bake is not provisioned at
             # all => SKIP. (A present outer stack with only the base image

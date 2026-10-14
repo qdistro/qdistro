@@ -110,7 +110,9 @@ silences only the success announcement, never a timeout. Set it per call, never
  (`/etc/polkit-1/rules.d/10-qci-broker-approve-test.rules`,
  `grant_broker_approve_for_tests` in `ci/lib/gates/gui.sh`), so scenarios
  approve without a prompt. A scenario that tests the real prompt declares
- `<!-- qci:polkit-test-grant: none -->` (see 62). Driving a scenario by hand
+ `<!-- qci:polkit-test-grant: none -->` (see 62; 63 opts out too and
+ also removes the tier-5 bridge YES rule 19–21 install, because it tests the
+ tier-5 launch password prompt). Driving a scenario by hand
  outside `qci gui`, write that rule yourself (copy it from `gui.sh`), or
  every app/TUI approval fails "Not authorized". The rule never ships:
  `image/verify-contents.sh` asserts it is absent.
