@@ -50,18 +50,17 @@ ARTIFACTS_DIR = UI_TESTS_ROOT / "artifacts"
 #
 # Recommended installs (any one is sufficient):
 #   sudo zypper in sway        # openSUSE
-#   sudo zypper in labwc
 #   sudo zypper in cage
 # ---------------------------------------------------------------------------
 
 # (compositor name on PATH, layer-shell support?, weston-screenshooter compatible?)
 # weston is included as a fallback for non-layer-shell sanity checks only.
-_COMPOSITOR_CANDIDATES = ["sway", "labwc", "cage", "wayfire", "river", "weston"]
+_COMPOSITOR_CANDIDATES = ["sway", "cage", "wayfire", "river", "weston"]
 
 
 @dataclasses.dataclass
 class Compositor:
-    name: str                          # "sway" | "labwc" | ...
+    name: str                          # "sway" | "cage" | ...
     socket_name: str
     proc: subprocess.Popen
     runtime_dir: str
@@ -97,7 +96,7 @@ def _pick_compositor() -> str:
             return c
     raise RuntimeError(
         "No nested compositor binary on PATH. qdshell needs wlr-layer-shell; "
-        "install one of: sway, labwc, cage. Tried: "
+        "install one of: sway, cage. Tried: "
         + ", ".join(_COMPOSITOR_CANDIDATES)
     )
 
@@ -136,8 +135,8 @@ def _write_minimal_config(name: str, runtime_dir: str) -> Optional[str]:
         p = Path(runtime_dir, "sway.config")
         p.write_text(_MINIMAL_SWAY_CONFIG)
         return str(p)
-    # labwc reads ~/.config/labwc/{rc.xml,autostart,environment}; we set
-    # XDG_CONFIG_HOME to a scratch dir elsewhere, so no override needed here.
+    # The others read $XDG_CONFIG_HOME; we set it to a scratch dir elsewhere,
+    # so no override is needed here.
     return None
 
 
@@ -161,8 +160,6 @@ def _compositor_cmd(name: str, width: int, height: int,
         if config_path:
             argv += ["-c", config_path]
         return (argv, wlroots_env)
-    if name == "labwc":
-        return (["labwc"], wlroots_env)
     if name == "cage":
         # cage requires a child program; we use a no-op holder.
         return (["cage", "--", "sleep", "infinity"], wlroots_env)
@@ -218,7 +215,7 @@ def start_compositor(width: int = 1920, height: int = 1200,
     log_path = ARTIFACTS_DIR / f"{name}.log"
     env = os.environ.copy()
     env["XDG_RUNTIME_DIR"] = runtime_dir
-    # Scratch XDG_CONFIG_HOME so labwc / wayfire / etc. don't load user config.
+    # Scratch XDG_CONFIG_HOME so wayfire / etc. don't load user config.
     scratch_cfg = Path(runtime_dir, "xdg-config")
     scratch_cfg.mkdir()
     env["XDG_CONFIG_HOME"] = str(scratch_cfg)
@@ -1745,7 +1742,7 @@ def vm_session_healthy(session: VMSession) -> tuple[bool, str]:
     """Probe that a live qdshell session is reachable in the VM.
 
     Returns (ok, reason). ok=False means the harness must FAIL/skip loudly
-    rather than capture a blank/labwc framebuffer and silently pass.
+    rather than capture a blank or foreign framebuffer and silently pass.
     """
     # 1. wayland-1 socket present (qdwin/weston session up).
     script = (
@@ -1758,13 +1755,13 @@ def vm_session_healthy(session: VMSession) -> tuple[bool, str]:
                        f"(no live qdwin session in VM {session.vm}); "
                        f"stderr: {res.stderr.strip()}")
     # 2. qdshell IPC answers — proves the quickshell config is the deployed
-    #    qdshell (not labwc/another shell) and IPC is live.
+    #    qdshell (not another shell) and IPC is live.
     try:
         ipc_vm(session, "bar", "showBar", timeout=30)
     except RuntimeError as exc:
         return (False,
                 f"qdshell IPC not reachable in VM {session.vm} "
-                f"(session may be labwc-only, not qdshell): {exc}")
+                f"(session may not be qdshell): {exc}")
     return (True, "qdshell session live")
 
 
