@@ -305,10 +305,18 @@ if _S:
     import struct as _struct
 
     class _FakeSockDiag:
+        """Answers one vsock_diag dump the way the kernel does: one
+        SOCK_DIAG_BY_FAMILY record per listener, then NLMSG_DONE (error 0),
+        all carrying the request's sequence number."""
+
         def __init__(self):
             self._out = []
 
+        def settimeout(self, t):
+            pass
+
         def sendto(self, data, addr):
+            seq = _struct.unpack_from("=IHHII", data)[3]
             msgs = b""
             try:
                 rows = _open(os.path.join(_S, "listeners")).read().splitlines()
@@ -318,14 +326,15 @@ if _S:
                 if not row.strip():
                     continue
                 port, ino = (int(x) for x in row.split())
-                body = _struct.pack("=BBBBIIIII2I", _socket.AF_VSOCK, 1, 10, 0,
-                                    0xFFFFFFFF, port, 0, 0, ino, 0, 0)
-                msgs += _struct.pack("=IHHII", 16 + len(body), 20, 2, 1, 0) + body
-            done = _struct.pack("=IHHIIi", 20, 3, 2, 1, 0, 0)
-            self._out = [msgs + done] if msgs else [done]
+                body = _struct.pack("=BBBBIIIII2I", _socket.AF_VSOCK,
+                                    _socket.SOCK_STREAM, 10, 0, 0xFFFFFFFF,
+                                    port, 0, 0, ino, 0, 0)
+                msgs += _struct.pack("=IHHII", 16 + len(body), 20, 2, seq, 0) + body
+            done = _struct.pack("=IHHIIi", 20, 3, 2, seq, 0, 0)
+            self._out = [msgs + done]
 
-        def recv(self, n):
-            return self._out.pop(0) if self._out else b""
+        def recvmsg(self, n):
+            return (self._out.pop(0) if self._out else b""), [], 0, (0, 0)
 
         def close(self):
             pass

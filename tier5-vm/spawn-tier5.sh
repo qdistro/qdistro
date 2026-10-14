@@ -797,19 +797,90 @@ start_bridge() {
 }
 
 # vsock_listening — rc 0 once OUR waypipe client (CLIENT_PID) listens on
-# PORT. READY means the client exec'd and is registered, not that it has
-# bound its socket yet. Ownership is proved by socket INODE, never by a
-# process name: the kernel's vsock_diag dump (sock_diag netlink) lists each
-# listening AF_VSOCK socket with its port and inode, and the listener counts
-# only if that inode is one of CLIENT_PID's own open sockets. (ss prints the
-# owner as `("<comm>",pid=N,fd=M)` with the comm unescaped, so a foreign
-# listener can name itself to look like ours; ss -e shows no inode for vsock.)
+# PORT at LISTEN_CID. READY means the client exec'd and is registered, not
+# that it has bound its socket yet. Ownership is proved by socket INODE,
+# never by a process name: the kernel's vsock_diag dump (sock_diag netlink)
+# lists each listening AF_VSOCK socket with its CID, port and inode, and the
+# listener counts only if that inode is one of CLIENT_PID's own open
+# sockets. (ss prints the owner as `("<comm>",pid=N,fd=M)` with the comm
+# unescaped, so a foreign listener can name itself to look like ours; ss -e
+# shows no inode for vsock.) The dump is parsed strictly and fails closed:
+# every message must fit its datagram and carry the full record, and a
+# match counts only once the dump completed (NLMSG_DONE, error 0, never
+# NLM_F_DUMP_INTR) within a bounded deadline. tests/unit/
+# test_tier5_vsock_ready.py loads this program (between the PY markers) and
+# drives vsock_ready_scan with crafted dumps.
 vsock_listening() {
-    T5PID="$CLIENT_PID" T5PORT="$PORT" python3 - <<'PY'
-import os, socket, struct, sys
-pid, port = int(os.environ["T5PID"]), int(os.environ["T5PORT"])
-ours = set()
-try:
+    T5PID="$CLIENT_PID" T5PORT="$PORT" T5CID="$LISTEN_CID" python3 - <<'PY'
+import os, random, socket, struct, sys, time
+
+NLMSG_HDR = struct.Struct("=IHHII")        # len, type, flags, seq, pid
+# struct vsock_diag_msg: family, type, state, shutdown, src_cid, src_port,
+# dst_cid, dst_port, ino, cookie[2]
+VSOCK_DIAG_MSG = struct.Struct("=BBBBIIIII2I")
+# struct vsock_diag_req: family, protocol, pad, states, ino, show, cookie[2]
+VSOCK_DIAG_REQ = struct.Struct("=BBHIII2I")
+NETLINK_SOCK_DIAG, SOCK_DIAG_BY_FAMILY = 4, 20
+NLMSG_NOOP, NLMSG_ERROR, NLMSG_DONE = 1, 2, 3
+NLM_F_REQUEST, NLM_F_DUMP, NLM_F_DUMP_INTR = 0x1, 0x300, 0x10
+TCP_LISTEN = 10
+VMADDR_CID_ANY = 0xFFFFFFFF
+DEADLINE_S = 2.0
+
+
+def vsock_ready_scan(datagrams, *, port, cid, inodes, seq):
+    """True only for a complete, error-free, uninterrupted dump that lists
+    a stream listener on (cid or the wildcard CID, port) whose inode is in
+    `inodes`. Any malformed, truncated, foreign or failed piece -> False."""
+    found = False
+    for data in datagrams:
+        if not data:
+            return False
+        off = 0
+        while off < len(data):
+            if len(data) - off < NLMSG_HDR.size:
+                return False
+            ln, typ, flags, mseq, _pid = NLMSG_HDR.unpack_from(data, off)
+            if ln < NLMSG_HDR.size or ln > len(data) - off:
+                return False
+            if mseq != seq or flags & NLM_F_DUMP_INTR:
+                return False
+            body = data[off + NLMSG_HDR.size:off + ln]
+            if typ == NLMSG_DONE:
+                if len(body) < 4 or struct.unpack_from("=i", body)[0] != 0:
+                    return False
+                return found
+            if typ == NLMSG_NOOP:
+                pass
+            elif typ != SOCK_DIAG_BY_FAMILY:      # NLMSG_ERROR or anything else
+                return False
+            else:
+                if len(body) < VSOCK_DIAG_MSG.size:
+                    return False
+                (fam, styp, state, _shut, scid, sport, _dcid, _dport, ino,
+                 _c0, _c1) = VSOCK_DIAG_MSG.unpack_from(body)
+                if (fam == socket.AF_VSOCK and styp == socket.SOCK_STREAM
+                        and state == TCP_LISTEN and sport == port
+                        and scid in (cid, VMADDR_CID_ANY) and ino in inodes):
+                    found = True
+            off += (ln + 3) & ~3
+    return False                                  # stream ended before DONE
+
+
+def _datagrams(nl, deadline):
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("vsock_diag dump deadline")
+        nl.settimeout(left)
+        data, _anc, flags, addr = nl.recvmsg(65536)
+        if flags & socket.MSG_TRUNC or (addr and addr[0] != 0):
+            raise OSError("truncated or non-kernel netlink datagram")
+        yield data
+
+
+def _socket_inodes(pid):
+    ours = set()
     for fd in os.listdir(f"/proc/{pid}/fd"):
         try:
             target = os.readlink(f"/proc/{pid}/fd/{fd}")
@@ -817,34 +888,32 @@ try:
             continue
         if target.startswith("socket:[") and target.endswith("]"):
             ours.add(int(target[8:-1]))
-except OSError:
-    sys.exit(1)
-NETLINK_SOCK_DIAG, SOCK_DIAG_BY_FAMILY = 4, 20
-NLMSG_ERROR, NLMSG_DONE, TCP_LISTEN = 2, 3, 10
-try:
-    nl = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM, NETLINK_SOCK_DIAG)
-    # struct vsock_diag_req: family, protocol, pad, states, ino, show, cookie[2]
-    req = struct.pack("=BBHIII2I", socket.AF_VSOCK, 0, 0, 1 << TCP_LISTEN,
-                      0, 0, 0xFFFFFFFF, 0xFFFFFFFF)
-    nl.sendto(struct.pack("=IHHII", 16 + len(req), SOCK_DIAG_BY_FAMILY,
-                          0x301, 1, 0) + req, (0, 0))   # REQUEST|DUMP
-    while True:
-        data, off = nl.recv(65536), 0
-        if not data:
-            sys.exit(1)
-        while off + 16 <= len(data):
-            ln, typ = struct.unpack_from("=IH", data, off)
-            if typ in (NLMSG_DONE, NLMSG_ERROR) or ln < 16:
-                sys.exit(1)
-            # struct vsock_diag_msg: family, type, state, shutdown,
-            # src_cid, src_port, dst_cid, dst_port, ino, cookie[2]
-            _f, _t, st, _s, _sc, sport, _dc, _dp, ino = struct.unpack_from(
-                "=BBBBIIIII", data, off + 16)
-            if st == TCP_LISTEN and sport == port and ino in ours:
-                sys.exit(0)
-            off += (ln + 3) & ~3
-except OSError:
-    sys.exit(1)
+    return ours
+
+
+def main():
+    pid, port = int(os.environ["T5PID"]), int(os.environ["T5PORT"])
+    cid = int(os.environ["T5CID"])
+    try:
+        inodes = _socket_inodes(pid)
+        seq = random.randint(1, 0x7FFFFFFF)
+        nl = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM,
+                           NETLINK_SOCK_DIAG)
+        req = VSOCK_DIAG_REQ.pack(socket.AF_VSOCK, 0, 0, 1 << TCP_LISTEN,
+                                  0, 0, 0xFFFFFFFF, 0xFFFFFFFF)
+        nl.sendto(NLMSG_HDR.pack(NLMSG_HDR.size + len(req),
+                                 SOCK_DIAG_BY_FAMILY,
+                                 NLM_F_REQUEST | NLM_F_DUMP, seq, 0) + req,
+                  (0, 0))
+        ok = vsock_ready_scan(_datagrams(nl, time.monotonic() + DEADLINE_S),
+                              port=port, cid=cid, inodes=inodes, seq=seq)
+    except (OSError, ValueError, TimeoutError):
+        return 1
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 PY
 }
 
@@ -949,6 +1018,7 @@ else
 fi
 # A loopback server connecting before the listener exists is refused, and a
 # client that never listens can publish nothing — fail the launch.
+LISTEN_CID=$([ "$MODE" = loopback ] && echo 1 || echo 2)
 LISTENING=0
 for _ in $(seq 1 100); do
     vsock_listening && { LISTENING=1; break; }
@@ -960,7 +1030,7 @@ if [ "$LISTENING" != "1" ]; then
     sed 's/^/[tier5]   /' "$CLIENT_LOG" >&2 2>/dev/null || true
     exit 9
 fi
-echo "[tier5] vsock listener ready cid=$([ "$MODE" = loopback ] && echo 1 || echo 2) port=$PORT" >&2
+echo "[tier5] vsock listener ready cid=$LISTEN_CID port=$PORT" >&2
 
 # --- 2. silo-side waypipe server (loopback) ---------------------------
 if [ "$MODE" = "loopback" ]; then
