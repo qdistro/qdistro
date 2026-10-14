@@ -50,23 +50,6 @@ setup() {
     [[ "$output" == *"TIMEOUT"* ]]
 }
 
-@test "await_x11_window: passes when a visible window id is returned" {
-    runuser() { echo 73400327; }
-    export -f runuser
-    run await_x11_window "admin approvals" admin :0 2 1
-    [ "$status" -eq 0 ]
-}
-
-@test "await_x11_window: TIMES OUT loudly when no window maps" {
-    runuser() { echo "xdotool: no matching window"; return 1; }
-    export -f runuser
-    run await_x11_window "admin approvals" admin :0 1 1
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"TIMEOUT"* ]]
-    [[ "$output" == *"visible X11 window matching: admin approvals"* ]]
-    [[ "$output" == *"xdotool: no matching window"* ]]
-}
-
 @test "_await: reports the probe's last observed state on timeout" {
     # A probe that always fails but echoes a diagnostic line.
     probe() { echo "state=degraded"; return 1; }
@@ -129,31 +112,6 @@ setup() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"TIMEOUT"* ]]
     [[ "$output" == *"app.send-to:3000:org.qdistro.Qnotebook.uid3000"* ]]
-}
-
-@test "await_x11_window_title: whole-title match, not a prefix" {
-    runuser() { shift 3; printf 'admin approvals (1 pending)\n'; }
-    export -f runuser
-    run await_x11_window_title admin 'admin approvals \(1 pending\)' 2 1
-    [ "$status" -eq 0 ]
-    # the emptied title must NOT be satisfied by the pending one
-    run await_x11_window_title admin 'admin approvals' 1 1
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"TIMEOUT"* ]]
-    [[ "$output" == *"titles=[admin approvals (1 pending)]"* ]]
-}
-
-@test "await_x11_window_title: succeeds once the title reaches the state mid-wait" {
-    local n="$BATS_TEST_TMPDIR/title"; echo 0 > "$n"
-    runuser() {
-        local c; c=$(cat "$n"); c=$((c + 1)); echo "$c" > "$n"
-        if [ "$c" -ge 2 ]; then echo 'admin approvals'; else echo 'admin approvals (1 pending)'; fi
-    }
-    export -f runuser
-    run await_x11_window_title admin 'admin approvals' 5 1
-    [ "$status" -eq 0 ]
-    run await_x11_window_title "" 'x' 1 1
-    [ "$status" -eq 2 ]
 }
 
 # ---- qdwin lane window helpers (journal of the running compositor) ---------
@@ -1714,5 +1672,259 @@ _host_go() {
     QCI_HOST_STEP_DIR=$d run qci_host_step s1 1.5
     [ "$status" -eq 2 ]
     QCI_HOST_STEP_DIR='' QCI_DRIVER_CLAIM_PATH='' run qci_host_step s1 1
+    [ "$status" -eq 2 ]
+}
+
+# ---- admin TUI in foot: install check, process identity, bus evidence ------
+# The TUI scenarios start the INSTALLED TUI and grade the broker's view of it;
+# these pin the helpers' verdicts against fake installs, a fake /proc and a
+# synthetic dbus-monitor trace. The identity check reads its allowlist from
+# the REAL broker module, so a drift between the two shows up here.
+
+_tui_fake_install() {
+    T="$BATS_TEST_TMPDIR/tui"
+    rm -rf "$T"
+    mkdir -p "$T/lib" "$T/bin" "$T/src" "$T/path"
+    chmod 0755 "$T/lib"
+    printf '#!/usr/bin/python3 -I\n"""tui"""\ndef _reexec_for_authority():\n    pass\n' > "$T/lib/qdistro_admin_tui.py"
+    chmod 0755 "$T/lib/qdistro_admin_tui.py"
+    cp "$T/lib/qdistro_admin_tui.py" "$T/src/qdistro_admin_tui.py"
+    ln -s "$T/lib/qdistro_admin_tui.py" "$T/bin/qdistro-admin-tui"
+    printf '#!/bin/sh\nexit 0\n' > "$T/py-ok"; chmod +x "$T/py-ok"
+    printf '#!/bin/sh\nexit 1\n' > "$T/py-no-textual"; chmod +x "$T/py-no-textual"
+    printf '#!/bin/sh\n' > "$T/path/foot"; chmod +x "$T/path/foot"
+    export QCI_ADMIN_TUI_ENTRY="$T/bin/qdistro-admin-tui" \
+        QCI_ADMIN_TUI_LIB="$T/lib/qdistro_admin_tui.py" \
+        QCI_ADMIN_TUI_SRC="$T/src/qdistro_admin_tui.py" \
+        QCI_ADMIN_TUI_PYTHON="$T/py-ok" \
+        QCI_ADMIN_TUI_OWNER_UID="$(id -u)"
+    PATH="$T/path:$PATH"
+}
+
+@test "admin TUI install check: the installer's symlink to an intact module passes" {
+    _tui_fake_install
+    run qdwin_admin_tui_check_install
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"admin TUI install OK"* ]]
+}
+
+@test "admin TUI install check: a wrapper written THROUGH the symlink is refused" {
+    _tui_fake_install
+    # What the retired golden step 4 did: `cat > /usr/local/bin/qdistro-admin-tui`
+    # follows the symlink and replaces the installed module with a dev wrapper.
+    printf '#!/bin/bash\nexec python3 /home/admin/qdistro/tui/qdistro_admin_tui.py "$@"\n' \
+        > "$QCI_ADMIN_TUI_ENTRY"
+    [ -L "$QCI_ADMIN_TUI_ENTRY" ]
+    run qdwin_admin_tui_check_install
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"a wrapper replaced it"* ]]
+}
+
+@test "admin TUI install check: no symlink, writable module, source drift are refused" {
+    _tui_fake_install
+    rm "$QCI_ADMIN_TUI_ENTRY"
+    cp "$QCI_ADMIN_TUI_LIB" "$QCI_ADMIN_TUI_ENTRY"
+    run qdwin_admin_tui_check_install
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"is not the installer's symlink"* ]]
+
+    _tui_fake_install
+    chmod 0775 "$QCI_ADMIN_TUI_LIB"
+    run qdwin_admin_tui_check_install
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"group/other writable"* ]]
+
+    chmod 0755 "$QCI_ADMIN_TUI_LIB"
+    printf '# drift\n' >> "$QCI_ADMIN_TUI_SRC"
+    run qdwin_admin_tui_check_install
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"differs from the source tree"* ]]
+}
+
+@test "admin TUI install check: missing Textual/Rich or foot is an ERROR, never a skip" {
+    _tui_fake_install
+    QCI_ADMIN_TUI_PYTHON="$T/py-no-textual"
+    run qdwin_admin_tui_check_install
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Textual/Rich do not import"*"a bake regression, not a skip"* ]]
+
+    _tui_fake_install
+    QCI_ADMIN_TUI_FOOT=qci-no-such-foot
+    run qdwin_admin_tui_check_install
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"foot is missing"* ]]
+}
+
+# A fake /proc entry: pid 4321, child of foot <ppid>.
+# Args: [exe] [argv words] [env words] [uid] [ppid]
+_tui_fake_proc() {
+    local exe=${1:-/usr/bin/python3.14} argv=${2:-/usr/bin/python3 -I /usr/local/bin/qdistro-admin-tui}
+    local env=${3:-PATH=/usr/bin:/bin HOME=/home/admin TERM=foot COLORTERM=truecolor LANG=C.UTF-8 LC_ALL=C.UTF-8 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1}
+    local uid=${4:-1000} ppid=${5:-77}
+    P="$BATS_TEST_TMPDIR/proc"
+    rm -rf "$P"
+    mkdir -p "$P/4321"
+    ln -s "$exe" "$P/4321/exe"
+    # shellcheck disable=SC2086 # word lists on purpose
+    printf '%s\0' $argv > "$P/4321/cmdline"
+    # shellcheck disable=SC2086
+    printf '%s\0' $env > "$P/4321/environ"
+    printf 'Name:\tpython3\nUid:\t%s\t%s\t%s\t%s\n' "$uid" "$uid" "$uid" "$uid" > "$P/4321/status"
+    printf '4321 (python3 (x)) S %s 4321 4321 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 99887766 0 0\n' "$ppid" > "$P/4321/stat"
+    export QCI_PROC_ROOT="$P" QCI_ADMIN_TUI_ENTRY=/usr/local/bin/qdistro-admin-tui \
+        QCI_ADMIN_TUI_BROKER_MODULE="$REPO_ROOT/broker/qdistro_admin_broker.py"
+}
+
+@test "admin TUI identity: the re-exec'd installed TUI under its foot passes" {
+    _tui_fake_proc
+    run qdwin_admin_tui_identity 4321 77
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"identity: OK pid=4321"*"TERM=foot"* ]]
+    run _qci_proc_starttime 4321
+    [ "$output" = 99887766 ]
+}
+
+@test "admin TUI identity: each shape the broker refuses for authority is refused" {
+    _tui_fake_proc /usr/bin/python3.14 "/usr/bin/python3 -I /usr/local/bin/qdistro-admin-tui --dev"
+    run qdwin_admin_tui_identity 4321 77
+    [ "$status" -ne 0 ]; [[ "$output" == *"no TUI arguments"* ]]
+
+    _tui_fake_proc /usr/bin/python3.14 "/usr/bin/python3 /usr/local/bin/qdistro-admin-tui"
+    run qdwin_admin_tui_identity 4321 77
+    [ "$status" -ne 0 ]; [[ "$output" == *"isolated"* ]]
+
+    _tui_fake_proc /usr/bin/python3.14 "/usr/bin/python3 -I /home/admin/qdistro/tui/qdistro_admin_tui.py"
+    run qdwin_admin_tui_identity 4321 77
+    [ "$status" -ne 0 ]
+
+    _tui_fake_proc /home/admin/bin/python3
+    run qdwin_admin_tui_identity 4321 77
+    [ "$status" -ne 0 ]; [[ "$output" == *"not the root-owned system python3"* ]]
+
+    # The pre-re-exec process: the same argv the shebang gives, but the
+    # launcher's environment -- the broker would refuse it.
+    _tui_fake_proc "" "" "PATH=/usr/bin TERM=foot PYTHONPATH=/home/admin/x"
+    run qdwin_admin_tui_identity 4321 77
+    [ "$status" -ne 0 ]; [[ "$output" == *"outside the broker allowlist"*"PYTHONPATH"* ]]
+
+    _tui_fake_proc "" "" "PATH=/usr/bin QT_QPA_PLATFORM=xcb TERM=foot"
+    run qdwin_admin_tui_identity 4321 77
+    [ "$status" -ne 0 ]; [[ "$output" == *"QT_QPA_PLATFORM"* ]]
+
+    _tui_fake_proc "" "" "PATH=/usr/bin HOME=/home/admin"
+    run qdwin_admin_tui_identity 4321 77
+    [ "$status" -ne 0 ]; [[ "$output" == *"TERM=''"* ]]
+
+    _tui_fake_proc "" "" "" 0
+    run qdwin_admin_tui_identity 4321 77
+    [ "$status" -ne 0 ]; [[ "$output" == *"uid"* ]]
+
+    _tui_fake_proc
+    run qdwin_admin_tui_identity 4321 78
+    [ "$status" -ne 0 ]; [[ "$output" == *"is not the foot terminal 78"* ]]
+
+    QCI_ADMIN_TUI_BROKER_MODULE="$BATS_TEST_TMPDIR/none.py"
+    run qdwin_admin_tui_identity 4321 77
+    [ "$status" -ne 0 ]; [[ "$output" == *"cannot read the broker's allowlist"* ]]
+}
+
+# A synthetic dbus-monitor log (body on stdin): the TUI (:1.40) mounts at
+# t=1000 (its first GetPending); the broker is :1.9, the admin app :1.50.
+_bus_fake_trace() {
+    export QCI_BUS_TRACE_DIR="$BATS_TEST_TMPDIR/trace" QCI_ADMIN_TUI_STATE="$BATS_TEST_TMPDIR/tuistate"
+    mkdir -p "$QCI_BUS_TRACE_DIR" "$QCI_ADMIN_TUI_STATE"
+    printf ':1.40\n' > "$QCI_ADMIN_TUI_STATE/tui.bus"
+    {
+        printf 'signal time=999.000000 sender=:1.3 -> destination=(null destination) serial=2 path=/org/qdistro/QciProbe; interface=org.qdistro.QciProbe; member=Ready\n   string "qci-trace"\n'
+        printf 'method call time=1000.000000 sender=:1.40 -> destination=:1.9 serial=5 path=/org/qdistro/AdminBroker1; interface=org.qdistro.AdminBroker1; member=GetPending\n'
+        cat
+    } > "$QCI_BUS_TRACE_DIR/admin-tui.log"
+}
+
+_sig() {  # _sig <time> <member> <args...>
+    local t=$1 m=$2 a
+    shift 2
+    printf 'signal time=%s sender=:1.9 -> destination=(null destination) serial=9 path=/org/qdistro/AdminBroker1; interface=org.qdistro.AdminBroker1; member=%s\n' "$t" "$m"
+    for a in "$@"; do printf '   %s\n' "$a"; done
+}
+_call() {  # _call <time> <sender> <member> <args...>
+    local t=$1 s=$2 m=$3 a
+    shift 3
+    printf 'method call time=%s sender=%s -> destination=:1.9 serial=6 path=/org/qdistro/AdminBroker1; interface=org.qdistro.AdminBroker1; member=%s\n' "$t" "$s" "$m"
+    for a in "$@"; do printf '   %s\n' "$a"; done
+}
+
+@test "bus trace: events parse calls, signals and their arguments" {
+    _bus_fake_trace < <(_sig 1005.250000 RequestDecided 'int32 3' 'string "deny"')
+    run qci_bus_trace_events admin-tui
+    [ "$status" -eq 0 ]
+    [ "${lines[1]}" = "$(printf '1000.000000\tcall\t:1.40\tGetPending\t')" ]
+    [ "${lines[2]}" = "$(printf '1005.250000\tsignal\t:1.9\tRequestDecided\t3,deny')" ]
+    qci_bus_names_of_pid() { echo ":1.40"; }
+    run qci_bus_trace_count admin-tui call GetPending 4321
+    [ "$output" = 1 ]
+    run qci_bus_trace_count admin-tui signal RequestDecided - 1006
+    [ "$output" = 0 ]
+    run qci_bus_trace_count admin-tui signal RequestDecided - 1005
+    [ "$output" = 1 ]
+}
+
+@test "TUI signal refresh: a GetPending right after RequestPending, off the poll grid, counts" {
+    _bus_fake_trace < <(_sig 1012.000000 RequestPending 'int32 1'; _call 1012.300000 :1.40 GetPending)
+    run qdwin_admin_tui_await_signal_refresh 1010 2
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SIGNAL-DRIVEN: RequestPending(1)"* ]]
+}
+
+@test "TUI signal refresh: a refresh on a safety-poll tick is INCONCLUSIVE, not proof" {
+    _bus_fake_trace < <(_sig 1029.500000 RequestPending 'int32 1'; _call 1030.010000 :1.40 GetPending)
+    run qdwin_admin_tui_await_signal_refresh 1010 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"INCONCLUSIVE"* ]]
+}
+
+@test "TUI signal refresh: no refresh after the signal times out naming it" {
+    _bus_fake_trace < <(_sig 1012.000000 RequestPending 'int32 1')
+    run qdwin_admin_tui_await_signal_refresh 1010 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"but no TUI GetPending within"* ]]
+    # Another client's refresh is not the TUI's.
+    _bus_fake_trace < <(_sig 1012.000000 RequestPending 'int32 1'; _call 1012.300000 :1.50 GetPending)
+    run qdwin_admin_tui_await_signal_refresh 1010 1
+    [ "$status" -ne 0 ]
+}
+
+@test "TUI removed by signal: the cheap path (no GetPending) after RequestDecided passes" {
+    _bus_fake_trace < <(_call 1014.000000 :1.50 DecideRequest 'int32 1' 'string "allow"'
+      _sig 1014.100000 RequestDecided 'int32 1' 'string "allow"')
+    run qdwin_admin_tui_removed_by_signal 1013
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK: RequestDecided(1,allow)"*"TUI made no DecideRequest"* ]]
+}
+
+@test "TUI removed by signal: a poll refresh, a TUI decision, or no signal all FAIL" {
+    _bus_fake_trace < <(_sig 1014.100000 RequestDecided 'int32 1' 'string "allow"'
+      _call 1030.000000 :1.40 GetPending)
+    run qdwin_admin_tui_removed_by_signal 1013
+    [ "$status" -ne 0 ]; [[ "$output" == *"not explained by a broker signal"* ]]
+
+    _bus_fake_trace < <(_sig 1014.100000 RequestDecided 'int32 1' 'string "allow"'
+      _call 1014.500000 :1.40 DecideRequest 'int32 1' 'string "deny"')
+    run qdwin_admin_tui_removed_by_signal 1013
+    [ "$status" -ne 0 ]; [[ "$output" == *"the TUI itself called DecideRequest"* ]]
+
+    _bus_fake_trace </dev/null
+    run qdwin_admin_tui_removed_by_signal 1013
+    [ "$status" -ne 0 ]; [[ "$output" == *"no RequestDecided signal"* ]]
+}
+
+@test "admin TUI state: helpers fail loudly when no TUI was started" {
+    export QCI_ADMIN_TUI_STATE="$BATS_TEST_TMPDIR/none"
+    run qdwin_admin_tui_alive
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no admin TUI recorded"* ]]
+    run qdwin_focus_admin_tui 1
+    [ "$status" -ne 0 ]
+    run qdwin_start_admin_tui 'bad tag'
     [ "$status" -eq 2 ]
 }

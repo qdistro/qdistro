@@ -212,9 +212,13 @@ zypper -n addlock noctalia-qs >/dev/null 2>&1 \
     || { log "  ERROR: zypper addlock noctalia-qs failed"; exit 3; }
 
 # The admin TUI (installed below by install-admin-cli-for-vm.sh) needs
-# Textual. The kiwi image carries it (image/config.xml); the baked cloud base
-# does not yet (adding it to scripts/vm/install-deps.sh changes the baked
-# recipe key and forces a rebake, so it rides the next planned one).
+# Textual and Rich. The kiwi image carries them (image/config.xml); the baked
+# cloud base does not yet (adding them to scripts/vm/install-deps.sh changes
+# the baked recipe key and forces a rebake, so it rides the next planned one).
+# They are MANDATORY here, like jq below: the permissions-gui TUI scenarios run
+# the installed TUI on every GUI golden, and a golden without Textual used to
+# warn and then fail every one of them at runtime. A missing dependency is a
+# bake failure, never a skip.
 # python3 → 3.14: the snapshot's python313-base still owns the unversioned
 # symlink while the dep set is python314-* (scripts/install/lib/qdistro-python.sh;
 # $SRC does not exist yet, so this is the same flip inline). Guarded: a base
@@ -224,13 +228,18 @@ command -v python3.14 >/dev/null 2>&1 && [ "$(readlink /usr/bin/python3)" != "py
 
 if ! /usr/bin/python3 -c 'import textual, rich' >/dev/null 2>&1; then
     if [ "${QCI_OFFLINE:-0}" = 1 ]; then
-        log "WARN: python314-textual missing and QCI_OFFLINE=1 forbids zypper; the admin TUI will not start in this VM"
-    else
-        log "installing python314-textual for the admin TUI"
-        zypper -n install --no-recommends python314-textual python314-rich \
-                >/tmp/qdistro-textual-install.log 2>&1 \
-            || { log "  WARN: zypper install of python314-textual failed; the admin TUI will not start in this VM (the CLI is unaffected)"; tail -20 /tmp/qdistro-textual-install.log; }
+        log "ERROR: python314-textual/python314-rich missing and QCI_OFFLINE=1 forbids zypper; use a base with them baked in or run with egress"
+        exit 3
     fi
+    log "installing python314-textual for the admin TUI"
+    zypper -n install --no-recommends python314-textual python314-rich \
+            >/tmp/qdistro-textual-install.log 2>&1 \
+        || { log "  ERROR: zypper install of python314-textual/python314-rich failed"; tail -40 /tmp/qdistro-textual-install.log; exit 3; }
+    # The install may have brought python314-base itself: re-pin, then prove.
+    command -v python3.14 >/dev/null 2>&1 && [ "$(readlink /usr/bin/python3)" != "python3.14" ] \
+        && ln -sf python3.14 /usr/bin/python3 || true
+    /usr/bin/python3 -c 'import textual, rich' >/dev/null 2>&1 \
+        || { log "  ERROR: Textual/Rich still do not import under /usr/bin/python3 after installation"; exit 3; }
 fi
 
 # ---- 0b. CI extras (iso/14 Phase G intermediate) ---------------------------

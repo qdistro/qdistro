@@ -194,25 +194,6 @@ await_socket() {
     _await "socket to exist: $path" "$timeout" "$interval" test -S "$path"
 }
 
-# await_x11_window <title-pattern> [user] [display] [timeout] [interval]
-# Wait until xdotool can resolve a visible X11/XWayland window whose title
-# matches <title-pattern>. This is intentionally bounded: `xdotool search
-# --sync` can wait forever when an application crashes before mapping, hiding
-# the useful application log behind an agent-level timeout.
-await_x11_window() {
-    local title=$1 user=${2:-admin} display=${3:-:0}
-    local timeout=${4:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${5:-$QCI_AWAIT_INTERVAL_DEFAULT}
-    _await "visible X11 window matching: $title (user $user, display $display)" \
-        "$timeout" "$interval" _probe_x11_window "$title" "$user" "$display"
-}
-_probe_x11_window() {
-    local title=$1 user=$2 display=$3 wid
-    wid=$(runuser -u "$user" -- env DISPLAY="$display" \
-        xdotool search --onlyvisible --name "$title" 2>&1 | head -n1)
-    printf 'window_id=%s' "${wid:-<none>}"
-    [[ "$wid" =~ ^[0-9]+$ ]]
-}
-
 # await_user_unit_active <unit> [user] [timeout] [interval]
 # Wait until a per-user systemd unit reports `active`, queried AS the session
 # user with XDG_RUNTIME_DIR set (so a root caller still reaches the user manager).
@@ -596,37 +577,10 @@ qci_sqlite() {
     fi
     sqlite3 -batch "$db" "$sql"
 }
-# await_x11_window_title <user> <title-ere> [timeout] [interval]
-# Wait until an XWayland window owned by <user>'s display :0 carries a title
-# that matches <title-ere> as a WHOLE line (grep -Ex). Use it where the app
-# publishes model state in its title -- the admin approvals window titles
-# itself `admin approvals (N pending)` from the rows it actually displays --
-# so a capture waits for that state instead of a fixed sleep a runner can
-# drop. Only VISIBLE windows count; the caller owns the one-window
-# precondition (the scenarios kill stale admin apps in Setup). On timeout the
-# titles seen are printed, so "no window" and "window in the wrong state"
-# stay distinct.
-await_x11_window_title() {
-    local user=$1 pattern=$2 timeout=${3:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${4:-$QCI_AWAIT_INTERVAL_DEFAULT}
-    if [ -z "$user" ] || [ -z "$pattern" ]; then
-        printf '[await] x11 window title needs a user and a title pattern\n' >&2
-        return 2
-    fi
-    _await "x11 window title /$pattern/ (user $user)" "$timeout" "$interval" \
-        _probe_x11_window_title "$user" "$pattern"
-}
-_probe_x11_window_title() {
-    local user=$1 pattern=$2 titles
-    titles=$(runuser -u "$user" -- env DISPLAY=:0 \
-        xdotool search --onlyvisible --name "$pattern" getwindowname %@ 2>/dev/null)
-    printf 'titles=[%s]' "$(printf '%s' "$titles" | paste -sd '|')"
-    grep -Exq -- "$pattern" <<<"$titles"
-}
 # ---- qdwin lane: windows by title, focus, idle locker ----------------------
 #
-# The qdwin lane runs the product session (qdwin compositor + qdshell), where
-# there is no X server for xdotool to ask. These helpers are its window
-# primitives. Everything comes from what the compositor itself records:
+# The GUI scenarios run the product session (qdwin compositor + qdshell).
+# These helpers are its window primitives. Everything comes from what the compositor itself records:
 #
 #   qdwin: toplevel_added handle=H uid=U pid=P app_id=A title="T"
 #   qdwin: toplevel_title handle=H title="T"     (each later change)
@@ -690,8 +644,8 @@ qdwin_windows() {
 }
 
 # qdwin_window_handle <title-ere> [pid] — the handle of the NEWEST live
-# toplevel whose current title matches <title-ere> as a WHOLE string (the same
-# whole-line rule as await_x11_window_title), optionally only one owned by
+# toplevel whose current title matches <title-ere> as a WHOLE string,
+# optionally only one owned by
 # client <pid>. Prints nothing and fails when there is none.
 qdwin_window_handle() {
     local pattern=$1 want_pid=${2:-} h p u a t found=""
@@ -706,8 +660,7 @@ qdwin_window_handle() {
 }
 
 # await_qdwin_window_title <title-ere> [timeout] [interval] [pid]
-# The qdwin-lane twin of await_x11_window_title: wait until a live toplevel's
-# current title matches <title-ere> as a whole string. The admin approvals
+# Wait until a live toplevel's current title matches <title-ere> as a whole string. The admin approvals
 # window titles itself `admin approvals (N pending)` from the rows its Pending
 # list displays, and qdwin logs a title change on the commit that carries it,
 # so this waits for the app's state instead of a sleep. On timeout every live
@@ -740,8 +693,7 @@ qdwin_focused_handle() {
 }
 
 # qdwin_focus_window <title-ere> [timeout] [pid]
-# The qdwin-lane replacement for `xdotool windowactivate --sync`: find the
-# newest live window whose title matches, ask qdshell to focus it (the same
+# Find the newest live window whose title matches, ask qdshell to focus it (the same
 # `qs ipc call qdwin focusWindow` the taskbar uses), and return only once the
 # compositor reports keyboard focus on that handle. Prints the handle.
 # Fails, naming what it saw, when no window matches or focus never lands.
@@ -891,6 +843,578 @@ qdwin_stop_admin_app() {
     pkill -KILL -u admin -f '[q]distro-admin-approval-app|[q]distro_admin_app' 2>/dev/null || true
     sleep 0.5
     ! pgrep -u admin -f '[q]distro-admin-approval-app|[q]distro_admin_app' >/dev/null
+}
+
+# ---- system-bus trace of the broker interface ------------------------------
+#
+# A root dbus-monitor on org.qdistro.AdminBroker1 (method calls AND signals,
+# including the unicast calls apps make to the broker's unique name). It is
+# the evidence for "which client called what, when": the admin app and the TUI
+# each refresh their queue with GetPending and decide with DecideRequest, and
+# the broker announces RequestPending / RequestDecided. A trace is attached
+# only once it has seen a private QciProbe signal sent after it started, so an
+# empty trace can never mean "not listening".
+: "${QCI_BUS_TRACE_DIR:=/run/qci-bus-trace}"
+: "${QCI_GUEST_PYTHON:=/usr/bin/python3}"
+
+_qci_bus_trace_tag_ok() {
+    case "$1" in
+        ''|*[!A-Za-z0-9_-]*) printf 'ERROR: bus trace tag must match [A-Za-z0-9_-]+ (got %s)\n' "${1:-nothing}" >&2; return 2 ;;
+    esac
+}
+
+# qci_bus_trace_start <tag> — start a trace into $QCI_BUS_TRACE_DIR/<tag>.log
+# and return once it is proven attached (bounded, 10 s).
+qci_bus_trace_start() {
+    local tag=$1 d=$QCI_BUS_TRACE_DIR tok i p
+    _qci_bus_trace_tag_ok "$tag" || return 2
+    install -d -m 0700 "$d" || return 1
+    qci_bus_trace_stop "$tag" >/dev/null 2>&1 || true
+    rm -f -- "$d/$tag.log" "$d/$tag.pid" "$d/$tag.start"
+    # shellcheck disable=SC2016 # $$ and $1.. expand in the inner shell
+    setsid -f /bin/sh -c 'echo $$ >"$1"; exec dbus-monitor --system "$2" "$3" "$4" >"$5" 2>&1 </dev/null' \
+        _ "$d/$tag.pid" \
+        "type='method_call',interface='org.qdistro.AdminBroker1'" \
+        "type='signal',interface='org.qdistro.AdminBroker1'" \
+        "type='signal',interface='org.qdistro.QciProbe',member='Ready'" \
+        "$d/$tag.log"
+    tok="qci-trace-$tag-$$-$RANDOM"
+    for ((i = 0; i < 100; i++)); do
+        dbus-send --system --type=signal /org/qdistro/QciProbe \
+            org.qdistro.QciProbe.Ready "string:$tok" 2>/dev/null
+        if grep -q -- "$tok" "$d/$tag.log" 2>/dev/null; then
+            p=$(cat "$d/$tag.pid" 2>/dev/null)
+            _qci_proc_starttime "$p" > "$d/$tag.start" 2>/dev/null || true
+            printf 'bus trace %s attached (dbus-monitor pid %s, log %s)\n' "$tag" "$p" "$d/$tag.log"
+            return 0
+        fi
+        sleep 0.1
+    done
+    printf 'ERROR: bus trace %s never saw its own readiness probe; dbus-monitor output:\n' "$tag" >&2
+    head -20 "$d/$tag.log" >&2 2>/dev/null || true
+    qci_bus_trace_stop "$tag" >/dev/null 2>&1 || true
+    return 1
+}
+
+# qci_bus_trace_stop <tag> — stop the trace's dbus-monitor (pid + starttime +
+# comm identity); the log is kept.
+qci_bus_trace_stop() {
+    local tag=$1 d=$QCI_BUS_TRACE_DIR p start i
+    _qci_bus_trace_tag_ok "$tag" || return 2
+    p=$(cat "$d/$tag.pid" 2>/dev/null) || return 0
+    case "$p" in ''|0|1|*[!0-9]*) return 0 ;; esac
+    start=$(cat "$d/$tag.start" 2>/dev/null)
+    [ "$(cat "/proc/$p/comm" 2>/dev/null)" = dbus-monitor ] || return 0
+    [ -z "$start" ] || [ "$(_qci_proc_starttime "$p" 2>/dev/null)" = "$start" ] || return 0
+    kill "$p" 2>/dev/null || true
+    for ((i = 0; i < 50; i++)); do
+        [ -d "/proc/$p" ] || return 0
+        sleep 0.1
+    done
+    kill -KILL "$p" 2>/dev/null || true
+    return 0
+}
+
+# _qci_proc_starttime <pid> — field 22 of /proc/<pid>/stat (after the comm).
+_qci_proc_starttime() {
+    local s
+    s=$(cat "${QCI_PROC_ROOT:-/proc}/$1/stat" 2>/dev/null) || return 1
+    s=${s##*) }
+    # shellcheck disable=SC2086 # split the stat fields on purpose
+    set -- $s
+    printf '%s\n' "${20}"
+}
+
+# qci_bus_names_of_pid <pid> — the unique system-bus names a live process owns
+# (one per connection), from the bus's own credentials.
+qci_bus_names_of_pid() {
+    local want=$1
+    case "$want" in ''|*[!0-9]*) printf 'ERROR: qci_bus_names_of_pid needs a pid\n' >&2; return 2 ;; esac
+    busctl --system list --unique --no-legend --no-pager 2>/dev/null \
+        | awk -v p="$want" '$2 == p { print $1 }'
+}
+
+# qci_bus_trace_events <tag> — the trace as TSV, one line per message:
+#   <epoch.us>\t<call|signal>\t<sender>\t<member>\t<args, comma-joined>
+qci_bus_trace_events() {
+    local tag=$1
+    _qci_bus_trace_tag_ok "$tag" || return 2
+    [ -r "$QCI_BUS_TRACE_DIR/$tag.log" ] || {
+        printf 'ERROR: no bus trace log for %s (start it with qci_bus_trace_start)\n' "$tag" >&2
+        return 1
+    }
+    "$QCI_GUEST_PYTHON" -I - "$QCI_BUS_TRACE_DIR/$tag.log" <<'PY'
+import re, sys
+HDR = re.compile(r"^(method call|signal) time=(\d+\.\d+) sender=(\S+) -> "
+                 r"destination=.*?member=(\S+)\s*$")
+ARG = re.compile(r"^\s+(?:int32|uint32|int64|uint64|string|boolean|double) (.*)$")
+cur = None
+def flush():
+    if cur:
+        print("\t".join([cur[0], cur[1], cur[2], cur[3], ",".join(cur[4])]))
+for line in open(sys.argv[1], errors="replace"):
+    m = HDR.match(line)
+    if m:
+        flush()
+        kind = "call" if m.group(1) == "method call" else "signal"
+        cur = [m.group(2), kind, m.group(3), m.group(4), []]
+        continue
+    a = ARG.match(line)
+    if cur and a and len(cur[4]) < 8:
+        cur[4].append(a.group(1).strip().strip('"'))
+flush()
+PY
+}
+
+# qci_bus_trace_count <tag> <call|signal> <member> <pid|-> [since-epoch]
+# Print how many <member> messages of that kind the trace holds, sent by any
+# connection of the live process <pid> ("-": any sender), at or after <since>.
+qci_bus_trace_count() {
+    local tag=$1 kind=$2 member=$3 pid=$4 since=${5:-0} names
+    case "$kind" in call|signal) ;; *) printf 'ERROR: kind must be call or signal\n' >&2; return 2 ;; esac
+    if [ "$pid" = - ]; then
+        names=-
+    else
+        names=$(qci_bus_names_of_pid "$pid" | paste -sd ' ') || return 1
+        [ -n "$names" ] || { printf 'ERROR: pid %s owns no system-bus connection (is it still running?)\n' "$pid" >&2; return 1; }
+    fi
+    qci_bus_trace_events "$tag" | awk -F'\t' -v k="$kind" -v m="$member" -v n="$names" -v s="$since" '
+        BEGIN { if (n != "-") { c = split(n, a, " "); for (i = 1; i <= c; i++) own[a[i]] = 1 } }
+        $2 == k && $4 == m && ($1 + 0) >= (s + 0) && (n == "-" || ($3 in own)) { cnt++ }
+        END { print cnt + 0 }'
+}
+
+# ---- the admin TUI, hosted in foot -----------------------------------------
+#
+# The Textual admin TUI ships as /usr/local/bin/qdistro-admin-tui, a symlink
+# into the root-owned /usr/local/lib/qdistro/admin-tui/ that
+# scripts/install/install-admin-cli-for-vm.sh lays down (the image chain runs
+# the same installer). The broker lets an admin-uid peer exercise authority
+# only as THAT script run `/usr/bin/python3 -I <path>`, with no arguments and an
+# allowlisted environment (_peer_is_installed_admin_script); the entry point
+# re-execs itself into that shape (_reexec_for_authority). So the scenarios
+# start the installed command with no arguments and verify the resulting
+# process -- never a dev copy, a wrapper, or root.
+#
+# The terminal is `foot`, a test client every golden bakes
+# (fresh-vm-bootstrap.sh, "Core test clients") and the image does NOT ship:
+# the shipped terminal is qterminator. The scenarios test the TUI, not a
+# terminal, and give no qterminator coverage.
+#
+# One TUI per scenario VM. Its identity lives in a root-only state directory so
+# every later guest shell (one per vm-exec) reads the same processes:
+#   title  foot.pid foot.start  tui.pid tui.start  tui.bus  foot.log
+# and the broker bus trace `admin-tui` started with it records the traffic the
+# scenarios use as evidence (qdwin_admin_tui_* below).
+: "${QCI_ADMIN_TUI_STATE:=/run/qci-admin-tui}"
+: "${QCI_ADMIN_TUI_ENTRY:=/usr/local/bin/qdistro-admin-tui}"
+: "${QCI_ADMIN_TUI_LIB:=/usr/local/lib/qdistro/admin-tui/qdistro_admin_tui.py}"
+: "${QCI_ADMIN_TUI_SRC:=/root/qdistro-src/tui/qdistro_admin_tui.py}"
+: "${QCI_ADMIN_TUI_BROKER_MODULE:=/usr/libexec/qdistro/qdistro_admin_broker.py}"
+: "${QCI_ADMIN_TUI_PYTHON:=/usr/bin/python3}"
+: "${QCI_ADMIN_TUI_FOOT:=foot}"
+
+# qdwin_admin_tui_check_install — the installed TUI is the installer's, intact,
+# and runnable: the entry symlink points at the root-owned module (not a
+# wrapper written THROUGH the symlink, which is what the retired golden step
+# did), the module matches the source tree when that is present, Textual and
+# Rich import under the system interpreter, and foot exists. Every failure is
+# a bake regression: report ERROR, never skip.
+qdwin_admin_tui_check_install() {
+    local entry=$QCI_ADMIN_TUI_ENTRY lib=$QCI_ADMIN_TUI_LIB owner=${QCI_ADMIN_TUI_OWNER_UID:-0}
+    local target f st uid mode first
+    target=$(readlink -- "$entry" 2>/dev/null) || target=""
+    if [ "$target" != "$lib" ]; then
+        printf 'ERROR: %s is not the installer'\''s symlink to %s (readlink: %s)\n' \
+            "$entry" "$lib" "${target:-not a symlink}" >&2
+        return 1
+    fi
+    if [ -L "$lib" ] || [ ! -f "$lib" ]; then
+        printf 'ERROR: %s is not a regular file\n' "$lib" >&2
+        return 1
+    fi
+    for f in "$lib" "$(dirname -- "$lib")"; do
+        st=$(stat -c '%u %a' -- "$f" 2>/dev/null) || { printf 'ERROR: cannot stat %s\n' "$f" >&2; return 1; }
+        uid=${st%% *}; mode=${st##* }
+        if [ "$uid" != "$owner" ]; then
+            printf 'ERROR: %s is owned by uid %s, not %s\n' "$f" "$uid" "$owner" >&2
+            return 1
+        fi
+        if (( (8#$mode & 8#022) != 0 )); then
+            printf 'ERROR: %s is group/other writable (mode %s)\n' "$f" "$mode" >&2
+            return 1
+        fi
+    done
+    IFS= read -r first < "$lib" || first=""
+    if [ "$first" != '#!/usr/bin/python3 -I' ] || ! grep -q '^def _reexec_for_authority' "$lib"; then
+        printf 'ERROR: %s is not the installed TUI module (first line: %s); a wrapper replaced it\n' \
+            "$lib" "$first" >&2
+        return 1
+    fi
+    if [ -f "$QCI_ADMIN_TUI_SRC" ]; then
+        cmp -s -- "$lib" "$QCI_ADMIN_TUI_SRC" || {
+            printf 'ERROR: %s differs from the source tree %s\n' "$lib" "$QCI_ADMIN_TUI_SRC" >&2
+            return 1
+        }
+    fi
+    if ! "$QCI_ADMIN_TUI_PYTHON" -I -c 'import textual, rich' >/dev/null 2>&1; then
+        printf 'ERROR: Textual/Rich do not import under %s -I: the golden must bake python314-textual and python314-rich (fresh-vm-bootstrap.sh); a bake regression, not a skip\n' \
+            "$QCI_ADMIN_TUI_PYTHON" >&2
+        return 1
+    fi
+    command -v "$QCI_ADMIN_TUI_FOOT" >/dev/null 2>&1 || {
+        printf 'ERROR: foot is missing: it is a core test client of every golden (fresh-vm-bootstrap.sh)\n' >&2
+        return 1
+    }
+    printf 'admin TUI install OK: %s -> %s\n' "$entry" "$lib"
+}
+
+# qdwin_admin_tui_identity <tui-pid> [foot-pid] — the process IS the installed
+# TUI in the shape the broker admits for authority: the root-owned system
+# python3 started `-I <installed path>` with no arguments, uid 1000, an
+# environment inside the broker's own allowlist (read from the installed
+# broker module, so this cannot drift from what the broker checks), and,
+# given <foot-pid>, a child of that terminal. Prints the evidence; 0 = OK.
+qdwin_admin_tui_identity() {
+    "$QCI_GUEST_PYTHON" -I - "${QCI_PROC_ROOT:-/proc}" "$1" "${2:-}" \
+        "$QCI_ADMIN_TUI_ENTRY" "$QCI_ADMIN_TUI_BROKER_MODULE" "${QCI_ADMIN_TUI_UID:-1000}" <<'PY'
+import ast, os, re, sys
+proc, tpid, fpid, entry, broker, want_uid = sys.argv[1:7]
+
+def fail(msg):
+    print(f"identity: FAIL pid={tpid}: {msg}")
+    sys.exit(1)
+
+if not tpid.isdigit():
+    fail("not a pid")
+
+def constants(path):
+    try:
+        tree = ast.parse(open(path).read(), path)
+    except (OSError, SyntaxError) as e:
+        fail(f"cannot read the broker's allowlist from {path}: {e}")
+    out = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            if name in ("_ADMIN_CONTROL_ENV_ALLOW", "_ADMIN_CONTROL_QPA_VALUES",
+                        "_ADMIN_CONTROL_ENV_ALLOW_PREFIX", "_POLKIT_AGENT_EXE_DIRS"):
+                v = node.value
+                if isinstance(v, ast.Call) and v.args:
+                    v = v.args[0]
+                out[name] = ast.literal_eval(v)
+    missing = {"_ADMIN_CONTROL_ENV_ALLOW", "_ADMIN_CONTROL_QPA_VALUES",
+               "_ADMIN_CONTROL_ENV_ALLOW_PREFIX", "_POLKIT_AGENT_EXE_DIRS"} - set(out)
+    if missing:
+        fail(f"broker module {path} lacks {sorted(missing)}")
+    return out
+
+c = constants(broker)
+base = os.path.join(proc, tpid)
+try:
+    exe = os.readlink(os.path.join(base, "exe"))
+    argv = [a.decode(errors="replace")
+            for a in open(os.path.join(base, "cmdline"), "rb").read().split(b"\0")[:-1]]
+    env = {}
+    for e in open(os.path.join(base, "environ"), "rb").read().split(b"\0"):
+        if b"=" in e:
+            k, v = e.split(b"=", 1)
+            env[k.decode(errors="replace")] = v.decode(errors="replace")
+    status = open(os.path.join(base, "status")).read()
+    stat = open(os.path.join(base, "stat")).read()
+except OSError as e:
+    fail(f"unreadable: {e}")
+
+if not (re.fullmatch(r"python3(\.\d+)?", os.path.basename(exe))
+        and os.path.dirname(exe) in c["_POLKIT_AGENT_EXE_DIRS"]
+        and " (deleted)" not in exe):
+    fail(f"exe {exe!r} is not the root-owned system python3")
+if argv[1:] != ["-I", entry]:
+    fail(f"argv {argv!r} is not [python3, -I, {entry}] (no TUI arguments, isolated)")
+uids = next((l.split()[1:] for l in status.splitlines() if l.startswith("Uid:")), [])
+if not uids or set(uids[:2]) != {want_uid}:
+    fail(f"real/effective uid {uids[:2]} is not {want_uid}")
+bad = sorted(k for k in env if k not in c["_ADMIN_CONTROL_ENV_ALLOW"]
+             and not k.startswith(c["_ADMIN_CONTROL_ENV_ALLOW_PREFIX"]))
+if bad:
+    fail(f"environment outside the broker allowlist: {bad} (not yet re-exec'd?)")
+if "QT_QPA_PLATFORM" in env and env["QT_QPA_PLATFORM"] not in c["_ADMIN_CONTROL_QPA_VALUES"]:
+    fail(f"QT_QPA_PLATFORM={env['QT_QPA_PLATFORM']!r} not allowed")
+term = env.get("TERM", "")
+if term in ("", "dumb"):
+    fail(f"TERM={term!r}: the terminal environment did not survive the re-exec")
+ppid = stat.rsplit(")", 1)[1].split()[1]
+if fpid and ppid != fpid:
+    fail(f"parent pid {ppid} is not the foot terminal {fpid}")
+print(f"identity: OK pid={tpid} exe={exe} argv={argv} uid={want_uid} "
+      f"ppid={ppid} TERM={term} COLORTERM={env.get('COLORTERM', '')} "
+      f"LANG={env.get('LANG', '')} env_keys={sorted(env)}")
+PY
+}
+
+# _qdwin_admin_tui_state <name> — one recorded value, or fail naming it.
+_qdwin_admin_tui_state() {
+    local v
+    v=$(cat "$QCI_ADMIN_TUI_STATE/$1" 2>/dev/null) || v=""
+    [ -n "$v" ] || { printf 'ERROR: no admin TUI recorded (%s/%s missing); start it with qdwin_start_admin_tui\n' "$QCI_ADMIN_TUI_STATE" "$1" >&2; return 1; }
+    printf '%s\n' "$v"
+}
+
+_probe_admin_tui_child() {
+    local fpid=$1 kids n out
+    kids=$(pgrep -P "$fpid" 2>/dev/null | paste -sd ' ')
+    n=$(printf '%s' "$kids" | wc -w)
+    if [ "$n" -ne 1 ]; then
+        printf 'foot pid %s has %s child process(es): [%s]' "$fpid" "$n" "$kids"
+        return 1
+    fi
+    out=$(qdwin_admin_tui_identity "$kids" "$fpid") || { printf '%s' "$out"; return 1; }
+    printf '%s\n' "$kids" > "$QCI_ADMIN_TUI_STATE/tui.pid"
+    printf '%s' "$out"
+}
+
+_probe_admin_tui_mounted() {
+    local tpid=$1 names name
+    names=$(qci_bus_names_of_pid "$tpid")
+    [ -n "$names" ] || { printf 'TUI pid %s has no system-bus connection yet' "$tpid"; return 1; }
+    for name in $names; do
+        if qci_bus_trace_events admin-tui 2>/dev/null \
+                | awk -F'\t' -v n="$name" '$2 == "call" && $3 == n && $4 == "GetPending" { f = 1 } END { exit !f }'; then
+            printf '%s\n' "$name" > "$QCI_ADMIN_TUI_STATE/tui.bus"
+            printf 'TUI connection %s made its first GetPending (mounted, subscribed)' "$name"
+            return 0
+        fi
+    done
+    printf 'TUI connection(s) %s made no GetPending yet' "$names"
+    return 1
+}
+
+# qdwin_start_admin_tui [tag] — start foot running the INSTALLED TUI (no
+# arguments) as the admin uid on wayland-1, and return once it is ready:
+#   1. foot's toplevel (unique, locked title) is mapped by the compositor;
+#   2. foot's one child IS the installed TUI in the broker's authority shape
+#      (qdwin_admin_tui_identity, after its re-exec);
+#   3. that TUI has mounted: its first GetPending is in the bus trace, which
+#      on_mount sends only after subscribing to RequestPending/RequestDecided.
+# Prints title/foot_pid/tui_pid/tui_bus. Fails (bounded, naming what it saw)
+# otherwise. foot is a golden-only test client; the TUI is the shipped one.
+qdwin_start_admin_tui() {
+    local tag=${1:-tui} st=$QCI_ADMIN_TUI_STATE title h fpid tpid argv
+    case "$tag" in ''|*[!A-Za-z0-9_-]*) printf 'usage: qdwin_start_admin_tui [tag: A-Za-z0-9_-]\n' >&2; return 2 ;; esac
+    qdwin_admin_tui_check_install || return 1
+    if pgrep -u 1000 -f '[q]distro-admin-tui|[q]distro_admin_tui' >/dev/null 2>&1; then
+        printf 'ERROR: an admin TUI is already running (qdwin_stop_admin_tui first): %s\n' \
+            "$(pgrep -a -u 1000 -f '[q]distro-admin-tui|[q]distro_admin_tui' | paste -sd ';')" >&2
+        return 1
+    fi
+    rm -rf -- "$st"
+    install -d -m 0700 "$st" || return 1
+    title="qci-admin-tui-$tag-$(date +%s)-$$"
+    printf '%s\n' "$title" > "$st/title"
+    qci_bus_trace_start admin-tui >/dev/null || return 1
+    # Root opens the log in its own 0700 directory; foot inherits the fd, so no
+    # admin-controlled path is ever opened as root. The environment is a clean
+    # session subset: the TUI re-execs into the broker allowlist anyway, and
+    # foot sets TERM/COLORTERM for its child. locked-title keeps the window's
+    # title ours, so focus and capture target exactly this terminal.
+    setsid -f runuser -u admin -- env -i HOME=/home/admin USER=admin LOGNAME=admin \
+        SHELL=/bin/bash PATH=/usr/bin:/bin LANG=C.UTF-8 \
+        XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
+        DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus XDG_SESSION_TYPE=wayland \
+        "$QCI_ADMIN_TUI_FOOT" --app-id=qci-admin-tui --title="$title" --maximized \
+            --override=locked-title=yes -- "$QCI_ADMIN_TUI_ENTRY" \
+        </dev/null >"$st/foot.log" 2>&1
+    if ! QCI_AWAIT_QUIET=1 await_qdwin_window_title "$title" 30 0.5 >/dev/null; then
+        printf 'ERROR: foot never mapped a window titled %s; foot log:\n' "$title" >&2
+        sed 's/^/  foot: /' "$st/foot.log" >&2 2>/dev/null || true
+        return 1
+    fi
+    h=$(qdwin_window_handle "$title") || return 1
+    fpid=$(qdwin_windows | awk -F'\t' -v h="$h" '$1 == h { print $2 }')
+    argv=$(tr '\0' ' ' < "/proc/$fpid/cmdline" 2>/dev/null)
+    if [ "$(cat "/proc/$fpid/comm" 2>/dev/null)" != foot ] \
+            || [ "$(stat -c %u "/proc/$fpid" 2>/dev/null)" != 1000 ] \
+            || [[ "$argv" != *"--title=$title "* ]]; then
+        printf 'ERROR: window %s (pid %s) is not this launch'\''s foot (argv: %s)\n' "$h" "$fpid" "$argv" >&2
+        return 1
+    fi
+    QCI_AWAIT_QUIET=1 await_qdwin_window_mapped_pid "$fpid" 30 0.2 >/dev/null || return 1
+    printf '%s\n' "$fpid" > "$st/foot.pid"
+    _qci_proc_starttime "$fpid" > "$st/foot.start" || return 1
+    if ! QCI_AWAIT_QUIET=1 _await "the installed admin TUI as foot pid $fpid's child" 30 0.5 \
+            _probe_admin_tui_child "$fpid" >/dev/null; then
+        sed 's/^/  foot: /' "$st/foot.log" >&2 2>/dev/null || true
+        return 1
+    fi
+    tpid=$(cat "$st/tui.pid")
+    _qci_proc_starttime "$tpid" > "$st/tui.start" || return 1
+    if ! QCI_AWAIT_QUIET=1 _await "admin TUI pid $tpid mounted (first GetPending on the bus)" 30 0.5 \
+            _probe_admin_tui_mounted "$tpid" >/dev/null; then
+        sed 's/^/  foot: /' "$st/foot.log" >&2 2>/dev/null || true
+        return 1
+    fi
+    printf 'title=%s\nfoot_pid=%s\ntui_pid=%s\ntui_bus=%s\n' "$title" "$fpid" "$tpid" "$(cat "$st/tui.bus")"
+    qdwin_admin_tui_identity "$tpid" "$fpid"
+}
+
+# qdwin_admin_tui_alive — the SAME foot and TUI processes recorded at start are
+# still running (pid AND starttime: a relaunch, or a recycled pid, fails), and
+# the TUI still passes qdwin_admin_tui_identity. Prints the evidence.
+qdwin_admin_tui_alive() {
+    local fpid tpid fst tst
+    fpid=$(_qdwin_admin_tui_state foot.pid) || return 1
+    tpid=$(_qdwin_admin_tui_state tui.pid) || return 1
+    fst=$(_qdwin_admin_tui_state foot.start) || return 1
+    tst=$(_qdwin_admin_tui_state tui.start) || return 1
+    if [ "$(_qci_proc_starttime "$fpid" 2>/dev/null)" != "$fst" ]; then
+        printf 'ERROR: the recorded foot (pid %s, start %s) is gone\n' "$fpid" "$fst" >&2
+        return 1
+    fi
+    if [ "$(_qci_proc_starttime "$tpid" 2>/dev/null)" != "$tst" ]; then
+        printf 'ERROR: the recorded admin TUI (pid %s, start %s) is gone or was relaunched\n' "$tpid" "$tst" >&2
+        return 1
+    fi
+    printf 'same processes: foot pid %s (start %s), TUI pid %s (start %s)\n' "$fpid" "$fst" "$tpid" "$tst"
+    qdwin_admin_tui_identity "$tpid" "$fpid"
+}
+
+# qdwin_focus_admin_tui [timeout] — keyboard focus on THIS launch's foot
+# window (its locked title AND its pid), proven by the compositor's focus
+# line, then the same-process check. Call it right before every key burst.
+qdwin_focus_admin_tui() {
+    local title fpid
+    title=$(_qdwin_admin_tui_state title) || return 1
+    fpid=$(_qdwin_admin_tui_state foot.pid) || return 1
+    qdwin_focus_window "$title" "${1:-15}" "$fpid" || return 1
+    qdwin_admin_tui_alive >/dev/null || return 1
+}
+
+# qdwin_stop_admin_tui — stop the recorded foot and TUI (identity-checked),
+# make sure no admin TUI of any launch survives, and stop the bus trace. The
+# logs ($QCI_ADMIN_TUI_STATE/foot.log, the trace log) are kept for artifacts.
+qdwin_stop_admin_tui() {
+    local f p start i
+    for f in tui foot; do
+        p=$(cat "$QCI_ADMIN_TUI_STATE/$f.pid" 2>/dev/null) || continue
+        start=$(cat "$QCI_ADMIN_TUI_STATE/$f.start" 2>/dev/null) || continue
+        case "$p" in ''|0|1|*[!0-9]*) continue ;; esac
+        [ "$(_qci_proc_starttime "$p" 2>/dev/null)" = "$start" ] && kill "$p" 2>/dev/null
+    done
+    for ((i = 0; i < 50; i++)); do
+        pgrep -u 1000 -f '[q]distro-admin-tui|[q]distro_admin_tui|[q]ci-admin-tui' >/dev/null 2>&1 || break
+        sleep 0.1
+    done
+    pkill -KILL -u 1000 -f '[q]distro-admin-tui|[q]distro_admin_tui|[q]ci-admin-tui' 2>/dev/null || true
+    qci_bus_trace_stop admin-tui >/dev/null 2>&1 || true
+    sleep 0.3
+    ! pgrep -u 1000 -f '[q]distro-admin-tui|[q]distro_admin_tui|[q]ci-admin-tui' >/dev/null 2>&1
+}
+
+# qdwin_admin_tui_bus_report — the TUI's broker traffic and the broker's
+# RequestPending/RequestDecided signals from the `admin-tui` trace, with the
+# TUI's 30 s safety-poll ticks, as evidence lines for a transcript.
+qdwin_admin_tui_bus_report() {
+    local names
+    names=$(_qdwin_admin_tui_state tui.bus) || return 1
+    qci_bus_trace_events admin-tui | _qdwin_admin_tui_analyse report "$names" 0
+}
+
+# qdwin_admin_tui_await_signal_refresh <since-epoch> [timeout]
+# Wait until the TUI refreshed its queue BECAUSE of a broker RequestPending
+# signal sent at or after <since>: a TUI GetPending within 2 s after that
+# signal, more than 3 s from every tick of its 30 s safety poll (which runs
+# from its first GetPending). That is the evidence that the signal
+# subscription delivered -- a refresh that only coincides with a poll tick
+# proves nothing and keeps the wait going; on TIMEOUT the last observation
+# says which happened (no signal / no refresh / poll-coincident only).
+qdwin_admin_tui_await_signal_refresh() {
+    local since=${1:?usage: qdwin_admin_tui_await_signal_refresh <since-epoch> [timeout]} timeout=${2:-30} names
+    names=$(_qdwin_admin_tui_state tui.bus) || return 1
+    _await "admin TUI refresh driven by a RequestPending signal since $since" "$timeout" 0.5 \
+        _probe_admin_tui_signal_refresh "$names" "$since"
+}
+_probe_admin_tui_signal_refresh() {
+    qci_bus_trace_events admin-tui | _qdwin_admin_tui_analyse refresh "$1" "$2"
+}
+
+# qdwin_admin_tui_removed_by_signal <since-epoch>
+# After a decision made ELSEWHERE (the admin app), prove the TUI's empty queue
+# came from the broker's RequestDecided signal and not from a poll: a
+# RequestDecided at or after <since> is in the trace, the TUI made NO
+# DecideRequest of its own, and every TUI GetPending since <since> (the TUI's
+# cheap path removes a known row without one) followed a broker signal within
+# 2 s away from a poll tick. Call it AFTER capturing the frame that shows the
+# empty queue, so "no poll refresh until now" covers that frame.
+qdwin_admin_tui_removed_by_signal() {
+    local since=${1:?usage: qdwin_admin_tui_removed_by_signal <since-epoch>} names
+    names=$(_qdwin_admin_tui_state tui.bus) || return 1
+    qci_bus_trace_events admin-tui | _qdwin_admin_tui_analyse removed "$names" "$since"
+}
+
+# _qdwin_admin_tui_analyse <report|refresh|removed> <tui-bus-names> <since>
+# reads qci_bus_trace_events TSV on stdin. The poll phase is the TUI's first
+# GetPending (on_mount refreshes, then starts its 30 s interval).
+_qdwin_admin_tui_analyse() {
+    "$QCI_GUEST_PYTHON" -I -c '
+import sys
+mode, names, since = sys.argv[1], set(sys.argv[2].split()), float(sys.argv[3])
+POLL, NEAR, AFTER = 30.0, 3.0, 2.0
+ev = []
+for line in sys.stdin:
+    f = line.rstrip("\n").split("\t")
+    if len(f) == 5:
+        ev.append((float(f[0]), f[1], f[2], f[3], f[4]))
+tui = [e for e in ev if e[2] in names]
+gets = [e[0] for e in tui if e[1] == "call" and e[3] == "GetPending"]
+if not gets:
+    print("no GetPending from the TUI connection(s) %s in the trace" % sorted(names)); sys.exit(1)
+m = gets[0]
+def tick_dist(t):
+    k = max(1, round((t - m) / POLL))
+    return abs(t - (m + k * POLL))
+sigs = [e for e in ev if e[1] == "signal" and e[3] in ("RequestPending", "RequestDecided")]
+def driven(g):
+    for s in sigs:
+        if s[0] <= g <= s[0] + AFTER and tick_dist(g) > NEAR:
+            return s
+    return None
+if mode == "report":
+    print("tui_first_getpending=%.3f (poll ticks every %ds after it)" % (m, POLL))
+    for e in ev:
+        who = "TUI" if e[2] in names else e[2]
+        extra = " tick_distance=%.1fs" % tick_dist(e[0]) if e[2] in names and e[3] == "GetPending" and e[0] > m else ""
+        print("%.3f %s %s %s(%s)%s" % (e[0], e[1], who, e[3], e[4], extra))
+    sys.exit(0)
+if mode == "refresh":
+    seen = [s for s in sigs if s[3] == "RequestPending" and s[0] >= since]
+    if not seen:
+        print("no RequestPending signal since %.3f" % since); sys.exit(1)
+    notes = []
+    for s in seen:
+        for g in gets:
+            if s[0] <= g <= s[0] + AFTER:
+                if tick_dist(g) > NEAR:
+                    print("SIGNAL-DRIVEN: RequestPending(%s) at %.3f, TUI GetPending at %.3f (+%.2fs), %.1fs from the nearest safety-poll tick" % (s[4], s[0], g, g - s[0], tick_dist(g)))
+                    sys.exit(0)
+                notes.append("TUI GetPending at %.3f follows RequestPending(%s) but is %.1fs from a safety-poll tick: INCONCLUSIVE" % (g, s[4], tick_dist(g)))
+    print("; ".join(notes) or "RequestPending at %s but no TUI GetPending within %ss after it" % ([round(s[0], 3) for s in seen], AFTER))
+    sys.exit(1)
+if mode == "removed":
+    dec = [s for s in sigs if s[3] == "RequestDecided" and s[0] >= since]
+    if not dec:
+        print("FAIL: no RequestDecided signal since %.3f" % since); sys.exit(1)
+    own = [e for e in tui if e[1] == "call" and e[3] == "DecideRequest"]
+    if own:
+        print("FAIL: the TUI itself called DecideRequest: %s" % [(round(e[0], 3), e[4]) for e in own]); sys.exit(1)
+    late = [g for g in gets if g >= since]
+    unexplained = [g for g in late if driven(g) is None]
+    if unexplained:
+        print("FAIL: TUI GetPending at %s since %.3f not explained by a broker signal (safety poll?)" % ([round(g, 3) for g in unexplained], since)); sys.exit(1)
+    print("OK: RequestDecided(%s) at %.3f; TUI made no DecideRequest; TUI GetPending since then: %s (each within %ss of a broker signal, away from poll ticks)" % (dec[0][4], dec[0][0], [round(g, 3) for g in late] or "none", AFTER))
+    sys.exit(0)
+print("unknown mode " + mode); sys.exit(2)
+' "$@"
 }
 
 _probe_system_unit_active() {
