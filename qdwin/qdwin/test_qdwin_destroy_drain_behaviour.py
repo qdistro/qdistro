@@ -194,6 +194,14 @@ struct weston_keyboard_grab {
 	void *interface;
 	struct weston_keyboard *keyboard;
 };
+struct weston_touch_grab {
+	void *interface;
+	struct weston_touch *touch;
+};
+struct weston_touch {
+	struct weston_touch_grab *grab;
+	struct weston_touch_grab default_grab;
+};
 struct weston_pointer {
 	struct weston_pointer_grab *grab;
 	struct weston_pointer_grab default_grab;
@@ -369,6 +377,7 @@ struct qdwin_layer_popup {
 	struct wl_listener popup_resource_destroy_listener;
 	struct wl_list link;
 	struct weston_pointer_grab grab;
+	struct weston_touch_grab touch_grab;
 	int grab_active;
 	struct wl_listener seat_destroy_listener;
 	struct weston_seat *grab_seat;
@@ -628,6 +637,12 @@ static void weston_keyboard_end_grab(struct weston_keyboard *k)
 	kbd_end_grab_calls++;
 	k->grab = &k->default_grab;
 }
+static int touch_end_grab_calls;
+static void weston_touch_end_grab(struct weston_touch *t)
+{
+	touch_end_grab_calls++;
+	t->grab = &t->default_grab;
+}
 static void weston_keyboard_send_modifiers(struct weston_keyboard *k,
 					   uint32_t s, uint32_t a,
 					   uint32_t b, uint32_t c,
@@ -817,8 +832,13 @@ SPLICED = [
     "qdwin_layer_popup_kbd_restore_set",
     "qdwin_layer_popup_chain_keyboard",
     "qdwin_layer_popup_chain_refocus",
+    "qdwin_layer_popup_pointer_grab_installed",
+    "qdwin_layer_popup_touch_grab_installed",
+    "qdwin_layer_popup_end_grabs",
     "qdwin_layer_popup_dismiss_chain",
+    "qdwin_layer_popup_grab_dismiss",
     "qdwin_layer_popup_grab_cancel",
+    "qdwin_layer_popup_touch_grab_cancel",
     "qdwin_layer_popup_destroy",
     "qdwin_layer_surface_resource_destroy",
     "qdwin_layer_surfaces_destroy_all",
@@ -971,6 +991,7 @@ static void init_input(void)
 static void reset_counters(void)
 {
 	end_grab_calls = kbd_end_grab_calls = pick_calls = set_focus_calls = 0;
+	touch_end_grab_calls = 0;
 	view_destroy_calls = view_unmap_calls = unlink_view_calls = 0;
 	curtain_destroy_calls = dismissed_calls = torn_down_calls = 0;
 	toplevel_removed_calls = unpublish_calls = sink_focus_calls = 0;
@@ -1616,13 +1637,23 @@ static int case_layer_popup_nested_chain(void)
 	lp->popup_resource = popup_res;
 	layer_popup_nest(lp);
 	layer_popup_nest(lp);
+	struct weston_view root_view = { 0 };
+	lp->view = &root_view;
 	qdwin_layer_popup_grab_cancel(&lp->grab);
 	CHECK(layer_popup_done_calls == 3,
 	      "chain cancel did not send popup_done to both nested popups "
 	      "and the root");
 	CHECK(wl_list_empty(&lp->nested),
 	      "chain cancel kept nested records");
+	/* D9 follow-up: dismissal unmaps the chain at once (the submenus'
+	 * views hang below the root's), not when the client answers. */
+	CHECK(root_view.destroyed && unlink_view_calls == 1 &&
+	      view_destroy_calls == 1 && lp->view == NULL,
+	      "chain dismissal left the root view mapped until the client "
+	      "destroys the popup");
 	qdwin_layer_popup_destroy(lp);
+	CHECK(view_destroy_calls == 1,
+	      "destroy after dismissal destroyed the root view again");
 	free(popup_res);
 
 	reset_counters();
@@ -1710,6 +1741,65 @@ static int case_layer_popup_grab_cancel(void)
 	CHECK(main_pointer.grab == &foreign && end_grab_calls == 0,
 	      "layer-popup destroy ended a grab it did not own");
 	main_pointer.grab = &main_pointer.default_grab;
+
+	/* D9 follow-up: the touch half. A touch cancel (touch device
+	 * released) ends BOTH halves and dismisses once; the later destroy
+	 * ends nothing twice. */
+	reset_counters();
+	layer_popup_done_calls = 0;
+	struct weston_touch touch = { 0 };
+	touch.grab = &touch.default_grab;
+	lp = layer_popup_new(1);
+	lp->touch_grab.touch = &touch;
+	touch.grab = &lp->touch_grab;
+	popup_res = res_new(lp, NULL);
+	lp->popup_resource = popup_res;
+	qdwin_layer_popup_touch_grab_cancel(&lp->touch_grab);
+	CHECK(touch.grab == &touch.default_grab && touch_end_grab_calls == 1,
+	      "touch cancel left the touch half installed");
+	CHECK(main_pointer.grab == &main_pointer.default_grab &&
+	      end_grab_calls == 1,
+	      "touch cancel left the pointer half installed");
+	CHECK(lp->touch_grab.touch == NULL && !lp->grab_active,
+	      "touch cancel kept a touch weston may reset");
+	CHECK(layer_popup_done_calls == 1,
+	      "touch cancel did not send popup_done once");
+	qdwin_layer_popup_destroy(lp);
+	CHECK(end_grab_calls == 1 && touch_end_grab_calls == 1 &&
+	      layer_popup_done_calls == 1,
+	      "destroy after touch cancel ended a grab or dismissed again");
+	free(popup_res);
+
+	/* A pointer cancel takes the touch half with it. */
+	reset_counters();
+	lp = layer_popup_new(1);
+	lp->touch_grab.touch = &touch;
+	touch.grab = &lp->touch_grab;
+	qdwin_layer_popup_grab_cancel(&lp->grab);
+	CHECK(touch.grab == &touch.default_grab && touch_end_grab_calls == 1,
+	      "pointer cancel left the touch half installed");
+	qdwin_layer_popup_destroy(lp);
+
+	/* Destroy ends a still-installed touch half (touch-only seat), and
+	 * leaves one replaced by another touch grab alone. */
+	reset_counters();
+	lp = layer_popup_new(0);
+	lp->grab.pointer = NULL;
+	lp->touch_grab.touch = &touch;
+	touch.grab = &lp->touch_grab;
+	qdwin_layer_popup_destroy(lp);
+	CHECK(touch.grab == &touch.default_grab && touch_end_grab_calls == 1,
+	      "destroy left an installed touch half pointing at the freed "
+	      "popup");
+	reset_counters();
+	struct weston_touch_grab tforeign = { .touch = &touch };
+	lp = layer_popup_new(0);
+	lp->grab.pointer = NULL;
+	lp->touch_grab.touch = &touch;
+	touch.grab = &tforeign;
+	qdwin_layer_popup_destroy(lp);
+	CHECK(touch.grab == &tforeign && touch_end_grab_calls == 0,
+	      "layer-popup destroy ended a touch grab it did not own");
 	return 0;
 }
 
@@ -2208,6 +2298,8 @@ def main():
         "qdwin_neutralize_binding_resource": "enum wl_iterator_result",
         "qdwin_overlay_grab_keyboard": "struct weston_keyboard *",
         "qdwin_layer_popup_chain_keyboard": "struct weston_keyboard *",
+        "qdwin_layer_popup_pointer_grab_installed": "bool",
+        "qdwin_layer_popup_touch_grab_installed": "bool",
     }
     for name in SPLICED:
         body = extract(qdwin_c, name)

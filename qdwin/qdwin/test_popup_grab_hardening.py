@@ -373,11 +373,15 @@ def check_d9_layer_popup_scope(source):
                     "weston_surface_get_main_surface")
     if "lp->parent" not in body:
         return fail("D9: refilter does not whitelist the layer parent surface")
-    # same-client delivery must now be gated on xdg_popup role, so a nested
-    # submenu still works but a hidden toplevel / unrelated panel does not.
-    if "qdwin_surface_is_xdg_popup" not in body:
-        return fail("D9: same-client delivery is not gated on xdg_popup role "
-                    "(would still leak grabbed input to toplevels/panels)")
+    # D9 follow-up: beyond the root and its parent, only a submenu that
+    # joined this grab is a target -- not any same-client xdg_popup (an
+    # ungrabbed tooltip, another panel's popup).
+    if "qdwin_layer_popup_chain_has" not in body:
+        return fail("D9: refilter does not confine delivery to the chain's "
+                    "joined submenus")
+    if "qdwin_surface_is_xdg_popup" in code or "wl_resource_get_client" in body:
+        return fail("D9: refilter still admits same-client popups outside "
+                    "the chain")
     # the old blanket same-client helper must be gone
     if "qdwin_layer_popup_grab_client" in code:
         return fail("D9: dead same-client helper qdwin_layer_popup_grab_client "
@@ -397,15 +401,24 @@ def check_d9_nested_chain(source):
     if "qdwin_layer_popup_chain_contains" not in body:
         return fail("D9: outside-click test ignores the nested chain (a press "
                     "on a submenu would dismiss the menu)")
-    if "qdwin_layer_popup_dismiss_chain" not in body:
+    if "qdwin_layer_popup_grab_dismiss" not in body:
         return fail("D9: outside click does not dismiss the nested chain")
     body, err = _function_body(
         code, r"qdwin_layer_popup_grab_cancel\s*\(",
         "qdwin_layer_popup_grab_cancel")
     if err:
         return fail(err)
-    if "qdwin_layer_popup_dismiss_chain" not in body:
+    if "qdwin_layer_popup_grab_dismiss" not in body:
         return fail("D9: grab cancel does not dismiss the nested chain")
+    body, err = _function_body(
+        code, r"qdwin_layer_popup_grab_dismiss\s*\(",
+        "qdwin_layer_popup_grab_dismiss")
+    if err:
+        return fail(err)
+    if ("qdwin_layer_popup_dismiss_chain" not in body or
+            "qdwin_layer_popup_end_grabs" not in body):
+        return fail("D9: ending the chain grab does not dismiss the chain "
+                    "and end both halves")
     body, err = _function_body(
         code, r"qdwin_layer_popup_layer_grab_handler\s*\(",
         "qdwin_layer_popup_layer_grab_handler")
@@ -420,8 +433,47 @@ def check_d9_nested_chain(source):
         return fail(err)
     if "weston_pointer_start_grab" in body:
         return fail("D9: a nested popup must join the root grab, not replace it")
-    if "root->grab.pointer->grab != &root->grab" not in body:
+    if ("qdwin_layer_popup_pointer_grab_installed(root)" not in body or
+            "qdwin_layer_popup_touch_grab_installed(root)" not in body):
         return fail("D9: nested grab does not require the root grab to be live")
+    return 0
+
+
+def check_d9_followups(source):
+    """D9 follow-ups: the chain grab has a touch half, and a dismissal
+    unmaps the chain before the client answers popup_done."""
+    code = _strip_comments(source)
+    body, err = _function_body(
+        code, r"qdwin_layer_popup_layer_grab_handler\s*\(",
+        "qdwin_layer_popup_layer_grab_handler")
+    if err:
+        return fail(err)
+    if "weston_touch_start_grab" not in body:
+        return fail("D9: the layer-popup grab installs no touch grab")
+    body, err = _function_body(
+        code, r"qdwin_layer_popup_touch_grab_down\s*\(",
+        "qdwin_layer_popup_touch_grab_down")
+    if err:
+        return fail(err)
+    if ("qdwin_layer_popup_touch_in_chain" not in body or
+            "qdwin_layer_popup_grab_dismiss" not in body):
+        return fail("D9: a touch down outside the chain does not dismiss it")
+    body, err = _function_body(
+        code, r"qdwin_layer_popup_end_grabs\s*\(",
+        "qdwin_layer_popup_end_grabs")
+    if err:
+        return fail(err)
+    if "weston_touch_end_grab" not in body or \
+            "weston_pointer_end_grab" not in body:
+        return fail("D9: ending the chain grab does not end both halves")
+    body, err = _function_body(
+        code, r"qdwin_layer_popup_dismiss_chain\s*\(",
+        "qdwin_layer_popup_dismiss_chain")
+    if err:
+        return fail(err)
+    if "weston_view_destroy(lp->view)" not in body:
+        return fail("D9: dismissing the chain leaves it mapped until the "
+                    "client destroys the popups")
     return 0
 
 
@@ -437,7 +489,8 @@ def main():
             (check_d7_show_popup_serial_source, source),
             (check_d7_show_popup_serial_protocol, xml),
             (check_d9_layer_popup_scope, source),
-            (check_d9_nested_chain, source)):
+            (check_d9_nested_chain, source),
+            (check_d9_followups, source)):
         rc = check(arg)
         if rc:
             return rc

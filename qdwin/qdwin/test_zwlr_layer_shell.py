@@ -1031,6 +1031,113 @@ def test_layer_chain_grab_live(display_name):
         s.close()
 
 
+def test_layer_chain_unmap_on_dismiss(display_name):
+    """D9 follow-up 2: a dismissed chain is unmapped with popup_done
+    (xdg_popup: "at the same time the surface will be unmapped"), not when
+    the client gets round to destroying it. The client here never destroys
+    the popups; the pointer then crosses where they were and must not enter
+    either (a still-mapped popup would be picked and focused)."""
+    label = "layer_chain_unmap_on_dismiss"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        _open_chain(s)
+        s.click(600, 300)
+        if [e[1] for e in s.since(0, "popup_done")] != ["P2", "P1"]:
+            print(f"  FAIL [{label}] chain not dismissed: {s.events}")
+            return False
+        m = s.mark()
+        s.move(120, 20)
+        s.move(80, 20)
+        entered = [e[1] for e in s.since(m, "enter")]
+        if "P1" in entered or "P2" in entered:
+            print(f"  FAIL [{label}] dismissed popups still mapped and "
+                  f"pickable: pointer entered {entered}")
+            return False
+        print(f"  PASS [{label}] dismissed chain left the scene at once "
+              f"(no enter on P1/P2 after popup_done)")
+        return True
+    finally:
+        s.close()
+
+
+def test_layer_chain_touch(display_name):
+    """D9 follow-up 1: the chain grab has a touch half. A touch down opens
+    the root, a touch on it opens the submenu, a touch on the submenu is
+    delivered to it, and a touch on a same-client sibling surface dismisses
+    the chain (topmost first) without reaching the sibling."""
+    label = "layer_chain_touch"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        if s.touch is None:
+            print(f"  FAIL [{label}] test seat advertises no touch")
+            return False
+        start = _stderr_size()
+        l1 = s.layer("L1", 50, 50)
+        s.layer("L2", 50, 50, margin_left=300)
+        s.tap(10, 10)
+        p1 = s.popup("P1", 60, 0, layer=l1, grab=s.serial)
+        s.tap(80, 20)
+        s.popup("P2", 40, 0, parent=p1, grab=s.serial)
+        m = s.mark()
+        s.tap(120, 20)
+        downs = [e[1] for e in s.since(m, "touch_down")]
+        if downs != ["P2"] or s.since(m, "popup_done"):
+            print(f"  FAIL [{label}] touch on the submenu: {s.since(m)}")
+            return False
+        m = s.mark()
+        s.tap(310, 10)
+        downs = [e[1] for e in s.since(m, "touch_down")]
+        done = [e[1] for e in s.since(m, "popup_done")]
+        errs = _errors_since(start)
+        if done != ["P2", "P1"] or downs or errs:
+            print(f"  FAIL [{label}] touch on the sibling: popup_done "
+                  f"{done} (want ['P2', 'P1']), touch downs {downs} "
+                  f"(want none), errors {errs}")
+            return False
+        print(f"  PASS [{label}] touch reaches the chain only; an outside "
+              f"touch dismissed P2 then P1")
+        return True
+    finally:
+        s.close()
+
+
+def test_layer_chain_refilter_scope(display_name):
+    """D9 follow-up 4: during the grab only the chain (root, its layer
+    parent, joined submenus) gets pointer focus — not every same-client
+    xdg_popup. Q is the client's own ungrabbed popup on another layer
+    surface; the pointer over it must not enter it."""
+    label = "layer_chain_refilter_scope"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        l2 = s.layer("L2", 50, 50, margin_left=300)
+        s.popup("Q", 0, 60, layer=l2)
+        s.move(310, 70)
+        if s.focus_name() != "Q":
+            print(f"  FAIL [{label}] setup: Q not under the pointer "
+                  f"(focus {s.focus_name()}, events {s.events})")
+            return False
+        _open_chain(s)
+        m = s.mark()
+        s.move(310, 70)
+        s.move(320, 80)
+        entered = [e[1] for e in s.since(m, "enter")]
+        if "Q" in entered:
+            print(f"  FAIL [{label}] same-client popup outside the chain got "
+                  f"pointer focus during the grab: {entered}")
+            return False
+        print(f"  PASS [{label}] a same-client popup outside the chain gets "
+              f"no focus during the grab")
+        return True
+    finally:
+        s.close()
+
+
 def _admission(label, display_name, build, want):
     """Run build(s) on a fresh session and require exactly `want`: an
     (iface, code) protocol error, or ("popup_done", name) with no error."""
@@ -1319,6 +1426,9 @@ def main():
         ("layer_popup_nested_grab_routed", test_layer_popup_nested_grab_routed),
         ("popup_double_construct_refused", test_popup_double_construct_refused),
         ("layer_chain_grab_live",       test_layer_chain_grab_live),
+        ("layer_chain_unmap_on_dismiss", test_layer_chain_unmap_on_dismiss),
+        ("layer_chain_touch",           test_layer_chain_touch),
+        ("layer_chain_refilter_scope",  test_layer_chain_refilter_scope),
         ("layer_chain_admission",       test_layer_chain_admission),
         ("layer_popup_reposition",      test_layer_popup_reposition),
         ("v19_register_hotkey_live",    test_v19_register_hotkey_live),

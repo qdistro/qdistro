@@ -15649,6 +15649,13 @@ struct qdwin_layer_popup {
 	 * delegates to qdwin. One pointer grab at a time per qdwin
 	 * instance (mirrors upstream xdg_popup grab serialisation). */
 	struct weston_pointer_grab grab;
+	/* D9 follow-up: the touch half of the same grab. A seat with touch
+	 * gets it alongside the pointer grab (libweston's desktop popup grab
+	 * installs both), so a touch down outside the chain dismisses it and
+	 * touch reaches only the chain. touch_grab.touch is the cached
+	 * weston_touch, nulled when the grab ends by cancel or the seat dies.
+	 * grab_active covers the chain grab as a whole. */
+	struct weston_touch_grab touch_grab;
 	int grab_active;
 	/* plan3 H3 (deep-review): seat destroy listener so we know the
 	 * cached grab.pointer became dangling before we attempt to end the
@@ -16384,6 +16391,38 @@ qdwin_layer_popup_nested_on_surface_destroyed(struct wl_listener *listener,
 	qdwin_layer_popup_nested_gone(n);
 }
 
+/* Is the pointer / touch half of lp's grab still the installed grab?
+ * weston_{pointer,touch}_start_grab() replace a grab without cancelling it,
+ * so a replaced half must be left alone even with grab_active set, and an
+ * installed half must be ended before lp is freed even with grab_active
+ * clear. The cached pointer/touch is nulled when its seat dies. */
+static bool
+qdwin_layer_popup_pointer_grab_installed(struct qdwin_layer_popup *lp)
+{
+	return lp->grab.pointer && lp->grab.pointer->grab == &lp->grab;
+}
+
+static bool
+qdwin_layer_popup_touch_grab_installed(struct qdwin_layer_popup *lp)
+{
+	return lp->touch_grab.touch &&
+	       lp->touch_grab.touch->grab == &lp->touch_grab;
+}
+
+/* D9 follow-up: end both halves of the chain grab, whichever are still
+ * installed. In vendored libweston weston_pointer_end_grab /
+ * weston_touch_end_grab only swap the default grab back (the pointer one
+ * also calls default_grab->focus()); neither calls our .cancel. */
+static void
+qdwin_layer_popup_end_grabs(struct qdwin_layer_popup *lp)
+{
+	lp->grab_active = 0;
+	if (qdwin_layer_popup_pointer_grab_installed(lp))
+		weston_pointer_end_grab(lp->grab.pointer);
+	if (qdwin_layer_popup_touch_grab_installed(lp))
+		weston_touch_end_grab(lp->touch_grab.touch);
+}
+
 static void
 qdwin_layer_popup_destroy(struct qdwin_layer_popup *lp)
 {
@@ -16424,16 +16463,15 @@ qdwin_layer_popup_destroy(struct qdwin_layer_popup *lp)
 	 *   a grab without cancelling it (so a replaced grab must be left
 	 *   alone even with grab_active set), and a grab that is still
 	 *   installed must be ended before lp is freed even with grab_active
-	 *   clear, or pointer->grab dangles into the freed popup. */
-	if (lp->grab_seat && lp->grab.pointer &&
-	    lp->grab.pointer->grab == &lp->grab) {
-		struct weston_pointer *p = lp->grab.pointer;
+	 *   clear, or pointer->grab dangles into the freed popup. The touch
+	 *   half (D9 follow-up) follows the same rule. */
+	if (lp->grab_seat &&
+	    (qdwin_layer_popup_pointer_grab_installed(lp) ||
+	     qdwin_layer_popup_touch_grab_installed(lp)))
 		lp->popup_resource = NULL;        /* suppresses cancel→dismiss */
-		lp->grab_active = 0;
-		weston_pointer_end_grab(p);
-	} else {
-		lp->grab_active = 0;
-	}
+	if (lp->grab_seat)
+		qdwin_layer_popup_end_grabs(lp);
+	lp->grab_active = 0;
 	if (lp->seat_destroy_listener.link.next)
 		wl_list_remove(&lp->seat_destroy_listener.link);
 	lp->grab_seat = NULL;
@@ -16494,8 +16532,9 @@ qdwin_layer_popup_on_grab_seat_destroyed(struct wl_listener *listener,
 	lp->grab_seat = NULL;
 	lp->grab_active = 0;
 	/* lp->grab.pointer is now stale; do not deref. weston_pointer was
-	 * freed alongside the seat. */
+	 * freed alongside the seat — and so was its weston_touch. */
 	lp->grab.pointer = NULL;
+	lp->touch_grab.touch = NULL;
 }
 
 /* plan3 H1: layer-popup grab interface. xdg_popup.grab on a layer-
@@ -16519,20 +16558,27 @@ qdwin_layer_popup_bbox_contains(struct qdwin_layer_popup *lp,
 	       pos.c.y >= vp.c.y && pos.c.y < vp.c.y + lp->surface->height;
 }
 
-/* D9: is this surface an xdg_popup (the role libweston stamps on
- * weston_desktop popups)? Used to keep a same-client *nested* submenu popup
- * inside the grab while still excluding unrelated same-client surfaces
- * (hidden toplevels, other panels). Role is matched by name. */
+/* D9: is this (main) surface a nested submenu that joined lp's grab? Only
+ * popups libweston routed to qdwin_layer_popup_nested_grab are members; a
+ * same-client xdg_popup outside the chain (an ungrabbed tooltip, another
+ * panel's popup) is not. */
 static bool
-qdwin_surface_is_xdg_popup(struct weston_surface *s)
+qdwin_layer_popup_chain_has(struct qdwin_layer_popup *lp,
+			    struct weston_surface *s)
 {
-	const char *role = s ? weston_surface_get_role(s) : NULL;
-	return role && strcmp(role, "xdg_popup") == 0;
+	struct qdwin_layer_popup_nested *n;
+	if (!s)
+		return false;
+	wl_list_for_each(n, &lp->nested, link) {
+		if (n->surface == s)
+			return true;
+	}
+	return false;
 }
 
 /* deep-review-2 H2 / D9: repick the topmost view at the pointer and clamp
  * pointer->focus to the popup surface, its layer parent, a subsurface of
- * either, or a same-client nested submenu popup; clear focus otherwise.
+ * either, or a nested submenu in the chain; clear focus otherwise.
  * Called by every grab event hook before sending events so stale pre-grab
  * focus cannot receive button/axis/frame.
  *
@@ -16553,28 +16599,22 @@ qdwin_layer_popup_grab_refilter_focus(struct qdwin_layer_popup *lp,
 		 * NOT to every surface owned by the popup's wl_client. Legitimate
 		 * targets are the popup surface, its layer parent (the anchor), a
 		 * subsurface of either (weston_surface_get_main_surface folds
-		 * subsurfaces onto their root), and a same-client *nested* submenu
-		 * popup (a separate xdg_popup, not a subsurface). Everything else
-		 * the old code reached via "any same-client surface" — a hidden
-		 * sibling toplevel, an unrelated panel — is excluded. All derefs
-		 * guarded (teardown/destroy paths null these). */
+		 * subsurfaces onto their root), and a nested submenu that joined
+		 * this grab (a separate xdg_popup, not a subsurface). Everything
+		 * else the old code reached via "any same-client surface" — a
+		 * hidden sibling toplevel, an unrelated panel, and (D9 follow-up)
+		 * a same-client xdg_popup that is not in the chain — is excluded.
+		 * All derefs guarded (teardown/destroy paths null these). */
 		struct weston_surface *parent_s =
 			lp->parent ? lp->parent->surface : NULL;
 		struct weston_surface *main_s =
 			weston_surface_get_main_surface(view->surface);
-		struct wl_client *grab_client = lp->popup_resource ?
-			wl_resource_get_client(lp->popup_resource) : NULL;
 		if (view->surface == lp->surface ||
 		    view->surface == parent_s ||
 		    main_s == lp->surface ||
-		    main_s == parent_s) {
+		    main_s == parent_s ||
+		    qdwin_layer_popup_chain_has(lp, main_s))
 			deliver = 1;
-		} else if (grab_client && view->surface->resource &&
-			   wl_resource_get_client(view->surface->resource) ==
-			       grab_client &&
-			   qdwin_surface_is_xdg_popup(view->surface)) {
-			deliver = 1;   /* same-client nested submenu popup */
-		}
 	}
 	if (deliver) {
 		if (view != pointer->focus)
@@ -16611,19 +16651,23 @@ qdwin_layer_popup_chain_contains(struct qdwin_layer_popup *lp,
 		pointer->seat->compositor, pointer->pos);
 	if (!view || !view->surface)
 		return false;
-	struct weston_surface *main_s =
-		weston_surface_get_main_surface(view->surface);
-	struct qdwin_layer_popup_nested *n;
-	wl_list_for_each(n, &lp->nested, link) {
-		if (main_s == n->surface)
-			return true;
-	}
-	return false;
+	return qdwin_layer_popup_chain_has(
+		lp, weston_surface_get_main_surface(view->surface));
 }
 
 /* D9: send popup_done down the chain, topmost first (the order a client
  * must destroy them in), then to the root. The nested records are dropped
- * here; the client destroys the popups in answer. */
+ * here; the client destroys the popups in answer.
+ *
+ * D9 follow-up: and unmap the chain now, not when the client answers.
+ * xdg_popup: "When the popup is dismissed, a popup_done event will be sent
+ * out, and at the same time the surface will be unmapped." The root's view
+ * is qdwin's; libweston hangs every joined submenu's views below it, so
+ * destroying it takes the whole chain out of the scene graph and input
+ * picking — what stock weston_desktop_surface_popup_dismiss does for a
+ * toplevel chain. A later commit cannot remap: the root's position update
+ * needs lp->view, and libweston re-creates a submenu's views only when its
+ * parent changes. */
 static void
 qdwin_layer_popup_dismiss_chain(struct qdwin_layer_popup *lp,
 				struct wl_resource *root_resource)
@@ -16641,6 +16685,26 @@ qdwin_layer_popup_dismiss_chain(struct qdwin_layer_popup *lp,
 	qdwin_layer_popup_kbd_restore_set(lp, NULL);
 	if (root_resource && dismiss)
 		dismiss(root_resource);
+	if (lp->view) {
+		weston_desktop_surface_unlink_view(lp->view);
+		weston_view_destroy(lp->view);
+		lp->view = NULL;
+	}
+}
+
+/* D9 follow-up: the chain grab is over — an outside press or touch, or
+ * either half cancelled. Dismiss exactly once (plan3 H5): popup_resource
+ * is nulled first, so a racing cancel from seat teardown sees the grab as
+ * already dismissed; then the one dismissal (which unmaps the chain), then
+ * both halves of the grab end, so the default grab's focus repick no longer
+ * finds the chain's views. */
+static void
+qdwin_layer_popup_grab_dismiss(struct qdwin_layer_popup *lp)
+{
+	struct wl_resource *r = lp->popup_resource;
+	lp->popup_resource = NULL;
+	qdwin_layer_popup_dismiss_chain(lp, r);
+	qdwin_layer_popup_end_grabs(lp);
 }
 
 static void
@@ -16677,16 +16741,9 @@ qdwin_layer_popup_grab_button(struct weston_pointer_grab *grab,
 		 * popup_done. The hazard the ordering still defends against is
 		 * a racing explicit weston_pointer_cancel_grab from seat
 		 * teardown (input.c:2802) that would call our cancel handler
-		 * while we are mid-dismiss. Null popup_resource first; the
-		 * cancel handler treats NULL as "already dismissed" and stays
-		 * a no-op. Then send the one dismiss, then end the grab. */
-		struct wl_resource *r = lp->popup_resource;
-		lp->popup_resource = NULL;
-		qdwin_layer_popup_dismiss_chain(lp, r);
-		if (lp->grab_active) {
-			lp->grab_active = 0;
-			weston_pointer_end_grab(pointer);
-		}
+		 * while we are mid-dismiss; qdwin_layer_popup_grab_dismiss
+		 * nulls popup_resource first, so that cancel is a no-op. */
+		qdwin_layer_popup_grab_dismiss(lp);
 		return;
 	}
 	/* deep-review-2 H2: clamp focus before delivering the button so a
@@ -16741,12 +16798,10 @@ qdwin_layer_popup_grab_cancel(struct weston_pointer_grab *grab)
 	 * popup_done was then freed under it. End it ourselves (guarded on it
 	 * still being the installed grab, as qdwin_move_grab_cancel does) and
 	 * drop the cached pointer: the grab is over, and weston may free that
-	 * pointer with its seat right after this cancel. */
-	lp->grab_active = 0;
-	if (grab->pointer && grab->pointer->grab == grab)
-		weston_pointer_end_grab(grab->pointer);
+	 * pointer with its seat right after this cancel. The touch half ends
+	 * with it (D9 follow-up): the chain grab is one grab. */
+	qdwin_layer_popup_grab_dismiss(lp);
 	grab->pointer = NULL;
-	qdwin_layer_popup_dismiss_chain(lp, lp->popup_resource);
 }
 
 static const struct weston_pointer_grab_interface
@@ -16758,6 +16813,108 @@ qdwin_layer_popup_grab_iface = {
 	.axis_source = qdwin_layer_popup_grab_axis_source,
 	.frame       = qdwin_layer_popup_grab_frame,
 	.cancel      = qdwin_layer_popup_grab_cancel,
+};
+
+/* D9 follow-up: the touch half of the chain grab. libweston picks
+ * touch->focus at the first touch down (process_touch_normal) before calling
+ * .down, and every later point of that touch session goes to the same view;
+ * so the session's focus decides, not the point's position. */
+
+/* Is the touch focus in the chain — the root popup or a joined submenu (or
+ * a subsurface of one)? A touch down anywhere else dismisses the chain. */
+static bool
+qdwin_layer_popup_touch_in_chain(struct qdwin_layer_popup *lp,
+				 struct weston_touch *touch)
+{
+	if (!touch->focus || !touch->focus->surface)
+		return false;
+	struct weston_surface *main_s =
+		weston_surface_get_main_surface(touch->focus->surface);
+	return main_s == lp->surface || qdwin_layer_popup_chain_has(lp, main_s);
+}
+
+/* May the current touch session's events reach its focus? The chain, plus
+ * the layer parent: the touch that opened the menu (its down went to the
+ * parent before the grab) must still get its up. Same family as the
+ * pointer refilter. */
+static bool
+qdwin_layer_popup_touch_deliverable(struct qdwin_layer_popup *lp,
+				    struct weston_touch *touch)
+{
+	if (qdwin_layer_popup_touch_in_chain(lp, touch))
+		return true;
+	if (!touch->focus || !touch->focus->surface || !lp->parent)
+		return false;
+	return weston_surface_get_main_surface(touch->focus->surface) ==
+	       lp->parent->surface;
+}
+
+static void
+qdwin_layer_popup_touch_grab_down(struct weston_touch_grab *grab,
+				  const struct weston_touch_event *event)
+{
+	struct qdwin_layer_popup *lp = wl_container_of(grab, lp, touch_grab);
+	struct weston_touch *touch = grab->touch;
+
+	if (!qdwin_layer_popup_touch_in_chain(lp, touch)) {
+		weston_log("qdwin: layer-popup dismissed by outside touch "
+			   "at (%.0f,%.0f)\n", event->pos.c.x, event->pos.c.y);
+		/* The down is consumed, as an outside press is. Clear the focus
+		 * the first point picked, so the rest of this session (now on
+		 * the default grab) does not deliver an up/motion without its
+		 * down to the surface underneath. */
+		qdwin_layer_popup_grab_dismiss(lp);
+		if (touch->num_tp == 1)
+			weston_touch_set_focus(touch, NULL);
+		return;
+	}
+	weston_touch_send_down(event);
+}
+
+static void
+qdwin_layer_popup_touch_grab_up(struct weston_touch_grab *grab,
+				const struct weston_touch_event *event)
+{
+	struct qdwin_layer_popup *lp = wl_container_of(grab, lp, touch_grab);
+	if (qdwin_layer_popup_touch_deliverable(lp, grab->touch))
+		weston_touch_send_up(event);
+}
+
+static void
+qdwin_layer_popup_touch_grab_motion(struct weston_touch_grab *grab,
+				    const struct weston_touch_event *event)
+{
+	struct qdwin_layer_popup *lp = wl_container_of(grab, lp, touch_grab);
+	if (qdwin_layer_popup_touch_deliverable(lp, grab->touch))
+		weston_touch_send_motion(event);
+}
+
+static void
+qdwin_layer_popup_touch_grab_frame(struct weston_touch_grab *grab)
+{
+	struct qdwin_layer_popup *lp = wl_container_of(grab, lp, touch_grab);
+	if (qdwin_layer_popup_touch_deliverable(lp, grab->touch))
+		weston_touch_send_frame(grab->touch);
+}
+
+/* weston_touch_cancel_grab() (touch device released, e.g. VT switch) only
+ * invokes this callback, as on the pointer side: end the grab ourselves,
+ * dismiss the chain, and drop the cached touch. */
+static void
+qdwin_layer_popup_touch_grab_cancel(struct weston_touch_grab *grab)
+{
+	struct qdwin_layer_popup *lp = wl_container_of(grab, lp, touch_grab);
+	qdwin_layer_popup_grab_dismiss(lp);
+	grab->touch = NULL;
+}
+
+static const struct weston_touch_grab_interface
+qdwin_layer_popup_touch_grab_iface = {
+	.down   = qdwin_layer_popup_touch_grab_down,
+	.up     = qdwin_layer_popup_touch_grab_up,
+	.motion = qdwin_layer_popup_touch_grab_motion,
+	.frame  = qdwin_layer_popup_touch_grab_frame,
+	.cancel = qdwin_layer_popup_touch_grab_cancel,
 };
 
 /* Forward declaration: defined later to find the qdwin_layer_popup that
@@ -16802,7 +16959,8 @@ qdwin_layer_popup_nested_grab(struct qdwin *qdwin,
 		return false;
 	}
 	if (!root->grab_active || root->grab_seat != wseat ||
-	    !root->grab.pointer || root->grab.pointer->grab != &root->grab) {
+	    !(qdwin_layer_popup_pointer_grab_installed(root) ||
+	      qdwin_layer_popup_touch_grab_installed(root))) {
 		weston_log("qdwin: layer-popup nested grab refused: root "
 			   "popup=%p holds no live grab on this seat\n",
 			   (void *)root->popup_resource);
@@ -16877,9 +17035,11 @@ qdwin_layer_popup_layer_grab_handler(struct wl_resource *popup_resource,
 						     layer_parent_surface, wseat);
 	}
 
-	if (!pointer) {
-		weston_log("qdwin: layer-popup grab refused: no pointer on "
-			   "seat\n");
+	/* D9 follow-up: pointer and touch halves, whichever the seat has. */
+	struct weston_touch *touch = weston_seat_get_touch(wseat);
+	if (!pointer && !touch) {
+		weston_log("qdwin: layer-popup grab refused: no pointer or "
+			   "touch on seat\n");
 		return false;
 	}
 	if (lp->grab_active) {
@@ -16887,8 +17047,14 @@ qdwin_layer_popup_layer_grab_handler(struct wl_resource *popup_resource,
 			   "popup=%p\n", (void *)popup_resource);
 		return true;
 	}
-	lp->grab.interface = &qdwin_layer_popup_grab_iface;
-	weston_pointer_start_grab(pointer, &lp->grab);
+	if (pointer) {
+		lp->grab.interface = &qdwin_layer_popup_grab_iface;
+		weston_pointer_start_grab(pointer, &lp->grab);
+	}
+	if (touch) {
+		lp->touch_grab.interface = &qdwin_layer_popup_touch_grab_iface;
+		weston_touch_start_grab(touch, &lp->touch_grab);
+	}
 	lp->grab_active = 1;
 	/* plan3 H3 (deep-review): subscribe to the seat's destroy signal so
 	 * that if the seat goes away mid-grab, the cached lp->grab.pointer
@@ -16900,9 +17066,11 @@ qdwin_layer_popup_layer_grab_handler(struct wl_resource *popup_resource,
 		wl_list_remove(&lp->seat_destroy_listener.link);
 	wl_signal_add(&wseat->destroy_signal, &lp->seat_destroy_listener);
 	lp->grab_seat = wseat;
-	weston_log("qdwin: layer-popup grab started popup=%p seat=%s\n",
+	weston_log("qdwin: layer-popup grab started popup=%p seat=%s "
+		   "pointer=%d touch=%d\n",
 		   (void *)popup_resource,
-		   wseat->seat_name ? wseat->seat_name : "");
+		   wseat->seat_name ? wseat->seat_name : "",
+		   pointer != NULL, touch != NULL);
 	return true;
 }
 
