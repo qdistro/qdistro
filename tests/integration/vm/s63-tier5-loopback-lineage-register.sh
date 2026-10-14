@@ -134,12 +134,15 @@ check_clip() {
         boolean:false "uint32:$5" "uint64:$6" 2>&1) || { echo "ERR: $out"; return 1; }
     printf '%s\n' "$out" | grep -oE 'string "[^"]*"' | tail -1 | sed 's/string //; s/"//g'
 }
+# track_rule <file.yaml> — record a rule for delete_rules. Called in the
+# PARENT shell before `written=$(save_rule ...)`: save_rule runs in that
+# command-substitution subshell, where an append would be lost.
+track_rule() { RULE_FILES="$RULE_FILES $1"; }
 save_rule() {   # save_rule <file.yaml> <yaml> -> the written path
     local out
     out=$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
         /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.SaveRule \
         "string:$1" "string:$2" 2>&1) || { echo "ERR: $out"; return 1; }
-    RULE_FILES="$RULE_FILES $1"
     printf '%s\n' "$out" | grep -oE 'string "[^"]*"' | tail -1 | sed 's/string //; s/"//g'
 }
 delete_rules() {
@@ -293,6 +296,7 @@ if [ -n "$REG_SILO" ] && [ -n "$WP" ] && [ -d "/proc/$WP" ]; then
     v=$(check_clip "$REG_SILO" admin "$APP" "$ENG" "$WP" "$ST")
     [ "$v" = deny ] && pass "enforce: attested tier-5 source, no rule -> deny (enforce never bypasses rules)" \
         || fail "enforce: attested source without a rule answered '$v'"
+    track_rule 99-s63-tier5-clip.yaml
     written=$(save_rule "99-s63-tier5-clip.yaml" "- name: s63-tier5-clip-allow
   decision: allow
   match:
@@ -325,6 +329,7 @@ if [ -n "$REG_SILO" ] && [ -n "$WP" ] && [ -d "/proc/$WP" ]; then
         || fail "enforce: no source pid answered '$v'"
     # Mismatched identity: the REAL tier-5 client claims another silo whose
     # rule allows a destination its own silo has no rule for.
+    track_rule 99-s63-other-clip.yaml
     written=$(save_rule "99-s63-other-clip.yaml" "- name: s63-other-clip-allow
   decision: allow
   match:
@@ -351,6 +356,12 @@ fi
 
 # --- 6. restore the broker posture ---------------------------------------
 delete_rules
+left=""
+for f in 99-s63-tier5-clip.yaml 99-s63-other-clip.yaml; do
+    [ -e "/etc/qdistro/rules.d/$f" ] && left="$left $f"
+done
+[ -z "$left" ] && pass "both s63 clipboard allow rules removed from /etc/qdistro/rules.d" \
+    || fail "s63 clipboard allow rules left installed:$left"
 if restore_enforce; then
     pass "lineage_enforce restored (prior: '${PRIOR_ENFORCE_LINE:-absent}')"
 else
