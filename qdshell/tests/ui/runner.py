@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -1612,6 +1613,113 @@ def _capture_mouse_override_vm(session: VMSession) -> str:
                     raise RuntimeError("mouse Customize override was not restored")
 
 
+_ZOOM_PROMPT = """You are looking at a MAGNIFIED crop ({scale}x) of a small
+region of a desktop UI screenshot, not a whole screen. Its contrast has been
+stretched per color channel so faint outlines become visible, so do NOT judge
+colors, brightness, opacity or dimming from this image: report only shapes and
+their positions. A thin black strip along the right and bottom edges is padding
+added by the test harness, not part of the UI.
+
+Answer, using only what is visible:
+{question}
+
+Be concise (under ~80 words). Do not guess what the control is expected to show.
+"""
+
+
+def _view_pix_sha(img) -> str:
+    """Canonical pixel digest of a decoded image (PIL).
+
+    Same stream as scripts/vm/lib/view-geometry.sh's qci_view_pix_sha: the
+    header `qci-rgb8 <w> <h>\\n` followed by 8-bit RGB (alpha dropped). Frames
+    are compared by this raw-pixel identity, never by encoded file bytes.
+    """
+    rgb = img.convert("RGB")
+    h = hashlib.sha256(f"qci-rgb8 {rgb.width} {rgb.height}\n".encode())
+    h.update(rgb.tobytes())
+    return h.hexdigest()
+
+
+def _crop_box_px(box: tuple, width: int, height: int) -> tuple[int, int, int, int]:
+    """Screen-fraction box -> integer pixel box inside a width x height frame."""
+    x0, y0, x1, y1 = (int(round(box[0] * width)), int(round(box[1] * height)),
+                      int(round(box[2] * width)), int(round(box[3] * height)))
+    if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
+        raise ValueError(f"zoom crop box {box} -> {(x0, y0, x1, y1)} is "
+                         f"outside a {width}x{height} frame")
+    return x0, y0, x1, y1
+
+
+def make_zoom_crop(src: Path, out: Path, crop, issued: set) -> Path:
+    """Write a magnified, contrast-stretched crop of `src` to `out`.
+
+    The region is autocontrasted then histogram-equalized (monotonic per
+    channel, so which part is brighter than which is preserved while a
+    #161645-on-#070722 outline becomes plainly visible) and magnified
+    `crop.scale` times. Then the vision-repeat-region rule applies (vision
+    models read a region repeated from an earlier same-size image as
+    BLACK): the result is padded with a black right/bottom margin of the
+    smallest k >= 1 whose (W, H) is not yet in `issued` (which the caller
+    seeds with every view size already issued), and a `.raw` sidecar
+    records `raw_w raw_h k raw_pix_sha kind source` like
+    scripts/vm/lib/view-geometry.sh, so the crop is identified by its raw
+    pixels, never by file bytes. A flat region (no contrast at all) has
+    nothing to observe: that is a wrong box or a blank frame, so raise.
+    """
+    from PIL import Image, ImageOps
+    with Image.open(src) as im:
+        im.load()
+        rgb = im.convert("RGB")
+    x0, y0, x1, y1 = _crop_box_px(crop.box, rgb.width, rgb.height)
+    region = rgb.crop((x0, y0, x1, y1))
+    if all(lo == hi for lo, hi in region.getextrema()):
+        raise RuntimeError(
+            f"zoom crop '{crop.label}' of {src.name} at "
+            f"{x1 - x0}x{y1 - y0}+{x0}+{y0} is a flat color; nothing to observe")
+    scale = int(crop.scale)
+    if scale < 1:
+        raise ValueError(f"zoom crop '{crop.label}' scale must be >= 1")
+    enhanced = ImageOps.equalize(ImageOps.autocontrast(region))
+    zoomed = enhanced.resize((region.width * scale, region.height * scale),
+                             Image.LANCZOS)
+    raw_w, raw_h = zoomed.size
+    k = 1
+    while (raw_w + k, raw_h + k) in issued:
+        k += 1
+    issued.add((raw_w + k, raw_h + k))
+    padded = Image.new("RGB", (raw_w + k, raw_h + k), (0, 0, 0))
+    padded.paste(zoomed, (0, 0))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    padded.save(out, format="PNG")
+    kind = f"crop:{x1 - x0}x{y1 - y0}+{x0}+{y0}"
+    Path(f"{out}.raw").write_text(
+        f"{raw_w} {raw_h} {k} {_view_pix_sha(zoomed)} {kind} {src.name}\n")
+    return out
+
+
+def _describe_zoom_crops_vm(surface, views: dict, issued: set) -> str:
+    """Crop, enhance and describe each of `surface.zoom_crops`.
+
+    `views` maps a view index (0 = first capture, n = after click n) to its
+    saved frame. Every crop is an additional described view, appended after
+    the full-frame views; describe_view makes an empty description fail loud.
+    """
+    out = ""
+    for idx, crop in enumerate(surface.zoom_crops, 1):
+        if crop.view not in views:
+            raise RuntimeError(
+                f"zoom crop '{crop.label}' of {surface.id} names view "
+                f"{crop.view}, but only views {sorted(views)} were captured")
+        crop_png = ARTIFACTS_DIR / f"{surface.id}-zoom{idx}.png"
+        make_zoom_crop(views[crop.view], crop_png, crop, issued)
+        prompt = _ZOOM_PROMPT.format(scale=crop.scale, question=crop.question)
+        desc = describe_view(crop_png, prompt=prompt)
+        out += (f"\n\n=== zoomed crop {idx}: {crop.label} "
+                f"({crop.scale}x, contrast-stretched, of "
+                f"{views[crop.view].name}; {crop_png.name}) ===\n{desc}")
+    return out
+
+
 def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
                        ) -> tuple[Path, str]:
     """VM analogue of capture_surface: open via in-VM IPC, shell-capture, describe."""
@@ -1668,6 +1776,7 @@ def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
             time.sleep(0.5)
 
         screenshot_vm(session, png_path)
+        views = {0: png_path}
         description = describe_view(png_path)
         if surface.kind == "settings":
             description = _describe_scrolled_vm(session, surface, png_path,
@@ -1695,9 +1804,20 @@ def capture_surface_vm(session: VMSession, surface, *, settle: float = 1.2
             time.sleep(2.5)
             page_png = ARTIFACTS_DIR / f"{surface.id}-click{idx + 1}.png"
             screenshot_vm(session, page_png)
+            views[idx + 1] = page_png
             page_desc = describe_view(page_png)
             description += (f"\n\n=== after click {idx + 1} "
                             f"({page_png.name}) ===\n" + page_desc)
+
+        if surface.zoom_crops:
+            # Seed the issued sizes with the full views so no crop can share
+            # a (W, H) with any frame of this capture.
+            from PIL import Image
+            issued = {(VM_SCREEN_W, VM_SCREEN_H)}
+            for view_png in views.values():
+                with Image.open(view_png) as im:
+                    issued.add(im.size)
+            description += _describe_zoom_crops_vm(surface, views, issued)
     finally:
         if surface.close_cmd is not None and surface.close_cmd is not NO_IPC:
             with contextlib.suppress(Exception):
@@ -1962,7 +2082,7 @@ def _describe_prompt_for(image_path: Path) -> str:
     return _DESCRIBE_PROMPT
 
 
-def describe(image_path: Path) -> str:
+def describe(image_path: Path, prompt: Optional[str] = None) -> str:
     """Send PNG to a vision LLM; return the textual description.
 
     Uses the local Codex CLI, unless QDSHELL_UI_NO_CODEX=1 is set. Falls
@@ -1972,7 +2092,8 @@ def describe(image_path: Path) -> str:
     A single bounded retry covers transient codex failures (empty output is
     an observability gap, never a pass — a second failure still returns "").
     """
-    prompt = _describe_prompt_for(image_path)
+    if prompt is None:
+        prompt = _describe_prompt_for(image_path)
     for _ in range(2):
         desc = ""
         if shutil.which("codex") and os.environ.get("QDSHELL_UI_NO_CODEX") != "1":
@@ -1992,7 +2113,7 @@ def _describe_backend_available() -> bool:
     return bool(shutil.which("pi")) and os.environ.get("QDSHELL_UI_NO_PI") != "1"
 
 
-def describe_view(image_path: Path) -> str:
+def describe_view(image_path: Path, prompt: Optional[str] = None) -> str:
     """describe() for one view of a multi-view VM capture; fail loudly on "".
 
     capture_surface_vm stitches several views (default subtab, scrolled
@@ -2006,7 +2127,9 @@ def describe_view(image_path: Path) -> str:
     instead of letting the judge grade a partial surface. With no backend at
     all, keep returning "" so judge() reports its existing SKIP.
     """
-    desc = describe(image_path)
+    # A view-specific prompt (zoom crops) is passed through; the default
+    # call keeps describe()'s one-argument form.
+    desc = describe(image_path) if prompt is None else describe(image_path, prompt)
     if not desc.strip() and _describe_backend_available():
         raise RuntimeError(
             f"vision describe returned no description for {image_path} "
