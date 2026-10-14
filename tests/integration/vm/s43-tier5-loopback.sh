@@ -60,6 +60,10 @@ pass "outer admin compositor up"
 CURSOR=$(journalctl --since=now -n0 --show-cursor 2>/dev/null \
     | awk -F': ' '/-- cursor:/ {print $2}')
 
+# The bridge's RegisterLaunch is mandatory: no broker, no launch.
+systemctl is-active -q qdistro-admin-broker.service \
+    || fail "qdistro-admin-broker.service not active (tier-5 launches require RegisterLaunch)"
+
 # --- tier-5 runs as admin; its one root step is the pkexec'd bridge --------
 # spawn-tier5.sh refuses root. Its waypipe client starts through
 # `pkexec /usr/libexec/qdistro/qdistro-tier5-bridge` (org.qdistro.tier5.bridge,
@@ -86,6 +90,25 @@ t5_as_admin() {
 }
 t5_grant_bridge
 trap t5_revoke_bridge EXIT
+# wrapper_pid_under <pid> — spawn-tier5.sh's own pid below <pid>. A
+# backgrounded `t5_as_admin`/`as_admin` call is a subshell running root
+# runuser, whose child becomes admin and execs (env →) spawn-tier5.sh: the
+# first admin-uid descendant IS the wrapper. Signals for the wrapper go to
+# it, never to runuser: runuser forwards SIGTERM but SIGKILLs its child 2 s
+# later ("Session terminated, killing shell"), and a SIGKILLed runuser
+# forwards nothing.
+wrapper_pid_under() {
+    local p c _
+    for _ in $(seq 1 100); do
+        p=$1
+        while c=$(pgrep -P "$p" 2>/dev/null | head -1) && [ -n "$c" ]; do
+            [ "$(stat -c %u "/proc/$c" 2>/dev/null)" = 1000 ] && { echo "$c"; return 0; }
+            p=$c
+        done
+        sleep 0.1
+    done
+    return 1
+}
 
 SPAWN_LOG=/tmp/s43-spawn.log
 : >"$SPAWN_LOG"
@@ -94,6 +117,9 @@ PORT=7791
 t5_as_admin bash "$SPAWN" --loopback -p "$PORT" \
     -- wayland-info >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
+# spawn-tier5.sh's own pid names the loopback silo and its log files
+# (tier5-loopback-<pid>-<app>-<token8>-*).
+SPAWN_INNER=$(wrapper_pid_under "$SPAWN_PID")
 
 LISTENER_OK=0
 for _ in $(seq 1 40); do
@@ -117,7 +143,7 @@ for _ in $(seq 1 30); do
     sleep 0.5
 done
 if kill -0 "$SPAWN_PID" 2>/dev/null; then
-    kill -TERM "$SPAWN_PID" 2>/dev/null || true
+    kill -TERM "${SPAWN_INNER:-$SPAWN_PID}" 2>/dev/null || true
     wait "$SPAWN_PID" 2>/dev/null || true
     fail "wayland-info never exited; bridge may be stalled"
 fi
@@ -125,7 +151,7 @@ fi
 # wayland-info writes its enumeration to stdout — which spawn-tier5
 # redirects into waypipe's server log. Look for the canonical
 # `wl_compositor` line wayland-info emits.
-SERVER_LOG=$(ls "$RUNTIME_DIR"/tier5-loopback-*-wayland-info-server.log 2>/dev/null | head -1)
+SERVER_LOG=$(ls "$RUNTIME_DIR"/tier5-loopback-"$SPAWN_INNER"-wayland-info-*-server.log 2>/dev/null | head -1)
 if [ -n "$SERVER_LOG" ] && grep -q "interface: 'wl_compositor'" "$SERVER_LOG" 2>/dev/null; then
     pass "wayland-info enumerated wl_compositor through the vsock bridge"
 elif grep -q "interface: 'wl_compositor'" "$SPAWN_LOG" 2>/dev/null; then

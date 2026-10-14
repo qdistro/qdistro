@@ -60,6 +60,25 @@ RULE
     sleep 1  # polkitd reloads rules.d on change
 }
 t5_revoke_bridge() { rm -f "$T5_POLKIT_RULE"; }
+# wrapper_pid_under <pid> — spawn-tier5.sh's own pid below <pid>. A
+# backgrounded `t5_as_admin`/`as_admin` call is a subshell running root
+# runuser, whose child becomes admin and execs (env →) spawn-tier5.sh: the
+# first admin-uid descendant IS the wrapper. Signals for the wrapper go to
+# it, never to runuser: runuser forwards SIGTERM but SIGKILLs its child 2 s
+# later ("Session terminated, killing shell"), and a SIGKILLed runuser
+# forwards nothing.
+wrapper_pid_under() {
+    local p c _
+    for _ in $(seq 1 100); do
+        p=$1
+        while c=$(pgrep -P "$p" 2>/dev/null | head -1) && [ -n "$c" ]; do
+            [ "$(stat -c %u "/proc/$c" 2>/dev/null)" = 1000 ] && { echo "$c"; return 0; }
+            p=$c
+        done
+        sleep 0.1
+    done
+    return 1
+}
 # t5_as_admin [VAR=VAL...] cmd... — admin's uid with its session paths.
 t5_as_admin() {
     runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin \
@@ -138,14 +157,14 @@ starttime() { local s; { read -r s < "/proc/$1/stat"; } 2>/dev/null || return 1;
 cleanup() {
     [ "$TRAP_FIRED" -eq 1 ] && return 0
     TRAP_FIRED=1
-    [ -n "$SPAWN_PID" ] && kill -TERM "$SPAWN_PID" 2>/dev/null || true
+    [ -n "${INNER_PID:-}" ] && kill -TERM "$INNER_PID" 2>/dev/null || true
+    pkill -u admin -f 'qdistro-test-window --title s63-t5' 2>/dev/null || true
     [ -n "$SPAWN_PID" ] && wait    "$SPAWN_PID" 2>/dev/null || true
     [ -n "${FORGER_PID:-}" ] && kill "$FORGER_PID" 2>/dev/null || true
-    pkill -u admin -f 'qdistro-test-window --title s63-t5' 2>/dev/null || true
     delete_rules
     restore_enforce
     rm -f /tmp/s63-spawn.log 2>/dev/null || true
-    rm -f "$RUNTIME_DIR"/tier5-loopback-*-wayland-info-*.log 2>/dev/null || true
+    rm -f "$RUNTIME_DIR"/tier5-loopback-*-qdistro-test-window-*.log 2>/dev/null || true
     rm -rf "$STAGE" 2>/dev/null || true
     t5_revoke_bridge
 }
@@ -198,14 +217,8 @@ SPAWN_LOG=/tmp/s63-spawn.log
 : >"$SPAWN_LOG"
 t5_as_admin bash "$TIER5_DIR/spawn-tier5.sh" --loopback -p "$PORT" -- qdistro-test-window --title s63-t5 >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
-# SPAWN_PID is runuser; its single child execs into spawn-tier5.sh, whose
-# own pid names the loopback silo.
-INNER_PID=""
-for _ in $(seq 1 50); do
-    INNER_PID=$(pgrep -P "$SPAWN_PID" 2>/dev/null | head -1)
-    [ -n "$INNER_PID" ] && break
-    sleep 0.1
-done
+# spawn-tier5.sh's own pid names the loopback silo.
+INNER_PID=$(wrapper_pid_under "$SPAWN_PID")
 
 # --- 3. wait for the lineage registration line -----------------------
 REG_SILO=""
@@ -233,7 +246,7 @@ WP=$(sed -n 's/.*bridge ready: waypipe client pid=\([0-9]*\) silo=.*/\1/p' "$SPA
 if [ -n "$REG_SILO" ]; then
     pass "spawn-tier5 (loopback) logged the launch-record registration for silo=$REG_SILO"
     # tier-5 loopback names its silo vm-loopback-<pid>, where <pid> is
-    # spawn-tier5.sh's own pid ($$) — the runuser child captured as INNER_PID.
+    # spawn-tier5.sh's own pid ($$) — the admin wrapper captured as INNER_PID.
     # Asserting that equality makes the audit-row proof below stale-proof (the
     # silo carries THIS launch's unique pid, so no prior run's row can satisfy
     # it even under PID reuse). The vm- prefix is the key qdshell's

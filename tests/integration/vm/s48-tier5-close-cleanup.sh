@@ -72,6 +72,25 @@ t5_as_admin() {
 }
 t5_grant_bridge
 trap t5_revoke_bridge EXIT
+# wrapper_pid_under <pid> — spawn-tier5.sh's own pid below <pid>. A
+# backgrounded `t5_as_admin`/`as_admin` call is a subshell running root
+# runuser, whose child becomes admin and execs (env →) spawn-tier5.sh: the
+# first admin-uid descendant IS the wrapper. Signals for the wrapper go to
+# it, never to runuser: runuser forwards SIGTERM but SIGKILLs its child 2 s
+# later ("Session terminated, killing shell"), and a SIGKILLed runuser
+# forwards nothing.
+wrapper_pid_under() {
+    local p c _
+    for _ in $(seq 1 100); do
+        p=$1
+        while c=$(pgrep -P "$p" 2>/dev/null | head -1) && [ -n "$c" ]; do
+            [ "$(stat -c %u "/proc/$c" 2>/dev/null)" = 1000 ] && { echo "$c"; return 0; }
+            p=$c
+        done
+        sleep 0.1
+    done
+    return 1
+}
 
 VM_NAME="qdistro-tier5-cleanup-$$"
 OVERLAY="/home/admin/.local/share/libvirt/images/$VM_NAME.qcow2"
@@ -91,6 +110,10 @@ t5_as_admin TIER5_MEM_KIB=2097152 \
     bash "$SPAWN" --vm "$VM_NAME" \
     -- weston-terminal >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
+# The teardown under test is spawn-tier5's own signal trap, so the SIGTERM
+# goes to the wrapper itself — the process qdshell signals when the user
+# closes the app.
+WRAPPER_PID=$(wrapper_pid_under "$SPAWN_PID")
 
 # Wait until the domain is running and overlay exists, then we can trigger
 # teardown. Budget 120s (nested-on-nested boot under CI; match s45/s47).
@@ -133,11 +156,15 @@ else
     exit 1
 fi
 
-# Trigger teardown: SIGTERM the wrapper (runuser forwards it). The trap
-# inside spawn-tier5.sh closes the bridge's stdin — the root bridge then
-# tears its waypipe client down — and runs virsh destroy, virsh undefine,
-# rm overlay (because TIER5_KEEP_DOMAIN is unset).
-kill -TERM "$SPAWN_PID" 2>/dev/null || true
+# Trigger teardown: SIGTERM spawn-tier5.sh itself. Its trap closes the
+# bridge's stdin — the root bridge then tears its waypipe client group down —
+# and runs virsh destroy, virsh undefine, rm overlay (TIER5_KEEP_DOMAIN unset).
+if [ -n "$WRAPPER_PID" ]; then
+    kill -TERM "$WRAPPER_PID" 2>/dev/null || true
+else
+    fail "could not resolve spawn-tier5.sh's pid under $SPAWN_PID"
+    kill -TERM "$SPAWN_PID" 2>/dev/null || true
+fi
 wait "$SPAWN_PID" 2>/dev/null || true
 
 # Allow up to 10s for the trap's virsh destroy/undefine to complete.
@@ -186,7 +213,7 @@ done
 runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
 runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
 for p in $NEW_WAYPIPE; do kill -KILL "$p" 2>/dev/null || true; done
-rm -f "$OVERLAY" "$SPAWN_LOG"
+rm -f "$OVERLAY" "$OVERLAY.appid" "$SPAWN_LOG"
 
 if [ "$FAILCOUNT" -eq 0 ]; then
     pass "§Phase-7 tier-5 SIGTERM teardown reclaims all per-VM resources"

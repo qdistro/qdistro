@@ -64,6 +64,25 @@ as_admin() {
         PATH=/usr/local/bin:/usr/bin:/bin LIBVIRT_DEFAULT_URI=qemu:///session "$@"
 }
 vsh() { as_admin virsh "$@"; }
+# wrapper_pid_under <pid> — spawn-tier5.sh's own pid below <pid>. A
+# backgrounded `t5_as_admin`/`as_admin` call is a subshell running root
+# runuser, whose child becomes admin and execs (env →) spawn-tier5.sh: the
+# first admin-uid descendant IS the wrapper. Signals for the wrapper go to
+# it, never to runuser: runuser forwards SIGTERM but SIGKILLs its child 2 s
+# later ("Session terminated, killing shell"), and a SIGKILLed runuser
+# forwards nothing.
+wrapper_pid_under() {
+    local p c _
+    for _ in $(seq 1 100); do
+        p=$1
+        while c=$(pgrep -P "$p" 2>/dev/null | head -1) && [ -n "$c" ]; do
+            [ "$(stat -c %u "/proc/$c" 2>/dev/null)" = 1000 ] && { echo "$c"; return 0; }
+            p=$c
+        done
+        sleep 0.1
+    done
+    return 1
+}
 
 # --- precondition: every one is a FAIL, never a skip ------------------------
 pre_ok=1
@@ -74,6 +93,7 @@ need 'command -v virsh >/dev/null' "virsh installed"
 need '[ -x "$SPAWN" ] && [ -x "$CLEANUP" ]' "installed qdistro-tier5-spawn / qdistro-tier5-cleanup"
 need '[ -x "$BRIDGE" ]' "installed tier-5 bridge"
 need 'runuser -u admin -- test -S $RT/wayland-1' "admin compositor socket $RT/wayland-1"
+need 'systemctl is-active -q qdistro-admin-broker.service' "admin broker active (the bridge's RegisterLaunch is mandatory)"
 if [ "$pre_ok" != 1 ]; then
     echo "[s111] $PASSCOUNT passes, $FAILCOUNT failures"
     exit 1
@@ -104,7 +124,8 @@ nqemu() { qemu_pids "$1" | grep -c . ; }
 defined() { vsh list --all --name 2>/dev/null | grep -Fxq -- "$1"; }
 overlay() { echo "$IMG/$1.qcow2"; }
 # chain_pids — every live bridge-chain process (root bridge, its runuser,
-# secctx-exec, waypipe), as "pid:starttime".
+# secctx-exec, waypipe — the client AND its per-connection children, whose
+# argv does not say "client"), as "pid:starttime".
 chain_pids() {
     local p exe cmd
     for p in /proc/[0-9]*; do
@@ -112,7 +133,7 @@ chain_pids() {
         cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
         case "$exe|$cmd" in
             *"|"*"$BRIDGE"*|/usr/bin/qdistro-secctx-exec"|"*|*/runuser"|"*qdistro-secctx-exec*) ;;
-            /usr/bin/waypipe"|"*" client"*) ;;
+            /usr/bin/waypipe"|"*) ;;
             *) continue ;;
         esac
         echo "${p#/proc/}:$(awk '{print $22}' "$p/stat" 2>/dev/null)"
@@ -135,7 +156,7 @@ spawn_bg() {
         "$SPAWN" --vm "$vm" --policy-key "$key" -- weston-terminal \
         >"$LOGDIR/$tag.log" 2>&1 </dev/null &
     rp=$!
-    for _ in $(seq 1 50); do w=$(pgrep -P "$rp" | head -1); [ -n "$w" ] && break; sleep 0.1; done
+    w=$(wrapper_pid_under "$rp")
     printf -v "W_$tag" '%s' "${w:-0}"
     printf -v "R_$tag" '%s' "$rp"
 }

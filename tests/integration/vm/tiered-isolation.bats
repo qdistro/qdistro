@@ -678,8 +678,12 @@ setup() {
     # §Phase-7 tier-5-Linux — waypipe-over-vsock wrapper smoke. Linux-only
     # per spec/00. Tests the data path with vsock CID=1 (loopback).
     # Real-VM mode (--vm <name>) is covered by phase7-tier5-vm.
+    # The broker is started first (setup() stops it): the tier-5 bridge
+    # registers every launch with RegisterLaunch and aborts the launch when
+    # it cannot (decision record step 3) — the same for every spawn-tier5
+    # case below. s63 manages its own broker.
     stage_vm_driver "s43-tier5-loopback.sh"
-    vm_run "curl -fsS -o /tmp/s43.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s43-tier5-loopback.sh && chmod +x /tmp/s43.sh && bash /tmp/s43.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s43.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s43-tier5-loopback.sh && chmod +x /tmp/s43.sh && bash /tmp/s43.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-5 stack (waypipe / vsock_loopback / wayland-info) not available on this VM"
@@ -762,7 +766,7 @@ setup() {
         skip "tier-5 base disk / virsh / qemu-img / kvm absent (opt-in bake; set QDISTRO_BUILD_TIER5_BASE=1)"
     fi
     stage_vm_driver "s45-tier5-vm.sh"
-    vm_run "curl -fsS -o /tmp/s45.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s45-tier5-vm.sh && chmod +x /tmp/s45.sh && bash /tmp/s45.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s45.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s45-tier5-vm.sh && chmod +x /tmp/s45.sh && bash /tmp/s45.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "tier-5 base disk absent (rerun fresh-vm-bootstrap.sh with QDISTRO_BUILD_TIER5_BASE=1)"
@@ -787,7 +791,7 @@ setup() {
         skip "tier-5 base disk / virsh / kvm absent (opt-in bake)"
     fi
     stage_vm_driver "s48-tier5-close-cleanup.sh"
-    vm_run "curl -fsS -o /tmp/s48.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s48-tier5-close-cleanup.sh && chmod +x /tmp/s48.sh && bash /tmp/s48.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s48.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s48-tier5-close-cleanup.sh && chmod +x /tmp/s48.sh && bash /tmp/s48.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "tier-5 base disk or virsh/kvm absent — same skip surface as phase7-tier5-vm"
@@ -809,7 +813,7 @@ setup() {
         skip "tier-5 base disk / virsh / kvm absent (opt-in bake)"
     fi
     stage_vm_driver "s49-tier5-graceful-shutdown.sh"
-    vm_run "curl -fsS -o /tmp/s49.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s49-tier5-graceful-shutdown.sh && chmod +x /tmp/s49.sh && bash /tmp/s49.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s49.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s49-tier5-graceful-shutdown.sh && chmod +x /tmp/s49.sh && bash /tmp/s49.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "tier-5 base disk or virsh/kvm absent — same skip surface as phase7-tier5-vm"
@@ -947,7 +951,7 @@ setup() {
     # Driven through the installed qdistro-tier5-spawn/-cleanup as qdshell
     # drives them; asserts process/domain/file ABSENCE after each scenario.
     stage_vm_driver "s111-tier5-lifecycle-stress.sh"
-    vm_run "curl -fsS -o /tmp/s111.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s111-tier5-lifecycle-stress.sh && chmod +x /tmp/s111.sh && bash /tmp/s111.sh 2>&1"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s111.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s111-tier5-lifecycle-stress.sh && chmod +x /tmp/s111.sh && bash /tmp/s111.sh 2>&1"
     printf '%s\n' "$output" | sed 's/^/# /' >&3
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "s111 must not skip: $(driver_skip_reason)"
