@@ -153,6 +153,7 @@ spawn_bg() {
     local tag=$1 vm=$2 key=$3 rp w=""
     as_admin env TIER5_MEM_KIB=2097152 TIER5_QGA_TIMEOUT_SECS=300 \
         TIER5_IDLE_SHUTDOWN_SECS=0 TIER5_SHUTDOWN_METHOD=force \
+        TIER5_DECISION_WAIT_SECS=300 \
         "$SPAWN" --vm "$vm" --policy-key "$key" -- weston-terminal \
         >"$LOGDIR/$tag.log" 2>&1 </dev/null &
     rp=$!
@@ -164,6 +165,34 @@ wlog() { cat "$LOGDIR/$1.log" 2>/dev/null; }
 published() { grep -q 'guest publisher pid=' "$LOGDIR/$1.log" 2>/dev/null; }
 bridge_wp() { sed -n 's/.*bridge ready: waypipe client pid=\([0-9]*\).*/\1/p' "$LOGDIR/$1.log" | head -1; }
 gone() { ! kill -0 "$1" 2>/dev/null; }
+st_of() { local s; s=$(cat "/proc/$1/stat" 2>/dev/null) || return 1; s=${s##*) }; set -- $s; echo "${20}"; }
+# session_tree <client pid> — "pid:starttime" of every process in the
+# client's launch-chain process group (the bridge makes runuser its
+# leader): runuser, secctx-exec, the waypipe client and the child waypipe
+# forks per guest connection.
+session_tree() {
+    local pg p
+    pg=$(ps -o pgid= -p "$1" 2>/dev/null | tr -d ' ')
+    [ -n "$pg" ] || return 0
+    for p in $(pgrep -g "$pg"); do echo "$p:$(st_of "$p")"; done
+}
+tree_gone() {   # tree_gone "<pid:start>..." — none of those processes lives
+    local e
+    for e in $1; do [ "$(st_of "${e%%:*}")" = "${e#*:}" ] && return 1; done
+    return 0
+}
+# The create-lock barrier: the driver (root) holds hold-dir/create-<vm>
+# exclusively, so every wrapper deciding to create that guest blocks on it.
+HOLDD=$RT/qdistro-tier5
+create_lock_waiters() {   # blocked flock waiters on create-<vm> (/proc/locks "->")
+    local ino; ino=$(stat -c %i "$HOLDD/create-$1" 2>/dev/null) || { echo 0; return; }
+    grep -cE -- "-> FLOCK .*:$ino " /proc/locks
+}
+create_lock_held() {   # a granted (non-waiter) flock on create-<vm>
+    local ino; ino=$(stat -c %i "$HOLDD/create-$1" 2>/dev/null) || return 1
+    grep -qE "^[0-9]+: FLOCK .*:$ino " /proc/locks
+}
+create_lock_contended() { [ "$(create_lock_waiters "$1")" -ge 2 ]; }
 
 reap_everything() {
     local vm p
@@ -183,8 +212,23 @@ trap cleanup EXIT INT TERM
 # =============================================================================
 # A. simultaneous cold starts of one app: one creator, one adopter
 # =============================================================================
+# Barrier: hold the create lock first, start both wrappers, and release it
+# only once BOTH are blocked on it — they then contend for the create
+# decision itself, not merely start close together. The lock file is
+# created by admin (no root-owned file in admin's lock dir); flock -o keeps
+# the lock with the flock process alone.
+as_admin sh -c "mkdir -p -m 0700 '$HOLDD' && umask 077 && : >> '$HOLDD/create-$VM1'"
+flock -o -x "$HOLDD/create-$VM1" sleep 900 &
+BARRIER=$!
+wait_for 10 create_lock_held "$VM1" || fail "A: barrier lock on $HOLDD/create-$VM1 not taken"
 spawn_bg a1 "$VM1" "$KEY"
 spawn_bg a2 "$VM1" "$KEY"
+if wait_for 120 create_lock_contended "$VM1"; then
+    pass "A: barrier — both wrappers blocked on the $VM1 create lock at once ($(create_lock_waiters "$VM1") waiters)"
+else
+    fail "A: barrier — wrappers never both waited on the create lock (waiters=$(create_lock_waiters "$VM1")): a1=[$(wlog a1 | tail -3 | tr '\n' ';')] a2=[$(wlog a2 | tail -3 | tr '\n' ';')]"
+fi
+kill "$BARRIER" 2>/dev/null; pkill -P "$BARRIER" -x sleep 2>/dev/null; wait "$BARRIER" 2>/dev/null
 if wait_for 480 sh -c "grep -q 'guest publisher pid=' $LOGDIR/a1.log && grep -q 'guest publisher pid=' $LOGDIR/a2.log"; then
     pass "A: both simultaneous launches published their app"
 else
@@ -233,6 +277,9 @@ fi
 # =============================================================================
 # B. shared-guest reuse: closing one session keeps the guest for the other
 # =============================================================================
+TREE_A1=$(session_tree "$WPA1"); NC_A1=$(pgrep -P "$WPA1" | grep -c .)
+[ "$NC_A1" -ge 1 ] && pass "B: the first session's waypipe client $WPA1 serves $NC_A1 guest connection child(ren)" \
+    || fail "B: waypipe client $WPA1 has no connection child — the child-reaping check below would be vacuous"
 kill -TERM "$W_a1" 2>/dev/null
 wait_for 60 gone "$W_a1" && pass "B: first session closed (wrapper $W_a1 exited)" || fail "B: wrapper $W_a1 still running"
 wlog a1 | grep -q "adopted by another session; leaving it running" \
@@ -241,6 +288,11 @@ wlog a1 | grep -q "adopted by another session; leaving it running" \
 [ "$(qemu_pids "$VM1" | head -1)" = "$QPA" ] && defined "$VM1" && [ -f "$(overlay "$VM1")" ] \
     && pass "B: guest still running for the other session (qemu $QPA)" \
     || fail "B: guest lost while a session still used it"
+if wait_for 15 tree_gone "$TREE_A1" && [ "$(qemu_pids "$VM1" | head -1)" = "$QPA" ]; then
+    pass "B: every process of the closed session's chain is gone ($(wc -w <<<"$TREE_A1") incl. $NC_A1 waypipe connection child(ren)) while the shared guest (qemu $QPA) stays up"
+else
+    fail "B: closed session's chain survivors: $(for e in $TREE_A1; do [ "$(st_of "${e%%:*}")" = "${e#*:}" ] && echo "${e%%:*}"; done | tr '\n' ' ') guest qemu=$(qemu_pids "$VM1" | tr '\n' ' ')"
+fi
 wait_for 15 gone "$WPA1" && kill -0 "$WPA2" 2>/dev/null \
     && pass "B: the closed session's waypipe client is gone, the other's lives" \
     || fail "B: waypipe a1=$WPA1 alive=$(kill -0 "$WPA1" 2>/dev/null && echo y || echo n) a2=$WPA2 alive=$(kill -0 "$WPA2" 2>/dev/null && echo y || echo n)"
@@ -266,6 +318,9 @@ if wait_for 480 published d1; then
     pass "D: launch up ($VM2)"
     WPD=$(bridge_wp d1)
     BRD=$(pgrep -f "$BRIDGE --vm $VM2 " | head -1)
+    TREE_D=$(session_tree "$WPD"); NC_D=$(pgrep -P "$WPD" | grep -c .)
+    [ "$NC_D" -ge 1 ] && pass "D: waypipe client $WPD serves $NC_D guest connection child(ren)" \
+        || fail "D: waypipe client $WPD has no connection child — the child-reaping check below would be vacuous"
     kill -KILL "$W_d1" 2>/dev/null
     wait_for 20 gone "$WPD" && pass "D: wrapper SIGKILL — the bridge reaped its waypipe client $WPD" \
         || fail "D: waypipe client $WPD survived the wrapper's SIGKILL"
@@ -274,8 +329,11 @@ if wait_for 480 published d1; then
     else
         fail "D: root bridge '${BRD:-not found}' still running"
     fi
-    [ "$(nqemu "$VM2")" = 1 ] && pass "D: the crashed session's guest is orphaned, still running (expected)" \
-        || info "D: guest qemu count after wrapper crash: $(nqemu "$VM2")"
+    if wait_for 20 tree_gone "$TREE_D" && [ "$(nqemu "$VM2")" = 1 ]; then
+        pass "D: every process of the crashed session's chain is gone ($(wc -w <<<"$TREE_D") incl. $NC_D waypipe connection child(ren)) while its orphaned guest stays up"
+    else
+        fail "D: chain survivors: $(for e in $TREE_D; do [ "$(st_of "${e%%:*}")" = "${e#*:}" ] && echo "${e%%:*}"; done | tr '\n' ' ') guest qemu count=$(nqemu "$VM2")"
+    fi
     out=$(as_admin "$CLEANUP" "$VM2" 2>&1); rc=$?
     info "cleanup: $(tr '\n' ' ' <<<"$out")"
     if [ "$rc" = 0 ] && wait_for 30 reaped "$VM2"; then

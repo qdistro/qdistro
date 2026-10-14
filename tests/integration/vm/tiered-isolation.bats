@@ -727,6 +727,7 @@ setup() {
     assert_output_contains "PASS: enforce: mismatched identity — the tier-5 client claiming vm-s63other cannot use its rule -> deny"
     assert_output_contains "PASS: enforce: broker logged the forged claim overridden with the attested silo vm-loopback-"
     assert_output_contains "PASS: enforce: source-deny audit rows recorded"
+    assert_output_contains "PASS: both s63 clipboard allow rules removed from /etc/qdistro/rules.d"
     assert_output_contains "PASS: lineage_enforce restored"
     assert_output_contains "PASS: §02/S3e tier-5 (loopback/vsock) permission-lineage register end-to-end"
 }
@@ -959,6 +960,7 @@ setup() {
     assert_success
     assert_output_contains "PASS: tier-5 stress preconditions present"
     # A. simultaneous cold starts
+    assert_output_contains "PASS: A: barrier — both wrappers blocked on the"
     assert_output_contains "PASS: A: both simultaneous launches published their app"
     assert_output_contains "PASS: A: exactly one wrapper created"
     assert_output_contains "PASS: A: one domain, one qemu, one overlay for"
@@ -970,17 +972,21 @@ setup() {
     assert_output_contains "PASS: C: sidecar still binds"
     assert_output_contains "PASS: C: the refused launch left no waypipe client"
     # B. shared-guest reuse
+    assert_output_contains "PASS: B: the first session's waypipe client"
     assert_output_contains "PASS: B: first session closed"
     assert_output_contains "PASS: B: closing wrapper handed the guest to the remaining session"
     assert_output_contains "PASS: B: guest still running for the other session"
+    assert_output_contains "PASS: B: every process of the closed session's chain is gone"
     assert_output_contains "PASS: B: the closed session's waypipe client is gone, the other's lives"
     assert_output_contains "PASS: B: last session closed"
     assert_output_contains "PASS: B: last close reaped"
     assert_output_contains "PASS: B: no waypipe client survives the last close"
     # D. wrapper crash
     assert_output_contains "PASS: D: launch up"
+    assert_output_contains "PASS: D: waypipe client"
     assert_output_contains "PASS: D: wrapper SIGKILL — the bridge reaped its waypipe client"
     assert_output_contains "PASS: D: the root bridge"
+    assert_output_contains "PASS: D: every process of the crashed session's chain is gone"
     assert_output_contains "PASS: D: qdistro-tier5-cleanup reaped the orphan (no domain, qemu, overlay, sidecar)"
     # E. qemu crash
     assert_output_contains "PASS: E: launch up"
