@@ -27,6 +27,14 @@ waypipe client is verified and registered; stdin is the caller's
 liveness pipe — EOF (caller exit, cancel, crash) tears the chain down.
 The bridge exits with the waypipe chain's status.
 
+The chain runs in its own process group (runuser leads it). waypipe
+forks one child per guest connection; those children are not the
+registered pid and would outlive a teardown that signalled only the
+chain — keeping a tagged window on the compositor while the guest stays
+up. Teardown therefore signals the whole group, and the group's id stays
+pinned (runuser is reaped only after the group is empty) so no recycled
+process can be hit.
+
 Usage (via pkexec only):
     qdistro-tier5-bridge --vm <name> --port <port> --token <hex32>
     qdistro-tier5-bridge --loopback loopback-<n> --port <port> --token <hex32>
@@ -285,11 +293,31 @@ def verify_chain(pid: int, runuser_pid: int, admin_uid: int,
 
 # -- the launch ------------------------------------------------------------
 
-def _set_pdeathsig() -> None:
-    # Runs in the forked runuser child: if the bridge dies, runuser gets
-    # SIGTERM and forwards it down the chain.
+def _chain_child_setup() -> None:
+    # Runs in the forked runuser child: lead a fresh process group (the
+    # teardown unit), and if the bridge dies, runuser gets SIGTERM and
+    # forwards it down the chain.
+    os.setpgid(0, 0)
     libc = ctypes.CDLL(None, use_errno=True)
     libc.prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+
+
+def group_members(pgid: int, leader: int) -> list[int]:
+    """Live processes in process group ``pgid`` other than its leader."""
+    out = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit() or int(name) == leader:
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        rest = raw[raw.rfind(b")") + 2:].split()
+        # rest[0] is field 3 (state), rest[2] field 5 (pgrp)
+        if len(rest) > 2 and rest[0] != b"Z" and int(rest[2]) == pgid:
+            out.append(int(name))
+    return out
 
 
 class Bridge:
@@ -341,7 +369,7 @@ class Bridge:
                 close_fds=True, pass_fds=(report_w,), cwd="/",
                 # the bridge is single-threaded; PDEATHSIG has no
                 # subprocess-native spelling
-                preexec_fn=_set_pdeathsig)  # noqa: PLW1509
+                preexec_fn=_chain_child_setup)  # noqa: PLW1509
         finally:
             os.close(report_w)
         try:
@@ -407,34 +435,69 @@ class Bridge:
         assert self.proc is not None
         rfd = os.pidfd_open(self.proc.pid)
         try:
-            while self.proc.poll() is None:
+            while True:
                 ready, _, _ = select.select(
                     [rfd, self.stdin_fd, self._sig_r], [], [])
+                if rfd in ready:
+                    break
                 if self._caller_gone(ready):
                     self.teardown()
                     break
         finally:
             os.close(rfd)
-        rc = self.proc.wait()
-        self._reap_stragglers()
+        rc = self._end_group()
         return 128 - rc if rc < 0 else rc
 
     def teardown(self) -> None:
         if self.proc is None or self._stopping:
             return
         self._stopping = True
-        if self.proc.poll() is None:
-            # runuser forwards SIGTERM to secctx-exec, which forwards it
-            # to waypipe; the pidfd copy is the belt for a chain that
-            # broke mid-way.
-            self.proc.send_signal(signal.SIGTERM)
+        # runuser forwards SIGTERM too; signalling the group also reaches
+        # waypipe's per-connection children. The pidfd copy is the belt
+        # for a registered client that left the group.
+        self._signal_group(signal.SIGTERM)
         self._signal_pidfds(signal.SIGTERM)
+        self._end_group()
+
+    def _leader_exited(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` for runuser to exit WITHOUT reaping it:
+        its zombie keeps the process-group id from being reused."""
+        assert self.proc is not None
+        if self.proc.returncode is not None:
+            return True
+        fd = os.pidfd_open(self.proc.pid)
         try:
-            self.proc.wait(TEARDOWN_GRACE_S)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait()
+            return bool(select.select([fd], [], [], timeout)[0])
+        finally:
+            os.close(fd)
+
+    def _signal_group(self, sig: int) -> None:
+        assert self.proc is not None
+        if self.proc.returncode is not None:
+            return  # reaped: the id is no longer ours to signal
+        try:
+            os.killpg(self.proc.pid, sig)
+        except ProcessLookupError:
+            pass
+
+    def _end_group(self) -> int:
+        """Give the chain TEARDOWN_GRACE_S to exit after its leader, kill
+        whatever of the group is left, then reap the leader. Returns the
+        leader's wait status."""
+        assert self.proc is not None
+        deadline = time.monotonic() + TEARDOWN_GRACE_S
+        if not self._leader_exited(TEARDOWN_GRACE_S):
+            self._signal_group(signal.SIGKILL)
+        if group_members(self.proc.pid, self.proc.pid):
+            # A chain that ended on its own leaves stragglers unsignalled.
+            self._signal_group(signal.SIGTERM)
+            while group_members(self.proc.pid, self.proc.pid) \
+                    and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self._signal_group(signal.SIGKILL)
+        rc = self.proc.wait()
         self._reap_stragglers()
+        return rc
 
     def _signal_pidfds(self, sig: int) -> None:
         for fd in self.pidfds:
@@ -444,8 +507,8 @@ class Bridge:
                 pass
 
     def _reap_stragglers(self) -> None:
-        # A waypipe that outlived its chain is reparented away from us;
-        # its pidfd still reaches exactly it.
+        # A registered waypipe that left the group is reparented away from
+        # us; its pidfd still reaches exactly it.
         deadline = time.monotonic() + TEARDOWN_GRACE_S
         for fd in self.pidfds:
             left = max(0.0, deadline - time.monotonic())

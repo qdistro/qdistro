@@ -191,11 +191,15 @@ across the checks — pins it with a pidfd, and registers the verified exe
 and starttime. Only then does it print `READY <pid>` on stdout.
 
 The bridge's stdin is the caller's liveness pipe. EOF — the wrapper
-exiting, being killed, or a cancelled launch — makes it SIGTERM runuser
-(forwarded down the chain) and the pinned waypipe, escalate to SIGKILL
-after a grace, and exit; runuser also carries a parent-death SIGTERM.
-When the chain exits on its own the bridge exits with its status. The
-wrapper treats the bridge's exit as the end of the session.
+exiting, being killed, or a cancelled launch — makes it SIGTERM the
+chain's process group (runuser leads it, so this also reaches the child
+waypipe forks per guest connection, which is not the registered pid) and
+the pinned waypipe, escalate to SIGKILL after a grace, and exit; runuser
+also carries a parent-death SIGTERM. runuser is reaped only once its
+group is empty, so the group id cannot be recycled under the signal.
+When the chain exits on its own the bridge ends whatever is left of the
+group and exits with its status. The wrapper treats the bridge's exit as
+the end of the session.
 
 Authentication: `org.qdistro.tier5.bridge` is `allow_active=auth_admin_keep`,
 `allow_inactive=no`, `allow_any=auth_admin`, with `exec.path` pinned to

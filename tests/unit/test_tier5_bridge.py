@@ -314,6 +314,13 @@ for fd in os.listdir("/proc/self/fd"):
         pass
 open(os.path.join(S, "waypipe.fds"), "w").write(repr(fds))
 open(os.path.join(S, "waypipe.pid"), "w").write(str(os.getpid()))
+# waypipe forks one child per connection; this one outlives its parent and
+# shrugs off SIGTERM, so only a group-wide teardown with a SIGKILL reaches it
+if os.path.exists(os.path.join(S, "conn-child")) and os.fork() == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    open(os.path.join(S, "conn.pid"), "w").write(str(os.getpid()))
+    while True:
+        time.sleep(1)
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 while True:
     time.sleep(1)
@@ -499,3 +506,37 @@ def test_chain_exit_is_reported_and_reaped(chain):
     os.kill(pid, signal.SIGTERM)
     assert chain.join() == 0
     assert _gone(pid)
+
+
+def _conn_pid(chain, timeout=5):
+    f = chain.state / "conn.pid"
+    deadline = time.monotonic() + timeout
+    while not f.exists():
+        assert time.monotonic() < deadline, "no connection child"
+        time.sleep(0.02)
+    return int(f.read_text())
+
+
+def test_caller_eof_reaps_waypipe_connection_children(chain):
+    # ensures: teardown reaches the whole chain process group — a per-
+    #          connection waypipe child that ignores SIGTERM is not left
+    #          holding a tagged compositor connection
+    chain.knob("conn-child")
+    chain.start()
+    chain.wait_ready()
+    conn = _conn_pid(chain)
+    chain.caller_exits()
+    chain.join()
+    assert _gone(conn)
+
+
+def test_chain_exit_reaps_leftover_connection_children(chain):
+    # ensures: a waypipe client that exits on its own does not leave its
+    #          connection children behind either
+    chain.knob("conn-child")
+    chain.start(B.parse_args(_args(mode="--loopback", name="loopback-9")))
+    pid = chain.wait_ready()
+    conn = _conn_pid(chain)
+    os.kill(pid, signal.SIGTERM)
+    chain.join()
+    assert _gone(conn)
