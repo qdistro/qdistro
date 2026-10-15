@@ -296,12 +296,12 @@ QCI_AGENT_CMD='my-visual-agent-runner' qdistro/ci/bin/qci gui
 If your runner needs a template, include `{prompt}` — it is substituted with the
 prompt-file path and the result is run via `bash -lc`, so the template can pass
 the prompt as a path, on stdin, or inlined with `$(cat {prompt})`, whichever the
-runner takes. The supported runner is Codex with `gpt-5.6-luna`, which reads the
+runner takes. The supported runner is Codex with `gpt-6-luna`, which reads the
 prompt on stdin:
 
 ```bash
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
-QCI_AGENT_MODEL=gpt-5.6-luna \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
+QCI_AGENT_MODEL=gpt-6-luna \
   qdistro/ci/bin/qci gui
 ```
 

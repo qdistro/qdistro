@@ -316,13 +316,13 @@ A dev `full` skips the image qualification with `QCI_SKIP_IMAGE=1`
 
 **The GUI gate wants an agent.** The GUI scenarios are markdown playbooks that
 need a visual runner — a coding-agent CLI that can look at screenshots and
-drive the VM. The sanctioned driver is Codex with `gpt-5.6-luna` at pinned
+drive the VM. The sanctioned driver is Codex with `gpt-6-luna` at pinned
 medium reasoning effort; run the gate in a foreground terminal (it's the
 most direct way to watch the product actually work):
 
 ```sh
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
-QCI_AGENT_MODEL=gpt-5.6-luna \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
+QCI_AGENT_MODEL=gpt-6-luna \
   ci/bin/qci gui
 ```
 

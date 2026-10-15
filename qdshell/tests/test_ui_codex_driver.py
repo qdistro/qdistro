@@ -23,7 +23,7 @@ def test_ui_codex_driver_pins_luna_and_keeps_rollout(monkeypatch, with_image):
 
     cmd, kwargs = seen[0]
     assert cmd[:2] == ["codex", "exec"]
-    assert cmd[cmd.index("--model") + 1] == "gpt-5.6-luna"
+    assert cmd[cmd.index("--model") + 1] == "gpt-6-luna"
     assert cmd[cmd.index("-c") + 1] == "model_reasoning_effort=medium"
     assert "--ephemeral" not in cmd
     assert (f"--image={image}" in cmd) == with_image
