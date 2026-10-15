@@ -20,15 +20,25 @@ their parent pointer when it is destroyed, so a surviving ungrabbed or
 pending child never reads a freed parent; a second get_popup on one
 xdg_surface is refused (already_constructed). Applies after 0001.
 
+A grab whose parent lies in a layer-rooted chain is answered per
+xdg_popup.grab before the handler sees it: a parent already dismissed
+through the layer-grab dismiss (layer_dismissed) dismisses the new popup
+(popup_done, no error); a parent that never took a grab (a root without
+layer_grabbed, or an ungrabbed submenu, which the stock path would
+otherwise hand an owner-events grab) is xdg_wm_base.invalid_popup_parent;
+a grabbed parent with a joined child above it is
+xdg_wm_base.not_the_topmost_popup, as the desktop seat grab posts.
+
 Regression gates: qdwin test_zwlr_layer_shell.py
-(test_layer_popup_nested_grab_routed) and the live lane
+(test_layer_popup_nested_grab_routed, test_layer_chain_*; the layer_chain
+tests take real grabs on the test input seat) and the live lane
 qdwin/tests/gui/agent-layer-popup-nested-grab-smoke.sh.
 
 diff --git a/include/libweston/desktop.h b/include/libweston/desktop.h
-index d2e46401..bf232d64 100644
+index d2e46401..1155513e 100644
 --- a/include/libweston/desktop.h
 +++ b/include/libweston/desktop.h
-@@ -245,7 +245,13 @@ weston_desktop_xdg_popup_get_geometry(struct wl_resource *popup_resource,
+@@ -245,7 +245,15 @@ weston_desktop_xdg_popup_get_geometry(struct wl_resource *popup_resource,
   * error. The handler is responsible for installing whatever pointer /
   * keyboard grab semantics it needs (e.g. dismiss-on-outside-click) and
   * returning true. Returning false makes libweston post the usual
@@ -39,12 +49,14 @@ index d2e46401..bf232d64 100644
 + * at a layer-parented popup (a submenu of a layer menu). Then
 + * `layer_parent_surface` is the immediate parent popup's surface, not a
 + * layer surface; the handler tells the two apart by whether it tracks
-+ * `popup_resource` as a layer popup. */
++ * `popup_resource` as a layer popup. libweston answers a parent that was
++ * dismissed (popup_done), never grabbed (invalid_popup_parent) or is not
++ * the topmost popup (not_the_topmost_popup) itself, before the handler. */
  typedef bool (*weston_desktop_xdg_popup_layer_grab_handler_t)(
  	struct wl_resource *popup_resource,
  	struct weston_surface *popup_surface,
 diff --git a/libweston/desktop/xdg-shell.c b/libweston/desktop/xdg-shell.c
-index 2c56c741..24967e12 100644
+index 2c56c741..a1b49086 100644
 --- a/libweston/desktop/xdg-shell.c
 +++ b/libweston/desktop/xdg-shell.c
 @@ -80,6 +80,11 @@ struct weston_desktop_xdg_surface {
@@ -59,7 +71,7 @@ index 2c56c741..24967e12 100644
  
  	bool has_next_geometry;
  	struct weston_geometry next_geometry;
-@@ -132,6 +137,14 @@ struct weston_desktop_xdg_popup {
+@@ -132,6 +137,22 @@ struct weston_desktop_xdg_popup {
  	struct wl_resource *resource;
  	struct weston_desktop_xdg_surface *parent;
  	struct weston_surface *layer_parent_surface;
@@ -68,13 +80,21 @@ index 2c56c741..24967e12 100644
 +	 * grab, so the topmost-destroy rule is kept here: chain_child is the
 +	 * popup that joined this one's grab, chain_parent the reverse link. */
 +	bool in_layer_chain;
++	/* layer_grabbed: a layer-parented root whose grab the handler took.
++	 * layer_dismissed: popup_done was sent through the layer-grab dismiss
++	 * (or the popup was refused as the child of a dismissed one). Together
++	 * they tell a submenu's grab apart per xdg_popup.grab: a dismissed
++	 * grabbing parent dismisses the child, a parent that never grabbed is
++	 * a protocol error. */
++	bool layer_grabbed;
++	bool layer_dismissed;
 +	struct weston_desktop_xdg_popup *chain_parent;
 +	struct weston_desktop_xdg_popup *chain_child;
 +	struct wl_list parent_link;	/* parent->popup_children */
  	struct weston_desktop_seat *seat;
  	struct weston_geometry geometry;
  
-@@ -1434,6 +1447,25 @@ static struct {
+@@ -1434,6 +1455,89 @@ static struct {
  	void *user_data;
  } weston_desktop_xdg_popup_layer_grab;
  
@@ -97,10 +117,85 @@ index 2c56c741..24967e12 100644
 +	return NULL;
 +}
 +
++/* qdistro patch (D9): the popup's chain ends at a layer-parented root.
++ * Parent pointers are nulled when a parent is destroyed (popup_children),
++ * so the walk never reads a freed popup. */
++static bool
++weston_desktop_xdg_popup_layer_rooted(struct weston_desktop_xdg_popup *popup)
++{
++	while (popup->parent != NULL) {
++		if (popup->parent->role != WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP)
++			return false;
++		popup = wl_container_of(popup->parent, popup, base);
++	}
++	return popup->layer_parent_surface != NULL;
++}
++
++/* qdistro patch (D9): admission of a grab whose parent popup lies in a
++ * layer-rooted chain, before the layer-grab handler sees it. Returns true
++ * when the grab was answered here (dismissed, or a protocol error posted).
++ * Per xdg_popup.grab:
++ *  - parent is a grabbing popup that was already dismissed: this popup is
++ *    immediately dismissed (popup_done, no error);
++ *  - parent did not take an explicit grab: "an error will be raised" —
++ *    xdg_wm_base.invalid_popup_parent, the error for an invalid popup
++ *    parent (xdg_popup.invalid_grab means "grab after being mapped");
++ *  - parent grabbed but is not the topmost popup (a submenu already joined
++ *    above it): xdg_wm_base.not_the_topmost_popup, as the desktop seat
++ *    grab path below posts for the same request on a toplevel chain. */
++static bool
++weston_desktop_xdg_popup_layer_chain_refuse(struct weston_desktop_xdg_popup *popup)
++{
++	struct weston_desktop_xdg_popup *parent;
++	struct weston_desktop_client *client =
++		weston_desktop_surface_get_client(popup->base.desktop_surface);
++	struct wl_resource *client_resource =
++		weston_desktop_client_get_resource(client);
++
++	if (popup->parent == NULL ||
++	    popup->parent->role != WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP)
++		return false;
++	parent = wl_container_of(popup->parent, parent, base);
++	if (!weston_desktop_xdg_popup_layer_rooted(parent))
++		return false;
++
++	if (parent->layer_dismissed) {
++		popup->layer_dismissed = true;
++		weston_desktop_surface_popup_dismiss(popup->base.desktop_surface);
++		return true;
++	}
++	if (!parent->in_layer_chain && !parent->layer_grabbed) {
++		if (client_resource)
++			wl_resource_post_error(client_resource,
++					       XDG_WM_BASE_ERROR_INVALID_POPUP_PARENT,
++					       "xdg_popup grab parent is a popup without an explicit grab");
++		return true;
++	}
++	if (parent->chain_child != NULL) {
++		if (client_resource)
++			wl_resource_post_error(client_resource,
++					       XDG_WM_BASE_ERROR_NOT_THE_TOPMOST_POPUP,
++					       "xdg_popup was not created on the topmost popup");
++		return true;
++	}
++	return false;
++}
++
  static void
  weston_desktop_xdg_popup_protocol_grab(struct wl_client *wl_client,
  				       struct wl_resource *resource,
-@@ -1493,6 +1525,40 @@ weston_desktop_xdg_popup_protocol_grab(struct wl_client *wl_client,
+@@ -1471,7 +1575,10 @@ weston_desktop_xdg_popup_protocol_grab(struct wl_client *wl_client,
+ 					XDG_POPUP_ERROR_INVALID_GRAB,
+ 					"xdg_popup layer-parent grab refused (serial=%u)",
+ 					serial);
++				return;
+ 			}
++			/* qdistro patch (D9): a submenu may now join it. */
++			popup->layer_grabbed = true;
+ 			return;
+ 		}
+ 		wl_resource_post_error(popup->resource,
+@@ -1493,6 +1600,46 @@ weston_desktop_xdg_popup_protocol_grab(struct wl_client *wl_client,
  		return;
  	}
  
@@ -111,7 +206,13 @@ index 2c56c741..24967e12 100644
 +	 * client's other surfaces input) and leave the root popup with no
 +	 * grab once it ends. Hand it to the layer-grab handler with the
 +	 * immediate parent popup's surface as the parent argument; the
-+	 * handler validates the serial and the chain. */
++	 * handler validates the serial and the chain. A parent in a
++	 * layer-rooted chain that is dismissed, never grabbed, or not the
++	 * topmost popup is answered first (and never reaches the stock path,
++	 * which would install the owner-events grab this patch removes). */
++	if (weston_desktop_xdg_popup_layer_grab.func != NULL &&
++	    weston_desktop_xdg_popup_layer_chain_refuse(popup))
++		return;
 +	struct weston_desktop_xdg_popup *chain_parent =
 +		weston_desktop_xdg_popup_layer_chain_parent(popup);
 +	if (weston_desktop_xdg_popup_layer_grab.func != NULL &&
@@ -141,7 +242,16 @@ index 2c56c741..24967e12 100644
  	topmost = weston_desktop_seat_popup_grab_get_topmost_surface(seat);
  	if (topmost != NULL && topmost != popup->parent->desktop_surface) {
  		struct weston_desktop_client *client =
-@@ -1764,6 +1830,30 @@ weston_desktop_xdg_popup_destroy(struct weston_desktop_xdg_popup *popup)
+@@ -1702,6 +1849,8 @@ weston_desktop_xdg_popup_dismiss_layer_grab(struct wl_resource *popup_resource)
+ 	if (!popup ||
+ 	    popup->base.role != WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP)
+ 		return;
++	/* qdistro patch (D9): a later submenu grab on it is dismissed. */
++	popup->layer_dismissed = true;
+ 	xdg_popup_send_popup_done(popup->resource);
+ }
+ 
+@@ -1764,6 +1913,30 @@ weston_desktop_xdg_popup_destroy(struct weston_desktop_xdg_popup *popup)
  	struct weston_desktop_client *client =
  		weston_desktop_surface_get_client(popup->base.desktop_surface);
  
@@ -172,7 +282,7 @@ index 2c56c741..24967e12 100644
  	if (!weston_desktop_surface_get_grab(popup->base.desktop_surface))
  		return;
  
-@@ -2036,6 +2126,16 @@ weston_desktop_xdg_surface_protocol_get_popup(struct wl_client *wl_client,
+@@ -2036,6 +2209,16 @@ weston_desktop_xdg_surface_protocol_get_popup(struct wl_client *wl_client,
  	wsurface = weston_desktop_surface_get_surface(dsurface);
  	popup = weston_desktop_surface_get_implementation_data(dsurface);
  
@@ -189,7 +299,7 @@ index 2c56c741..24967e12 100644
  	/* qdistro patch: per the xdg-shell spec, parent may be NULL provided
  	 * the parent is set 'using some other protocol' before commit. We
  	 * accept NULL here, mark the popup as parentless, and enforce the
-@@ -2071,6 +2171,10 @@ weston_desktop_xdg_surface_protocol_get_popup(struct wl_client *wl_client,
+@@ -2071,6 +2254,10 @@ weston_desktop_xdg_surface_protocol_get_popup(struct wl_client *wl_client,
  
  	popup->base.role = WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP;
  	popup->parent = parent;
@@ -200,7 +310,7 @@ index 2c56c741..24967e12 100644
  
  	if (parent_surface) {
  		popup->geometry =
-@@ -2320,6 +2424,15 @@ weston_desktop_xdg_surface_destroy(struct weston_desktop_surface *dsurface,
+@@ -2320,6 +2507,15 @@ weston_desktop_xdg_surface_destroy(struct weston_desktop_surface *dsurface,
  		break;
  	}
  
@@ -216,7 +326,7 @@ index 2c56c741..24967e12 100644
  	if (surface->configure_idle != NULL)
  		wl_event_source_remove(surface->configure_idle);
  
-@@ -2445,6 +2558,7 @@ weston_desktop_xdg_shell_protocol_get_xdg_surface(struct wl_client *wl_client,
+@@ -2445,6 +2641,7 @@ weston_desktop_xdg_shell_protocol_get_xdg_surface(struct wl_client *wl_client,
  	surface->desktop = weston_desktop_client_get_desktop(client);
  	surface->surface = wsurface;
  	wl_list_init(&surface->configure_list);

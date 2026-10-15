@@ -39,6 +39,10 @@ try:  # qdwin_shell_v1 may be absent on installs that didn't gen this protocol
     from protocol.qdwin_shell_v1 import QdwinShellV1  # noqa: E402
 except Exception:
     QdwinShellV1 = None  # type: ignore
+try:  # weston_test: only when the harness loaded the test input module
+    from protocol.weston_test import WestonTest  # noqa: E402
+except Exception:
+    WestonTest = None  # type: ignore
 
 
 def _vendored_libweston_active():
@@ -575,12 +579,14 @@ def test_layer_popup_nested_grab_routed(display_name):
     seat grab (an owner-events grab that would hand the popup client's
     other surfaces input and orphan the root popup's grab).
 
-    Discriminator: with serial=0 the stock path posts no error (the seat
-    grab start fails and the popup is simply dismissed); the routed path
-    is refused by qdwin and libweston posts INVALID_GRAB with the
-    "nested layer-chain grab refused" message. The live lane
-    qdwin/tests/gui/agent-layer-popup-nested-grab-smoke.sh drives a real
-    serial through the chain.
+    Discriminator: P1 never took a grab. The stock path posts no error
+    (with serial=0 the seat grab start fails and the popup is simply
+    dismissed); the routed path answers per xdg_popup.grab ("if the parent
+    is a popup that did not take an explicit grab, an error will be
+    raised") with xdg_wm_base.invalid_popup_parent (3). The D9 follow-up
+    tests below (layer_chain_*) drive real grabs through the chain with the
+    test input seat; the live lane
+    qdwin/tests/gui/agent-layer-popup-nested-grab-smoke.sh does it on a VM.
     """
     label = "layer_popup_nested_grab_routed"
     if not _vendored_libweston_active():
@@ -651,8 +657,8 @@ def test_layer_popup_nested_grab_routed(display_name):
     routed = False
     for m in _WL_ERR_RE.finditer(captured):
         iface, code, msg = m.group(1), int(m.group(3)), m.group(4)
-        if (iface == "xdg_popup" and code == 0
-                and "nested layer-chain grab refused" in msg):
+        if (iface == "xdg_wm_base" and code == 3
+                and "without an explicit grab" in msg):
             routed = True
             break
     del p1
@@ -661,11 +667,12 @@ def test_layer_popup_nested_grab_routed(display_name):
     except: pass
 
     if routed:
-        print(f"  PASS [{label}] nested grab reached the layer-grab handler")
+        print(f"  PASS [{label}] nested grab under an ungrabbed layer popup "
+              f"refused invalid_popup_parent on the layer-chain route")
         return True
-    print(f"  FAIL [{label}] expected xdg_popup INVALID_GRAB \"nested "
-          f"layer-chain grab refused\" for a nested popup in a layer "
-          f"chain; got: {captured.strip()[:200]}")
+    print(f"  FAIL [{label}] expected xdg_wm_base error 3 "
+          f"(invalid_popup_parent) for a grab under an ungrabbed layer "
+          f"popup; got: {captured.strip()[:200]}")
     return False
 
 
@@ -710,6 +717,769 @@ def test_popup_double_construct_refused(display_name):
     print(f"  FAIL [{label}] expected xdg_surface error 2 "
           f"(already_constructed); got: {captured.strip()[:200]}")
     return False
+
+
+# ---------------------------------------------------------------------------
+# D9 follow-ups: live layer-chain grabs on the test input seat.
+#
+# The harness loads tests/protocol/weston-test-input-module.c, a seat named
+# "qdwin-test-input" (pointer, keyboard, touch) driven over weston_test.
+# These tests take REAL grabs on it — press/touch serials, outside presses —
+# which the stale-serial tests above cannot. Layout (global coordinates,
+# headless output at 0,0):
+#
+#   L1  layer surface (top layer)          (0,0)    50x50
+#   P1  root popup on L1                   (60,0)   40x40
+#   P2  submenu, parent P1                 (100,0)  40x40
+#   L2  sibling layer surface, same client (300,0)  50x50
+#   Q   ungrabbed root popup on L2         (300,60) 40x40
+#   (600,300) is empty: an outside press lands on nothing.
+# ---------------------------------------------------------------------------
+
+BTN_LEFT = 0x110
+TEST_SEAT = "qdwin-test-input"
+XDG_POSITIONER_ANCHOR_TOP_LEFT = 5
+XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT = 8
+
+
+class _D9Session:
+    """One client connection with the globals, the test seat's pointer and
+    touch, and an event log the tests assert on."""
+
+    def __init__(self, display_name):
+        from pywayland.protocol.wayland import WlSeat
+        self.ok = False
+        self.why = ""
+        self.d = Display(display_name)
+        self.d.connect()
+        self.g = {}
+        self.seats = []
+        self.events = []          # (kind, name, *details)
+        self.serial = None        # latest press / touch-down serial
+        self.names = {}           # surface ptr -> name
+        reg = self.d.get_registry()
+
+        def on_global(r, name, iface, ver):
+            if iface == WlCompositor.name:
+                self.g["compositor"] = r.bind(name, WlCompositor, min(ver, 4))
+            elif iface == ZwlrLayerShellV1.name:
+                self.g["shell"] = r.bind(name, ZwlrLayerShellV1, min(ver, 5))
+            elif iface == XdgWmBase.name:
+                self.g["xdg"] = r.bind(name, XdgWmBase, min(ver, 3))
+            elif iface == WlShm.name:
+                self.g["shm"] = r.bind(name, WlShm, 1)
+            elif iface == "qdwin_shell_v1" and QdwinShellV1 is not None:
+                self.g["qdwin_shell"] = r.bind(name, QdwinShellV1,
+                                               min(ver, 19))
+            elif iface == "weston_test" and WestonTest is not None:
+                self.g["test"] = r.bind(name, WestonTest, 1)
+            elif iface == "wl_seat":
+                s = r.bind(name, WlSeat, min(ver, 5))
+                rec = {"seat": s, "name": None, "caps": 0}
+                s.dispatcher["name"] = lambda _s, n, rec=rec: rec.update(name=n)
+                s.dispatcher["capabilities"] = (
+                    lambda _s, c, rec=rec: rec.update(caps=c))
+                self.seats.append(rec)
+
+        reg.dispatcher["global"] = on_global
+        reg.dispatcher["global_remove"] = lambda r, n: None
+        self.d.roundtrip()
+        self.d.roundtrip()
+        missing = [k for k in ("compositor", "shell", "xdg", "shm", "test")
+                   if k not in self.g]
+        if missing:
+            self.why = "missing globals: " + ", ".join(missing)
+            return
+        self.g["xdg"].dispatcher["ping"] = lambda x, serial: x.pong(serial)
+        rec = next((r for r in self.seats if r["name"] == TEST_SEAT), None)
+        if rec is None:
+            self.why = f"no wl_seat named {TEST_SEAT}"
+            return
+        self.seat = rec["seat"]
+        self.pointer = self.seat.get_pointer()
+        self.touch = self.seat.get_touch() if rec["caps"] & 4 else None
+        self.pointer.dispatcher["enter"] = self._on_enter
+        self.pointer.dispatcher["leave"] = lambda *a: None
+        self.pointer.dispatcher["motion"] = lambda *a: None
+        self.pointer.dispatcher["frame"] = lambda *a: None
+        self.pointer.dispatcher["button"] = self._on_button
+        if self.touch is not None:
+            self.touch.dispatcher["down"] = self._on_touch_down
+            self.touch.dispatcher["up"] = (
+                lambda *a: self.events.append(("touch_up",)))
+            self.touch.dispatcher["motion"] = (
+                lambda *a: self.events.append(("touch_motion",)))
+            self.touch.dispatcher["frame"] = lambda *a: None
+            self.touch.dispatcher["cancel"] = (
+                lambda *a: self.events.append(("touch_cancel",)))
+        self.ok = True
+
+    # -- event log -----------------------------------------------------
+    def _name(self, surface):
+        if surface is None:
+            return None
+        for ptr, name in self.names.items():
+            if getattr(surface, "_ptr", None) == ptr:
+                return name
+        return "?"
+
+    def _on_enter(self, _p, serial, surface, sx, sy):
+        self.events.append(("enter", self._name(surface)))
+
+    def _on_button(self, _p, serial, time, button, state):
+        if state == 1:
+            self.serial = serial
+        self.events.append(("button", self.focus_name(), state))
+
+    def focus_name(self):
+        for kind, *rest in reversed(self.events):
+            if kind == "enter":
+                return rest[0]
+        return None
+
+    def _on_touch_down(self, _t, serial, time, surface, tid, x, y):
+        self.serial = serial
+        self.events.append(("touch_down", self._name(surface)))
+
+    def mark(self):
+        return len(self.events)
+
+    def since(self, mark, kind=None):
+        return [e for e in self.events[mark:] if kind is None or e[0] == kind]
+
+    # -- input on the test seat -----------------------------------------
+    def _ts(self):
+        import time
+        ns = time.monotonic_ns()
+        sec, nsec = divmod(ns, 1_000_000_000)
+        return (sec >> 32, sec & 0xffffffff, nsec)
+
+    def move(self, x, y):
+        self.g["test"].move_pointer(*self._ts(), x, y)
+        self.d.roundtrip()
+
+    def click(self, x, y):
+        self.move(x, y)
+        self.g["test"].send_button(*self._ts(), BTN_LEFT, 1)
+        self.d.roundtrip()
+        self.g["test"].send_button(*self._ts(), BTN_LEFT, 0)
+        self.d.roundtrip()
+
+    def touch_down(self, x, y, tid=0):
+        self.g["test"].send_touch(*self._ts(), tid, x, y, 0)
+        self.d.roundtrip()
+
+    def touch_motion(self, x, y, tid=0):
+        self.g["test"].send_touch(*self._ts(), tid, x, y, 2)
+        self.d.roundtrip()
+
+    def touch_up(self, tid=0):
+        self.g["test"].send_touch(*self._ts(), tid, 0, 0, 1)
+        self.d.roundtrip()
+
+    def tap(self, x, y, tid=0):
+        self.g["test"].send_touch(*self._ts(), tid, x, y, 0)   # down
+        self.d.roundtrip()
+        self.g["test"].send_touch(*self._ts(), tid, 0, 0, 1)   # up
+        self.d.roundtrip()
+
+    # -- surfaces --------------------------------------------------------
+    def _buffer(self, w, h):
+        stride = w * 4
+        size = stride * h
+        fd = os.memfd_create("d9-buf")
+        os.ftruncate(fd, size)
+        os.write(fd, b"\xff" * size)
+        pool = self.g["shm"].create_pool(fd, size)
+        buf = pool.create_buffer(0, w, h, stride, 0)   # argb8888
+        pool.destroy()
+        os.close(fd)
+        return buf
+
+    def _commit_and_repaint(self, surf):
+        """Commit and wait for the frame callback. Input picking walks the
+        compositor's view list, which is rebuilt at repaint: until the
+        output has repainted, a freshly mapped surface takes no input."""
+        import time
+        done = []
+        cb = surf.frame()
+        cb.dispatcher["done"] = lambda _cb, t: done.append(t)
+        surf.commit()
+        deadline = time.monotonic() + 3.0
+        while not done and time.monotonic() < deadline:
+            try:
+                self.d.roundtrip()
+            except Exception:
+                return
+            time.sleep(0.005)
+
+    def layer(self, name, w, h, margin_left=0):
+        surf = self.g["compositor"].create_surface()
+        self.names[surf._ptr] = name
+        ls = self.g["shell"].get_layer_surface(
+            surf, None, ZwlrLayerShellV1.layer.top.value, "d9-" + name)
+        ls.set_size(w, h)
+        ls.set_anchor(ZwlrLayerSurfaceV1.anchor.top.value
+                      | ZwlrLayerSurfaceV1.anchor.left.value)
+        if margin_left:
+            ls.set_margin(0, 0, 0, margin_left)
+        ls.dispatcher["configure"] = lambda _ls, s, cw, ch: _ls.ack_configure(s)
+        surf.commit()
+        self.d.roundtrip()
+        surf.attach(self._buffer(w, h), 0, 0)
+        self._commit_and_repaint(surf)
+        return {"surf": surf, "ls": ls, "name": name}
+
+    def popup(self, name, x, y, layer=None, parent=None, grab=None,
+              wait=True):
+        """A 40x40 popup at (x,y) relative to its parent: a root popup on a
+        layer surface, or a submenu of another popup. grab=serial takes
+        xdg_popup.grab before the first commit (the spec order). wait=False
+        skips waiting for the repaint (a popup refused or dismissed at
+        grab time never maps)."""
+        pos = self.g["xdg"].create_positioner()
+        pos.set_size(40, 40)
+        pos.set_anchor_rect(x, y, 1, 1)
+        pos.set_anchor(XDG_POSITIONER_ANCHOR_TOP_LEFT)
+        pos.set_gravity(XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT)
+        surf = self.g["compositor"].create_surface()
+        self.names[surf._ptr] = name
+        xs = self.g["xdg"].get_xdg_surface(surf)
+        p = xs.get_popup(parent["xs"] if parent else None, pos)
+        rec = {"surf": surf, "xs": xs, "popup": p, "name": name,
+               "configured": []}
+        p.dispatcher["configure"] = lambda *a: None
+        p.dispatcher["popup_done"] = (
+            lambda _p, n=name: self.events.append(("popup_done", n)))
+        xs.dispatcher["configure"] = (
+            lambda _xs, s, rec=rec: (_xs.ack_configure(s),
+                                     rec["configured"].append(s)))
+        if layer is not None:
+            layer["ls"].get_popup(p)
+        if grab is not None:
+            p.grab(self.seat, grab)
+        surf.commit()
+        self.d.roundtrip()
+        if rec["configured"]:
+            surf.attach(self._buffer(40, 40), 0, 0)
+            if wait:
+                self._commit_and_repaint(surf)
+            else:
+                surf.commit()
+        try:
+            self.d.roundtrip()
+        except Exception:
+            pass
+        return rec
+
+    def lock(self):
+        """Bind as the shell, attach an output-sized lock surface named
+        LOCK and lock (qdwin_shell_v1 set_locked, the path every lock -
+        hotkey, idle timeout, locker - ends in). Returns False when this
+        connection cannot be the shell."""
+        sh = self.g.get("qdwin_shell")
+        if sh is None:
+            return False
+        sh.bind_as_shell()
+        surf = self.g["compositor"].create_surface()
+        self.names[surf._ptr] = "LOCK"
+        self.lock_surf = surf
+        self.lock_obj = sh.attach_lock_surface(surf)
+        self.lock_obj.dispatcher["dismissed"] = lambda *a: None
+        surf.attach(self._buffer(1024, 640), 0, 0)
+        self._commit_and_repaint(surf)
+        sh.set_locked(1)
+        self.d.roundtrip()
+        self.locked = True
+        return True
+
+    def unlock(self):
+        """Unlock and take the lock surface down, as a locker does."""
+        self.g["qdwin_shell"].set_locked(0)
+        self.lock_obj.destroy()
+        self.lock_surf.destroy()
+        self.d.roundtrip()
+        self.locked = False
+
+    def close(self):
+        if getattr(self, "locked", False):
+            try:
+                self.g["qdwin_shell"].set_locked(0)
+                self.d.roundtrip()
+            except Exception:
+                pass
+        try:
+            self.d.disconnect()
+        except Exception:
+            pass
+
+
+def _d9_session(label, display_name):
+    """A ready session, or None after printing why the test SKIPs."""
+    if not _vendored_libweston_active():
+        print(f"  SKIP [{label}] layer-chain grabs need the vendored "
+              f"libweston; set QDWIN_USE_VENDORED_LIBWESTON=1")
+        return None
+    if WestonTest is None:
+        print(f"  SKIP [{label}] no weston_test bindings (harness loaded no "
+              f"test input module)")
+        return None
+    s = _D9Session(display_name)
+    if not s.ok:
+        print(f"  SKIP [{label}] {s.why} (harness loaded no test input "
+              f"module?)")
+        s.close()
+        return None
+    return s
+
+
+def _errors_since(start):
+    return [(m.group(1), int(m.group(3)), m.group(4))
+            for m in _WL_ERR_RE.finditer(_read_captured_stderr_since(start))]
+
+
+def _open_chain(s, nested=True):
+    """L1 + grabbed P1 (+ grabbed submenu P2), each grab on a fresh press
+    serial: the press on L1 opens P1, a press on P1 opens P2."""
+    l1 = s.layer("L1", 50, 50)
+    s.click(10, 10)
+    p1 = s.popup("P1", 60, 0, layer=l1, grab=s.serial)
+    if not nested:
+        return l1, p1, None
+    s.click(80, 20)
+    p2 = s.popup("P2", 40, 0, parent=p1, grab=s.serial)
+    return l1, p1, p2
+
+
+def test_layer_chain_grab_live(display_name):
+    """D9 positive path on a real grab: a submenu joins the root's grab, a
+    press on it is delivered (no dismissal), and an outside press dismisses
+    the chain topmost first."""
+    label = "layer_chain_grab_live"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        start = _stderr_size()
+        _l1, _p1, _p2 = _open_chain(s)
+        m = s.mark()
+        s.click(120, 20)
+        pressed = [e for e in s.since(m, "button") if e[2] == 1]
+        if s.since(m, "popup_done") or not pressed or pressed[0][1] != "P2":
+            print(f"  FAIL [{label}] press on the submenu was not delivered "
+                  f"to it inside the grab: {s.since(m)}")
+            return False
+        m = s.mark()
+        s.click(600, 300)
+        done = [e[1] for e in s.since(m, "popup_done")]
+        errs = _errors_since(start)
+        if done != ["P2", "P1"] or errs:
+            print(f"  FAIL [{label}] outside press: popup_done {done} "
+                  f"(want ['P2', 'P1']), errors {errs}")
+            return False
+        print(f"  PASS [{label}] submenu press delivered; outside press "
+              f"dismissed P2 then P1")
+        return True
+    finally:
+        s.close()
+
+
+def test_layer_chain_unmap_on_dismiss(display_name):
+    """D9 follow-up 2: a dismissed chain is unmapped with popup_done
+    (xdg_popup: "at the same time the surface will be unmapped"), not when
+    the client gets round to destroying it. The client here never destroys
+    the popups; the pointer then crosses where they were and must not enter
+    either (a still-mapped popup would be picked and focused)."""
+    label = "layer_chain_unmap_on_dismiss"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        _open_chain(s)
+        s.click(600, 300)
+        if [e[1] for e in s.since(0, "popup_done")] != ["P2", "P1"]:
+            print(f"  FAIL [{label}] chain not dismissed: {s.events}")
+            return False
+        m = s.mark()
+        s.move(120, 20)
+        s.move(80, 20)
+        entered = [e[1] for e in s.since(m, "enter")]
+        if "P1" in entered or "P2" in entered:
+            print(f"  FAIL [{label}] dismissed popups still mapped and "
+                  f"pickable: pointer entered {entered}")
+            return False
+        print(f"  PASS [{label}] dismissed chain left the scene at once "
+              f"(no enter on P1/P2 after popup_done)")
+        return True
+    finally:
+        s.close()
+
+
+def test_layer_chain_touch(display_name):
+    """D9 follow-up 1: the chain grab has a touch half. A touch down opens
+    the root, a touch on it opens the submenu, a touch on the submenu is
+    delivered to it, and a touch on a same-client sibling surface dismisses
+    the chain (topmost first) without reaching the sibling."""
+    label = "layer_chain_touch"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        if s.touch is None:
+            print(f"  FAIL [{label}] test seat advertises no touch")
+            return False
+        start = _stderr_size()
+        l1 = s.layer("L1", 50, 50)
+        s.layer("L2", 50, 50, margin_left=300)
+        s.tap(10, 10)
+        p1 = s.popup("P1", 60, 0, layer=l1, grab=s.serial)
+        s.tap(80, 20)
+        s.popup("P2", 40, 0, parent=p1, grab=s.serial)
+        m = s.mark()
+        s.tap(120, 20)
+        downs = [e[1] for e in s.since(m, "touch_down")]
+        if downs != ["P2"] or s.since(m, "popup_done"):
+            print(f"  FAIL [{label}] touch on the submenu: {s.since(m)}")
+            return False
+        m = s.mark()
+        s.tap(310, 10)
+        downs = [e[1] for e in s.since(m, "touch_down")]
+        done = [e[1] for e in s.since(m, "popup_done")]
+        errs = _errors_since(start)
+        if done != ["P2", "P1"] or downs or errs:
+            print(f"  FAIL [{label}] touch on the sibling: popup_done "
+                  f"{done} (want ['P2', 'P1']), touch downs {downs} "
+                  f"(want none), errors {errs}")
+            return False
+        print(f"  PASS [{label}] touch reaches the chain only; an outside "
+              f"touch dismissed P2 then P1")
+        return True
+    finally:
+        s.close()
+
+
+def test_layer_chain_refilter_scope(display_name):
+    """D9 follow-up 4: during the grab only the chain (root, its layer
+    parent, joined submenus) gets pointer focus — not every same-client
+    xdg_popup. Q is the client's own ungrabbed popup on another layer
+    surface; the pointer over it must not enter it."""
+    label = "layer_chain_refilter_scope"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        l2 = s.layer("L2", 50, 50, margin_left=300)
+        s.popup("Q", 0, 60, layer=l2)
+        s.move(310, 70)
+        if s.focus_name() != "Q":
+            print(f"  FAIL [{label}] setup: Q not under the pointer "
+                  f"(focus {s.focus_name()}, events {s.events})")
+            return False
+        _open_chain(s)
+        m = s.mark()
+        s.move(310, 70)
+        s.move(320, 80)
+        entered = [e[1] for e in s.since(m, "enter")]
+        if "Q" in entered:
+            print(f"  FAIL [{label}] same-client popup outside the chain got "
+                  f"pointer focus during the grab: {entered}")
+            return False
+        print(f"  PASS [{label}] a same-client popup outside the chain gets "
+              f"no focus during the grab")
+        return True
+    finally:
+        s.close()
+
+
+def _admission(label, display_name, build, want):
+    """Run build(s) on a fresh session and require exactly `want`: an
+    (iface, code) protocol error, or ("popup_done", name) with no error."""
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        start = _stderr_size()
+        m = build(s)
+        errs = _errors_since(start)
+        if want[0] == "popup_done":
+            done = [e[1] for e in s.since(m, "popup_done")]
+            if done == [want[1]] and not errs:
+                return True
+            print(f"  FAIL [{label}] want popup_done on {want[1]} and no "
+                  f"error; got popup_done {done}, errors {errs}")
+            return False
+        if any(e[0] == want[0] and e[1] == want[1] for e in errs):
+            return True
+        print(f"  FAIL [{label}] want {want[0]} error {want[1]}; got "
+              f"{errs}")
+        return False
+    finally:
+        s.close()
+
+
+def test_layer_chain_admission(display_name):
+    """D9 follow-up 3: a submenu grab in a layer chain is answered per
+    xdg_popup.grab, as the desktop seat grab answers it on a toplevel
+    chain:
+      not_topmost   parent grabbed but a submenu already joined above it
+                    -> xdg_wm_base.not_the_topmost_popup (2)
+      ungrabbed     parent is a popup that never took a grab
+                    -> xdg_wm_base.invalid_popup_parent (3)
+      nonchain      parent is an ungrabbed submenu of a grabbed root (the
+                    stock path would install an owner-events grab here)
+                    -> xdg_wm_base.invalid_popup_parent (3)
+      dismissed     parent grabbed but already dismissed
+                    -> the popup is dismissed at once (popup_done, no error)
+      stale         parent topmost and live, stale serial
+                    -> the layer-grab handler refuses: xdg_popup.invalid_grab
+    """
+    label = "layer_chain_admission"
+
+    def not_topmost(s):
+        _l1, p1, p2 = _open_chain(s)
+        s.click(120, 20)
+        m = s.mark()
+        s.popup("P3", 0, 40, parent=p1, grab=s.serial, wait=False)
+        return m
+
+    def ungrabbed(s):
+        l1 = s.layer("L1", 50, 50)
+        p1 = s.popup("P1", 60, 0, layer=l1)
+        s.click(80, 20)
+        m = s.mark()
+        s.popup("P2", 40, 0, parent=p1, grab=s.serial, wait=False)
+        return m
+
+    def nonchain(s):
+        _l1, p1, _ = _open_chain(s, nested=False)
+        s.click(80, 20)
+        serial = s.serial
+        p2 = s.popup("P2", 40, 0, parent=p1)
+        m = s.mark()
+        s.popup("P3", 0, 0, parent=p2, grab=serial, wait=False)
+        return m
+
+    def dismissed(s):
+        l1, p1, _ = _open_chain(s, nested=False)
+        s.click(600, 300)
+        s.click(10, 10)
+        m = s.mark()
+        s.popup("P2", 40, 0, parent=p1, grab=s.serial, wait=False)
+        return m
+
+    def stale(s):
+        _l1, p1, _ = _open_chain(s, nested=False)
+        m = s.mark()
+        s.popup("P2", 40, 0, parent=p1, grab=0, wait=False)
+        return m
+
+    cases = [
+        ("not_topmost", not_topmost, ("xdg_wm_base", 2)),
+        ("ungrabbed", ungrabbed, ("xdg_wm_base", 3)),
+        ("nonchain", nonchain, ("xdg_wm_base", 3)),
+        ("dismissed", dismissed, ("popup_done", "P2")),
+        ("stale", stale, ("xdg_popup", 0)),
+    ]
+    if _d9_session_probe(label, display_name) is None:
+        return True
+    ok = True
+    for name, build, want in cases:
+        if _admission(f"{label}:{name}", display_name, build, want):
+            print(f"  PASS [{label}:{name}] -> {want[0]} {want[1]}")
+        else:
+            ok = False
+    return ok
+
+
+def test_layer_chain_lock_touch(display_name):
+    """D9 follow-up (sol r1): a lock ends the chain grab and the touch that
+    is in progress. A finger held on the grabbed popup when the lock lands
+    must deliver nothing more (its motion and up would go to a menu the
+    lock hides), the chain is dismissed by the lock itself, and the
+    locker's first touch reaches the lock surface instead of being eaten
+    to dismiss the hidden menu."""
+    label = "layer_chain_lock_touch"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        if s.touch is None or "qdwin_shell" not in s.g:
+            print(f"  SKIP [{label}] no touch / qdwin_shell_v1 on this "
+                  f"connection")
+            return True
+        l1 = s.layer("L1", 50, 50)
+        s.tap(10, 10)
+        s.popup("P1", 60, 0, layer=l1, grab=s.serial)
+        s.touch_down(80, 20)
+        if [e[1] for e in s.since(0, "touch_down")][-1:] != ["P1"]:
+            print(f"  FAIL [{label}] setup: held touch not on P1: {s.events}")
+            return False
+        m = s.mark()
+        if not s.lock():
+            print(f"  SKIP [{label}] cannot bind as the shell")
+            return True
+        done = [e[1] for e in s.since(m, "popup_done")]
+        cancels = len(s.since(m, "touch_cancel"))
+        s.touch_motion(85, 25)
+        s.touch_up()
+        leaked = [e for e in s.since(m)
+                  if e[0] in ("touch_motion", "touch_up")]
+        m2 = s.mark()
+        s.tap(600, 300)
+        downs = [e[1] for e in s.since(m2, "touch_down")]
+        if done != ["P1"] or cancels != 1 or leaked or downs != ["LOCK"]:
+            print(f"  FAIL [{label}] at lock: popup_done {done} (want "
+                  f"['P1']); wl_touch.cancel x{cancels} (want 1); held "
+                  f"touch after lock delivered {leaked} (want nothing); "
+                  f"locker's first touch went to {downs} (want ['LOCK'])")
+            return False
+        print(f"  PASS [{label}] lock dismissed the chain, the held touch "
+              f"went quiet, the locker got its first touch")
+        return True
+    finally:
+        s.close()
+
+
+def test_layer_chain_lock_pointer(display_name):
+    """D9 follow-up (sol r1), pointer half: a lock with a chain grab live
+    dismisses the chain (topmost first) at once, and the locker's first
+    press reaches the lock surface rather than dismissing the hidden
+    menu."""
+    label = "layer_chain_lock_pointer"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        if "qdwin_shell" not in s.g:
+            print(f"  SKIP [{label}] no qdwin_shell_v1 on this connection")
+            return True
+        _open_chain(s)
+        m = s.mark()
+        if not s.lock():
+            print(f"  SKIP [{label}] cannot bind as the shell")
+            return True
+        done = [e[1] for e in s.since(m, "popup_done")]
+        m2 = s.mark()
+        s.click(600, 300)
+        pressed = [e[1] for e in s.since(m2, "button") if e[2] == 1]
+        if done != ["P2", "P1"] or pressed != ["LOCK"]:
+            print(f"  FAIL [{label}] at lock: popup_done {done} (want "
+                  f"['P2', 'P1']); locker's first press went to {pressed} "
+                  f"(want ['LOCK'])")
+            return False
+        print(f"  PASS [{label}] lock dismissed P2 then P1; the locker got "
+              f"its first press")
+        return True
+    finally:
+        s.close()
+
+
+def test_lock_touch_cancel_reuse(display_name):
+    """sol r2: a lock cancels a touch in progress on any surface, not only
+    a menu. A finger held on an ordinary surface (L2, no grab) when the
+    lock lands gets wl_touch.cancel; its motion/up while locked go
+    nowhere; after unlock a new touch reusing the same id starts a clean
+    session on L2 (down then up), with no up ever delivered for the
+    cancelled one."""
+    label = "lock_touch_cancel_reuse"
+    s = _d9_session(label, display_name)
+    if s is None:
+        return True
+    try:
+        if s.touch is None or "qdwin_shell" not in s.g:
+            print(f"  SKIP [{label}] no touch / qdwin_shell_v1")
+            return True
+        l2 = s.layer("L2", 50, 50, margin_left=300)
+        m = s.mark()
+        s.touch_down(310, 10)
+        if [e[1] for e in s.since(m, "touch_down")] != ["L2"]:
+            print(f"  FAIL [{label}] setup: held touch not on L2: "
+                  f"{s.since(m)}")
+            return False
+        m = s.mark()
+        if not s.lock():
+            print(f"  SKIP [{label}] cannot bind as the shell")
+            return True
+        s.touch_motion(315, 15)
+        s.touch_up()
+        locked_events = [e[0] for e in s.since(m)
+                         if e[0].startswith("touch_")]
+        s.unlock()
+        s._commit_and_repaint(l2["surf"])
+        m2 = s.mark()
+        s.tap(310, 10)
+        after = [e[0] if e[0] != "touch_down" else ("touch_down", e[1])
+                 for e in s.since(m2) if e[0].startswith("touch_")]
+        if locked_events != ["touch_cancel"] or \
+                after != [("touch_down", "L2"), "touch_up"]:
+            print(f"  FAIL [{label}] while locked got {locked_events} "
+                  f"(want ['touch_cancel']); after unlock got {after} "
+                  f"(want down on L2 then up)")
+            return False
+        print(f"  PASS [{label}] lock cancelled the held touch; the reused "
+              f"id after unlock is a clean down/up on L2")
+        return True
+    finally:
+        s.close()
+
+
+def test_layer_chain_grab_after_lock(display_name):
+    """sol r2: a serial obtained before the lock cannot grab after it. The
+    client keeps its last touch-down / press serial, the lock lands, then it
+    opens a layer popup and grabs with that serial: the grab is denied the
+    spec way (popup_done, no protocol error), no grab is installed, and the
+    locker's next touch / press is delivered to it."""
+    label = "layer_chain_grab_after_lock"
+    ok = True
+    for kind in ("touch", "pointer"):
+        sub = f"{label}:{kind}"
+        s = _d9_session(sub, display_name)
+        if s is None:
+            return True
+        try:
+            if "qdwin_shell" not in s.g or (kind == "touch" and
+                                            s.touch is None):
+                print(f"  SKIP [{sub}] no touch / qdwin_shell_v1")
+                continue
+            l1 = s.layer("L1", 50, 50)
+            if kind == "touch":
+                s.tap(10, 10)
+            else:
+                s.click(10, 10)
+            serial = s.serial
+            if not s.lock():
+                print(f"  SKIP [{sub}] cannot bind as the shell")
+                continue
+            start = _stderr_size()
+            m = s.mark()
+            s.popup("P1", 60, 0, layer=l1, grab=serial, wait=False)
+            done = [e[1] for e in s.since(m, "popup_done")]
+            errs = _errors_since(start)
+            m2 = s.mark()
+            if kind == "touch":
+                s.tap(600, 300)
+                got = [e[1] for e in s.since(m2, "touch_down")]
+            else:
+                s.click(600, 300)
+                got = [e[1] for e in s.since(m2, "button") if e[2] == 1]
+            if done != ["P1"] or errs or got != ["LOCK"]:
+                print(f"  FAIL [{sub}] grab after lock: popup_done {done} "
+                      f"(want ['P1']), errors {errs} (want none); the "
+                      f"locker's next {kind} went to {got} (want ['LOCK'])")
+                ok = False
+            else:
+                print(f"  PASS [{sub}] pre-lock serial grab denied with "
+                      f"popup_done; the locker got its {kind}")
+        finally:
+            s.close()
+    return ok
+
+
+def _d9_session_probe(label, display_name):
+    s = _d9_session(label, display_name)
+    if s is not None:
+        s.close()
+    return s
 
 
 def test_layer_popup_grab_handler_registered(display_name):
@@ -892,6 +1662,15 @@ def main():
         ("layer_popup_grab_handler_registered", test_layer_popup_grab_handler_registered),
         ("layer_popup_nested_grab_routed", test_layer_popup_nested_grab_routed),
         ("popup_double_construct_refused", test_popup_double_construct_refused),
+        ("layer_chain_grab_live",       test_layer_chain_grab_live),
+        ("layer_chain_unmap_on_dismiss", test_layer_chain_unmap_on_dismiss),
+        ("layer_chain_touch",           test_layer_chain_touch),
+        ("layer_chain_refilter_scope",  test_layer_chain_refilter_scope),
+        ("layer_chain_admission",       test_layer_chain_admission),
+        ("layer_chain_lock_touch",      test_layer_chain_lock_touch),
+        ("layer_chain_lock_pointer",    test_layer_chain_lock_pointer),
+        ("lock_touch_cancel_reuse",     test_lock_touch_cancel_reuse),
+        ("layer_chain_grab_after_lock", test_layer_chain_grab_after_lock),
         ("layer_popup_reposition",      test_layer_popup_reposition),
         ("v19_register_hotkey_live",    test_v19_register_hotkey_live),
     ]

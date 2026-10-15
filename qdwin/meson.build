@@ -1632,6 +1632,32 @@ if libweston_prefix != '/usr' and libweston_libdir != ''
   layer_shell_protocol_env.set('QDWIN_VENDORED_LIBWESTON_PREFIX', libweston_prefix)
   layer_shell_protocol_env.set('QDWIN_VENDORED_LIBWESTON_LIBDIR', libweston_libdir)
 endif
+# Test-only input seat for that suite (D9 follow-ups): a weston module that
+# adds a pointer + keyboard + touchscreen seat and drives it over weston's
+# own test protocol (weston_test, XML vendored with libweston), so the
+# layer-chain grab tests take REAL grabs instead of stale-serial refusals.
+# Built here, loaded with --modules by the harness, never installed.
+weston_test_xml = files('libweston-vendored/src/protocol/weston-test.xml')
+weston_test_server_header = custom_target(
+  'weston-test-server-header',
+  input: weston_test_xml,
+  output: 'weston-test-server-protocol.h',
+  command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@'],
+)
+weston_test_protocol_code = custom_target(
+  'weston-test-private-code',
+  input: weston_test_xml,
+  output: 'weston-test-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+weston_test_input_module = shared_module('qdwin-test-input',
+  'tests/protocol/weston-test-input-module.c',
+  weston_test_server_header,
+  weston_test_protocol_code,
+  dependencies: [dep_libweston, dep_wayland_server],
+  name_prefix: '',
+  install: false,
+)
 test('layer-shell-protocol',
   find_program('tests/protocol/run-layer-shell-protocol-test.sh'),
   args: [
@@ -1639,9 +1665,11 @@ test('layer-shell-protocol',
     files('qdwin/test_zwlr_layer_shell.py'),
     files('qdwin/wlr-layer-shell-unstable-v1.xml'),
     files('qdwin/qdwin-shell-v1.xml'),
+    weston_test_input_module,
+    weston_test_xml,
   ],
   env: layer_shell_protocol_env,
-  depends: qdwin_plugin,
+  depends: [qdwin_plugin, weston_test_input_module],
   suite: 'protocol',
   timeout: 120,
 )

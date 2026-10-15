@@ -251,7 +251,9 @@ weston_desktop_xdg_popup_get_geometry(struct wl_resource *popup_resource,
  * at a layer-parented popup (a submenu of a layer menu). Then
  * `layer_parent_surface` is the immediate parent popup's surface, not a
  * layer surface; the handler tells the two apart by whether it tracks
- * `popup_resource` as a layer popup. */
+ * `popup_resource` as a layer popup. libweston answers a parent that was
+ * dismissed (popup_done), never grabbed (invalid_popup_parent) or is not
+ * the topmost popup (not_the_topmost_popup) itself, before the handler. */
 typedef bool (*weston_desktop_xdg_popup_layer_grab_handler_t)(
 	struct wl_resource *popup_resource,
 	struct weston_surface *popup_surface,
