@@ -2233,7 +2233,8 @@ def describe_view(image_path: Path, prompt: Optional[str] = None) -> str:
     return desc
 
 
-def _run_codex(prompt: str, image_path: Optional[Path] = None) -> str:
+def _run_codex(prompt: str, image_path: Optional[Path] = None,
+               effort: str = "medium") -> str:
     with tempfile.TemporaryDirectory(prefix="qdshell-codex-") as tmp:
         output_path = Path(tmp) / "last-message.txt"
         cmd = [
@@ -2242,7 +2243,7 @@ def _run_codex(prompt: str, image_path: Optional[Path] = None) -> str:
             "--sandbox", "danger-full-access",
             "--cd", str(QDSHELL_ROOT),
             "--model", "gpt-6-luna",
-            "-c", "model_reasoning_effort=medium",
+            "-c", f"model_reasoning_effort={effort}",
             "--output-last-message", str(output_path),
         ]
         if image_path is not None:
@@ -2367,7 +2368,13 @@ def judge(reference: str, actual: str) -> JudgeResult:
     )
     raw = ""
     if shutil.which("codex") and os.environ.get("QDSHELL_UI_NO_CODEX") != "1":
-        raw = _run_codex(prompt)
+        # High effort for the text-only judge. At medium, Luna 6 applied the
+        # reference's conditional branches as unconditional (battery rows with
+        # no battery, an armed countdown, album art when enabled) and failed
+        # 15 correct frames in full-20261015T072112Z-444803; at high it agreed
+        # with Luna 5.6 on those saved descriptions and still failed every
+        # swapped-panel and blank-panel description.
+        raw = _run_codex(prompt, effort="high")
     if not raw and shutil.which("pi") and os.environ.get("QDSHELL_UI_NO_PI") != "1":
         raw = _judge_with_pi(prompt)
     if not raw:
