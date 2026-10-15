@@ -267,9 +267,9 @@ runsc_state_left() {
 # /etc/sub{u,g}id rows. A provisioning launch swept mid-useradd leaves a bare
 # account (passwd row only) that podman cannot use and spawn refuses to co-opt.
 acct_complete() {
-    local acct=$1 hd
-    timeout 5 id "$acct" >/dev/null 2>&1 || return 1
-    hd=$(getent passwd "$acct" | cut -d: -f6)
+    local acct=$1 pw hd
+    pw=$(timeout 5 getent passwd "$acct") || return 1
+    hd=$(printf '%s\n' "$pw" | cut -d: -f6)
     [ -n "$hd" ] && [ -d "$hd" ] && grep -q "^$acct:" /etc/subuid \
         && grep -q "^$acct:" /etc/subgid
 }
