@@ -963,18 +963,20 @@ class TestInstalledPath:
                 if needle in ln and not ln.strip().startswith("#")]
 
     def _gui_fixture_source(self) -> str:
-        """Follow the real provisioning helper, retaining caller checks too."""
-        gui = _REPO / "scripts" / "vm" / "spin-test-vm-gui.sh"
+        """Follow the real provisioning helper, retaining caller checks too.
+
+        Since the labwc golden (the only one that baked the fixtures) was
+        retired, the caller is the scenario Setup, qdwin_admin_lane_setup
+        --silos in ci/lib/guest/gui-waiters.sh, on a disposable clone."""
+        gui = _REPO / "ci" / "lib" / "guest" / "gui-waiters.sh"
         helper = _REPO / "scripts" / "vm" / "lib" / "gui-silo-fixtures.sh"
         text = gui.read_text()
         code = "\n".join(ln for ln in text.splitlines()
                          if not ln.lstrip().startswith("#"))
-        assert 'bash "$SRC/scripts/vm/lib/gui-silo-fixtures.sh" --prove-restart' in code, (
-            "spin-test-vm-gui.sh must invoke the durable-silo helper with "
-            "--prove-restart, not just mention it in a comment")
-        assert '|| { echo "[gui-spin] ERROR: work/work2 silo fixtures failed"; exit 1; }' in code, (
-            "spin-test-vm-gui.sh must stop golden construction when the "
-            "durable-silo helper fails")
+        assert "bash /root/qdistro-src/scripts/vm/lib/gui-silo-fixtures.sh || return 1" in code, (
+            "qdwin_admin_lane_setup must invoke the durable-silo helper and "
+            "fail the scenario Setup when it fails, not just mention it in "
+            "a comment")
         # Positive invariants moved into the helper; prohibitions must still
         # cover the caller as well, so an old shortcut cannot return there.
         return text + "\n" + helper.read_text()
@@ -1060,7 +1062,11 @@ class TestInstalledPath:
         appeared on the clone's next boot, spread across per-scenario
         results. The harness must restart the session manager and re-check
         the fragments, so a regression fails once, during golden
-        construction, where it is cheap and unambiguous."""
+        construction, where it is cheap and unambiguous. No golden bakes the
+        fixtures any more (Setup provisions them on a running clone, which
+        never crosses that boot), so the proof lives on as the helper's
+        --prove-restart path for hand-provisioned VMs; this pins that it
+        still restarts and re-checks."""
         code = [ln for ln in self._gui_fixture_source().splitlines()
                 if not ln.lstrip().startswith("#")]
         joined = "\n".join(code)
