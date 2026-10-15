@@ -1977,13 +1977,35 @@ _call() {  # _call <time> <sender> <member> <args...>
     date() { [ "$1" = +%s.%N ] && echo 1031.000000; }   # phase 1.0 s
     run qdwin_admin_tui_clear_of_poll
     [ "$status" -eq 0 ]
-    [[ "$output" == *"poll phase 2.0s after a tick, 28.0s before the next (waited 1.0s)"* ]]
+    [[ "$output" == *"poll phase 4.0s after a tick, 26.0s before the next (waited 3.0s)"* ]]
     date() { [ "$1" = +%s.%N ] && echo 1010.000000; }   # phase 10 s
     run qdwin_admin_tui_clear_of_poll
     [[ "$output" == *"waited 0.0s"* ]]
-    # A 25 s budget only fits at phases 2-5 s; at 29.5 s wait for tick + 2 s.
+    # A 25 s budget only fits at phases 4-5 s; at 29.5 s wait for tick + 4 s.
     date() { [ "$1" = +%s.%N ] && echo 1029.500000; }
     run qdwin_admin_tui_clear_of_poll 25
-    [[ "$output" == *"poll phase 2.0s after a tick, 28.0s before the next (waited 2.5s)"* ]]
+    [[ "$output" == *"poll phase 4.0s after a tick, 26.0s before the next (waited 4.5s)"* ]]
     unset -f date
+}
+
+@test "TUI clear of poll: a refresh right after it returns is signal-driven to the oracle" {
+    # permissions-gui/35 (full-20261015T112127Z-3016413): the helper left the
+    # grid at 2.0 s, the signal-driven refresh came 0.1 s later, and the
+    # oracle (more than NEAR = 3 s from a tick) ruled it INCONCLUSIVE.
+    # Wherever the helper starts, the earliest moment it returns plus that
+    # 0.1 s must clear the oracle.
+    local start back
+    for start in 1030.500 1031.000 1031.999 1033.000 1059.000; do
+        _bus_fake_trace < /dev/null
+        date() { [ "$1" = +%s.%N ] && echo "$start"; }
+        run qdwin_admin_tui_clear_of_poll
+        [ "$status" -eq 0 ]
+        unset -f date
+        back=$("$QCI_GUEST_PYTHON" -c 'import re,sys; s=float(sys.argv[1]); w=float(re.search(r"waited ([0-9.]+)s", sys.argv[2]).group(1)); print("%.6f" % (s + w))' "$start" "$output")
+        _bus_fake_trace < <(_sig "$back" RequestPending 'int32 1'
+            _call "$("$QCI_GUEST_PYTHON" -c 'import sys; print("%.6f" % (float(sys.argv[1]) + 0.1))' "$back")" :1.40 GetPending)
+        run qdwin_admin_tui_await_signal_refresh 1010 1
+        [ "$status" -eq 0 ] || { echo "start $start, back at $back: $output"; false; }
+        [[ "$output" == *SIGNAL-DRIVEN* ]]
+    done
 }
