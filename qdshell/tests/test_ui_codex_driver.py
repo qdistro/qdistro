@@ -31,6 +31,26 @@ def test_ui_codex_driver_pins_luna_and_keeps_rollout(monkeypatch, with_image):
     assert kwargs["timeout"] == 180
 
 
+def test_ui_codex_judge_runs_at_high_effort(monkeypatch):
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        out = Path(cmd[cmd.index("--output-last-message") + 1])
+        out.write_text("MISSING: none\nEXTRA: none\nVERDICT: PASS\n")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.delenv("QDSHELL_UI_NO_CODEX", raising=False)
+    assert runner.judge("reference", "actual").verdict == "PASS"
+
+    (cmd,) = seen
+    assert cmd[cmd.index("--model") + 1] == "gpt-6-luna"
+    assert cmd[cmd.index("-c") + 1] == "model_reasoning_effort=high"
+    assert not any(a.startswith("--image") for a in cmd)
+
+
 @pytest.mark.parametrize(
     ("image_name", "expected_detail"),
     [

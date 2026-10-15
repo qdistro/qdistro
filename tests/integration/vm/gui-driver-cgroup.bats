@@ -4,10 +4,14 @@
 load helpers
 
 @test "GUI driver cgroup drains foreground and orphaned work before retry" {
-    local root lib_b64 test_b64
+    local root test_b64
     root=$(git -C "$BATS_TEST_DIRNAME" rev-parse --show-toplevel)
-    lib_b64=$(base64 -w0 "$root/ci/lib/guest/gui-waiters.sh")
-    vm_run "echo $lib_b64 | base64 -d > /tmp/qci-gui-waiters-cgroup.sh"
+    # In chunks: the library is past the one-argument limit of vm-exec's
+    # command (an inline copy failed with E2BIG).
+    # shellcheck source=../../../scripts/vm/lib/vm-push-file.sh
+    . "$root/scripts/vm/lib/vm-push-file.sh"
+    run qdistro_vm_push_file "$VM_EXEC" "$VM_NAME" \
+        "$root/ci/lib/guest/gui-waiters.sh" /tmp/qci-gui-waiters-cgroup.sh "bash -n"
     assert_success
 
     test_b64=$(base64 -w0 "$BATS_TEST_DIRNAME/s115-gui-driver-cgroup.sh")

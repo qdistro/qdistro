@@ -263,6 +263,16 @@ runsc_state_left() {
         find "$d" -mindepth 1 ! -name null-netns
     done
 }
+# acct_complete <acct> — the account exists with its home and its
+# /etc/sub{u,g}id rows. A provisioning launch swept mid-useradd leaves a bare
+# account (passwd row only) that podman cannot use and spawn refuses to co-opt.
+acct_complete() {
+    local acct=$1 pw hd
+    pw=$(timeout 5 getent passwd "$acct") || return 1
+    hd=$(printf '%s\n' "$pw" | cut -d: -f6)
+    [ -n "$hd" ] && [ -d "$hd" ] && grep -q "^$acct:" /etc/subuid \
+        && grep -q "^$acct:" /etc/subgid
+}
 # ensure_silo_image <silo> [workload] — under Model A each silo launches from
 # ITS OWN store: the qt3s-<silo> account exists only after a first launch
 # attempt (spawn 3b creates it before any broker/image refusal), and the image
@@ -273,18 +283,7 @@ ensure_silo_image() {
     local s="$1" w="${2:-$(silo_workload "$1")}" acct uid gid img arch
     [ -n "$w" ] || { echo "ensure_silo_image: $s: no workload (no silo row?)" >&2; return 1; }
     acct=$(silo_acct "$s")
-    if timeout 5 id "$acct" >/dev/null 2>&1; then
-        # a provisioning launch swept mid-useradd leaves a bare account — no
-        # home, no /etc/sub{u,g}id rows — that podman cannot use and that
-        # spawn refuses to co-opt; drop the fragment and re-provision below
-        local hd
-        hd=$(getent passwd "$acct" | cut -d: -f6)
-        if [ ! -d "$hd" ] || ! grep -q "^$acct:" /etc/subuid \
-                || ! grep -q "^$acct:" /etc/subgid; then
-            userdel -f "$acct" >/dev/null 2>&1 || :
-        fi
-    fi
-    if ! timeout 5 id "$acct" >/dev/null 2>&1; then
+    if ! acct_complete "$acct"; then
         # the launch wrapper refuses an empty argv before spawn runs; a real
         # argv reaches 3b (account creation) and is still refused later —
         # at the broker gate (unknown/deny) or the missing image (allow).
@@ -294,16 +293,21 @@ ensure_silo_image() {
         # manager restart can be swept before spawn's step 3b. The sweep
         # runs once per restart: retry while the account is absent.
         write_stanza_workload "$s" "$w" "[\"$SMOKE_APP\",\"--hold\",\"1\"]" >/dev/null || return 1
+        # The sweep can also land mid-useradd and leave a bare account
+        # (full-20261015T072112Z-444803, s120x). Only a complete account ends
+        # the loop: the next launch's spawn recognises the killed-mid-useradd
+        # fragment and re-provisions it (spawn-tier3s.sh, provision loop),
+        # under its own proofs; the harness never deletes an account.
         local try
         for try in 1 2 3; do
             systemctl start "$(unit_of "$s")" >/dev/null 2>&1 || :
-            timeout 5 id "$acct" >/dev/null 2>&1 && break
+            acct_complete "$acct" && break
             systemctl reset-failed "$(unit_of "$s")" 2>/dev/null || :
             sleep 1
         done
         rm -f "$STANZA_DIR/$s.env"
-        timeout 5 id "$acct" >/dev/null 2>&1 \
-            || { echo "ensure_silo_image: the provisioning launch did not create $acct" >&2; return 1; }
+        acct_complete "$acct" \
+            || { echo "ensure_silo_image: the provisioning launch did not create a complete $acct" >&2; return 1; }
     fi
     uid=$(silo_uid "$s"); gid=$(silo_gid "$s")
     [ -n "$uid" ] && [ -n "$gid" ] || return 1

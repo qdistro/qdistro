@@ -18,6 +18,8 @@ GUI_GATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shared with vm-gui; the F5 darkness diagnostic asks qci_frame_not_dark.
 # shellcheck source=../../../scripts/vm/lib/frame-usable.sh
 . "$GUI_GATE_DIR/../../../scripts/vm/lib/frame-usable.sh"
+# shellcheck source=../../../scripts/vm/lib/vm-push-file.sh
+. "$GUI_GATE_DIR/../../../scripts/vm/lib/vm-push-file.sh"
 GUI_ROLLOUT_ADAPTER="$GUI_GATE_DIR/../gui_rollout_views.py"
 # The per-attempt allocator state: a dotfile in the artifact directory the
 # agent is given (harvest copies `$parent/*`, which skips it).
@@ -2386,13 +2388,15 @@ gui_skip_reason() {
 # from the caller's view: returns nonzero (and the caller logs) on failure; a
 # scenario that genuinely needs the waiters and lacks them fails its own
 # assertion loudly rather than passing silently.
+#
+# The library is past the one-argument limit vm-exec's single command string
+# can carry, so it goes in chunks (scripts/vm/lib/vm-push-file.sh). A one-shot
+# delivery failed with E2BIG on every VM in full-20261015T072112Z-444803 and
+# every scenario that sources the waiters ERRORed in setup.
 install_gui_waiters() {
-    local vm=$1 src="$QDISTRO_REPO/ci/lib/guest/gui-waiters.sh" b64
+    local vm=$1 src="$QDISTRO_REPO/ci/lib/guest/gui-waiters.sh"
     [ -f "$src" ] || { log "install_gui_waiters: source missing: $src"; return 1; }
-    b64=$(base64 -w0 < "$src" 2>/dev/null) || b64=$(base64 < "$src" | tr -d '\n')
-    "$VM_TOOLS/vm-exec" "$vm" \
-        "printf '%s' '$b64' | base64 -d > /tmp/qci-gui-waiters.sh && bash -n /tmp/qci-gui-waiters.sh" \
-        >/dev/null 2>&1
+    qdistro_vm_push_file "$VM_TOOLS/vm-exec" "$vm" "$src" /tmp/qci-gui-waiters.sh "bash -n"
 }
 
 # Pre-create the per-scenario guest scratch dir (/tmp/qci/<slug>) world-writable
