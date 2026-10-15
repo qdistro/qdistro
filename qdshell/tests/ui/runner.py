@@ -2241,7 +2241,7 @@ def _run_codex(prompt: str, image_path: Optional[Path] = None) -> str:
             "--dangerously-bypass-approvals-and-sandbox",
             "--sandbox", "danger-full-access",
             "--cd", str(QDSHELL_ROOT),
-            "--model", "gpt-5.6-luna",
+            "--model", "gpt-6-luna",
             "-c", "model_reasoning_effort=medium",
             "--output-last-message", str(output_path),
         ]

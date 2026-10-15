@@ -250,14 +250,14 @@ under `agent-notes/` and hands it to `QCI_AGENT_CMD` (`{prompt}` is the
 prompt path):
 
 ```sh
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
-QCI_AGENT_MODEL=gpt-5.6-luna \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
+QCI_AGENT_MODEL=gpt-6-luna \
   ci/bin/qci gui
 ```
 
 Rules that make a run count:
 
-- **The sanctioned driver is Codex with `gpt-5.6-luna` at
+- **The sanctioned driver is Codex with `gpt-6-luna` at
   `model_reasoning_effort=medium`**, pinned explicitly every run — an
   inherited host default (some hosts run Luna at `none`) silently changes
   the run's meaning. `QCI_AGENT_MODEL` must name the model whenever the
