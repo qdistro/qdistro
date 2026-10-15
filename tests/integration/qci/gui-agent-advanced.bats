@@ -86,14 +86,30 @@ SH
     QCI_SCENARIO_FILE="$LISTED" run run_agent_command "$prompt" "$log"
     [ "$status" -eq 0 ]
     grep -qx ADVANCED-AGENT "$log"
-    ! grep -q DEFAULT-AGENT "$log"
+    if grep -q DEFAULT-AGENT "$log"; then echo "default agent ran"; false; fi
     grep -qx "qci_agent_profile=advanced qci_agent_model=strong-model" "$log"
 
     QCI_SCENARIO_FILE="$UNLISTED" run run_agent_command "$prompt" "$log"
     [ "$status" -eq 0 ]
     grep -qx DEFAULT-AGENT "$log"
-    ! grep -q ADVANCED-AGENT "$log"
+    if grep -q ADVANCED-AGENT "$log"; then echo "advanced agent ran"; false; fi
     grep -q "^qci_agent_profile=default " "$log"
+}
+
+@test "run_agent_command: the rollout observer sees the attempt's template; QCI_AGENT_CMD is restored" {
+    use_bwrap_or_passthrough
+    local prompt="$BATS_TEST_TMPDIR/prompt.md" log="$BATS_TEST_TMPDIR/agent.log"
+    local seen="$BATS_TEST_TMPDIR/observer-saw"
+    printf '# fixture\n' > "$prompt"
+    gui_observe_attempt() { printf '%s\n' "$QCI_AGENT_CMD" >> "$seen"; }
+    QCI_AGENT_CMD='true --ephemeral DEFAULT; # {prompt}'
+    QCI_AGENT_ADVANCED_CMD='true ADVANCED; # {prompt}'
+    QCI_SCENARIO_FILE="$LISTED" run_agent_command "$prompt" "$log" "$BATS_TEST_TMPDIR/obs1"
+    [ "$QCI_AGENT_CMD" = 'true --ephemeral DEFAULT; # {prompt}' ]
+    QCI_SCENARIO_FILE="$UNLISTED" run_agent_command "$prompt" "$log" "$BATS_TEST_TMPDIR/obs2"
+    [ "$QCI_AGENT_CMD" = 'true --ephemeral DEFAULT; # {prompt}' ]
+    [ "$(sed -n 1p "$seen")" = 'true ADVANCED; # {prompt}' ]
+    [ "$(sed -n 2p "$seen")" = 'true --ephemeral DEFAULT; # {prompt}' ]
 }
 
 @test "manifest: the advanced agent's identity and scenarios are recorded" {
