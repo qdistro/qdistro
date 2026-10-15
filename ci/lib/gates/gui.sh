@@ -2398,6 +2398,9 @@ QCI_GUI_WAITERS_CHUNK=${QCI_GUI_WAITERS_CHUNK:-49152}
 install_gui_waiters() {
     local vm=$1 src="$QDISTRO_REPO/ci/lib/guest/gui-waiters.sh" b64 part redirect off=0
     [ -f "$src" ] || { log "install_gui_waiters: source missing: $src"; return 1; }
+    case "$QCI_GUI_WAITERS_CHUNK" in
+        ''|*[!0-9]*|0*) log "install_gui_waiters: QCI_GUI_WAITERS_CHUNK must be a positive integer, got '$QCI_GUI_WAITERS_CHUNK'"; return 1 ;;
+    esac
     b64=$(base64 -w0 < "$src" 2>/dev/null) || b64=$(base64 < "$src" | tr -d '\n')
     part=/tmp/qci-gui-waiters.sh.part
     redirect='>'

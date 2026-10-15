@@ -72,3 +72,12 @@ teardown() {
     [ "$status" -ne 0 ]
     [ "$(cat "$GUEST/qci-gui-waiters.sh")" = previous ]
 }
+
+@test "install_gui_waiters: a non-positive chunk size is refused, not looped on" {
+    local c
+    for c in 0 -5 abc ""; do
+        run timeout 10 bash -c "$(declare -f install_gui_waiters log); QCI_GUI_WAITERS_CHUNK='$c' QDISTRO_REPO='$REPO_ROOT' VM_TOOLS='$VM_TOOLS' TDIR='$TDIR' install_gui_waiters vm"
+        [ "$status" -eq 1 ] || { echo "chunk '$c': status $status"; false; }
+    done
+    [ ! -e "$GUEST/qci-gui-waiters.sh" ]
+}
