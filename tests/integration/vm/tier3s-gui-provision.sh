@@ -76,8 +76,10 @@ cp "$here/tier3s-guest-lib.sh" "$here/tier3s-guest-setup.sh" "$STAGE/" || fail "
 # (ci/lib/gates/gui.sh): /tmp/qci-gui-waiters.sh, sourceable by guest scripts.
 WAITERS="$repo/ci/lib/guest/gui-waiters.sh"
 [ -f "$WAITERS" ] || fail "missing $WAITERS"
-wb64=$(base64 -w0 "$WAITERS")
-"$VMEXEC" "$VM" "printf '%s' '$wb64' | base64 -d > /tmp/qci-gui-waiters.sh && bash -n /tmp/qci-gui-waiters.sh" \
+# In chunks: the library is past the one-argument limit of vm-exec's command.
+# shellcheck source=../../../scripts/vm/lib/vm-push-file.sh
+. "$repo/scripts/vm/lib/vm-push-file.sh"
+qdistro_vm_push_file "$VMEXEC" "$VM" "$WAITERS" /tmp/qci-gui-waiters.sh "bash -n" \
     || fail "could not deliver the GUI waiter library to /tmp/qci-gui-waiters.sh"
 
 rel=$(sed -n 's/^release=//p' "$repo/tier3s/RUNSC_RELEASE")

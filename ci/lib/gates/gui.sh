@@ -18,6 +18,8 @@ GUI_GATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shared with vm-gui; the F5 darkness diagnostic asks qci_frame_not_dark.
 # shellcheck source=../../../scripts/vm/lib/frame-usable.sh
 . "$GUI_GATE_DIR/../../../scripts/vm/lib/frame-usable.sh"
+# shellcheck source=../../../scripts/vm/lib/vm-push-file.sh
+. "$GUI_GATE_DIR/../../../scripts/vm/lib/vm-push-file.sh"
 GUI_ROLLOUT_ADAPTER="$GUI_GATE_DIR/../gui_rollout_views.py"
 # The per-attempt allocator state: a dotfile in the artifact directory the
 # agent is given (harvest copies `$parent/*`, which skips it).
@@ -2387,33 +2389,14 @@ gui_skip_reason() {
 # scenario that genuinely needs the waiters and lacks them fails its own
 # assertion loudly rather than passing silently.
 #
-# The base64 travels in chunks. vm-exec puts the whole guest command into one
-# argv string (jq --arg, then virsh's JSON argument), and Linux refuses any
-# single argument over MAX_ARG_STRLEN (128 KiB) with E2BIG. Once the library
-# passed ~96 KiB, a one-shot delivery failed on every VM and every scenario
-# that sources the waiters ERRORed in setup (full-20261015T072112Z-444803).
-# Chunks append to a part file; only a complete file that parses is renamed
-# into place, so a failed delivery never leaves a truncated library behind.
-QCI_GUI_WAITERS_CHUNK=${QCI_GUI_WAITERS_CHUNK:-49152}
+# The library is past the one-argument limit vm-exec's single command string
+# can carry, so it goes in chunks (scripts/vm/lib/vm-push-file.sh). A one-shot
+# delivery failed with E2BIG on every VM in full-20261015T072112Z-444803 and
+# every scenario that sources the waiters ERRORed in setup.
 install_gui_waiters() {
-    local vm=$1 src="$QDISTRO_REPO/ci/lib/guest/gui-waiters.sh" b64 part redirect off=0
+    local vm=$1 src="$QDISTRO_REPO/ci/lib/guest/gui-waiters.sh"
     [ -f "$src" ] || { log "install_gui_waiters: source missing: $src"; return 1; }
-    case "$QCI_GUI_WAITERS_CHUNK" in
-        ''|*[!0-9]*|0*) log "install_gui_waiters: QCI_GUI_WAITERS_CHUNK must be a positive integer, got '$QCI_GUI_WAITERS_CHUNK'"; return 1 ;;
-    esac
-    b64=$(base64 -w0 < "$src" 2>/dev/null) || b64=$(base64 < "$src" | tr -d '\n')
-    part=/tmp/qci-gui-waiters.sh.part
-    redirect='>'
-    while [ "$off" -lt "${#b64}" ]; do
-        "$VM_TOOLS/vm-exec" "$vm" \
-            "printf '%s' '${b64:off:QCI_GUI_WAITERS_CHUNK}' $redirect $part" \
-            >/dev/null 2>&1 || return 1
-        redirect='>>'
-        off=$((off + QCI_GUI_WAITERS_CHUNK))
-    done
-    "$VM_TOOLS/vm-exec" "$vm" \
-        "base64 -d < $part > /tmp/qci-gui-waiters.sh.new && rm -f $part && bash -n /tmp/qci-gui-waiters.sh.new && mv -f /tmp/qci-gui-waiters.sh.new /tmp/qci-gui-waiters.sh" \
-        >/dev/null 2>&1
+    qdistro_vm_push_file "$VM_TOOLS/vm-exec" "$vm" "$src" /tmp/qci-gui-waiters.sh "bash -n"
 }
 
 # Pre-create the per-scenario guest scratch dir (/tmp/qci/<slug>) world-writable

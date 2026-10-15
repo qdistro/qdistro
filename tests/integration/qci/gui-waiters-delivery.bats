@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 #
-# Host tests for install_gui_waiters (ci/lib/gates/gui.sh): the real library
-# reaches the guest byte-identical however large it grows. The fake vm-exec
+# Host tests for install_gui_waiters (ci/lib/gates/gui.sh) and the chunked
+# copy under it (scripts/vm/lib/vm-push-file.sh): the real library reaches the
+# guest byte-identical however large it grows. The fake vm-exec
 # maps the guest's /tmp into a test dir and then really execs bash with the
 # command as one argv string, as the qga path does, so the kernel's
 # MAX_ARG_STRLEN (128 KiB) applies exactly as in production. A one-shot
@@ -23,6 +24,7 @@ EOF
     chmod +x "$TDIR/tools/vm-exec"
     export FAKE_GUEST_TMP="$GUEST" FAKE_ARGSIZES="$TDIR/argsizes"
     source "$REPO_ROOT/ci/lib/gates/gui.sh"
+    source "$REPO_ROOT/scripts/vm/lib/vm-push-file.sh"
     VM_TOOLS="$TDIR/tools"
     QDISTRO_REPO="$REPO_ROOT"
     log() { printf '%s\n' "$*" >> "$TDIR/log"; }
@@ -57,7 +59,7 @@ teardown() {
 @test "install_gui_waiters: control: one-shot delivery of the real library hits E2BIG" {
     # Proves the fake applies the kernel limit: with one chunk the size of the
     # whole base64 (the old delivery) the guest file never appears.
-    QCI_GUI_WAITERS_CHUNK=100000000
+    QDISTRO_VM_PUSH_CHUNK=100000000
     run install_gui_waiters qci-gui-test-vm
     [ "$status" -ne 0 ]
     [ ! -e "$GUEST/qci-gui-waiters.sh" ]
@@ -73,11 +75,30 @@ teardown() {
     [ "$(cat "$GUEST/qci-gui-waiters.sh")" = previous ]
 }
 
-@test "install_gui_waiters: a non-positive chunk size is refused, not looped on" {
+@test "qdistro_vm_push_file: a non-positive chunk size is refused, not looped on" {
     local c
-    for c in 0 -5 abc ""; do
-        run timeout 10 bash -c "$(declare -f install_gui_waiters log); QCI_GUI_WAITERS_CHUNK='$c' QDISTRO_REPO='$REPO_ROOT' VM_TOOLS='$VM_TOOLS' TDIR='$TDIR' install_gui_waiters vm"
-        [ "$status" -eq 1 ] || { echo "chunk '$c': status $status"; false; }
+    for c in 0 -5 abc 08; do
+        run timeout 10 bash -c '. "$1"; QDISTRO_VM_PUSH_CHUNK=$2 qdistro_vm_push_file "$3" vm "$4" /tmp/x' _ \
+            "$REPO_ROOT/scripts/vm/lib/vm-push-file.sh" "$c" "$VM_TOOLS/vm-exec" "$REPO_ROOT/ci/lib/guest/gui-waiters.sh"
+        [ "$status" -eq 2 ] || { echo "chunk '$c': status $status"; false; }
     done
-    [ ! -e "$GUEST/qci-gui-waiters.sh" ]
+    [ ! -e "$GUEST/x" ]
+}
+
+@test "qdistro_vm_push_file: an empty file arrives empty" {
+    : > "$TDIR/empty"
+    run qdistro_vm_push_file "$VM_TOOLS/vm-exec" vm "$TDIR/empty" /tmp/empty
+    [ "$status" -eq 0 ]
+    [ -f "$GUEST/empty" ] && [ ! -s "$GUEST/empty" ]
+}
+
+@test "qdistro_vm_push_file: a failing check keeps the previous destination" {
+    printf 'new\n' > "$TDIR/src"
+    printf 'previous\n' > "$GUEST/dest"
+    run qdistro_vm_push_file "$VM_TOOLS/vm-exec" vm "$TDIR/src" /tmp/dest false
+    [ "$status" -ne 0 ]
+    [ "$(cat "$GUEST/dest")" = previous ]
+    run qdistro_vm_push_file "$VM_TOOLS/vm-exec" vm "$TDIR/src" /tmp/dest true
+    [ "$status" -eq 0 ]
+    [ "$(cat "$GUEST/dest")" = new ]
 }
