@@ -1,0 +1,14 @@
+# gui-agent-advanced.tsv — GUI scenarios driven by the secondary ("advanced")
+# agent when the operator pins one in QCI_AGENT_ADVANCED_CMD (see
+# ci/lib/gates/gui.sh, gui_agent_profile). Without that variable this file is
+# inert. The profile changes WHO drives a scenario, never what it asserts or
+# how it is graded; each attempt log records qci_agent_profile/model.
+# Columns (TAB-separated): path_suffix<TAB>reason
+#   path_suffix  matched against the END of the scenario path at a / boundary
+#   reason       the default driver's observed failure mode (run id)
+# Keep this list SHORT: a scenario belongs here only when the default driver
+# fails it for reasons of its own, not the product's.
+qdwin/tests/apps/13-rdp-subscribe-frame.md	default driver hand-retyped the block and doubled the sed \1 backslashes (full-20261015T112127Z-3016413)
+tests/integration/permissions-gui/61-window-chrome-context-menu.md	default driver recorded ERROR after S4 with nothing blocking S5-S9 (full-20261015T112127Z-3016413)
+tests/integration/permissions-gui/63-tier5-launch-password-prompt.md	default driver re-ran a half-executed block; the second Return sent an empty password (full-20261015T112127Z-3016413)
+tests/integration/presentation-gui/01-four-apps-follow-shell.md	default driver batch-opened unlabelled frames and credited QFileMan's frame to qdbrowser (full-20261015T112127Z-3016413)

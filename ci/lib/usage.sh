@@ -127,6 +127,12 @@ Environment:
   QCI_AGENT_CMD            Command used for markdown GUI scenarios.
                             It receives the generated prompt file as argv[1],
                             unless the value contains {prompt}.
+  QCI_AGENT_ADVANCED_CMD   Optional secondary ("advanced") GUI agent, same
+                            template rules. Drives only the scenarios listed
+                            in ci/gui-agent-advanced.tsv; unset = every
+                            scenario uses QCI_AGENT_CMD.
+  QCI_AGENT_ADVANCED_MODEL  Model name recorded for the advanced agent when
+                            its template does not say (--model/-m).
   QCI_KEEP_FAILED_VM=1      Preserve failed disposable VMs (default). Preserved
                             VMs are hibernated (managedsave) so they stop
                             consuming RAM/CPU; `virsh start <vm>` resumes them
