@@ -468,6 +468,16 @@ tier-3 wrapper.
 - Outer-side: each app shows up as a regular `xdg_toplevel` from the
   waypipe-client `wl_client`; gets the standard
   `qdwin_nested_manager_v1` + secctx + chrome treatment.
+- **Privilege split.** `spawn-tier5.sh` runs the whole VM lifecycle as
+  admin in admin's `qemu:///session`. The host-side waypipe client is the
+  only privileged step: `pkexec qdistro-tier5-bridge` (polkit
+  `org.qdistro.tier5.bridge`, password via the qdistro agent on every launch
+  — `auth_admin_keep` serves only the same caller process, and each launch
+  is a fresh wrapper) runs it as `runuser → qdistro-secctx-exec → waypipe client` with
+  fixed identity — engine `qdistro.tier5`, app-id `qdistro.tier5.<vm>`,
+  silo `vm-<vm>`, instance-id the launch token — learns its pid over a
+  private pipe after exec, verifies it and registers it with the broker
+  (`RegisterLaunch`). Details: `tier5-vm/README.md`.
 - Pixels, input and clipboard all ride the single waypipe byte stream —
   there are no separate vsock multiplexes (AF_VSOCK does not implement
   `SCM_RIGHTS`, which is also why the secctx tag is stamped host-side on

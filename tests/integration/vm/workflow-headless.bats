@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
-# Workflow engine, live in the broker — headless equivalents of
-# tests/integration/workflow-gui/01, 02, 03 and 05 (2026-10-02 test audit).
+# Workflow engine, live in the broker — headless equivalents of the
+# workflow-gui scenarios 01, 02, 03 and 05 (2026-10-02 test audit; since
+# 2026-10-14 the rendered rows of 01-03 are asserted in workflow-gui/04).
 #
 # The GUI files assert workflow_audit.sqlite rows, broker D-Bus replies and
 # the per-run ssh-agent socket; the admin app's Workflows tab only renders

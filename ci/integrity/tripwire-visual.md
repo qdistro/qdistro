@@ -15,7 +15,9 @@ fake a green. Stored outside the permissions-gui glob; run only by
 
 ```bash
 VM=${VMNAME:?set VMNAME (qci provides it)}
-VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh   # qdwin_chord, qdwin_screenshot (host side)
+qdwin_set_vm "$VM"
+ART=${QCI_GUI_ARTIFACT_DIR:-/tmp}
 ```
 
 ## Steps
@@ -23,10 +25,11 @@ VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 ### S1 — open the launcher and screenshot it
 
 ```bash
-# Open the launcher (Ctrl+Space on the VM image), then capture it.
-$VMGUI "$VM" key ctrl+space
+# Open the qdshell launcher (Ctrl+Space on the qdwin session), then capture it
+# with qdwin's in-compositor capture.
+qdwin_chord ctrl -- spc
 sleep 1
-$VMGUI "$VM" screenshot /tmp/tripwire-visual-launcher.png
+qdwin_screenshot "$ART/tripwire-visual-launcher.png"
 ```
 
 **Assert** (hard, visual): This is an integrity tripwire. PASS only if the

@@ -284,10 +284,11 @@ Rules that make a run count:
   for tight infra signatures (`transport-timeout`,
   `agent-api-unreachable`, `agent-tooling`) — never a product
   `FAIL`/`ERROR`. A retried pass is always logged to `flake.tsv`.
-- Opt-in lanes stay off in normal runs: `QCI_GUI_APPS=1` (third-party app
-  compatibility, `qdwin/tests/apps/`), `QCI_LABWC_ADMIN_LANE=1` and
-  `QCI_XWAYLAND_E2E=1` (the labwc/XWayland harness lane; `qci gui-admin`
-  sets `QCI_LABWC_ADMIN_LANE`). GUI concurrency defaults to serial
+- One GUI profile runs every scenario: the product session (qdwin +
+  qdshell). The opt-in lane `QCI_GUI_APPS=1` (third-party app
+  compatibility, `qdwin/tests/apps/`) stays off in normal runs. The
+  labwc/XWayland harness lane and `qci gui-admin` were retired
+  (2026-10-14). GUI concurrency defaults to serial
   (`QCI_GUI_JOBS` to
   override) — parallel full GUI stacks have produced flakes that don't
   reproduce in isolation.

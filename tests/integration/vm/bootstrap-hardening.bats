@@ -238,13 +238,18 @@ run_boot() { run bash "$BOOT" "$@"; }
     [ "$status" -ne 0 ] || { echo "bootstrap still clones a legacy component repo: $output" >&2; return 1; }
 }
 
-@test "hardening: tier5 secctx wrapper is fail-closed by default" {
+@test "hardening: tier5 waypipe client is always secctx-wrapped by the root bridge" {
+    # The admin-run lifecycle has no untagged path at all: the only way to a
+    # host-side waypipe client is the bridge, which always runs it under
+    # qdistro-secctx-exec (argv pinned by tests/unit/test_tier5_bridge.py).
     SPAWN="$REPO_ROOT/tier5-vm/spawn-tier5.sh"
-    grep -q "TIER5_USE_SECCTX:-1" "$SPAWN"
-    grep -q "qdistro-secctx-exec not in PATH; refusing untagged Tier-5 launch" "$SPAWN"
-    grep -q "set TIER5_USE_SECCTX=0 only for explicit debug runs" "$SPAWN"
-    run grep -nE '^[[:space:]]*USE_SECCTX=0([[:space:]]|$)' "$SPAWN"
-    [ "$status" -ne 0 ] || { echo "implicit secctx disable remains:"$'\n'"$output" >&2; return 1; }
+    BRIDGE="$REPO_ROOT/tier5-vm/qdistro_tier5_bridge.py"
+    run grep -nE 'TIER5_USE_SECCTX|TIER5_SECCTX|^[[:space:]]*(exec[[:space:]]+)?waypipe[[:space:]].*[[:space:]]client([[:space:]]|$)' "$SPAWN"
+    [ "$status" -ne 0 ] || { echo "spawn-tier5 still launches/configures the client:"$'\n'"$output" >&2; return 1; }
+    grep -q 'TIER5_BRIDGE=/usr/libexec/qdistro/qdistro-tier5-bridge' "$SPAWN"
+    grep -q '^SECCTX_EXEC = "/usr/bin/qdistro-secctx-exec"$' "$BRIDGE"
+    run grep -nE 'ALLOW_UNTRUSTED' "$BRIDGE"
+    [ "$status" -ne 0 ] || { echo "bridge uses the dev override:"$'\n'"$output" >&2; return 1; }
 }
 
 @test "hardening: RDP cert dir is 0700 and private key 0600" {

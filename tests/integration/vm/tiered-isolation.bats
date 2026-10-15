@@ -678,8 +678,12 @@ setup() {
     # §Phase-7 tier-5-Linux — waypipe-over-vsock wrapper smoke. Linux-only
     # per spec/00. Tests the data path with vsock CID=1 (loopback).
     # Real-VM mode (--vm <name>) is covered by phase7-tier5-vm.
+    # The broker is started first (setup() stops it): the tier-5 bridge
+    # registers every launch with RegisterLaunch and aborts the launch when
+    # it cannot (decision record step 3) — the same for every spawn-tier5
+    # case below. s63 manages its own broker.
     stage_vm_driver "s43-tier5-loopback.sh"
-    vm_run "curl -fsS -o /tmp/s43.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s43-tier5-loopback.sh && chmod +x /tmp/s43.sh && bash /tmp/s43.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s43.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s43-tier5-loopback.sh && chmod +x /tmp/s43.sh && bash /tmp/s43.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-5 stack (waypipe / vsock_loopback / wayland-info) not available on this VM"
@@ -692,22 +696,39 @@ setup() {
 
 @test "phase7-tier5-loopback-lineage-register: spawn-tier5 --loopback auto-registers a launch record (02/S3e)" {
     # 02/S3e evidence: the tier-5 half of permission lineage. spawn-tier5.sh
-    # wraps waypipe-client with qdistro-secctx-exec, which now publishes the
-    # inner pid; spawn-tier5 calls qd_register_secctx_launch_record so the broker
-    # persists qdistro.lineage.register:<silo>. Loopback (vsock CID=1) needs no
+    # (admin) starts the root qdistro-tier5-bridge, which runs waypipe-client
+    # under qdistro-secctx-exec, learns its pid over a private pipe after exec,
+    # verifies it and registers it, so the broker persists
+    # qdistro.lineage.register:vm-<name>. Loopback (vsock CID=1) needs no
     # guest VM / nested KVM. Companion to s60 (tier-3), s61/s62 (tier-2); tier-5
-    # has no broker spawn gate so no allow rule is authored.
+    # has no broker spawn gate so no spawn allow rule is authored. The driver
+    # runs the broker under `lineage_enforce = true` (a broker.conf flag, NOT
+    # SELinux enforcing) and restores the prior posture in its own trap.
     stage_vm_driver "s63-tier5-loopback-lineage-register.sh"
     vm_run "curl -fsS -o /tmp/s63.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s63-tier5-loopback-lineage-register.sh && chmod +x /tmp/s63.sh && bash /tmp/s63.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-5 stack (waypipe / vsock_loopback / wayland-info / qdistro-secctx-exec / outer compositor / broker audit db) not available on this VM"
     fi
-    # Load-bearing: the registration line only appears if secctx-exec published
-    # the inner waypipe-client pid and the broker RegisterLaunch re-verified it.
+    # Load-bearing: the bridge reports READY only after secctx-exec reported the
+    # exec'd waypipe-client pid and the broker RegisterLaunch re-verified it.
     assert_output_contains "PASS: spawn-tier5 (loopback) logged the launch-record registration for silo="
-    assert_output_contains "PASS: tier-5 loopback silo identity is this spawn's pid (loopback-"
+    assert_output_contains "PASS: tier-5 loopback silo identity is this spawn's pid (vm-loopback-"
     assert_output_contains "PASS: broker recorded qdistro.lineage.register:"
+    # Decision record step 10: under lineage_enforce=true the record DECIDES
+    # the cross-silo gate — matching-silo success AND forged/mismatched
+    # identity denial, not just registration/audit presence.
+    assert_output_contains "PASS: broker restarted under lineage_enforce=true"
+    assert_output_contains "PASS: enforce: attested tier-5 source, no rule -> deny (enforce never bypasses rules)"
+    assert_output_contains "PASS: enforce: matching silo — the attested tier-5 client"
+    assert_output_contains "PASS: enforce: forged identity — an unregistered admin pid claiming vm-loopback-"
+    assert_output_contains "PASS: enforce: the registered pid with a drifted starttime -> deny"
+    assert_output_contains "PASS: enforce: no relayed source pid -> deny"
+    assert_output_contains "PASS: enforce: mismatched identity — the tier-5 client claiming vm-s63other cannot use its rule -> deny"
+    assert_output_contains "PASS: enforce: broker logged the forged claim overridden with the attested silo vm-loopback-"
+    assert_output_contains "PASS: enforce: source-deny audit rows recorded"
+    assert_output_contains "PASS: both s63 clipboard allow rules removed from /etc/qdistro/rules.d"
+    assert_output_contains "PASS: lineage_enforce restored"
     assert_output_contains "PASS: §02/S3e tier-5 (loopback/vsock) permission-lineage register end-to-end"
 }
 
@@ -746,7 +767,7 @@ setup() {
         skip "tier-5 base disk / virsh / qemu-img / kvm absent (opt-in bake; set QDISTRO_BUILD_TIER5_BASE=1)"
     fi
     stage_vm_driver "s45-tier5-vm.sh"
-    vm_run "curl -fsS -o /tmp/s45.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s45-tier5-vm.sh && chmod +x /tmp/s45.sh && bash /tmp/s45.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s45.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s45-tier5-vm.sh && chmod +x /tmp/s45.sh && bash /tmp/s45.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "tier-5 base disk absent (rerun fresh-vm-bootstrap.sh with QDISTRO_BUILD_TIER5_BASE=1)"
@@ -771,7 +792,7 @@ setup() {
         skip "tier-5 base disk / virsh / kvm absent (opt-in bake)"
     fi
     stage_vm_driver "s48-tier5-close-cleanup.sh"
-    vm_run "curl -fsS -o /tmp/s48.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s48-tier5-close-cleanup.sh && chmod +x /tmp/s48.sh && bash /tmp/s48.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s48.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s48-tier5-close-cleanup.sh && chmod +x /tmp/s48.sh && bash /tmp/s48.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "tier-5 base disk or virsh/kvm absent — same skip surface as phase7-tier5-vm"
@@ -793,7 +814,7 @@ setup() {
         skip "tier-5 base disk / virsh / kvm absent (opt-in bake)"
     fi
     stage_vm_driver "s49-tier5-graceful-shutdown.sh"
-    vm_run "curl -fsS -o /tmp/s49.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s49-tier5-graceful-shutdown.sh && chmod +x /tmp/s49.sh && bash /tmp/s49.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s49.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s49-tier5-graceful-shutdown.sh && chmod +x /tmp/s49.sh && bash /tmp/s49.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "tier-5 base disk or virsh/kvm absent — same skip surface as phase7-tier5-vm"
@@ -895,20 +916,22 @@ setup() {
     assert_output_contains "[s110] 14 passes, 0 failures"
 }
 
-@test "phase7-tier4-tier5-lifecycle-stress: crash/restart/churn leaves no orphaned resources" {
-    # §5 lifecycle stress — failure + churn paths must reap every qemu,
-    # waypipe, socat, domain, overlay, and socket. Observable resource
-    # ABSENCE, not "didn't crash". Live nested boot is opt-in; the driver
-    # marks PENDING-LIVE-BOOT steps and the wrapper skips on minimal bakes.
+@test "phase7-tier4-lifecycle-stress: crash/restart/churn leaves no orphaned resources" {
+    # §5 lifecycle stress, tier-4 half — moved unchanged from the former
+    # s111-tier4-tier5-lifecycle-stress.sh (now s113) when s111 became the
+    # tier-5 concurrency/crash stress below. Failure + churn paths must reap
+    # every qemu, waypipe, socat, domain, overlay, and socket. Live nested
+    # boot is opt-in; the driver marks PENDING-LIVE-BOOT steps and the wrapper
+    # skips on minimal bakes.
     vm_run "command -v virsh >/dev/null && [ -e /dev/kvm ]"
     if [[ "$status" -ne 0 ]]; then
-        skip "tier-4/5 stack (virsh/kvm) absent on this VM (opt-in bake)"
+        skip "tier-4 stack (virsh/kvm) absent on this VM (opt-in bake)"
     fi
-    stage_vm_driver "s111-tier4-tier5-lifecycle-stress.sh"
-    vm_run "curl -fsS -o /tmp/s111.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s111-tier4-tier5-lifecycle-stress.sh && chmod +x /tmp/s111.sh && bash /tmp/s111.sh 2>/dev/null"
+    stage_vm_driver "s113-tier4-lifecycle-stress.sh"
+    vm_run "curl -fsS -o /tmp/s113.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s113-tier4-lifecycle-stress.sh && chmod +x /tmp/s113.sh && bash /tmp/s113.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "tier-4/5 stack / kvm absent on this VM (opt-in bake)"
+        skip "tier-4 stack / kvm absent on this VM (opt-in bake)"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: guest crash during startup"
@@ -918,7 +941,67 @@ setup() {
     assert_output_contains "PASS: host qdshell crash/restart: display client is setsid-detached"
     assert_output_contains "PASS: qdwin disconnect cleanup: client exit triggers domain destroy via EXIT trap"
     assert_output_contains "PASS: denied nested-proxy: broker denies the cross-silo proxy (verdict=deny)"
-    assert_output_contains "PASS: §5 tier-4/tier-5 lifecycle stress end-to-end (no leaked resources)"
+    assert_output_contains "PASS: §5 tier-4 lifecycle stress end-to-end (no leaked resources)"
+}
+
+@test "phase7-tier5-lifecycle-stress: concurrent cold starts, shared reuse, cross-app refusal, crashes leave no resources" {
+    # Tier-5 decision record step 10: genuine tier-5 concurrency/crash stress
+    # against real nested guests, executed WITHOUT skips — a missing base
+    # disk, kvm, compositor or installed tool is a FAIL (the tier-5 base is
+    # baked into every --from-baked overlay by build-baked-baseweed.sh).
+    # Driven through the installed qdistro-tier5-spawn/-cleanup as qdshell
+    # drives them; asserts process/domain/file ABSENCE after each scenario.
+    stage_vm_driver "s111-tier5-lifecycle-stress.sh"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s111.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s111-tier5-lifecycle-stress.sh && chmod +x /tmp/s111.sh && bash /tmp/s111.sh 2>&1"
+    printf '%s\n' "$output" | sed 's/^/# /' >&3
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "s111 must not skip: $(driver_skip_reason)"
+    fi
+    assert_success
+    assert_output_contains "PASS: tier-5 stress preconditions present"
+    # A. simultaneous cold starts
+    assert_output_contains "PASS: A: barrier — both wrappers blocked on the"
+    assert_output_contains "PASS: A: both simultaneous launches published their app"
+    assert_output_contains "PASS: A: exactly one wrapper created"
+    assert_output_contains "PASS: A: one domain, one qemu, one overlay for"
+    assert_output_contains "PASS: A: overlay sidecar binds"
+    assert_output_contains "PASS: A: each session runs its own registered waypipe client"
+    # C. different-app refusal
+    assert_output_contains "PASS: C: different-app launch refused (exit 3, 'refusing cross-app adoption')"
+    assert_output_contains "PASS: C: the running guest (qemu"
+    assert_output_contains "PASS: C: sidecar still binds"
+    assert_output_contains "PASS: C: the refused launch left no waypipe client"
+    # B. shared-guest reuse
+    assert_output_contains "PASS: B: the first session's waypipe client"
+    assert_output_contains "PASS: B: first session closed"
+    assert_output_contains "PASS: B: closing wrapper handed the guest to the remaining session"
+    assert_output_contains "PASS: B: guest still running for the other session"
+    assert_output_contains "PASS: B: every process of the closed session's chain is gone"
+    assert_output_contains "PASS: B: the closed session's waypipe client is gone, the other's lives"
+    assert_output_contains "PASS: B: last session closed"
+    assert_output_contains "PASS: B: last close reaped"
+    assert_output_contains "PASS: B: no waypipe client survives the last close"
+    # D. wrapper crash
+    assert_output_contains "PASS: D: launch up"
+    assert_output_contains "PASS: D: waypipe client"
+    assert_output_contains "PASS: D: wrapper SIGKILL — the bridge reaped its waypipe client"
+    assert_output_contains "PASS: D: the root bridge"
+    assert_output_contains "PASS: D: every process of the crashed session's chain is gone"
+    assert_output_contains "PASS: D: qdistro-tier5-cleanup reaped the orphan (no domain, qemu, overlay, sidecar)"
+    # E. qemu crash
+    assert_output_contains "PASS: E: launch up"
+    assert_output_contains "PASS: E: qemu SIGKILL — the wrapper noticed and exited"
+    assert_output_contains "PASS: E: dead guest reaped (no domain, qemu, overlay, sidecar)"
+    assert_output_contains "PASS: E: its waypipe client"
+    # postconditions
+    assert_output_contains "PASS: no bridge, runuser, secctx-exec or waypipe client from this driver survives"
+    assert_output_contains "PASS: no domain, qemu or overlay named"
+    assert_output_contains "PASS: no root-owned file in admin's image or lock directories"
+    assert_output_contains "PASS: no root-run tier-5 lifecycle state"
+    assert_output_contains "PASS: §5 tier-5 concurrency/crash stress end-to-end (no leaked resources)"
+    if grep -q "PENDING-LIVE-BOOT" <<<"$output"; then
+        fail_loud "s111 must not report PENDING-LIVE-BOOT passes"
+    fi
 }
 
 @test "phase7-cross-tier-clipboard: large + multi-MIME clipboard between tier-1/3/4/5b" {
@@ -1121,28 +1204,6 @@ setup() {
     assert_output_contains "PASS: broker running pid="
     assert_output_contains "PASS: D-Bus probe succeeded under enforcing"
     assert_output_contains "PASS: 0 new denials — qdistro_broker.te 0.3.0 covers the enforcing workload"
-}
-
-@test "phase7-qsu-enforcing: qsu end to end under Enforcing — zero qdistro-domain AVCs" {
-    # Headless port of permissions-gui/55 (+ its host runner run-55): real
-    # `qsu /usr/bin/id` as the non-admin user, root approve over D-Bus, the
-    # command must run and no new qdistro_root_exec_t / qsu_child_t /
-    # qdistro_broker_t / qdistro_tier1_t / qdistro_pwd_t AVC may appear.
-    # qga cannot setenforce, so this needs the SSH transport
-    # (run-bats-enforcing.sh exports VM_SSH_PORT); on the default bake the
-    # driver also SKIPs because /etc/selinux/config pins permissive.
-    [ -n "${VM_SSH_PORT:-}" ] \
-        || skip "qsu enforcing needs the SSH transport (VM_SSH_PORT unset; qga cannot setenforce)"
-    stage_vm_driver "s54-qsu-enforcing.sh"
-    vm_run "curl -fsS -o /tmp/s54.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s54-qsu-enforcing.sh && chmod +x /tmp/s54.sh && bash /tmp/s54.sh 2>/dev/null"
-    if [[ "$output" == *"SKIP:"* ]]; then
-        skip "qsu enforcing not enabled in this bake (config-pinned permissive; opt-in QDISTRO_BUILD_TIER1=1)"
-    fi
-    assert_success
-    assert_output_contains "PASS: SELinux mode now Enforcing"
-    assert_output_contains "PASS: qsu request found by admin and approved by root over D-Bus under Enforcing"
-    assert_output_contains "PASS: qsu /usr/bin/id ran under Enforcing (uid=0(root))"
-    assert_output_contains "PASS: 0 new denials — qsu policy covers the enforcing qsu flow"
 }
 
 @test "phase7-session-manager-enforcing: S6 — qdistro_sessmgr_t lifecycle AVC budget" {

@@ -11,6 +11,11 @@
 #
 # (2026-10-02: permissions-gui 07 and 24 left this set when they became
 # headless bats in tests/integration/vm/permissions-headless.bats.)
+# (2026-10-14: the labwc/XWayland lane was retired. 16 merged into 12 and 09
+# into 40, which replaces it here; 35 and 40 now run on the qdwin lane with the
+# installed TUI in foot. The migrated TUI rows have not yet been re-validated
+# as genuine passes under the current driver on qdwin: do that before trusting
+# a driver swap on them.)
 # The PASS rows are the "admin-9" set validated 2026-06-23/06-28 as genuine
 # (non-rubber-stamping) passes under the driver in use at that date. The FAIL
 # rows are the ground-truth
@@ -24,9 +29,8 @@
 qdistro/tests/integration/permissions-gui/03-qt-admin-app-visual.md	PASS
 qdistro/tests/integration/permissions-gui/06-qt-admin-app-mouse.md	PASS
 qdistro/tests/integration/permissions-gui/10-qt-cache-revoke.md	PASS
-qdistro/tests/integration/permissions-gui/16-realapp-sendto-visual.md	PASS
 qdistro/tests/integration/permissions-gui/35-tui-and-qt-concurrent.md	PASS
-qdistro/tests/integration/permissions-gui/09-tui-broker-offline.md	PASS
+qdistro/tests/integration/permissions-gui/40-tui-survives-broker-restart.md	PASS
 qdistro/tests/integration/permissions-gui/12-cross-user-sendto-visual.md	PASS
 qdistro/ci/integrity/tripwire-deterministic.md	FAIL
 qdistro/ci/integrity/tripwire-visual.md	FAIL

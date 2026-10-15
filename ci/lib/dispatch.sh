@@ -75,7 +75,7 @@ print_triage() {
 # the real case arms from this file and fails on any difference.
 QCI_COMMANDS="preflight lint selftest image registry-check release-manifest \
 bootstrap-release-profile affected edit-guard replay host feedback vm-smoke bats gui \
-gui-admin full snapshot-daily mmnet cleanup report triage list-runs"
+full snapshot-daily mmnet cleanup report triage list-runs"
 
 qci_is_command() {
     local c
@@ -97,7 +97,7 @@ qci_value_opts() {
         edit-guard) echo "--changed-from" ;;
         vm-smoke) echo "--vm" ;;
         bats) echo "--vm --file" ;;
-        gui|gui-admin) echo "--vm --scenario" ;;
+        gui) echo "--vm --scenario" ;;
         image) echo "--root" ;;
         snapshot-daily) echo "--date --name" ;;
         cleanup) echo "--age-hours" ;;
@@ -200,7 +200,7 @@ main() {
             done
         fi
         case "$refuse_cmd" in
-            full|bats|gui|gui-admin|image|cleanup|vm-smoke|replay|mmnet|snapshot-daily|"affected --run")
+            full|bats|gui|image|cleanup|vm-smoke|replay|mmnet|snapshot-daily|"affected --run")
                 echo "qci $refuse_cmd: refused inside GUI scenario agent ($QCI_GUI_SCENARIO_AGENT)." >&2
                 echo "You ARE the scenario driver; qci already launched you on \$VMNAME." >&2
                 echo "Run the scenario's steps yourself with scripts/vm/vm-exec and vm-gui." >&2
@@ -212,7 +212,7 @@ main() {
     # The flock guardian owns the fd for this command's full lifetime; worker
     # children inherit no lock fd. image and cleanup share it with full/bats/gui.
     case "$cmd" in
-        full|bats|gui|gui-admin|image|cleanup)
+        full|bats|gui|image|cleanup)
             qdistro_run_lock_reexec "$SELF" "$cmd" "$@" ;;
     esac
 
@@ -229,7 +229,7 @@ main() {
     # not depend on this image; explicit Kiwi runs use their own source.
     local check_substrate=0 arg base_kind
     case "$cmd" in
-        preflight|full|vm-smoke|bats|gui|gui-admin|replay|mmnet|snapshot-daily)
+        preflight|full|vm-smoke|bats|gui|replay|mmnet|snapshot-daily)
             check_substrate=1 ;;
         affected)
             for arg in "$@"; do [ "$arg" = --run ] && check_substrate=1; done ;;
@@ -337,16 +337,11 @@ main() {
                 shift
             done
             gate_bats "$EXPLICIT_VM" "${files[@]}"; rc=$?; finish_run "$rc" ;;
-        gui|gui-admin)
-            # `qci gui-admin` IS the labwc admin lane, which is otherwise opt-in
-            # (gui_scenario_labwc_lane_skip_reason); an explicit 0 still wins.
-            [ "$cmd" = gui-admin ] && export QCI_GUI_SKIP_QDWIN=1 \
-                QCI_LABWC_ADMIN_LANE=${QCI_LABWC_ADMIN_LANE:-1}
+        gui)
             while [ $# -gt 0 ]; do
                 case "$1" in
                     --vm) shift; EXPLICIT_VM=${1:-} ;;
                     --scenario) shift; scenarios+=("${1:-}") ;;
-                    --skip-qdwin) export QCI_GUI_SKIP_QDWIN=1 ;;
                     --no-require-agent) export QCI_REQUIRE_AGENT_GUI=0 ;;
                     *) record_blocked gui "$1" "$EXIT_USAGE" args "unknown arg"; finish_run "$EXIT_USAGE" ;;
                 esac

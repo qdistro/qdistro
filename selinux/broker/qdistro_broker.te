@@ -105,10 +105,29 @@
 ##   AuthenticationAgentResponse2 already uses). Optional, D-Bus only: it
 ##   joins no network attribute, so the 0.6.0 neverallow ratchet holds.
 ##
+##   0.7.1 (tier-5 enforcing acceptance): systemd unit status for the
+##   polkit relay. The relay methods accept only the peer whose pid IS
+##   qdistro-polkit-agent.service's MainPID, read from systemd over D-Bus.
+##   systemd checks that query against the caller's SELinux context
+##   (init_t:system status for the unit lookup, the unit file's
+##   service:status for the property read) and refused qdistro_broker_t,
+##   so under enforcing every agent relay was refused ("could not resolve
+##   qdistro-polkit-agent.service's MainPID") and no forced-PAM
+##   authentication (org.qdistro.tier5.bridge, org.qdistro.broker.approve)
+##   could succeed. Status only: no start/stop/reload of any unit.
+##   Plus self:capability kill: the relay's origin check sends signal 0
+##   through the connection's pidfd (pidfd_send_signal) to the admin-uid
+##   agent, a cross-uid signal that needs CAP_KILL — refused (silently:
+##   dontaudit) it read as "origin process is dead" and failed the relay.
+##   Signal 0 is the only use; the broker signals no other process. The
+##   same probe needs process:signull on the agent's domain: the agent
+##   (qdistro-polkit-agent.service) has no module of its own and runs as
+##   unconfined_service_t — move this grant with it if it gets one.
+##
 ##   Spec refs: doc/selinux.md §"Broker module split-out";
 ##   doc/threat-model.md "TCB process discipline".
 ## </desc>
-policy_module(qdistro_broker, 0.7.0)
+policy_module(qdistro_broker, 0.7.1)
 
 ########################################
 #
@@ -236,6 +255,13 @@ allow qdistro_broker_t tmpfs_t:file { execute read write };
 allow qdistro_broker_t self:process { signal sigkill sigchld getsched };
 allow qdistro_broker_t self:fifo_file rw_fifo_file_perms;
 allow qdistro_broker_t self:capability { sys_resource sys_ptrace dac_read_search dac_override };
+# (0.7.1) kill: pidfd_send_signal(pidfd, 0) liveness probe of the admin-uid
+# polkit agent in the relay's origin check (cross-uid → CAP_KILL).
+allow qdistro_broker_t self:capability kill;
+gen_require(`
+    type unconfined_service_t;
+')
+allow qdistro_broker_t unconfined_service_t:process signull;
 
 # 0.4.0: shared audit dir. /var/lib/qdistro/audit is labelled
 # qdistro_pwd_audit_t by the qdistro_pwd module's .fc; the broker's
@@ -269,6 +295,19 @@ auth_read_passwd(qdistro_broker_t)
 optional_policy(`
     policykit_dbus_chat(qdistro_broker_t)
 ')
+
+# (0.7.1) The polkit relay pins its peer to qdistro-polkit-agent.service's
+# MainPID, which the broker reads from systemd (GetUnit + the MainPID
+# property). systemd's own SELinux access checks gate both: the unit lookup
+# as init_t:system status, the property read as service:status on the unit
+# file's label. Read-only status; no unit control.
+gen_require(`
+    type init_t, systemd_unit_file_t;
+    class system status;
+    class service status;
+')
+allow qdistro_broker_t init_t:system status;
+allow qdistro_broker_t systemd_unit_file_t:service status;
 
 # (0.6.0) The 0.5.0 module also carried optional systemd_dbus_chat_logind() and
 # fprintd_dbus_chat() blocks "for the admin-approval auth path". The broker has

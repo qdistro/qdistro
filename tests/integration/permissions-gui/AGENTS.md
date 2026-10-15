@@ -81,20 +81,25 @@ silences only the success announcement, never a timeout. Set it per call, never
 - Host: openSUSE Tumbleweed with `libvirt` + `virsh`.
 - Target: a running virt-manager VM (name passed via `$VMNAME`, default
  picked from `virsh list --name --state-running | head -1`).
-- VM runs an admin compositor session as user `admin`; current CI may use
-  the labwc harness for admin-only scenarios or the qdwin/qdshell profile for
-  production-compositor scenarios.
-- `qdistro-admin-broker.service` is active under root; TUI at
- `/usr/local/bin/qdistro-admin-tui`; Qt admin app at
- `/home/admin/qdistro/admin_app/qdistro_admin_app.py`.
+- The VM runs the product session as user `admin`: the qdwin compositor +
+  qdshell on `wayland-1` (`scripts/vm/spin-test-vm-gui.sh`, the one GUI
+  profile). There is no labwc, LXQt or X server for scenario input; qdwin's
+  own XWayland serves X11 *apps* only.
+- `qdistro-admin-broker.service` is active under root; the admin TUI is
+ installed at `/usr/local/bin/qdistro-admin-tui` (a symlink into
+ `/usr/local/lib/qdistro/admin-tui/`); the Qt admin app at
+ `/usr/local/bin/qdistro-admin-approval-app`, started through
+ `/usr/local/bin/qdistro-start-admin-app`.
 - Tools on host (absolute paths — not on PATH):
  - `${QDISTRO_REPO}/scripts/vm/vm-exec <vm> '<cmd>'`
  runs shell as root in VM via qemu-guest-agent.
+ - `${QDWIN_REPO}/tests/gui/qdwin-helpers.sh` (source it):
+ `qdwin_screenshot` for graded frames, `qdwin_send_key` / `qdwin_chord`
+ for QMP keyboard input.
  - `${QDISTRO_REPO}/scripts/vm/vm-gui <vm> ...`
- `start`, `screenshot [file]`, `click-preview x y [label]`,
- `click-confirm <manifest>`, `click x y`, `type <text>`, `key <keysym>`.
- Screenshots use virsh; raw pointer clicks use QEMU input events; window
- activation and some keyboard fallbacks use xdotool in XWayland (`DISPLAY=:0`).
+ `click-preview x y [label]`, `click-confirm <manifest>`, `view-copy`,
+ `screenshot [file]` (virsh; diagnostics, not graded qdwin frames).
+ Pointer clicks use QEMU input events.
 - VM user password is `Pa_ssw0rd45` for `admin` and `work`.
 - **Approving as admin needs a polkit grant.** The broker refuses an
  admin-uid authority call (approve/deny, rules, revoke, workflow approve)
@@ -105,39 +110,42 @@ silences only the success announcement, never a timeout. Set it per call, never
  (`/etc/polkit-1/rules.d/10-qci-broker-approve-test.rules`,
  `grant_broker_approve_for_tests` in `ci/lib/gates/gui.sh`), so scenarios
  approve without a prompt. A scenario that tests the real prompt declares
- `<!-- qci:polkit-test-grant: none -->` (see 62). Driving a scenario by hand
+ `<!-- qci:polkit-test-grant: none -->` (see 62; 63 opts out too and
+ also removes the tier-5 bridge YES rule 19–21 install, because it tests the
+ tier-5 launch password prompt). Driving a scenario by hand
  outside `qci gui`, write that rule yourself (copy it from `gui.sh`), or
  every app/TUI approval fails "Not authorized". The rule never ships:
  `image/verify-contents.sh` asserts it is absent.
 
 ## qdwin lane: the admin app as the image ships it
 
-The admin-app scenarios 03, 04, 06, 08, 10, 12, 13, 14, 34, 43, 47 and 62 run on
-the **qdwin lane** (`gui_scenario_requires_qdwin` in `ci/lib/gates/gui.sh`),
-like 18–21: the product session (qdwin compositor + qdshell on `wayland-1`),
-with the admin app started through the **shipped** native-Wayland launcher
-`/usr/local/bin/qdistro-start-admin-app` (`deploy/start-admin-app-wayland.sh`).
-There is no X server, so nothing in those scenarios may use `xdotool`,
-`DISPLAY=:0`, `vm-gui activate`, `await_x11_window_title`, or
-`vm-gui screenshot` for a graded frame. Everything else on this page (vm-exec
-quoting, `bg_start`/`bg_wait`, broker ground truth, preview/confirm clicks)
-still applies. The scenarios that do NOT name the qdwin lane run on the labwc
-admin lane, which is opt-in (`QCI_LABWC_ADMIN_LANE=1`; see ci/README.md).
+Every scenario here runs on the **qdwin lane**: the product session (qdwin
+compositor + qdshell on `wayland-1`), with the admin app started through the
+**shipped** native-Wayland launcher `/usr/local/bin/qdistro-start-admin-app`
+(`deploy/start-admin-app-wayland.sh`) and the admin TUI as installed (next
+section). There is no X server for scenario input, so nothing here may use
+`xdotool`, `DISPLAY=:0`, or `vm-gui screenshot` for a graded frame.
+Everything else on this page (vm-exec quoting, `bg_start`/`bg_wait`, broker
+ground truth, preview/confirm clicks) applies. (The labwc/LXQt/XWayland admin
+lane that once ran the TUI scenarios was retired on 2026-10-14.)
 
 The lane's primitives (guest side, in `/tmp/qci-gui-waiters.sh`):
 
-| need | qdwin lane | labwc lane equivalent |
-| --- | --- | --- |
-| preconditions | `qdwin_admin_lane_setup [--silos]`: session up, `--silos` provisions work/work2 (the qdwin golden has none), idle locker held off and proven unlocked | baked into the gui-admin golden |
-| launch, wait for first painted frame | `qdwin_start_admin_app` (prints the app pid; fails if the launcher exits nonzero) | `runuser -u admin -- /usr/local/bin/qdistro-start-admin-app` |
-| stop the app | `qdwin_stop_admin_app` | `pkill -u admin -f qdistro_admin_app` |
-| wait for the app's model state | `await_qdwin_window_title 'admin approvals \(1 pending\)' 30` | `await_x11_window_title admin ...` |
-| focus a window before keys | `qdwin_focus_window 'admin approvals.*'` (returns once the compositor reports keyboard focus on it) | `xdotool search --sync ... windowactivate --sync` |
-| list windows | `qdwin_windows` (handle, pid, uid, app_id, title) | `xdotool search` |
+| need | primitive |
+| --- | --- |
+| preconditions | `qdwin_admin_lane_setup [--silos]`: session up, `--silos` provisions work/work2 (the golden has none), idle locker held off and proven unlocked |
+| launch, wait for first painted frame | `qdwin_start_admin_app` (prints the app pid; fails if the launcher exits nonzero) |
+| stop the app | `qdwin_stop_admin_app` |
+| wait for the app's model state | `await_qdwin_window_title 'admin approvals \(1 pending\)' 30` |
+| focus a window before keys | `qdwin_focus_window 'admin approvals.*'` (returns once the compositor reports keyboard focus on it) |
+| list windows | `qdwin_windows` (handle, pid, uid, app_id, title) |
 
-Keys still go through `virsh send-key` on the HOST (the KVM keyboard reaches
-the focused Wayland client through the compositor). Graded frames are taken
-with qdwin's in-compositor capture on the HOST:
+Keys go to the focused Wayland client through the compositor, injected on the
+HOST: `virsh send-key` (the Qt admin-app scenarios) or the QMP helpers
+`qdwin_send_key` / `qdwin_chord` from `qdwin-helpers.sh` (the TUI scenarios).
+Use ONE of the two paths within a scenario: mixing them can leave a modifier
+held in QEMU's input layer (`qdwin-helpers.sh`, "key"). Graded frames are
+taken with qdwin's in-compositor capture on the HOST:
 
 ```bash
 source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh
@@ -146,14 +154,40 @@ qdwin_screenshot "${QCI_GUI_ARTIFACT_DIR:-/tmp}/NN-s1.png"
 ```
 
 It renders the compositor's current scene from the clients' committed
-buffers, so the XWayland stale/half-drawn frame that the labwc lane suffers
-(the "display-path stall" in pitfall 2) does not exist here, and the
-labwc-era "recapture up to N frames" allowances are gone from these
-scenarios: a partly drawn or stale admin window on this lane is a FAIL
+buffers, so the XWayland stale/half-drawn frame of the retired labwc lane
+does not exist here, and the labwc-era "recapture up to N frames" allowances
+are gone: a partly drawn or stale admin window on this lane is a FAIL
 (product or compositor), not harness noise. Model-targeted clicks keep the
 `vm-gui click-preview` / `click-confirm` handshake (it drives the QEMU pointer,
 which qdwin receives like a mouse); grade the RESULT from a `qdwin_screenshot`
 taken after the state wait, not from the click-confirm post frame.
+
+## The admin TUI in foot
+
+The TUI scenarios (01, 35, 40) run the INSTALLED `/usr/local/bin/qdistro-admin-tui`
+(installer: `scripts/install/install-admin-cli-for-vm.sh`, the image's own)
+with no arguments, as the admin uid, inside **foot** — a core test client
+every GUI golden bakes and the image does NOT ship (its terminal is
+qterminator; these scenarios give no qterminator coverage). The broker lets an
+admin-uid TUI exercise authority (approve/deny) only as that installed script
+run `/usr/bin/python3 -I <path>` with no arguments and an allowlisted
+environment, plus the `org.qdistro.broker.approve` grant (the CI test rule);
+the entry point re-execs itself into that shape. Never substitute a dev copy,
+a wrapper, extra TUI arguments, or root.
+
+| need | primitive (guest side) |
+| --- | --- |
+| launch, ready | `qdwin_start_admin_tui <tag>`: checks the install (installer symlink, intact root-owned module, Textual/Rich import, foot present — a failure is a bake ERROR, never a skip), starts foot maximized with a unique locked title, and returns once foot's window is mapped, its child passes `qdwin_admin_tui_identity` (the broker's authority shape, allowlist read from the installed broker), and the TUI made its first `GetPending` (mounted and subscribed). Also starts the broker bus trace `admin-tui`. |
+| focus before keys | `qdwin_focus_admin_tui` (THIS foot, by title and pid, proven by the compositor; then the same-process check). Abort the step on failure: no key may go to an unknown focus. |
+| same process still | `qdwin_admin_tui_alive` (pid + start time + identity) |
+| TUI refreshed after a new request | `qdwin_admin_tui_await_refresh <since>` (readiness) |
+| it was the SIGNAL, not the 30 s poll | `qdwin_admin_tui_clear_of_poll [budget]` before the action, then `qdwin_admin_tui_await_signal_refresh <since>` / `qdwin_admin_tui_removed_by_signal <since>` |
+| the TUI made THIS decision | `qdwin_admin_tui_decision_evidence <action> <allow\|deny> <scope>` (its own `DecideRequest`, the broker's `RequestDecided`, the audit row) |
+| stop | `qdwin_stop_admin_tui` (identity-checked; no TUI of any launch survives) |
+
+`<since>` is the guest clock (`date +%s.%N` via vm-exec), the bus trace's
+clock. foot's title is locked, so it cannot signal TUI state: after a key,
+keep the scenario's settle wait before the capture.
 
 How the paint wait works: with `QDISTRO_ADMIN_APP_WAIT_PAINTED=1` the shipped
 launcher starts the app detached and returns only after the app created its
@@ -214,86 +248,42 @@ frame of that state.
  returns** unless you detach them. Use `setsid ... </dev/null
  >/tmp/foo.log 2>&1 &` inside a script.
 
- **Launcher env caveat**: `runuser -u admin -- env DISPLAY=:0 /tmp/launch.sh`
- does NOT inherit admin's Wayland-session env (`XDG_RUNTIME_DIR`,
- `DBUS_SESSION_BUS_ADDRESS`, `WAYLAND_DISPLAY`). qterminal, the Qt
- admin app, and anything D-Bus-session-aware will abort on connect.
- The repo ships two launchers that DO set the env correctly — use
- these instead of hand-rolling `runuser -u admin -- env ...`:
+ **Launcher env caveat**: `runuser -u admin -- /tmp/launch.sh` does NOT
+ inherit admin's Wayland-session env (`XDG_RUNTIME_DIR`,
+ `DBUS_SESSION_BUS_ADDRESS`, `WAYLAND_DISPLAY`); the Qt admin app and
+ anything D-Bus-session-aware abort on connect. Use the helpers, which set
+ it: `qdwin_start_admin_app` (the shipped launcher in its first-paint mode:
+ returns the app pid only after the window painted, exit 3 if the app dies
+ first or paints nothing within `QDISTRO_ADMIN_APP_READY_TIMEOUT`, 60 s) and
+ `qdwin_start_admin_tui`. A sleep, or a window merely existing, is not a
+ paint readiness check (full-20260930T051422Z-65193 permissions-gui/22 and
+ /47 captured the bare desktop that way).
+3. **Drive input from the host, into the focused window.** Pointer input is
+ the QEMU virtual pointer (preview/confirm, 3b); keyboard input the KVM
+ keyboard. Both reach the client the compositor focuses, below any toolkit.
 
- - `/usr/local/bin/qdistro-start-admin-app` — launches the PyQt6
- admin approval app and returns (printing its pid) only after the window
- has painted its first frame; it exits 3 if the app dies first or paints
- nothing within `QDISTRO_ADMIN_APP_READY_TIMEOUT` (60 s). Check its exit
- status. A sleep or `xdotool search --sync --name` is not a paint
- readiness check: the X window exists and is named before Qt paints it,
- and a capture in that gap shows the bare desktop or a half-drawn window
- (full-20260930T051422Z-65193 permissions-gui/22 and /47).
- A separate, open display-path stall on this labwc/XWayland lane can
- still freeze the SCREEN on an older or partly black frame after the app
- has drawn a newer one (the app and compositor hold the right content; a
- compositor-wide redraw such as `pkill -HUP -x labwc` shows it). It is not
- limited to launch (04's post-approve frame kept the pending row). Such a
- frame is harness evidence, not a product FAIL: record ERROR with that
- reason rather than grading the app from it.
- - `/usr/local/bin/qdistro-start-admin-tui` — launches qterminal
- wrapping the Textual TUI (`qdistro-admin-tui`).
-
- Source in `deploy/start-admin-{app,tui}.sh`.
-3. **Wayland input injection is unreliable on the GUI harness.** Drive the GUI
- via keyboard (`vm-gui key`) through XWayland where possible; do
- **not** click pixel coordinates for Wayland-native windows unless a
- scenario explicitly instructs to.
-
- **Caveat for modifier-key shortcuts on XWayland Qt apps** (e.g.
- the admin approval app's `Ctrl+Y`/`Ctrl+N`): `vm-gui key ctrl+n`
- silently fails to reach the app — xdotool/XTest routes modifier
- combos through XWayland's focus handling, which the compositor may not
- synchronize with the Qt window's X input focus. Use the KVM
- keyboard instead:
- ```bash
- virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
- ```
- This works because `virsh send-key` injects at the virtual
- keyboard (evdev) layer, below X/Wayland entirely.
-
- **Plain-key caveat too**: even single letters / digits through
- `vm-gui key <X>` may silently no-op against qterminal under XWayland in
- practice — xdotool reaches the X server but the focused terminal
- window doesn't see the key consistently. TUI scenarios (01, 02,
- 05, 09) drive every plain key (`d`, `1`, `2`, `3`, `r`, `?`,
- `Escape`) via `virsh send-key` for the same reason modifier
- chords do. If a future scenario finds `vm-gui key` works on a
- focused qterminal — it sometimes does — that's fine, but don't
- rely on it; `virsh send-key` is the portable path.
-
-3a. **Keyboard navigation via `virsh send-key` is the BLESSED input
- path.** Unless a scenario explicitly exercises the pointer
- (06-qt-admin-app-mouse.md), drive every interaction with the keyboard:
- - Modifier chords (`Ctrl+Y`, `Ctrl+N`): `virsh send-key "$VM"
- --codeset linux KEY_LEFTCTRL KEY_Y`.
- - Plain keys / arrows / Tab / Escape: `virsh send-key "$VM"
- --codeset linux KEY_TAB` (etc).
- `virsh send-key` injects at the virtual evdev keyboard, below
- X/Wayland focus handling entirely, which is why it works where
- xdotool/`vm-gui key` silently no-op. Always `xdotool search
- --sync --name "<window title>" windowactivate --sync` (as the
- right user, with `DISPLAY=:0`) immediately before a `send-key`
- burst so the intended window holds X focus when the evdev event
- arrives. Bound it (`timeout 20 xdotool search --sync ...`) and check its
- exit status: `--sync` waits forever when no X window matches, e.g. when
- the client came up as a native Wayland window (qterminal does unless it
- is launched with `QT_QPA_PLATFORM=xcb`; see permissions-gui/05). This is the supported, portable contract for this VM
- template; do not introduce new scenarios that depend on pixel
- clicks.
+3a. **Keyboard navigation is the BLESSED input path.** Unless a scenario
+ explicitly exercises the pointer (06-qt-admin-app-mouse.md), drive every
+ interaction with the keyboard:
+ - Qt admin-app scenarios: `virsh send-key "$VM" --codeset linux
+ KEY_LEFTCTRL KEY_Y` for chords, `virsh send-key "$VM" --codeset linux
+ KEY_TAB` (etc.) for plain keys.
+ - TUI scenarios: `qdwin_chord ctrl -- n`, `qdwin_chord shift -- slash`
+ (`?`), `qdwin_send_key KEY_D` (QMP `input-send-event`, discrete
+ press/release).
+ Never mix the two paths in one scenario. Immediately before every key
+ burst, prove focus: `qdwin_focus_window '<title ERE>' 15 <pid>` or
+ `qdwin_focus_admin_tui`, and stop the step if it fails — a key sent to an
+ unknown focus is not a test. `virsh send-key` returns 0 for an unknown
+ keysym, so use `KEY_*` names from `input-event-codes.h`. Do not introduce
+ new scenarios that depend on pixel clicks.
 
 3b. **Every model-targeted mouse click uses a preview/confirm handshake.**
- Direct `xdotool mousemove…click` remains unreliable for Qt XWayland windows
- because X11 focus can disagree with the compositor's Wayland seat focus.
- `vm-gui click` uses the better QEMU virtual-pointer path, but a model can still
- choose the wrong coordinate or reason from a stale frame. Visual runners MUST
- NOT invoke either raw path directly. Use this sequence:
- 1. Activate the intended window and take a fresh screenshot.
+ `vm-gui click` drives the QEMU virtual pointer, but a model can still choose
+ the wrong coordinate or reason from a stale frame. Visual runners MUST NOT
+ invoke a raw click directly. Use this sequence:
+ 1. Focus the intended window (`qdwin_focus_window`) and take a fresh
+ `qdwin_screenshot`.
  2. Extract text + bounding boxes from the screenshot. A
  vision-capable LLM agent can read text off the PNG
  directly; otherwise run `tesseract` (once installed —
@@ -338,10 +328,9 @@ frame of that state.
  is either describing a different UI state (scenario bug) or
  the application actually failed to render (app bug); both
  want the human's eyes.
-4. **The TUI has no menubar of its own.** Its surrounding chrome
- (titlebar "Shell No. 1", menubar, tab strip) belongs to qterminal
- and is not under test. Assertions about the TUI refer to the inner
- content area only.
+4. **The TUI has no menubar of its own.** Its surrounding chrome (foot's
+ client-side decoration and qdshell's window chrome) is not under test.
+ Assertions about the TUI refer to the terminal's content area only.
 5. **Don't `zypper dup`** — it restarts qemu-guest-agent and orphans
  your in-flight `vm-exec` calls. Stick to `zypper -n install` for
  additions.
@@ -349,18 +338,14 @@ frame of that state.
  request must trigger it first (usually by running
  `qdistro-test-permission` as `work` in the background — see
  `deploy/step-d-test.sh` for the pattern).
-7. **qterminal default geometry is pinned to 1200×700** via
- `/home/admin/.config/qterminal.org/qterminal.ini` (`[MainWindow]
- size=@Size(1200 700)`). This width is needed so the TUI header
- subtitle (`• scope: ...`) and full footer (incl. `4`, `5`, `r`,
- `? Help`, `q Quit`) fit without truncation. If a scenario is
- hitting truncation, verify the ini still has that size and
- re-launch qterminal; don't rewrite the scenario to accept
- truncation.
-8. **Clean up TUI processes in teardown.** `pkill -u admin -f
- qdistro_admin_tui` — closing qterminal does *not* always reap the
- TUI subprocess. Stale TUIs accumulate across runs and hold
- broker connections open.
+7. **foot runs maximized** (`qdwin_start_admin_tui`), so the TUI header
+ subtitle (`• scope: ...`), the footer and the help modal fit the 1280x800
+ test output. If a frame shows them truncated, report ERROR with the window
+ size (an environment/geometry problem); don't rewrite the scenario to
+ accept truncation.
+8. **Clean up TUI processes in teardown** with `qdwin_stop_admin_tui`: it
+ stops the recorded foot and TUI by identity and makes sure no admin TUI of
+ any launch survives. Stale TUIs hold broker connections open.
 9. **Broker state persists across scenarios.** A pending request
  left by a prior run (e.g. a scenario that failed before its
  deny/approve step) will show up as non-empty state in the next
@@ -378,17 +363,13 @@ frame of that state.
 
 ## Ground truth: broker state + app stdout, screenshots are coarse
 
-Screenshots on this VM template are NOT authoritative for
-fine-grained content assertions. `virsh screenshot` sometimes
-captures a stale framebuffer: Qt's `QLabel.setText` (verified via
-instrumented debug prints showing the show-request fired) has
-already run, but the SPICE/QXL output buffer hasn't been flipped
-yet, so the PNG shows the *previous* detail-pane content. Repaint
-nudges (`xdotool mousemove`, sleep loops) do not reliably force a
-flush. There is no blessed repaint-trigger — treat screenshots as a
-**coarse visual check** (is a window up? is the list empty vs.
-non-empty? is the right app focused?), never as the sole PASS/FAIL
-evidence for *what text a pane shows*.
+A frame shows what the UI rendered, not what the broker decided. On the
+retired labwc lane `virsh screenshot` also showed stale framebuffers; on the
+qdwin lane `qdwin_screenshot` renders the compositor's current scene, so a
+stale or partly drawn window there is a FAIL, not harness noise. Either way,
+treat a frame as the evidence for *rendering* (layout, legibility, colour,
+which state the UI shows), never as the sole evidence for a decision, scope,
+cache row or delivery.
 
 For any assertion about decision outcome, scope, cache state, pane
 text, or pending-request contents, use **broker-side state + app
@@ -439,17 +420,16 @@ stdout** as ground truth:
  `DENIED` on its own line based on the broker's reply (see
  scenario 04 S2/S3). `cat`/`wait` its log; that one line settles
  the approve/deny question without trusting a pixel.
-- **Admin-app stdout** — launch the Qt admin app so its stdout is
- captured to a log. The `qdistro-start-admin-app` launcher redirects
- into the admin's own XDG state dir, mode 0700 --
- `~admin/.local/state/qdistro/admin-app.log`, i.e.
- `/home/admin/.local/state/qdistro/admin-app.log` on the golden --
- and truncates it on every launch. (It is NOT in /tmp: a predictable
- shared path there can be pre-created by another uid and then the
- launcher's redirection fails before the app starts.) The app logs
- show-requests and decisions there; grep that log to confirm the
- app *received* and *acted on* a request even when the screenshot
- is stale.
+- **Admin-app stdout** — `qdwin_start_admin_app` starts the shipped
+ launcher in its first-paint mode, which logs the app to a FRESH private
+ file `/run/user/1000/qdistro-admin-app.XXXXXXXX.log` (mode 0600 in admin's
+ own 0700 runtime directory; never a predictable shared /tmp path) and
+ prints `qdistro admin approvals: app log <path>` on stderr. The app logs
+ show-requests and decisions there.
+- **TUI** — the TUI paints a terminal and logs nothing per request; its
+ broker traffic is the evidence: the `admin-tui` bus trace and the
+ `qdwin_admin_tui_*` helpers above (foot's own output is in
+ `/run/qci-admin-tui/foot.log`).
 
 Rule of thumb: a screenshot can downgrade a PASS to "needs a
 closer look", but only broker state / SDK return / app stdout can
@@ -458,11 +438,11 @@ screenshot and the broker state disagree, the broker state wins —
 note the screenshot staleness in your justification and decide from
 the broker.
 
-For visual-only assertions such as a Textual modal appearing, also verify that
-the post-action capture is fresh before interpreting it: take it with
-`vm-gui "$VMNAME" screenshot-fresh <out> <baseline>`, which refuses a frame
-whose RAW pixels equal the baseline's, and treat a refused capture as
-**invalid evidence**. Do not compare PNG file hashes yourself: every frame is
+For visual-only assertions such as a Textual modal appearing, the frame's
+CONTENT decides. (`vm-gui "$VMNAME" screenshot-fresh <out> <baseline>`, which
+refuses a frame whose RAW pixels equal the baseline's, is the tool where a
+scenario captures through vm-gui; treat a refused capture as **invalid
+evidence**.) Do not compare PNG file hashes yourself: every frame is
 padded to a size of its own, so two captures of an unchanged screen never have
 equal file bytes (the raw identity is `raw_pix_sha`, field 4 of the frame's
 `.raw` sidecar). The admin TUI header has a live clock, so a capture after the
@@ -608,11 +588,11 @@ executed, and you'll spawn runner subagents to do it.
 
 `spin-test-vm.sh` only builds a broker-only VM (no work/work2 users,
 no admin-app launchers, no admin compositor session up). Use
-`scripts/vm/spin-test-vm-gui.sh` instead — it layers the
-permissions-gui prereqs (work/work2 users, `qdistro-test-permission`,
-`qdistro-start-admin-{app,tui}`, qterminal.ini, and starts admin's
-compositor session) on top. The last
-stdout line is the VM name,
+`scripts/vm/spin-test-vm-gui.sh` instead — it layers the GUI prereqs
+(`qdistro-test-permission`, the installed admin app and its shipped
+launcher, the GUI test-profile pins, the qdwin session) on top and verifies
+the installed admin TUI. work/work2 are provisioned per scenario
+(`qdwin_admin_lane_setup --silos`). The last stdout line is the VM name,
 ready to feed runners as `VMNAME`.
 
 ### Spawn pattern (validated)
@@ -651,12 +631,15 @@ anything the runner should expect to find>
 
 ## Tools
 - ${QDISTRO_REPO}/scripts/vm/{vm-exec,vm-gui} — absolute paths.
-- vm-gui <VM> screenshot /tmp/<name>.png then Read the PNG (vision-capable).
+- source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh; qdwin_set_vm <VM>;
+  qdwin_screenshot <file.png> then Read the PNG (vision-capable).
 - vm-gui <VM> click-preview X Y "label" — moves without clicking; Read the
   annotated full image + zoom and confirm cursor/ring alignment when visible.
 - vm-gui <VM> click-confirm <manifest> — only after confirming the red ring.
-- Never use raw `vm-gui click X Y` or `xdotool click` for model-targeted input.
-- virsh send-key <VM> --codeset linux KEY_... — modifier chords.
+- Never use a raw `vm-gui click X Y` for model-targeted input.
+- Keys: `virsh send-key <VM> --codeset linux KEY_...` (Qt scenarios) or
+  `qdwin_send_key` / `qdwin_chord` (TUI scenarios) — one path per scenario,
+  after proving focus.
 - Base64 scripts with embedded quotes.
 
 ## Execution contract
@@ -689,8 +672,9 @@ After a runner finishes, drain the VM state before spawning the next:
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-pkill -u admin -f qdistro_admin_app 2>/dev/null || true
-pkill -u admin -f qdistro_admin_tui 2>/dev/null || true
+source /tmp/qci-gui-waiters.sh
+qdwin_stop_admin_app
+qdwin_stop_admin_tui
 pkill -u work -f qdistro-test-permission 2>/dev/null || true
 pkill -u work -f dbus-send 2>/dev/null || true
 pkill -f "dbus-monitor.*qdistro" 2>/dev/null || true
@@ -822,7 +806,7 @@ happy path end-to-end with ~5 min of orchestrator wall-clock per VM.
 | `qdwin/tests/gui/16-qdshell-binding-protocol-events.md` | qdshell binds `qdwin_shell_v1`; toplevel add/remove, seat focus and Alt+Tab switching round-trip through the protocol |
 | `qdlocker/tests/gui/01-lock-cycle.md` | Ctrl+Alt+L → qdlocker → password → unlock, and post-unlock typing reaches the app |
 | `qdwin/tests/gui/13-focus-events-emitted.md` | spawn / close / drop-to-no-window — the focus-event ground truth that downstream window-list highlight depends on |
-| `tests/integration/workflow-gui/01-one-trigger-one-run-audit-row.md` | workflow engine spine — a trigger fires a run on the broker loop and it lands in the audit DB + admin Workflows tab (see `tests/integration/workflow-gui/AGENTS.md`) |
+| `tests/integration/workflow-gui/04-admin-workflowstab-list-run-view.md` | workflow engine spine as the admin sees it — triggers fire runs on the broker loop and the admin Workflows tab renders completed, running and failed runs (see `tests/integration/workflow-gui/AGENTS.md`) |
 
 Optional add-ons when you're touching the bar:
 

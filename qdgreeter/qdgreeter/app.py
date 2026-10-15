@@ -545,9 +545,9 @@ class _RawKeyboardBridge(QObject):
 def _running_virtualized() -> bool:
     """Best-effort: are we inside a VM/container?
 
-    Mirrors qdistro deploy/qdistro-startlxqtwayland.sh, which only forces
-    software cursors (``WLR_NO_HARDWARE_CURSORS=1``) under
-    ``systemd-detect-virt --quiet``. If the tool is missing or errors we
+    Mirrors the retired labwc session wrapper (qdistro's
+    qdistro-startlxqtwayland.sh), which only forced software cursors
+    (``WLR_NO_HARDWARE_CURSORS=1``) under ``systemd-detect-virt --quiet``. If the tool is missing or errors we
     assume virtualized: an invisible pointer on a login screen is a worse
     failure than an unnecessary software cursor on bare metal.
     """
@@ -572,8 +572,8 @@ def _ensure_eglfs_software_cursor() -> None:
     — does not scan that plane out, so the cursor is invisible even
     though Qt thinks it is drawing one. This is the same class of bug the
     wlroots fallback session sidesteps with ``WLR_NO_HARDWARE_CURSORS=1``
-    (see qdistro deploy/qdistro-startlxqtwayland.sh) — a fix that was
-    applied to that path but never to this eglfs greeter.
+    (the retired qdistro-startlxqtwayland.sh) — a fix that was applied to
+    that path but never to this eglfs greeter.
 
     The eglfs equivalent is a KMS config file with ``"hwcursor": false``,
     which makes Qt composite the cursor into the framebuffer with the GL

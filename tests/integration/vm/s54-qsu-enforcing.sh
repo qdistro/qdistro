@@ -1,22 +1,33 @@
 #!/bin/bash
-# In-VM driver for tiered-isolation.bats:phase7-qsu-enforcing.
+# In-VM driver for qsu-enforcing.bats (`# qci:enforcing`: the bats gate runs
+# it on a clone of the per-run golden booted SELinux=enforcing, over SSH).
 #
-# Headless port of tests/integration/permissions-gui/55-qsu-selinux-enforcing.md
-# (formerly driven from the host by permissions-gui/run-55-qsu-selinux-enforcing.sh).
-# The scenario never needed the GUI: it flips SELinux to Enforcing, runs the
-# real `qsu /usr/bin/id` as the non-admin user, finds it over D-Bus as the
-# admin uid and approves it as root (admin-uid inline Python may not call
-# DecideRequest), and asserts
-#   (A) the command ran as that user (id reports uid=<work>(work)), and
-#   (B) zero new AVC / USER_AVC denials with a qdistro source context
+# Headless replacement for the retired GUI scenario
+# tests/integration/permissions-gui/55-qsu-selinux-enforcing.md (and its host
+# runner run-55). It never needed the GUI. Under Enforcing it runs the real
+# `qsu /usr/bin/id` as the non-admin user twice -- approved `once`, then
+# approved `forever_argv` -- each found over D-Bus by the admin uid (read-only
+# GetPending) and approved by root (the broker refuses DecideRequest from
+# admin-uid inline Python), and asserts
+#   (A) both invocations completed with rc 0 and ran the command as root
+#       (qsu targets root by default; the requester is the work user):
+#       `uid=0(root)`;
+#   (B) the `forever_argv` decision was APPLIED (not `applied-uncached`) and
+#       wrote the matching approval row: caller uid = work, action
+#       qsu.exec:root, scope forever_argv, an argv-exact match whose captured
+#       argv is exactly the one `id` command, approver uid 0;
+#   (C) zero new AVC / USER_AVC denials with a qdistro source context
 #       (qdistro_root_exec_t / qdistro_tier1_t / qdistro_broker_t /
-#       qdistro_pwd_t / qsu_child_t) since a baseline cursor.
+#       qdistro_pwd_t / qsu_child_t) since a baseline taken before the first
+#       request -- where a failed audit query is a FAILURE, never "zero";
+#   (D) the SELinux mode is restored to what it was at start (Permissive when
+#       the driver flipped a permissive VM; Enforcing on an enforcing boot),
+#       and the added approval row is removed.
 #
-# TRANSPORT: qemu-guest-agent's domain cannot setenforce, so the bats case
-# runs this only over SSH (VM_SSH_PORT, run-bats-enforcing.sh) and SKIPs
-# otherwise. SKIP semantics match s55/s56: Disabled, config-pinned
-# permissive, or the runtime flip refused -> "SKIP:". The EXIT trap restores
-# Permissive on natural exit or signal.
+# TRANSPORT: qemu-guest-agent's domain cannot setenforce, so this needs SSH
+# (the `# qci:enforcing` routing, or run-bats-enforcing.sh). It prints
+# "SKIP:" only when SELinux is Disabled or the runtime flip to Enforcing did
+# not take; the enforcing bats file treats any SKIP as a failure.
 
 set -u
 
@@ -28,9 +39,6 @@ skip() { echo "SKIP: $*"; exit 0; }
 
 SE_MODE_INITIAL=$(/usr/sbin/getenforce 2>/dev/null || echo Disabled)
 [ "$SE_MODE_INITIAL" = Disabled ] && skip "SELinux is Disabled"
-if grep -Eq '^SELINUX=permissive' /etc/selinux/config 2>/dev/null; then
-    skip "/etc/selinux/config pins SELINUX=permissive — runtime flip refused"
-fi
 [ -x /usr/local/bin/qsu ] || { fail "/usr/local/bin/qsu absent"; exit 1; }
 
 WORK_USER=work
@@ -39,29 +47,50 @@ if ! getent passwd "$WORK_USER" >/dev/null 2>&1; then
         || { fail "could not create $WORK_USER"; exit 1; }
 fi
 WORK_UID=$(id -u "$WORK_USER")
+APPROVALS=/var/lib/qdistro/approvals/approvals.sqlite
+QSU_PGID=""
 
-QSU_PID=""
-restore() {
-    [ -n "$QSU_PID" ] && kill "$QSU_PID" 2>/dev/null
-    /usr/sbin/setenforce 0 2>/dev/null || true
+# ausearch_since <epoch> — AVC/USER_AVC records since <epoch>. ausearch takes
+# the start DATE and TIME as TWO arguments (`--start 10/14/26 09:50:47`; one
+# "date time" word is parsed as a time and refused), in the locale's %x
+# format, so both the date(1) rendering and ausearch run under the same C
+# locale. tests/integration/qci/qsu-enforcing-driver.bats pins this argv.
+ausearch_since() {
+    local d t
+    d=$(LC_ALL=C date -d "@$1" +%x) || return 2
+    t=$(LC_ALL=C date -d "@$1" +%T) || return 2
+    LC_ALL=C ausearch -m AVC,USER_AVC --start "$d" "$t"
 }
-trap restore EXIT INT TERM
 
-# Drain qsu state so the request below is the only one.
-python3 - <<'PYEOF' 2>/dev/null || true
-import sqlite3
-con = sqlite3.connect("/var/lib/qdistro/approvals/approvals.sqlite", timeout=10)
+drain_qsu_cache() {
+    python3 - "$APPROVALS" <<'PYEOF'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1], timeout=10)
 con.execute("DELETE FROM approvals WHERE action LIKE 'qsu.exec:%'")
 con.commit()
 PYEOF
+}
+
+restore() {
+    [ -n "$QSU_PGID" ] && kill -KILL -- "-$QSU_PGID" 2>/dev/null
+    drain_qsu_cache 2>/dev/null
+    case "$SE_MODE_INITIAL" in
+        Permissive) /usr/sbin/setenforce 0 2>/dev/null ;;
+        Enforcing) /usr/sbin/setenforce 1 2>/dev/null ;;
+    esac
+}
+trap restore EXIT INT TERM
+
+# Drain qsu state so the requests below are the only ones.
+drain_qsu_cache || { fail "could not drain qsu approvals in $APPROVALS"; exit 1; }
 
 BASELINE_TS=$(( $(date +%s) - 1 ))
 /usr/sbin/setenforce 1 2>/dev/null
 SE_MODE=$(/usr/sbin/getenforce 2>/dev/null || echo Unknown)
 if [ "$SE_MODE" = Enforcing ]; then
-    pass "SELinux mode now Enforcing"
+    pass "SELinux mode now Enforcing (was $SE_MODE_INITIAL)"
 else
-    skip "setenforce 1 left mode at $SE_MODE (config-pinned or transport cannot setenforce)"
+    skip "setenforce 1 left mode at $SE_MODE (the runtime flip did not take; /etc/selinux/config: $(grep -E '^SELINUX=' /etc/selinux/config 2>/dev/null))"
 fi
 
 systemctl restart qdistro-admin-broker.service 2>/dev/null || true
@@ -72,16 +101,17 @@ for _ in $(seq 1 40); do
     sleep 0.25
 done
 
-rm -f /tmp/s54.out /tmp/s54.rc
-( runuser -u "$WORK_USER" -- /usr/local/bin/qsu /usr/bin/id >/tmp/s54.out 2>&1 </dev/null
-  echo $? >/tmp/s54.rc ) &
-QSU_PID=$!
-
-# The admin uid finds the pending row (read-only GetPending: keeps the
-# admin-domain -> broker D-Bus path under Enforcing covered); root approves
-# it, because the broker refuses DecideRequest from admin-uid inline Python
-# (only the installed admin app/TUI/qdshell may exercise authority).
-RID=$(runuser -u admin -- python3 -c '
+# run_leg <label> <scope> — one qsu request as the work user, found by the
+# admin uid, decided by root with <scope>. Bounded: the request must reach
+# GetPending within 20 s and qsu must finish within 60 s of the decision; on a
+# timeout its whole process group is killed and the leg fails.
+run_leg() {
+    local label=$1 scope=$2 out=/tmp/s54-$1.out rc_file=/tmp/s54-$1.rc rid decide
+    rm -f "$out" "$rc_file"
+    setsid bash -c 'runuser -u "$1" -- /usr/local/bin/qsu /usr/bin/id >"$2" 2>&1 </dev/null; echo $? >"$3"' \
+        _ "$WORK_USER" "$out" "$rc_file" &
+    QSU_PGID=$!
+    rid=$(runuser -u admin -- python3 -c '
 import dbus, sys, time
 bus = dbus.SystemBus()
 iface = dbus.Interface(bus.get_object("org.qdistro.AdminBroker1",
@@ -96,45 +126,108 @@ while time.monotonic() < deadline:
     time.sleep(0.2)
 print("no qsu pending row")
 ' "$WORK_UID" 2>&1)
-case "$RID" in
-    ''|*[!0-9]*) DECIDE="admin GetPending: $RID" ;;
-    *) DECIDE=$(python3 -c '
+    case "$rid" in
+        ''|*[!0-9]*) decide="admin GetPending: $rid" ;;
+        *) decide=$(python3 -c '
 import dbus, sys
 bus = dbus.SystemBus()
 iface = dbus.Interface(bus.get_object("org.qdistro.AdminBroker1",
         "/org/qdistro/AdminBroker1"), "org.qdistro.AdminBroker1")
-iface.DecideRequest(int(sys.argv[1]), "allow", "once")
-print("decided rid=%d" % int(sys.argv[1]))
-' "$RID" 2>&1) ;;
-esac
-case "$DECIDE" in
-    "decided rid="*) pass "qsu request found by admin and approved by root over D-Bus under Enforcing ($DECIDE)" ;;
-    *) fail "D-Bus approve (admin GetPending, root DecideRequest) failed under Enforcing: $DECIDE" ;;
-esac
+r = iface.DecideRequest(int(sys.argv[1]), "allow", sys.argv[2])
+print("decided rid=%d scope=%s result=%s" % (int(sys.argv[1]), sys.argv[2], r))
+' "$rid" "$scope" 2>&1) ;;
+    esac
+    case "$decide" in
+        "decided rid="*" result=applied")
+            pass "$label: qsu request found by admin and approved by root over D-Bus under Enforcing ($decide)" ;;
+        *) fail "$label: D-Bus approve (admin GetPending, root DecideRequest $scope) did not apply under Enforcing: $decide" ;;
+    esac
+    for _ in $(seq 1 300); do [ -s "$rc_file" ] && break; sleep 0.2; done
+    if [ ! -s "$rc_file" ]; then
+        kill -KILL -- "-$QSU_PGID" 2>/dev/null
+        QSU_PGID=""
+        fail "$label: qsu /usr/bin/id did not finish within 60 s (process group killed); out=$(cat "$out" 2>/dev/null)"
+        return
+    fi
+    QSU_PGID=""
+    if [ "$(cat "$rc_file")" = 0 ] && grep -q "uid=0(root)" "$out"; then
+        pass "$label: qsu /usr/bin/id ran under Enforcing (rc=0, uid=0(root))"
+    else
+        fail "$label: qsu /usr/bin/id under Enforcing: rc=$(cat "$rc_file") out=$(cat "$out" 2>/dev/null)"
+    fi
+}
 
-for _ in $(seq 1 100); do [ -s /tmp/s54.rc ] && break; sleep 0.2; done
-wait "$QSU_PID" 2>/dev/null; QSU_PID=""
-OUT=$(cat /tmp/s54.out 2>/dev/null)
-if grep -q "uid=0(root)" <<<"$OUT" && [ "$(cat /tmp/s54.rc 2>/dev/null)" = 0 ]; then
-    pass "qsu /usr/bin/id ran under Enforcing (uid=0(root))"
+run_leg once once
+run_leg forever_argv forever_argv
+
+ROW=$(python3 - "$APPROVALS" "$WORK_UID" <<'PYEOF'
+import json, sqlite3, sys
+con = sqlite3.connect(sys.argv[1], timeout=10)
+rows = con.execute(
+    "SELECT caller_uid, action, scope, match_kind, argv, decision, approver_uid "
+    "FROM approvals WHERE action='qsu.exec:root' AND scope='forever_argv'").fetchall()
+if len(rows) != 1:
+    print("rows=%r" % (rows,)); sys.exit(1)
+uid, action, scope, kind, argv, decision, approver = rows[0]
+try:
+    argv_list = json.loads(argv)
+except ValueError:
+    argv_list = None
+# The captured argv is the one command run: [<path to id>] (qsu may record
+# the resolved path), nothing more.
+ok = (uid == int(sys.argv[2]) and kind == "argv_exact" and decision == 1
+      and approver == 0 and isinstance(argv_list, list) and len(argv_list) == 1
+      and argv_list[0].rsplit("/", 1)[-1] == "id")
+print("caller_uid=%s action=%s scope=%s match_kind=%s argv=%s decision=%s approver_uid=%s"
+      % (uid, action, scope, kind, argv, decision, approver))
+sys.exit(0 if ok else 1)
+PYEOF
+)
+if [ $? -eq 0 ]; then
+    pass "forever_argv approval row written ($ROW)"
 else
-    fail "qsu /usr/bin/id did not run under Enforcing: rc=$(cat /tmp/s54.rc 2>/dev/null) out=$OUT"
+    fail "forever_argv approval row missing or wrong: $ROW"
 fi
 
 sleep 1   # let auditd flush
 AVCS=/tmp/s54-avcs.txt
+AU_ERR=/tmp/s54-ausearch.err
 : >"$AVCS"
-ausearch -m AVC,USER_AVC --start "$(date -d @"$BASELINE_TS" '+%x %T')" 2>/dev/null \
-    | grep -E 'scontext=[^ ]*:(qdistro_root_exec_t|qdistro_tier1_t|qdistro_broker_t|qdistro_pwd_t|qsu_child_t)' \
-    >"$AVCS" || true
-N=$(wc -l <"$AVCS")
-if [ "$N" -eq 0 ]; then
-    pass "0 new denials — qsu policy covers the enforcing qsu flow"
+AU_RC=0
+ausearch_since "$BASELINE_TS" >/tmp/s54-ausearch.out 2>"$AU_ERR" || AU_RC=$?
+# ausearch exits 1 with "<no matches>" when there is nothing; any other
+# failure (no audit log, no permission, bad time) proves nothing.
+if [ "$AU_RC" -eq 0 ] || { [ "$AU_RC" -eq 1 ] && grep -q '<no matches>' "$AU_ERR"; }; then
+    grep -E 'scontext=[^ ]*:(qdistro_root_exec_t|qdistro_tier1_t|qdistro_broker_t|qdistro_pwd_t|qsu_child_t)' \
+        /tmp/s54-ausearch.out >"$AVCS" || true
+    N=$(wc -l <"$AVCS")
+    if [ "$N" -eq 0 ]; then
+        pass "0 new denials — qsu policy covers the enforcing qsu flow"
+    else
+        cat "$AVCS"
+        command -v audit2allow >/dev/null 2>&1 && audit2allow -i "$AVCS"
+        fail "$N new qdistro-domain AVCs for the qsu flow under Enforcing"
+    fi
 else
-    cat "$AVCS" >&2
-    command -v audit2allow >/dev/null 2>&1 && audit2allow -i "$AVCS" >&2
-    fail "$N new qdistro-domain AVCs for the qsu flow under Enforcing"
+    fail "audit query failed (ausearch rc=$AU_RC: $(head -c 300 "$AU_ERR")); zero denials NOT established"
 fi
+
+trap - EXIT INT TERM
+restore
+SE_MODE_FINAL=$(/usr/sbin/getenforce 2>/dev/null || echo Unknown)
+if [ "$SE_MODE_FINAL" = "$SE_MODE_INITIAL" ]; then
+    pass "SELinux mode restored to $SE_MODE_INITIAL"
+else
+    fail "SELinux mode is $SE_MODE_FINAL after the run, not the initial $SE_MODE_INITIAL"
+fi
+LEFT=$(python3 - "$APPROVALS" <<'PYEOF'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1], timeout=10)
+print(con.execute("SELECT count(*) FROM approvals WHERE action LIKE 'qsu.exec:%'").fetchone()[0])
+PYEOF
+)
+[ "$LEFT" = 0 ] && pass "added qsu approval rows removed" \
+    || fail "$LEFT qsu approval rows left behind"
 
 if [ "$FAILCOUNT" -eq 0 ]; then
     echo "[s54] $PASSCOUNT passes, 0 failures"; exit 0

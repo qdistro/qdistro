@@ -15,7 +15,7 @@ def _require_gui_profile(png):
     expected = (runner.VM_SCREEN_W, runner.VM_SCREEN_H)
     assert actual == expected, (
         f"GUI VM screen is {actual}, expected {expected}; use "
-        "spin-test-vm-gui.sh with QDISTRO_VM_GUI_SESSION=qdwin")
+        "a VM from spin-test-vm-gui.sh (the GUI test profile pins 1280x800)")
 
 
 def test_desktopicons_sort_options(vm_session):

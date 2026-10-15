@@ -259,8 +259,8 @@ How the PAM route prompts: the agent (a system service running as admin,
 password field — on the admin's qdwin compositor, verifies the typed password
 with python-pam (service `login`), and relays the verdict through the
 broker. The dialog is always graphical, whoever asked: an approval from the
-admin TUI running in a terminal (qterminal) on the admin desktop gets the
-same dialog on the compositor. A TUI with no compositor behind it (a bare
+admin TUI running in a terminal on the admin desktop gets the same dialog
+on the compositor. A TUI with no compositor behind it (a bare
 VT, SSH) has no way to show it, so its authentication fails ("not
 authorized") and the request stays pending; approve with the root CLI
 `qdistro-approvals` there. The prompt times out after 120 s.

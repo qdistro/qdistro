@@ -68,7 +68,7 @@ descriptions naturally vary in wording.
 System packages:
 
 * **A wlroots-based nested compositor** (any one of):
-  `sway`, `labwc`, `cage`, `wayfire`, `river`.
+  `sway`, `cage`, `wayfire`, `river`.
   qdshell uses `wlr-layer-shell` for every panel/bar surface;
   weston does *not* implement this protocol, so weston cannot be used
   to validate panel rendering. The runner auto-probes the candidates

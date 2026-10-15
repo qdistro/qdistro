@@ -51,8 +51,8 @@ silo lifecycle".
 > `qdistro-startlxqtwayland` (LXQt+labwc) with qdshell as a
 > parity-test overlay. P01 made qdgreeter functional and made qdwin
 > the actual compositor greetd boots. (The legacy LXQt+labwc session
-> was later kept only as a tty4 dev fallback, since removed; it now
-> survives solely as the GUI test harness — see `deploy/AGENTS.md`.)
+> was later kept only as a tty4 dev fallback, since removed, and as the
+> GUI test harness, retired 2026-10-14 — see `deploy/AGENTS.md`.)
 
 ### Greeter keyboard grab and `_greeter` input access
 
@@ -419,15 +419,14 @@ registry."
 
 ### Admin panel operations
 
-> **Status: the admin app is written but ships in no production installer.**
-> `admin_app/qdistro_admin_app.py` implements the `SilosTab` and every
-> operation below that is not separately marked planned, and the operations are
-> exercised by the GUI acceptance tests — but `admin_app` appears in neither
-> `qdistro-bootstrap.sh` nor `image/config.sh`. The only thing that copies it is
-> the labwc GUI test harness, and `deploy/start-admin-app.sh` hardcodes a path
-> no production installer creates. On a bootstrapped machine there is no silo
-> admin panel; the D-Bus surface below is the only way to drive silo lifecycle,
-> via `busctl`/`gdbus`.
+> **Status:** `admin_app/qdistro_admin_app.py` implements the `SilosTab` and
+> every operation below that is not separately marked planned. The installer
+> chain's admin-app step (`scripts/install/install-admin-app-for-vm.sh`, run by
+> `qdistro-bootstrap.sh` and the image build) installs it as
+> `/usr/local/bin/qdistro-admin-approval-app` with the native-Wayland launcher
+> `/usr/local/bin/qdistro-start-admin-app`; the GUI acceptance tests run that
+> installed app. The D-Bus surface below can also drive silo lifecycle
+> directly, via `busctl`/`gdbus`.
 
 A PyQt app in admin's session (see the status note above):
 

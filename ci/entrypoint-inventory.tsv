@@ -41,3 +41,6 @@ broker/org.qdistro.broker.policy	tests/unit/test_broker_authority_polkit.py	polk
 broker/qdistro_audisp_parser.py	tests/unit/test_audisp_parser.py	audispd plugin parser: processes UNTRUSTED kernel audit input; crash = silent audit loss
 broker/qdistro_vm_schema.py	tests/unit/test_vm_schema.py	VM silo manifest schema validator: fail-open = unauthorized guest service activation
 ci/bin/doc-link-lint.py	tests/integration/qci/doc-link-lint.bats	Documentation contract checker: broken setup and security-document links must fail deterministic lint
+tier5-vm/qdistro_tier5_bridge.py	tests/unit/test_tier5_bridge.py	Root pkexec helper: launcher parent for tier-5 secctx tagging + RegisterLaunch; must refuse unbounded args/env and register only its verified exec'd waypipe
+daemons/secctx-exec/qdistro-secctx-exec.c	tests/unit/test_secctx_exec_launch_report.py	Launch report fd: the pid must be reported only after exec and never leak to the inner command
+polkit/qdistro_polkit_agent.py	tests/unit/test_polkit_agent_forced_pam.py	Forced PAM route: the tier-5 bridge action must never be authorized by a broker vote, user config or test override

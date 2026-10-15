@@ -15,6 +15,11 @@ The harness opens this tab via `settings openTab desktopicons`
     default. The separate opened-chooser test checks the "Type" option
     (`desktop-icons.sort-name`, `sort-type`).
   - An "arrange folders first" toggle (`desktop-icons.folders-first-label`).
+    Its default is ON (`desktopIcons.arrangeFoldersFirst: true` in
+    `Commons/Settings.qml` / `Assets/settings-default.json`), so with desktop
+    icons off it shows the thumb on the right AND is dimmed/disabled like the
+    rest of this block. Checked and enabled are independent: an ON-but-dimmed
+    switch here is correct, an ON switch rendered at full brightness is not.
   - An icon-size spin box in pixels (`desktop-icons.icon-size-label`).
   - A label-size spin box in points (`desktop-icons.label-size-label`).
 

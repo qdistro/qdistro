@@ -3,7 +3,7 @@
 # capture-attest.sh — the harness side of the qci GUI VISUAL-EVIDENCE CONTRACT.
 #
 # Sourced by every tool that CAPTURES A FRAME FROM A TEST VM:
-#   * qdistro/scripts/vm/vm-gui              (virsh screenshot: labwc/admin lane)
+#   * qdistro/scripts/vm/vm-gui              (virsh screenshot: preview/confirm clicks, diagnostics)
 #   * qdwin/tests/gui/qdwin-helpers.sh       (in-guest qdshell capture: qdwin lane)
 #   * qdwin/tests/apps/qdwin-apps-helpers.sh (virsh screenshot: qdwin apps lane)
 #

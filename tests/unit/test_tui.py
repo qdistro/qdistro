@@ -476,6 +476,73 @@ async def test_help_overlay_dismisses_on_escape():
         assert not isinstance(app.screen, HelpScreen)
 
 
+def _help_plain_lines() -> list[str]:
+    """HelpScreen.HELP as the terminal renders it (markup applied), one
+    whitespace-normalised line per row."""
+    from rich.text import Text
+    return [" ".join(line.split())
+            for line in Text.from_markup(HelpScreen.HELP).plain.splitlines()]
+
+
+def test_help_content_documents_decisions_scopes_and_navigation():
+    """The help overlay is the only runtime documentation of the full scope
+    vocabulary (1..8) and the non-obvious keys. Its CONTENT is pinned here;
+    permissions-gui/01 (qdwin, foot) checks that it renders legibly in a real
+    terminal. Compared on rendered plain text with whitespace normalised --
+    never on raw Rich markup."""
+    lines = _help_plain_lines()
+    assert lines[0] == "qdistro admin TUI"
+    heads = [i for i, line in enumerate(lines)
+             if line in ("Decide current:", "Scope:", "Navigation:")]
+    assert [lines[i] for i in heads] == ["Decide current:", "Scope:", "Navigation:"]
+    decide = lines[heads[0]:heads[1]]
+    assert any(line.startswith("a / Ctrl+Y") and "Approve" in line for line in decide)
+    assert any(line.startswith("d / Ctrl+N") and "Deny" in line for line in decide)
+    scope = lines[heads[1] + 1:heads[2]]
+    expected = [
+        "1 Just this once (default; no cache write)",
+        "2 1 hour",
+        "3 24 hours",
+        "4 Forever, any command from this user",
+        "5 Forever, only this exact program",
+        "6 Forever, only this exact argv tuple",
+        "7 Forever, this argv basename anywhere",
+        "8 Forever, this argv prefix + any trailing args",
+    ]
+    assert scope[:8] == expected
+    nav = lines[heads[2]:]
+    assert any(line.startswith("? ") for line in nav)
+    tail = " ".join(line for line in lines if line)
+    assert "mirrored to the GUI app instantly" in tail
+
+
+def test_help_title_and_section_heads_are_bold():
+    from rich.text import Text
+    text = Text.from_markup(HelpScreen.HELP)
+    bold = {text.plain[span.start:span.end] for span in text.spans
+            if "bold" in str(span.style)}
+    assert {"qdistro admin TUI", "Decide current:", "Scope:", "Navigation:"} <= bold
+
+
+@pytest.mark.asyncio
+async def test_help_overlay_escape_restores_main_view_and_default_scope():
+    from textual.widgets import Static
+    app = AdminTuiApp(broker=FakeBrokerClient())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        main = app.screen
+        assert "scope: Just this once" in app.sub_title
+        await pilot.press("question_mark")
+        await pilot.pause()
+        assert isinstance(app.screen, HelpScreen)
+        assert app.screen.query_one("#help_body", Static) is not None
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen is main
+        assert "scope: Just this once" in app.sub_title
+        assert "⚠" not in app.sub_title
+
+
 # --- shortcut coverage (per spec/23 mandate) -----------------------------
 
 def test_every_binding_has_a_handler():

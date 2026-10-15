@@ -548,36 +548,36 @@ MD
     [[ "$output" == *"32-xdo.md:6: unbounded-xdotool-sync"* ]]
 }
 
-@test "permissions-gui/05: XWayland forced, every xdotool --sync bounded, settle wait after each key" {
-    local sc="$REPO_ROOT/tests/integration/permissions-gui/05-tui-help-overlay.md"
+@test "permissions-gui/01: every TUI key burst is preceded by a proven focus; help keys settle 2 s before the capture" {
+    local sc="$REPO_ROOT/tests/integration/permissions-gui/01-tui-approver-visual.md"
     run lint --strict "$sc"
     [ "$status" -eq 0 ]
-    [[ "$output" != *"unbounded-xdotool-sync"* ]]
-    # the launcher runs qterminal on the Qt xcb platform (XWayland)
-    grep -q "env QT_QPA_PLATFORM=xcb /usr/local/bin/qdistro-start-admin-tui" "$sc"
-    # an XWayland proof that can fail: a bounded xdotool search before any key
-    grep -q 'timeout 20 xdotool search --sync --name "Shell No. 1"'"'" "$sc"
-    # every `virsh send-key` is followed, before the next capture, by sleep >= 2
+    # The installed TUI in foot, through the guest helper; QMP keys only.
+    grep -q 'qdwin_start_admin_tui pg01' "$sc"
+    ! grep -q 'virsh send-key' "$sc"
     python3 - "$sc" <<'PY'
 import re, sys
 lines = open(sys.argv[1]).read().splitlines()
-keys = [i for i, l in enumerate(lines) if l.startswith("virsh send-key")]
-assert len(keys) == 2, keys
+keys = [i for i, l in enumerate(lines) if re.match(r"^qdwin_(send_key|chord) ", l)]
+assert len(keys) == 6, keys          # ?, Escape, 2, 3, 1, d
 for i in keys:
-    j = next(k for k in range(i + 1, len(lines)) if "screenshot" in lines[k] and "$VMGUI" in lines[k])
-    sl = [float(m.group(1)) for l in lines[i + 1:j] for m in [re.match(r"^sleep ([0-9.]+)\s*$", l)] if m]
+    # the focus proof is right before the key, and aborts the step on failure
+    prev = [l for l in lines[max(0, i - 3):i] if l.strip()]
+    assert any("qdwin_focus_admin_tui" in l for l in prev), (i, prev)
+    assert any("exit 1" in l for l in prev), (i, prev)
+# the two help keys: a >= 2 s settle before the capture
+for i in keys[:2]:
+    j = next(k for k in range(i + 1, len(lines)) if lines[k].startswith("qdwin_screenshot"))
+    sl = [float(m.group(1)) for l in lines[i + 1:j] for m in [re.match(r"^sleep ([0-9.]+)", l)] if m]
     assert sl and max(sl) >= 2, (i, lines[i + 1:j])
 PY
-    # the misleading claim is gone and its correction is present
-    ! grep -q 'its hash differs from S1' "$sc"
-    grep -q 'proves only that a new frame was captured' "$sc"
 }
 
-# Run one fenced bash block of the REAL pg/05 scenario (the first one after a
-# heading) with host stubs: VMEXEC fails with $XDO_RC when the guest command
-# runs xdotool, virsh/sleep log to $LOG, VMGUI logs its capture. Args: heading.
-pg05_block() {
-    local sc="$REPO_ROOT/tests/integration/permissions-gui/05-tui-help-overlay.md"
+# Run one fenced bash block of the REAL pg/01 scenario (the first one after a
+# heading) with host stubs: VMEXEC fails with $FOCUS_RC when the guest command
+# proves TUI focus; keys, sleeps and captures log to $LOG. Args: heading.
+pg01_block() {
+    local sc="$REPO_ROOT/tests/integration/permissions-gui/01-tui-approver-visual.md" t
     python3 - "$sc" "$1" > "$BATS_TEST_TMPDIR/block.sh" <<'PY'
 import sys
 lines = open(sys.argv[1]).read().splitlines()
@@ -590,34 +590,31 @@ PY
     cat > "$BATS_TEST_TMPDIR/bin/vmexec" <<'SH'
 #!/bin/bash
 echo "vmexec $2" >> "$LOG"
-case "$2" in *xdotool*) exit "${XDO_RC:-0}" ;; esac
+case "$2" in *qdwin_focus_admin_tui*) exit "${FOCUS_RC:-0}" ;; esac
 exit 0
 SH
-    printf '#!/bin/bash\necho "virsh $*" >> "$LOG"\n' > "$BATS_TEST_TMPDIR/bin/virsh"
-    printf '#!/bin/bash\necho "sleep $*" >> "$LOG"\n' > "$BATS_TEST_TMPDIR/bin/sleep"
-    printf '#!/bin/bash\necho "vmgui $*" >> "$LOG"\n' > "$BATS_TEST_TMPDIR/bin/vmgui"
+    for t in qdwin_send_key qdwin_chord qdwin_screenshot sleep; do
+        printf '#!/bin/bash\necho "%s $*" >> "$LOG"\n' "$t" > "$BATS_TEST_TMPDIR/bin/$t"
+    done
     chmod +x "$BATS_TEST_TMPDIR/bin/"*
     : > "$BATS_TEST_TMPDIR/log"
-    run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" LOG="$BATS_TEST_TMPDIR/log" VM=vm \
-        VMEXEC="$BATS_TEST_TMPDIR/bin/vmexec" VMGUI="$BATS_TEST_TMPDIR/bin/vmgui" \
-        XDO_RC="${XDO_RC:-0}" bash "$BATS_TEST_TMPDIR/block.sh"
+    run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" LOG="$BATS_TEST_TMPDIR/log" VM=vm ART=/art \
+        VMEXEC="$BATS_TEST_TMPDIR/bin/vmexec" FOCUS_RC="${FOCUS_RC:-0}" bash "$BATS_TEST_TMPDIR/block.sh"
 }
 
-@test "permissions-gui/05: a failed XWayland proof or focus handoff stops before any key or capture" {
-    XDO_RC=124 pg05_block "### S2"
-    [ "$status" -eq 124 ]
-    [[ "$output" == *"XWAYLAND-FOCUS-FAILED rc=124"* ]]
-    ! grep -q '^virsh' "$BATS_TEST_TMPDIR/log"
-    ! grep -q '^vmgui' "$BATS_TEST_TMPDIR/log"
-    XDO_RC=124 pg05_block "### S1"
-    [ "$status" -eq 124 ]
-    [[ "$output" == *"XWAYLAND-SETUP-FAILED rc=124"* ]]
-    grep -q 'QT_QPA_PLATFORM=xcb' "$BATS_TEST_TMPDIR/log"
-    ! grep -q '^vmgui' "$BATS_TEST_TMPDIR/log"
-    # healthy handoff: key, then the 2 s settle, then the capture -- in order
-    XDO_RC=0 pg05_block "### S2"
+@test "permissions-gui/01: a failed focus proof stops before any key or capture" {
+    local step
+    for step in "### S2" "### S3" "### S5" "### S8"; do
+        FOCUS_RC=1 pg01_block "$step"
+        [ "$status" -eq 1 ] || { echo "$step: status $status"; return 1; }
+        [[ "$output" == *"TUI-FOCUS-FAILED"* ]]
+        run grep -qE '^(qdwin_send_key|qdwin_chord|qdwin_screenshot)' "$BATS_TEST_TMPDIR/log"
+        [ "$status" -ne 0 ] || { echo "$step: a key or capture ran after a failed focus"; return 1; }
+    done
+    # healthy focus: key, then the 2 s settle, then the capture -- in order
+    FOCUS_RC=0 pg01_block "### S2"
     [ "$status" -eq 0 ]
-    [ "$(grep -v '^vmexec' "$BATS_TEST_TMPDIR/log" | cut -d' ' -f1-2)" = "virsh send-key
+    [ "$(grep -v '^vmexec' "$BATS_TEST_TMPDIR/log" | cut -d' ' -f1-2)" = "qdwin_chord shift
 sleep 2
-vmgui vm" ]
+qdwin_screenshot /art/01-s2-help.png" ]
 }

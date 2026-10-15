@@ -2,9 +2,10 @@
 # qdwin-helpers.sh — host-side helpers for driving a qdwin-on-tty3
 # session from automated tests / LLM agents.
 #
-# Why this is separate from phase1/gui-tests/../vm-gui:
-# - vm-gui assumes labwc + XWayland (Phase 1-5). It uses xdotool via
-#   DISPLAY=:0, which doesn't exist under the qdwin compositor.
+# Why this is separate from qdistro/scripts/vm/vm-gui:
+# - vm-gui is the virsh-side tool (attested virsh screenshots, the click
+#   preview/confirm handshake). It once drove a labwc + XWayland harness
+#   with xdotool; that lane is retired, and nothing here needs an X server.
 # - qdwin runs on bare DRM via libweston. Input goes through evdev
 #   (kernel input layer) and key bindings fire in the compositor.
 # - The launcher overlay does NOT redirect keyboard input — it can
@@ -56,7 +57,7 @@ export QDWIN_VM_EXEC
 # HARNESS CAPTURE ATTESTATION (qci GUI visual-evidence contract).
 #
 # qdwin_screenshot is the qdwin lane's CAPTURE TOOL -- the counterpart of
-# qdistro/scripts/vm/vm-gui's `virsh screenshot` for the labwc lane. The qci GUI
+# qdistro/scripts/vm/vm-gui's `virsh screenshot`. The qci GUI
 # gate grades only frames its own capture tools took, so this helper must record
 # its captures in the same ledger or every `qci:visual: required` qdwin/qdlocker
 # scenario would be recorded ERROR for want of an attested frame.

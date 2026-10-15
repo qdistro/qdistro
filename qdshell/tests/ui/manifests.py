@@ -16,10 +16,36 @@ Coverage status:
 """
 
 from dataclasses import dataclass
+from typing import Optional
 
 from . import fixtures
 
 NO_IPC = object()  # sentinel: surface known but no IPC handle yet
+
+
+@dataclass(frozen=True)
+class ZoomCrop:
+    """A magnified, contrast-stretched crop of one captured view.
+
+    Some load-bearing details are too small or too low-contrast for the
+    vision describer to read from the full 1280x800 frame (a disabled
+    switch's knob inside a near-black outline). The harness crops `box`
+    out of an already-captured view, stretches its contrast, magnifies it
+    and describes it as an EXTRA view with its own `question`. It adds
+    evidence to the judged description; it never replaces a full view.
+
+    `knob_must_be` ("left"/"right"), when set, makes the crop a switch
+    check on top of the description: the harness measures the knob's side
+    from the UNSTRETCHED pixels (runner.measure_switch_knob) and fails the
+    capture unless it is at that end. The measurement line is appended to
+    the crop's described view, so the judge sees it next to the crop text.
+    """
+    view: int        # 0 = the first capture; n = the view after post_open_clicks[n-1]
+    box: tuple       # (x0, y0, x1, y1) screen fractions of the region to crop
+    label: str       # short human name used in the stitched description
+    question: str    # what the describer must report from the crop (neutral)
+    scale: int = 8   # integer magnification
+    knob_must_be: Optional[str] = None   # "left" / "right": measured, enforced
 
 
 @dataclass(frozen=True)
@@ -49,6 +75,9 @@ class Surface:
     # e.g. the session menu ignores mouse hover until the pointer moves
     # twice, but an arrow key sets a real selectedIndex deterministically.
     post_open_keys: tuple = ()
+    # Optional ZoomCrop entries: magnified, contrast-stretched crops of a
+    # captured view, each described as an extra view (see ZoomCrop).
+    zoom_crops: tuple = ()
 
 
 # 30 covered settings tabs — `qs ipc call settings openTab <name>`.
@@ -89,6 +118,38 @@ _SETTINGS_EXTRA_CLICKS = {
     "notifications": ((0.730, 0.450),),           # Toast theme choices
 }
 
+# Settings tabs whose golden needs a detail the full frame cannot show the
+# describer reliably. Connections: with no Bluetooth adapter the master switch
+# is disabled at 0.6 opacity and its off-state track outline is #161645 on a
+# #070722 card; luna repeatedly read the knob as "RIGHT / on" from the full
+# frame although it sits at the left end (knob x~982-996 in a track
+# x~977-1020 at y~176-201 of 1280x800, measured on the 2026-10-13 frame).
+# 2026-10-14 full run: the crop was described "knob at the LEFT end" while the
+# full-frame describer still placed the thumb RIGHT, and the judge sided with
+# the full frame. The crop is therefore also measured from pixels and the
+# product's off state enforced: NToggle draws an unchecked thumb at x=3 (the
+# LEFT end); BluetoothSubTab binds the master toggle's `checked` to
+# BluetoothService.enabled (false without an adapter) and disables it
+# (`enabled: ... && BluetoothService.bluetoothAvailable`).
+_SETTINGS_ZOOM_CROPS = {
+    "connections": (
+        ZoomCrop(
+            view=1,                                   # after clicking Bluetooth
+            box=(960 / 1280, 170 / 800, 1026 / 1280, 206 / 800),
+            label="Bluetooth master switch",
+            question=(
+                "The crop shows one toggle switch. Describe the outline of "
+                "its track (its pill/rounded-rectangle shape) and say where "
+                "the round knob sits inside that track: at the LEFT end, the "
+                "RIGHT end, or the middle. Say whether the track interior "
+                "is filled with a solid color or is an empty outline. If no "
+                "switch is recognisable, say so."
+            ),
+            knob_must_be="left",
+        ),
+    ),
+}
+
 # Settings tabs needing a guest-side state fixture (see fixtures.py for what
 # each seeds and why a restart-seed is required).
 _SETTINGS_GUEST_FIXTURES = {
@@ -115,6 +176,7 @@ SETTINGS_SURFACES = [
         teardown_guest=(() if tab not in _SETTINGS_GUEST_FIXTURES
                         else (_SETTINGS_GUEST_FIXTURES[tab][1],)),
         post_open_clicks=_SETTINGS_EXTRA_CLICKS.get(tab, ()),
+        zoom_crops=_SETTINGS_ZOOM_CROPS.get(tab, ()),
     )
     for tab in SETTINGS_TABS
 ]
