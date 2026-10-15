@@ -2386,12 +2386,30 @@ gui_skip_reason() {
 # from the caller's view: returns nonzero (and the caller logs) on failure; a
 # scenario that genuinely needs the waiters and lacks them fails its own
 # assertion loudly rather than passing silently.
+#
+# The base64 travels in chunks. vm-exec puts the whole guest command into one
+# argv string (jq --arg, then virsh's JSON argument), and Linux refuses any
+# single argument over MAX_ARG_STRLEN (128 KiB) with E2BIG. Once the library
+# passed ~96 KiB, a one-shot delivery failed on every VM and every scenario
+# that sources the waiters ERRORed in setup (full-20261015T072112Z-444803).
+# Chunks append to a part file; only a complete file that parses is renamed
+# into place, so a failed delivery never leaves a truncated library behind.
+QCI_GUI_WAITERS_CHUNK=${QCI_GUI_WAITERS_CHUNK:-49152}
 install_gui_waiters() {
-    local vm=$1 src="$QDISTRO_REPO/ci/lib/guest/gui-waiters.sh" b64
+    local vm=$1 src="$QDISTRO_REPO/ci/lib/guest/gui-waiters.sh" b64 part redirect off=0
     [ -f "$src" ] || { log "install_gui_waiters: source missing: $src"; return 1; }
     b64=$(base64 -w0 < "$src" 2>/dev/null) || b64=$(base64 < "$src" | tr -d '\n')
+    part=/tmp/qci-gui-waiters.sh.part
+    redirect='>'
+    while [ "$off" -lt "${#b64}" ]; do
+        "$VM_TOOLS/vm-exec" "$vm" \
+            "printf '%s' '${b64:off:QCI_GUI_WAITERS_CHUNK}' $redirect $part" \
+            >/dev/null 2>&1 || return 1
+        redirect='>>'
+        off=$((off + QCI_GUI_WAITERS_CHUNK))
+    done
     "$VM_TOOLS/vm-exec" "$vm" \
-        "printf '%s' '$b64' | base64 -d > /tmp/qci-gui-waiters.sh && bash -n /tmp/qci-gui-waiters.sh" \
+        "base64 -d < $part > /tmp/qci-gui-waiters.sh.new && rm -f $part && bash -n /tmp/qci-gui-waiters.sh.new && mv -f /tmp/qci-gui-waiters.sh.new /tmp/qci-gui-waiters.sh" \
         >/dev/null 2>&1
 }
 
