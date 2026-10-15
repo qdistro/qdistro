@@ -59,10 +59,12 @@ teardown() {
 @test "install_gui_waiters: control: one-shot delivery of the real library hits E2BIG" {
     # Proves the fake applies the kernel limit: with one chunk the size of the
     # whole base64 (the old delivery) the guest file never appears.
-    QDISTRO_VM_PUSH_CHUNK=100000000
+    QDISTRO_VM_PUSH_CHUNK=9999999
     run install_gui_waiters qci-gui-test-vm
     [ "$status" -ne 0 ]
     [ ! -e "$GUEST/qci-gui-waiters.sh" ]
+    # The kernel refused to start vm-exec at all: it never logged an argument.
+    [ ! -s "$FAKE_ARGSIZES" ]
 }
 
 @test "install_gui_waiters: a library that does not parse is never installed" {
@@ -77,7 +79,7 @@ teardown() {
 
 @test "qdistro_vm_push_file: a non-positive chunk size is refused, not looped on" {
     local c
-    for c in 0 -5 abc 08; do
+    for c in 0 -5 abc 08 18446744073709551616 10000000; do
         run timeout 10 bash -c '. "$1"; QDISTRO_VM_PUSH_CHUNK=$2 qdistro_vm_push_file "$3" vm "$4" /tmp/x' _ \
             "$REPO_ROOT/scripts/vm/lib/vm-push-file.sh" "$c" "$VM_TOOLS/vm-exec" "$REPO_ROOT/ci/lib/guest/gui-waiters.sh"
         [ "$status" -eq 2 ] || { echo "chunk '$c': status $status"; false; }

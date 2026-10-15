@@ -19,9 +19,12 @@
 qdistro_vm_push_file() {
     local vmexec=$1 vm=$2 src=$3 dest=$4 check=${5:-} chunk=${QDISTRO_VM_PUSH_CHUNK:-49152}
     local b64 off=0 redirect='>' part new
+    # At most 7 digits, checked as text: bash arithmetic wraps a huge value
+    # (2^64 -> 0), and a zero chunk would never advance. One argument must
+    # stay under 128 KiB anyway.
     case "$chunk" in
-        ''|*[!0-9]*|0*)
-            echo "qdistro_vm_push_file: QDISTRO_VM_PUSH_CHUNK must be a positive integer, got '$chunk'" >&2
+        ''|*[!0-9]*|0*|????????*)
+            echo "qdistro_vm_push_file: QDISTRO_VM_PUSH_CHUNK must be a positive integer below 10^7, got '$chunk'" >&2
             return 2 ;;
     esac
     case "$dest" in
