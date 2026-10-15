@@ -13,6 +13,14 @@
 #     qdlocker_ctrl status
 #     qdlocker_wait_for_lock
 
+# A driver may source this from an interactive shell (the GUI agent opens a
+# tty bash), which reads the user's rc file. Its aliases then expand inside
+# every function defined below: stat='git status' turned qdwin_vmx_merged's
+# capture check into a 125 (presentation-gui/02, full-20261015T072112Z-444803),
+# and rm/cp/mv -i would wait on a prompt. Drop them before any definition.
+\unalias -a 2>/dev/null
+\shopt -u expand_aliases 2>/dev/null
+
 : "${QDLOCKER_REPO:=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}"
 : "${QDWIN_REPO:=${QDLOCKER_REPO}/../qdwin}"
 : "${QDWIN_VM_EXEC:=${QDLOCKER_REPO}/../scripts/vm/vm-exec}"   # monorepo root

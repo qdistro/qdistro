@@ -12,6 +12,14 @@
 # - The active wayland socket name is auto-detected because weston
 #   restarts cycle through wayland-1 / wayland-2.
 
+# A driver may source this from an interactive shell (the GUI agent opens a
+# tty bash), which reads the user's rc file. Its aliases then expand inside
+# every function defined below: stat='git status' turned qdwin_vmx_merged's
+# capture check into a 125 (presentation-gui/02, full-20261015T072112Z-444803),
+# and rm/cp/mv -i would wait on a prompt. Drop them before any definition.
+\unalias -a 2>/dev/null
+\shopt -u expand_aliases 2>/dev/null
+
 # qdwin_find_workspace() — shared with tests/gui/qdwin-helpers.sh; see
 # tests/lib/workspace.sh for the rationale (worktree-aware upward search).
 # shellcheck source=../lib/workspace.sh
