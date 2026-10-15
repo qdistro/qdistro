@@ -3824,12 +3824,20 @@ class WorkflowsTab(QWidget):
         self.refresh()
 
     def _confirm_preview(self, preview: dict) -> bool:
+        return self._preview_dialog(preview).exec() == QDialog.DialogCode.Accepted
+
+    def _preview_dialog(self, preview: dict) -> QDialog:
         dialog = QDialog(self)
         dialog.setWindowTitle("Review workflow plan")
         dialog.resize(700, 600)
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel(
-            f"Run {preview['run_id']}\nDefinition SHA-256: {preview['definition_digest']}"))
+        # The digest is one unbreakable 64-hex word, so it gets its own line:
+        # after the label it ran past the screen edge (workflow-gui/05,
+        # full-20261015T112127Z-3016413), and the admin compares all of it.
+        header = QLabel(
+            f"Run {preview['run_id']}\nDefinition SHA-256:\n{preview['definition_digest']}")
+        header.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(header)
         details = QTextEdit(dialog)
         details.setReadOnly(True)
         details.setPlainText(json.dumps(preview["definition"], indent=2, sort_keys=True))
@@ -3843,7 +3851,7 @@ class WorkflowsTab(QWidget):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        return dialog.exec() == QDialog.DialogCode.Accepted
+        return dialog
 
     @staticmethod
     def _configure_table(table: QTableView, model: QStandardItemModel) -> None:

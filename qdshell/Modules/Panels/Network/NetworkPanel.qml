@@ -25,6 +25,17 @@ SmartPanel {
 
   // Unified panel view mode: "wifi" | "ethernet" (persisted)
   property string panelViewMode: "wifi"
+  // The header glyph shows the link, as the bar's Network widget does: the
+  // full Wi-Fi/Ethernet icon only while connected, the -off variant
+  // otherwise (offline used to keep the full Wi-Fi glyph whenever Wi-Fi was
+  // merely enabled; the Ethernet branch never showed -off when unplugged).
+  readonly property bool wifiConnected: {
+    for (const net in NetworkService.networks) {
+      if (NetworkService.networks[net].connected)
+        return true;
+    }
+    return false;
+  }
   property bool panelViewPersistEnabled: false
 
   onPanelViewModeChanged: {
@@ -104,8 +115,8 @@ SmartPanel {
     id: panelContent
 
     title: panelViewMode === "wifi" ? I18n.tr("common.wifi") : I18n.tr("common.ethernet")
-    icon: panelViewMode === "wifi" ? (Settings.data.network.wifiEnabled ? "wifi" : "wifi-off") : (NetworkService.hasEthernet ? (NetworkService.ethernetConnected ? "ethernet" : "ethernet") : "ethernet-off")
-    iconColor: panelViewMode === "wifi" ? (Settings.data.network.wifiEnabled ? Color.mPrimary : Color.mOnSurfaceVariant) : (NetworkService.ethernetConnected ? Color.mPrimary : Color.mOnSurfaceVariant)
+    icon: panelViewMode === "wifi" ? (Settings.data.network.wifiEnabled && root.wifiConnected ? "wifi" : "wifi-off") : (NetworkService.ethernetConnected ? "ethernet" : "ethernet-off")
+    iconColor: panelViewMode === "wifi" ? (Settings.data.network.wifiEnabled && root.wifiConnected ? Color.mPrimary : Color.mOnSurfaceVariant) : (NetworkService.ethernetConnected ? Color.mPrimary : Color.mOnSurfaceVariant)
     onCloseRequested: root.close()
 
     // Body uses Layout.fillHeight; pin to declared height so NScrollView has room.

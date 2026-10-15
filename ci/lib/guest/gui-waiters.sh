@@ -1339,8 +1339,20 @@ _probe_admin_tui_signal_refresh() {
     qci_bus_trace_events admin-tui | _qdwin_admin_tui_analyse refresh "$1" "$2"
 }
 
+# The TUI's safety-poll grid, shared by qdwin_admin_tui_clear_of_poll and the
+# oracle (_qdwin_admin_tui_analyse): a refresh counts as signal-driven only
+# when it lands within AFTER of the signal and more than NEAR from a tick of
+# the POLL-second grid. clear_of_poll must leave the grid at least NEAR (plus
+# a margin) behind, or a refresh right after its return is ruled
+# INCONCLUSIVE (permissions-gui/35, full-20261015T112127Z-3016413: it left at
+# 2.0 s, the refresh came 0.1 s later, 2.1 s from the tick).
+_QDWIN_ADMIN_TUI_POLL_S=30.0
+_QDWIN_ADMIN_TUI_NEAR_S=3.0
+_QDWIN_ADMIN_TUI_AFTER_S=2.0
+_QDWIN_ADMIN_TUI_CLEAR_S=4.0   # NEAR + 1 s margin for the action itself
+
 # qdwin_admin_tui_clear_of_poll [budget-s] — return at a moment that is at
-# least 2 s after a tick of the TUI's 30 s safety poll and leaves <budget-s>
+# least _QDWIN_ADMIN_TUI_CLEAR_S (4 s) after a tick of the TUI's 30 s safety poll and leaves <budget-s>
 # (default 10, max 26) before the next one (phase taken from its first
 # GetPending in the trace), sleeping at most ~28 s. Call it right before the
 # action whose SIGNAL-driven effect a step asserts, so no poll can run inside
@@ -1357,17 +1369,18 @@ qdwin_admin_tui_clear_of_poll() {
     "$QCI_GUEST_PYTHON" -I -c '
 import sys, time
 m, now, budget = float(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3])
-phase = (now - m) % 30.0
-latest = 30.0 - budget
+POLL, CLEAR = float(sys.argv[4]), float(sys.argv[5])
+phase = (now - m) % POLL
+latest = POLL - budget
 wait = 0.0
-if phase < 2.0:
-    wait = 2.0 - phase
+if phase < CLEAR:
+    wait = CLEAR - phase
 elif phase > latest:
-    wait = 32.0 - phase
+    wait = POLL + CLEAR - phase
 time.sleep(wait)
 print("poll phase %.1fs after a tick, %.1fs before the next (waited %.1fs)"
-      % ((phase + wait) % 30.0, 30.0 - (phase + wait) % 30.0, wait))
-' "$m" "$now" "$budget"
+      % ((phase + wait) % POLL, POLL - (phase + wait) % POLL, wait))
+' "$m" "$now" "$budget" "$_QDWIN_ADMIN_TUI_POLL_S" "$_QDWIN_ADMIN_TUI_CLEAR_S"
 }
 
 # qdwin_admin_tui_await_refresh <since-epoch> [timeout] — readiness only: wait
@@ -1454,7 +1467,7 @@ _qdwin_admin_tui_analyse() {
     "$QCI_GUEST_PYTHON" -I -c '
 import sys
 mode, names, since = sys.argv[1], set(sys.argv[2].split()), float(sys.argv[3])
-POLL, NEAR, AFTER = 30.0, 3.0, 2.0
+POLL, NEAR, AFTER = float(sys.argv[4]), float(sys.argv[5]), float(sys.argv[6])
 ev = []
 for line in sys.stdin:
     f = line.rstrip("\n").split("\t")
@@ -1521,7 +1534,7 @@ if mode == "removed":
     print("OK: RequestDecided(%s) at %.3f; TUI made no DecideRequest; TUI GetPending since then: %s (each within %ss of a broker signal, away from poll ticks)" % (dec[0][4], dec[0][0], [round(g, 3) for g in late] or "none", AFTER))
     sys.exit(0)
 print("unknown mode " + mode); sys.exit(2)
-' "$@"
+' "$@" "$_QDWIN_ADMIN_TUI_POLL_S" "$_QDWIN_ADMIN_TUI_NEAR_S" "$_QDWIN_ADMIN_TUI_AFTER_S"
 }
 
 _probe_system_unit_active() {

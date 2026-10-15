@@ -170,7 +170,8 @@ $VMEXEC "$VM" "sqlite3 /var/lib/qdistro/audit/workflow_audit.sqlite \"SELECT sta
 
 **Assert:**
 - A "Review workflow plan" dialog is up and shows `Run <RUN_ID>` and
-  `Definition SHA-256: <DIGEST>` — the same run id as S1 and the same digest
+  `Definition SHA-256:` with the full `<DIGEST>` on the line below it (all
+  64 hex characters visible) — the same run id as S1 and the same digest
   as S2 (and as `05-s4-preview.txt`).
 - Its definition text shows the seeded workflow: `wfgui-approval`, the
   `call_broker` step with `ListRules`, and the `wait_for_process` step; no
