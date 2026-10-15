@@ -25,7 +25,9 @@ def _load():
     body = SPAWN.read_text().split("vsock_listening() {", 1)[1]
     src = body.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
     ns = {"__name__": "t5_vsock_ready"}
-    exec(compile(src, "vsock_listening", "exec"), ns)  # noqa: S102
+    # "<...>": coverage skips pseudo-filenames; a bare name makes its json
+    # report fail looking for a file of that name.
+    exec(compile(src, "<vsock_listening>", "exec"), ns)  # noqa: S102
     return ns["vsock_ready_scan"]
 
 
