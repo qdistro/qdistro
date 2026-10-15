@@ -273,6 +273,39 @@ acct_complete() {
     [ -n "$hd" ] && [ -d "$hd" ] && grep -q "^$acct:" /etc/subuid \
         && grep -q "^$acct:" /etc/subgid
 }
+# drop_acct_fragment <silo> <acct> — delete <acct> only if it is a bare
+# fragment (exists, not acct_complete) that nothing can still be building:
+# the silo unit is positively inactive/failed (spawn's useradd runs in its
+# cgroup) and no process runs as the uid. Anything else — a unit still
+# active after 10 s, an unreadable state, a live process — is refused with
+# a nonzero return, never deleted under. A complete or absent account is
+# left alone (0). Every drop is logged, so a provisioning defect that keeps
+# leaving fragments stays visible.
+drop_acct_fragment() {
+    local s=$1 acct=$2 unit state="" uid i
+    timeout 5 id "$acct" >/dev/null 2>&1 || return 0
+    acct_complete "$acct" && return 0
+    unit=$(unit_of "$s")
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        state=$(systemctl show -P ActiveState "$unit" 2>/dev/null) || state=""
+        case "$state" in inactive|failed) break ;; esac
+        sleep 1
+    done
+    case "$state" in
+        inactive|failed) ;;
+        *) echo "drop_acct_fragment: $acct is incomplete but $unit is '${state:-unreadable}'; not deleting" >&2
+           return 1 ;;
+    esac
+    uid=$(id -u "$acct" 2>/dev/null) || { echo "drop_acct_fragment: no uid for $acct" >&2; return 1; }
+    if pgrep -u "$uid" >/dev/null 2>&1; then
+        echo "drop_acct_fragment: processes still run as $acct ($uid); not deleting" >&2
+        return 1
+    fi
+    echo "drop_acct_fragment: dropping incomplete $acct (interrupted provisioning)" >&2
+    userdel -f "$acct" >/dev/null 2>&1
+    ! timeout 5 id "$acct" >/dev/null 2>&1 \
+        || { echo "drop_acct_fragment: userdel left $acct behind" >&2; return 1; }
+}
 # ensure_silo_image <silo> [workload] — under Model A each silo launches from
 # ITS OWN store: the qt3s-<silo> account exists only after a first launch
 # attempt (spawn 3b creates it before any broker/image refusal), and the image
@@ -284,9 +317,7 @@ ensure_silo_image() {
     [ -n "$w" ] || { echo "ensure_silo_image: $s: no workload (no silo row?)" >&2; return 1; }
     acct=$(silo_acct "$s")
     # drop a bare fragment and re-provision below
-    if timeout 5 id "$acct" >/dev/null 2>&1 && ! acct_complete "$acct"; then
-        userdel -f "$acct" >/dev/null 2>&1 || :
-    fi
+    drop_acct_fragment "$s" "$acct" || return 1
     if ! timeout 5 id "$acct" >/dev/null 2>&1; then
         # the launch wrapper refuses an empty argv before spawn runs; a real
         # argv reaches 3b (account creation) and is still refused later —
@@ -304,18 +335,8 @@ ensure_silo_image() {
         for try in 1 2 3; do
             systemctl start "$(unit_of "$s")" >/dev/null 2>&1 || :
             acct_complete "$acct" && break
-            # never delete under a launch that is still provisioning
-            local settle
-            for settle in 1 2 3 4 5 6 7 8 9 10; do
-                case "$(systemctl show -P ActiveState "$(unit_of "$s")" 2>/dev/null)" in
-                    activating|deactivating|reloading) sleep 1 ;;
-                    *) break ;;
-                esac
-            done
+            drop_acct_fragment "$s" "$acct" || return 1
             systemctl reset-failed "$(unit_of "$s")" 2>/dev/null || :
-            if timeout 5 id "$acct" >/dev/null 2>&1 && ! acct_complete "$acct"; then
-                userdel -f "$acct" >/dev/null 2>&1 || :
-            fi
             sleep 1
         done
         rm -f "$STANZA_DIR/$s.env"
