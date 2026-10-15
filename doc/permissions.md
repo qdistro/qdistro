@@ -774,7 +774,8 @@ End-to-end behaviour is covered by:
   VM: tier-1 audisp/selinux, tier-2 podman, tier-3/4/5 isolation,
   broker enforcing, qsu argv scopes.
 - `tests/integration/permissions-gui/NN-*.md` — agent-driven GUI
-  acceptance against a labwc VM: admin TUI + Qt approval app, cross-
+  acceptance on the qdwin product session: admin TUI (installed, in foot)
+  + Qt approval app, cross-
   user send-to, signal contracts (`ApprovalRevoked`, `RulesReloaded`),
   rule hot-reload, clipboard policy, scope isolation, fire-and-forget,
   rate-limit, multi-pending navigation, TUI/Qt concurrent subscribers.

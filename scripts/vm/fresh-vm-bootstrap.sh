@@ -212,9 +212,13 @@ zypper -n addlock noctalia-qs >/dev/null 2>&1 \
     || { log "  ERROR: zypper addlock noctalia-qs failed"; exit 3; }
 
 # The admin TUI (installed below by install-admin-cli-for-vm.sh) needs
-# Textual. The kiwi image carries it (image/config.xml); the baked cloud base
-# does not yet (adding it to scripts/vm/install-deps.sh changes the baked
-# recipe key and forces a rebake, so it rides the next planned one).
+# Textual and Rich. The kiwi image carries them (image/config.xml); the baked
+# cloud base does not yet (adding them to scripts/vm/install-deps.sh changes
+# the baked recipe key and forces a rebake, so it rides the next planned one).
+# They are MANDATORY here, like jq below: the permissions-gui TUI scenarios run
+# the installed TUI on every GUI golden, and a golden without Textual used to
+# warn and then fail every one of them at runtime. A missing dependency is a
+# bake failure, never a skip.
 # python3 → 3.14: the snapshot's python313-base still owns the unversioned
 # symlink while the dep set is python314-* (scripts/install/lib/qdistro-python.sh;
 # $SRC does not exist yet, so this is the same flip inline). Guarded: a base
@@ -224,13 +228,18 @@ command -v python3.14 >/dev/null 2>&1 && [ "$(readlink /usr/bin/python3)" != "py
 
 if ! /usr/bin/python3 -c 'import textual, rich' >/dev/null 2>&1; then
     if [ "${QCI_OFFLINE:-0}" = 1 ]; then
-        log "WARN: python314-textual missing and QCI_OFFLINE=1 forbids zypper; the admin TUI will not start in this VM"
-    else
-        log "installing python314-textual for the admin TUI"
-        zypper -n install --no-recommends python314-textual python314-rich \
-                >/tmp/qdistro-textual-install.log 2>&1 \
-            || { log "  WARN: zypper install of python314-textual failed; the admin TUI will not start in this VM (the CLI is unaffected)"; tail -20 /tmp/qdistro-textual-install.log; }
+        log "ERROR: python314-textual/python314-rich missing and QCI_OFFLINE=1 forbids zypper; use a base with them baked in or run with egress"
+        exit 3
     fi
+    log "installing python314-textual for the admin TUI"
+    zypper -n install --no-recommends python314-textual python314-rich \
+            >/tmp/qdistro-textual-install.log 2>&1 \
+        || { log "  ERROR: zypper install of python314-textual/python314-rich failed"; tail -40 /tmp/qdistro-textual-install.log; exit 3; }
+    # The install may have brought python314-base itself: re-pin, then prove.
+    command -v python3.14 >/dev/null 2>&1 && [ "$(readlink /usr/bin/python3)" != "python3.14" ] \
+        && ln -sf python3.14 /usr/bin/python3 || true
+    /usr/bin/python3 -c 'import textual, rich' >/dev/null 2>&1 \
+        || { log "  ERROR: Textual/Rich still do not import under /usr/bin/python3 after installation"; exit 3; }
 fi
 
 # ---- 0b. CI extras (iso/14 Phase G intermediate) ---------------------------
@@ -278,9 +287,9 @@ fi
 # every base and golden checked, 2026-09-23). No test uses it: screenshots go
 # through virsh / the qdshell capture socket, input through ydotool + qemu-ga,
 # and the clipboard tests exercise Wayland data-device, not SPICE. Its resize
-# path needs Mutter, so under labwc it loops ("failed to call GetCurrentState
-# from mutter") at ~500k journal lines per 3 min and journald drops the admin
-# session's evidence; under qdwin it fails at every login. Remove it and lock
+# path needs Mutter, so under the retired labwc lane it looped ("failed to call
+# GetCurrentState from mutter") at ~500k journal lines per 3 min and journald
+# dropped the admin session's evidence; under qdwin it fails at every login. Remove it and lock
 # it, so the later GUI-lane installs (spin-test-vm-gui.sh) cannot bring it
 # back. Test VMs only; the product image does not ship it.
 if rpm -q spice-vdagent >/dev/null 2>&1; then
@@ -709,9 +718,8 @@ zypper -n install --no-recommends seatd >/dev/null 2>&1 \
 
 # xwayland provides /usr/bin/Xwayland, which weston's xwayland.so module
 # (loaded via the qdwin weston.ini modules= line) execs to serve X11
-# clients. The labwc gui profile installs this in spin-test-vm-gui.sh, but
-# the qdwin profile builds its own session here, so install it on this path
-# too — without it qdwin starts with no working XWayland and every X11 app
+# clients. qdwin's XWayland support is product behaviour (the image ships it);
+# without the binary qdwin starts with no working XWayland and every X11 app
 # test fails.
 log "installing xwayland (Xwayland binary for qdwin's xwayland.so module)..."
 zypper -n install --no-recommends xwayland >/dev/null 2>&1 \
@@ -778,7 +786,7 @@ fi
 # real desktop apps — firefox, thunar, vlc, chromium, audacity, feh,
 # tk/fltk/swing. OPT-IN (QDWIN_APP_DEPS=1, which `QCI_GUI_APPS=1` sets for
 # the periodic gui-apps lane), DEFAULT OFF: this bootstrap is shared by EVERY
-# golden (bats, gui-admin, gui-qdwin), so installing these heavy packages
+# golden (bats, gui-qdwin), so installing these heavy packages
 # unconditionally bloated all goldens. With deps absent those scenarios SKIP.
 # The marker file written below is what the GUI gate probes to decide that
 # this golden carries the app set (foot alone no longer says so: it is a core
@@ -1159,13 +1167,13 @@ if [ ! -S /run/user/1000/wayland-1 ]; then
 fi
 
 # qdlocker.sock is created by a successfully running qdlocker by default
-# (QDLOCKER_CTRL_SOCKET=1). This admin-test harness starts the lxqt/labwc
-# path, not the qdwin compositor session, so qdlocker may retry-crash before
-# binding qdwin_locker_v1 and before creating the ctrl socket. The
+# (QDLOCKER_CTRL_SOCKET=1). A qdwin session that is slow to come up can
+# leave qdlocker retry-crashing before it binds qdwin_locker_v1 and creates
+# the ctrl socket. The
 # /etc/qdistro/locker-ctrl-introspection marker gates only the diagnostic
 # commands (status/unlock-result/prompt-text); it does not gate socket
 # creation or the production `lock` command. Warn-and-continue — do NOT fail
-# the bootstrap on this harness; only flag the case that signals a real
+# the bootstrap on it; only flag the case that signals a real
 # regression (qdlocker active but no socket).
 log "  waiting for /run/user/1000/qdlocker.sock (best-effort)..."
 for _ in $(seq 1 30); do

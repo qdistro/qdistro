@@ -11,8 +11,8 @@ relevant when you handle a handoff.
 
 ## Why these are host-side, not VM-side
 
-The `phase1/gui-tests/` suite runs against a labwc VM (Xorg-on-tty3,
-xdotool through XWayland). qdwin is **Wayland-only and headless** in
+The GUI suites run against a qdwin VM (the product session; the old labwc
++ XWayland harness is retired). qdwin is **Wayland-only and headless** in
 this harness — no XWayland, no X server, no popups on the user's
 desktop. weston runs with `--backend=headless`, so the test
 compositor is invisible to the host (no window manager involvement,

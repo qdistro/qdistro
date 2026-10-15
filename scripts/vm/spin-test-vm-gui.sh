@@ -1,40 +1,28 @@
 #!/bin/bash
-# spin-test-vm-gui.sh — like spin-test-vm.sh, plus the post-bootstrap
-# layer that the permissions-gui scenarios depend on:
+# spin-test-vm-gui.sh — like spin-test-vm.sh, plus the post-bootstrap layer
+# the GUI scenarios depend on. ONE profile: the product session (qdwin
+# compositor + qdshell on wayland-1) that fresh-vm-bootstrap.sh stages and
+# starts under admin's lingering user manager; greetd stays masked (it would
+# grab the DRM seat and keep that user manager from starting).
 #
-#   - work (uid 2000) + work2 (uid 3000) silos with linger (labwc only; the
-#     qdwin lane provisions them per scenario, see step 1).
-#   - /usr/local/bin/qdistro-test-permission helper.
-#   - /usr/local/bin/qdistro-start-admin-app (labwc: the test-only xcb
-#     launcher; qdwin: the shipped native-Wayland launcher) and -tui.
-#   - PyQt admin app source under /home/admin/qdistro/admin_app/.
-#   - Textual admin TUI source under /home/admin/qdistro/tui/.
-#   - qterminal.ini pinned to 1200×700 so TUI scenarios don't truncate.
-#   - The admin user's qdwin/qdshell session started so DISPLAY=:0
-#     XWayland is reachable for `vm-gui screenshot` / `xdotool`.
-#
-# fresh-vm-bootstrap.sh masks greetd (greetd would grab the DRM seat and
-# prevent admin's lingering user manager from starting) and stages BOTH the
-# qdwin+qdshell session units (qdwin-compositor.service/qdshell.service via
-# qdwin-session.target) and the labwc
-# stack. greetd stays masked here; this script then selects which session
-# admin's user manager leaves running, via QDISTRO_VM_GUI_SESSION:
-#
-#   labwc (default) — disables the qdwin units and runs labwc+lxqt from the
-#                     lingering admin user manager on wayland-0 for the
-#                     permissions-gui admin-app scenarios.
-#   qdwin           — keeps the production qdwin compositor + qdshell session on
-#                     wayland-1 (the one fresh-vm-bootstrap.sh already started),
-#                     for the qdwin/qdshell GUI lanes (taskbar isolation menu,
-#                     popup-clamp, …). Needs the vendored libweston (staged by
-#                     fresh-vm-bootstrap.sh) for the popup clamp/grab paths.
+#   - /usr/local/bin/qdistro-test-permission helper + the qdistro_app SDK.
+#   - The admin approvals app as the image installs it
+#     (install-admin-app-for-vm.sh: /usr/local/bin/qdistro-admin-approval-app,
+#     the shipped native-Wayland launcher /usr/local/bin/qdistro-start-admin-app
+#     and the desktop entry). The admin TUI is the one fresh-vm-bootstrap.sh
+#     installed (install-admin-cli-for-vm.sh), verified intact here; the TUI
+#     scenarios host it in foot, a core test client of every golden.
+#   - The test-profile pins: pixman renderer, fixed 1280x800 output, no spare
+#     VTs, the patterned test wallpaper, virtio-gpu as the DRM driver.
+#   - The work/work2 silo fixtures are NOT baked: scenarios that need them
+#     provision them at Setup (qdwin_admin_lane_setup --silos), because Active
+#     silos change what the qdlocker scenarios' lock screen shows.
 #
 # Usage:
-#   [QDISTRO_VM_GUI_SESSION=labwc|qdwin] scripts/vm/spin-test-vm-gui.sh [<prefix>]
+#   scripts/vm/spin-test-vm-gui.sh [<prefix>]
 #
-# Output (last line): the VM name, suitable for piping into
-# `tests/integration/permissions-gui/` (labwc) or `qdwin-noctalia/` (qdwin)
-# runner agents as VMNAME.
+# Output (last line): the VM name, suitable for the GUI scenario runners as
+# VMNAME.
 
 set -euo pipefail
 
@@ -42,31 +30,19 @@ VM_PASSWORD='Pa_ssw0rd45'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${1:-qd-gui}"
 
-# Which graphical session to leave running (see the POSTBOOT block for the full
-# contract): `labwc` (default — labwc+lxqt on wayland-0 for permissions-gui) or
-# `qdwin` (the production qdwin compositor + qdshell on wayland-1, for the
-# qdwin/qdshell GUI lanes). Select with QDISTRO_VM_GUI_SESSION=qdwin.
-GUI_SESSION="${QDISTRO_VM_GUI_SESSION:-labwc}"
-case "$GUI_SESSION" in
-    labwc|qdwin) ;;
-    *) echo "[gui-spin] ERROR: QDISTRO_VM_GUI_SESSION='$GUI_SESSION' (want labwc|qdwin)" >&2; exit 2 ;;
-esac
-
 # Per-run GOLDEN clone? acquire_vm exports QCI_RUN_GOLDEN_BACKING when cloning a
-# worker from the gui golden. On a clone the whole gui layer (work users, SDK,
-# launchers, labwc/qdwin install, §8b virtio-gpu, autologin/session config) is
-# already BAKED into the golden and the staged source ($SRC) is absent, so the
-# POSTBOOT install path is skipped (see the GOLDEN_CLONE fast-path inside it) and
-# we only verify the baked session came up.
+# worker from the gui golden. On a clone the whole gui layer (SDK, admin app,
+# test-profile pins, §8b virtio-gpu, session config) is already BAKED into the
+# golden, so the POSTBOOT install path is skipped (see the GOLDEN_CLONE
+# fast-path inside it) and we only verify the baked session came up.
 GOLDEN_CLONE=0
 [ -n "${QCI_RUN_GOLDEN_BACKING:-}" ] && GOLDEN_CLONE=1
 
 echo "[gui-spin] step 1/3: spin-test-vm.sh $PREFIX (broker layer)" >&2
 # spin-test-vm prints the VM name on the last stdout line. Capture stderr to
-# console, stdout to a variable. QCI_SPIN_VERIFY_SESSION=none: the child's
-# stage-6 wayland-1 check is qdwin-specific (and a labwc golden clone has no
-# wayland-1) — the gui POSTBOOT below does profile-aware verification instead.
-VM=$(QCI_SPIN_VERIFY_SESSION=none bash "$SCRIPT_DIR/spin-test-vm.sh" "$PREFIX" 2>&1 | tee /dev/stderr | tail -1)
+# console, stdout to a variable. Its stage 6 verifies the qdwin session
+# (wayland-1); the POSTBOOT below verifies the GUI-specific layer.
+VM=$(bash "$SCRIPT_DIR/spin-test-vm.sh" "$PREFIX" 2>&1 | tee /dev/stderr | tail -1)
 
 if ! echo "$VM" | grep -qE "^${PREFIX}-[0-9]+-[0-9]+(-[0-9]+)*$"; then
     echo "[gui-spin] could not parse VM name from spin-test-vm.sh output: '$VM'" >&2
@@ -76,7 +52,7 @@ echo "[gui-spin] broker VM ready: $VM" >&2
 
 VMEXEC="$SCRIPT_DIR/vm-exec"
 
-echo "[gui-spin] step 2/3: layering permissions-gui prereqs on $VM" >&2
+echo "[gui-spin] step 2/3: layering the GUI scenario prereqs on $VM" >&2
 
 # Base64 the whole post-bootstrap so embedded quotes / heredocs don't
 # trip vm-exec's JSON quoting.
@@ -85,151 +61,79 @@ set -eu
 
 SRC=/root/qdistro-src
 
-# Which graphical session this VM should expose to scenarios:
-#   labwc  (default) — labwc + lxqt on wayland-0, for the permissions-gui
-#                      admin-app scenarios (the historical behaviour).
-#   qdwin            — the production qdwin compositor + qdshell (Quickshell)
-#                      session on wayland-1, for the qdwin/qdshell GUI lanes
-#                      (taskbar isolation menu, popup-clamp, etc.). The session
-#                      units (qdwin-compositor.service/qdshell.service via
-#                      qdwin-session.target — the qdwin+qdshell
-#                      units install-qdwin-session-for-vm.sh wires up), the
-#                      vendored libweston, and the QML plugin are already staged
-#                      by fresh-vm-bootstrap.sh; this profile simply KEEPS that
-#                      session up instead of tearing it down for labwc.
-SESSION="${QDISTRO_VM_GUI_SESSION:-labwc}"
-case "$SESSION" in labwc|qdwin) ;; *)
-    echo "[gui-spin] ERROR: QDISTRO_VM_GUI_SESSION='$SESSION' (want labwc|qdwin)"; exit 2 ;;
-esac
-echo "[gui-spin] gui session profile: $SESSION"
-
-# GOLDEN-CLONE FAST-PATH. Everything below (work/work2 users, SDK, launchers,
-# labwc/qdwin install, §8b virtio-gpu dracut/grub, autologin + session config)
-# is already BAKED into the gui golden disk, and the staged source ($SRC) does
-# NOT exist on a clone — so re-running it would fail and/or duplicate work. A
-# clone boots straight into the baked session (admin user unit → labwc, or the
-# enabled noctalia user units → qdwin). We only VERIFY, fail-closed and
-# profile-aware, that the baked session + the surface scenarios depend on came
-# up, then exit. The full-build path (golden build / QCI_NO_GOLDEN) is below.
-if [ "${GOLDEN_CLONE:-0}" = 1 ]; then
-    echo "[gui-spin] golden clone: skipping install, verifying baked session ($SESSION)"
-    if [ "$SESSION" = labwc ]; then
-        for _i in $(seq 1 30); do [ -S /run/user/1000/wayland-0 ] && break; sleep 2; done
-        if [ ! -S /run/user/1000/wayland-0 ]; then
-            echo "[gui-spin] ERROR: wayland-0 missing on labwc golden clone"
-            runuser -l admin -c 'systemctl --user --no-pager status 2>&1 | head -30' || true
-            journalctl -b --no-pager 2>&1 | tail -40 || true
-            exit 1
-        fi
-        pgrep -x labwc >/dev/null || { echo "[gui-spin] ERROR: labwc not running on clone"; exit 1; }
-        # Test wallpaper (step 8-wp). The baked config is checked fail-closed;
-        # a swaybg that has not (yet) come up is only a warning, since the
-        # scenarios still run without it -- an empty desktop just reads black.
-        grep -q "^swaybg -m tile -i '/home/admin/Pictures/Wallpapers/qdistro-test-pattern.png'" \
-                /home/admin/.config/lxqt/labwc/autostart 2>/dev/null \
-            && [ -s /home/admin/Pictures/Wallpapers/qdistro-test-pattern.png ] \
-            || { echo "[gui-spin] ERROR: labwc golden clone lost its test-wallpaper swaybg config"; exit 1; }
-        for _i in $(seq 1 10); do pgrep -u admin -x swaybg >/dev/null && break; sleep 1; done
-        pgrep -u admin -x swaybg >/dev/null \
-            || echo "[gui-spin] WARN: swaybg not running on labwc clone (desktop will be black)"
-        echo "[gui-spin] labwc clone session up (wayland-0)"
-    else
-        for _i in $(seq 1 30); do [ -S /run/user/1000/wayland-1 ] && break; sleep 2; done
-        if [ ! -S /run/user/1000/wayland-1 ]; then
-            echo "[gui-spin] ERROR: wayland-1 missing on qdwin golden clone"
-            runuser -l admin -c 'systemctl --user --no-pager status qdwin-compositor.service qdshell.service 2>&1 | head -40' || true
-            exit 1
-        fi
-        runuser -l admin -c 'systemctl --user is-active qdwin-compositor.service qdshell.service' >/dev/null 2>&1 \
-            || { echo "[gui-spin] ERROR: qdwin session units not active on qdwin clone"; exit 1; }
-        grep -qx 'renderer=pixman' /home/admin/weston.ini \
-            || { echo "[gui-spin] ERROR: qdwin golden clone lost its pixman renderer pin"; exit 1; }
-        grep -qx 'mode=1280x800@60' /home/admin/weston.ini \
-            || { echo "[gui-spin] ERROR: qdwin golden clone lost its fixed GUI-test output mode"; exit 1; }
-        echo "[gui-spin] qdwin clone session up (wayland-1)"
+# The installed admin TUI must be the installer's: the entry symlink pointing at
+# the root-owned module (never a wrapper written through the symlink -- the
+# retired dev-copy step here did exactly that and stripped the TUI of the
+# broker's authority shape), and Textual/Rich importable. Fatal: every TUI
+# scenario runs this installed TUI, so a broken one is a bake failure.
+verify_installed_tui() {
+    local lib=/usr/local/lib/qdistro/admin-tui/qdistro_admin_tui.py first
+    [ "$(readlink /usr/local/bin/qdistro-admin-tui)" = "$lib" ] \
+        || { echo "[gui-spin] ERROR: /usr/local/bin/qdistro-admin-tui is not the installer's symlink to $lib"; exit 1; }
+    [ -f "$lib" ] && [ ! -L "$lib" ] && [ "$(stat -c %u "$lib")" = 0 ] \
+        || { echo "[gui-spin] ERROR: $lib is not a root-owned regular file"; exit 1; }
+    IFS= read -r first < "$lib" || first=""
+    [ "$first" = '#!/usr/bin/python3 -I' ] && grep -q '^def _reexec_for_authority' "$lib" \
+        || { echo "[gui-spin] ERROR: $lib is not the installed TUI module (first line: $first)"; exit 1; }
+    if [ -f "$SRC/tui/qdistro_admin_tui.py" ]; then
+        cmp -s "$lib" "$SRC/tui/qdistro_admin_tui.py" \
+            || { echo "[gui-spin] ERROR: $lib differs from $SRC/tui/qdistro_admin_tui.py"; exit 1; }
     fi
+    /usr/bin/python3 -I -c 'import textual, rich' \
+        || { echo "[gui-spin] ERROR: Textual/Rich do not import under /usr/bin/python3 -I"; exit 1; }
+    command -v foot >/dev/null 2>&1 \
+        || { echo "[gui-spin] ERROR: foot (core test client hosting the TUI scenarios) missing"; exit 1; }
+}
+
+# GOLDEN-CLONE FAST-PATH. Everything below (SDK, admin app, test-profile pins,
+# §8b virtio-gpu dracut/grub, session config) is already BAKED into the gui
+# golden disk, so re-running it would duplicate work. A clone boots straight
+# into the baked qdwin session. We only VERIFY, fail-closed, that the session
+# and the surface scenarios depend on came up, then exit. The full-build path
+# (golden build / QCI_NO_GOLDEN) is below.
+if [ "${GOLDEN_CLONE:-0}" = 1 ]; then
+    echo "[gui-spin] golden clone: skipping install, verifying the baked qdwin session"
+    for _i in $(seq 1 30); do [ -S /run/user/1000/wayland-1 ] && break; sleep 2; done
+    if [ ! -S /run/user/1000/wayland-1 ]; then
+        echo "[gui-spin] ERROR: wayland-1 missing on qdwin golden clone"
+        runuser -l admin -c 'systemctl --user --no-pager status qdwin-compositor.service qdshell.service 2>&1 | head -40' || true
+        exit 1
+    fi
+    runuser -l admin -c 'systemctl --user is-active qdwin-compositor.service qdshell.service' >/dev/null 2>&1 \
+        || { echo "[gui-spin] ERROR: qdwin session units not active on qdwin clone"; exit 1; }
+    grep -qx 'renderer=pixman' /home/admin/weston.ini \
+        || { echo "[gui-spin] ERROR: qdwin golden clone lost its pixman renderer pin"; exit 1; }
+    grep -qx 'mode=1280x800@60' /home/admin/weston.ini \
+        || { echo "[gui-spin] ERROR: qdwin golden clone lost its fixed GUI-test output mode"; exit 1; }
+    echo "[gui-spin] qdwin clone session up (wayland-1)"
     # The baked install surface the scenarios require — fail-closed on core bits
     # (codex review: verify, don't ls-and-warn, the things a clone depends on).
-    # The work/work2 fixtures are provisioned on the labwc profile only (see
-    # the fixture block below for why), so only verify them there.
-    if [ "$SESSION" = labwc ]; then
-        id work >/dev/null 2>&1 && id work2 >/dev/null 2>&1 \
-            || { echo "[gui-spin] ERROR: work/work2 users missing in golden"; exit 1; }
-        # They must be real SILOS, not just Linux users, and they must be
-        # ACTIVE. The session manager purges any relay policy fragment whose
-        # name has no silos.yaml row at every daemon start — and a clone's
-        # first boot IS such a start. Checking the users alone is what let a
-        # golden ship with grants that this very boot had already deleted
-        # (permissions-gui 12/15, 2026-07-26). This runs AFTER that boot, so
-        # it observes the post-purge, post-autostart truth.
-        for _u in work work2; do
-            [ -f "/etc/dbus-1/system.d/org.qdistro.UserRelay.silo-$_u.conf" ] \
-                || { echo "[gui-spin] ERROR: golden clone has no relay policy fragment" \
-                          "for $_u — it is not a registered silo, so its relay cannot own" \
-                          "org.qdistro.UserRelay.uid*"; exit 1; }
-        done
-        # An autostart failure would otherwise pass clone verification and
-        # resurface later as an opaque SiloNotActive inside a scenario.
-        for _u in work work2; do
-            _cstate=$(runuser -u admin -- /usr/bin/python3 -c '
-import json, sys, dbus
-bus = dbus.SystemBus()
-obj = bus.get_object("org.qdistro.SessionManager1",
-                     "/org/qdistro/SessionManager1")
-for row in json.loads(dbus.Interface(
-        obj, "org.qdistro.SessionManager1").ListSilos(timeout=2.0)):
-    if row.get("name") == sys.argv[1]:
-        print(row.get("state", ""))
-        break
-' "$_u" 2>/dev/null)
-            [ "$_cstate" = Active ] \
-                || { echo "[gui-spin] ERROR: golden clone has silo $_u in state" \
-                          "'$_cstate', not Active — the broker refuses cross-uid" \
-                          "relays to a registered non-Active target"; exit 1; }
-        done
-    fi
     for _f in /usr/local/bin/qdistro-test-permission \
-              /usr/local/bin/qdistro-start-admin-app \
-              /usr/local/bin/qdistro-start-admin-tui; do
+              /usr/local/bin/qdistro-start-admin-app; do
         [ -x "$_f" ] || { echo "[gui-spin] ERROR: baked launcher $_f missing in golden"; exit 1; }
     done
-    # The qdwin lane runs the SHIPPED native-Wayland admin app launcher and
-    # app path, never the labwc lane's xcb launcher (step 3 below).
-    if [ "$SESSION" = qdwin ]; then
-        grep -qx 'export QT_QPA_PLATFORM=wayland' /usr/local/bin/qdistro-start-admin-app \
-            || { echo "[gui-spin] ERROR: qdwin golden's qdistro-start-admin-app is not the shipped Wayland launcher"; exit 1; }
-        [ -f /usr/local/bin/qdistro-admin-approval-app ] \
-            || { echo "[gui-spin] ERROR: qdwin golden lacks /usr/local/bin/qdistro-admin-approval-app"; exit 1; }
-    fi
+    # The scenarios run the SHIPPED native-Wayland admin app launcher and app.
+    grep -qx 'export QT_QPA_PLATFORM=wayland' /usr/local/bin/qdistro-start-admin-app \
+        || { echo "[gui-spin] ERROR: qdwin golden's qdistro-start-admin-app is not the shipped Wayland launcher"; exit 1; }
+    [ -f /usr/local/bin/qdistro-admin-approval-app ] \
+        || { echo "[gui-spin] ERROR: qdwin golden lacks /usr/local/bin/qdistro-admin-approval-app"; exit 1; }
+    verify_installed_tui
     /usr/bin/python3 -c 'import qdistro_app' 2>/dev/null \
         || { echo "[gui-spin] ERROR: qdistro_app SDK not importable in golden clone"; exit 1; }
-    echo "[gui-spin] golden clone verification OK ($SESSION)"
+    echo "[gui-spin] golden clone verification OK (qdwin)"
     exit 0
 fi
 
-# 1. work + work2 as REAL SILOS (uids 2000 / 3000), linger so their
-#    session buses come up, ACTIVE, with their user-relay grants -- and,
-#    here at bake time, proven to survive a session-manager restart. The
-#    why of every step is in scripts/vm/lib/gui-silo-fixtures.sh.
-#
-# BAKED INTO THE labwc PROFILE ONLY, ON PURPOSE.
+# 1. work + work2 silo fixtures are NOT baked into the golden, on purpose.
 #
 # Registered ACTIVE silos are not invisible the way the old plain accounts
 # were: qdshell's SiloEgress service normalises egress=None to a
 # legacy/host row and lists Active legacy silos, and the qdwin LOCK SCREEN
 # renders a network-egress indicator from exactly that list. All qdlocker
-# GUI scenarios run on the qdwin golden, so baking the fixtures there would
-# change what those screens show. The permissions-gui scenarios that run on
-# the qdwin lane provision the same fixtures at Setup, with the same
-# script, on their own disposable clone (permissions-gui/AGENTS.md).
-if [ "$SESSION" != labwc ]; then
-    echo "[gui-harness] $SESSION profile: not baking the work/work2 silo fixtures" \
-         "(Active silos would add an egress indicator to this profile's lock" \
-         "screen; qdwin-lane permissions-gui scenarios provision them at Setup)"
-else
-    VM_PASSWORD="$VM_PASSWORD" bash "$SRC/scripts/vm/lib/gui-silo-fixtures.sh" --prove-restart \
-        || { echo "[gui-spin] ERROR: work/work2 silo fixtures failed"; exit 1; }
-fi
+# GUI scenarios run on this golden, so baking the fixtures here would change
+# what those screens show. The permissions-gui scenarios that need work/work2
+# provision them at Setup, with scripts/vm/lib/gui-silo-fixtures.sh, on
+# their own disposable clone (qdwin_admin_lane_setup --silos).
 
 # 2. qdistro-test-permission helper.
 install -m 0755 "$SRC/tests/unit/test_permission.py" \
@@ -243,30 +147,15 @@ done
 import qdistro_app  # noqa: F401
 PY
 
-# 3. start-admin-app / start-admin-tui launchers.
-#
-# The admin app launcher is PER PROFILE. The labwc lane drives the app as an
-# XWayland client with xdotool, so it gets the test-only xcb launcher
-# (deploy/start-admin-app.sh). The qdwin lane must run what the image ships:
-# the real installer lays down the app at /usr/local/bin/qdistro-admin-approval-app
-# (the path the broker trusts), the native-Wayland launcher
-# (deploy/start-admin-app-wayland.sh) and the desktop entry, exactly as
-# image/config.sh does. Installing the xcb launcher over it here, as this step
-# used to on every profile, meant no GUI scenario ever ran the shipped one.
-if [ "$SESSION" = labwc ]; then
-    install -m 0755 "$SRC/deploy/start-admin-app.sh" \
-                    /usr/local/bin/qdistro-start-admin-app
-else
-    bash "$SRC/scripts/install/install-admin-app-for-vm.sh" "$SRC/admin_app" \
-        || { echo "[gui-spin] ERROR: install-admin-app-for-vm.sh failed"; exit 1; }
-    grep -qx 'export QT_QPA_PLATFORM=wayland' /usr/local/bin/qdistro-start-admin-app \
-        || { echo "[gui-spin] ERROR: /usr/local/bin/qdistro-start-admin-app is not" \
-                  "the shipped native-Wayland launcher"; exit 1; }
-fi
-install -m 0755 "$SRC/deploy/start-admin-tui.sh" \
-                /usr/local/bin/qdistro-start-admin-tui
-install -m 0755 "$SRC/deploy/start-user-app.sh" \
-                /usr/local/bin/qdistro-start-user-app
+# 3. The admin approvals app as the image installs it: the real installer lays
+# down the app at /usr/local/bin/qdistro-admin-approval-app (the path the
+# broker trusts), the native-Wayland launcher (deploy/start-admin-app-wayland.sh)
+# and the desktop entry, exactly as image/config.sh does.
+bash "$SRC/scripts/install/install-admin-app-for-vm.sh" "$SRC/admin_app" \
+    || { echo "[gui-spin] ERROR: install-admin-app-for-vm.sh failed"; exit 1; }
+grep -qx 'export QT_QPA_PLATFORM=wayland' /usr/local/bin/qdistro-start-admin-app \
+    || { echo "[gui-spin] ERROR: /usr/local/bin/qdistro-start-admin-app is not" \
+              "the shipped native-Wayland launcher"; exit 1; }
 install -m 0755 "$SRC/cli/qdistro_approvals.py" \
                 /usr/local/sbin/qdistro-approvals
 install -d -o root -g root -m 0755 /usr/local/lib/qdistro/stubs
@@ -289,50 +178,15 @@ systemctl reload dbus-broker.service 2>/dev/null \
     || true
 systemctl daemon-reload
 
-# 4. PyQt admin app and Textual TUI sources under /home/admin/qdistro/.
-install -d -o admin -g users -m 0755 /home/admin/qdistro
-install -d -o admin -g users -m 0755 /home/admin/qdistro/admin_app
-install -m 0644 -o admin -g users \
-        "$SRC/admin_app/qdistro_admin_app.py" \
-        /home/admin/qdistro/admin_app/qdistro_admin_app.py
-install -d -o admin -g users -m 0755 /home/admin/qdistro/tui
-# Explicit file list — adding a new module to tui/ requires updating this
-# script. Globbing was previously used but masked missing modules silently
-# (nullglob would have installed nothing); naming each file makes the
-# install loudly fail if a source file goes missing.
-for _tui_src in __init__.py broker_client.py silo_colors.py qdistro_admin_tui.py; do
-    install -m 0644 -o admin -g users \
-            "$SRC/tui/$_tui_src" \
-            "/home/admin/qdistro/tui/$_tui_src"
-done
-# Wrapper hard-codes the install location instead of using getent — the
-# script always installs to /home/admin/qdistro/tui/ in this VM, and the
-# getent dance only obscured the contract.
-cat > /usr/local/bin/qdistro-admin-tui <<'TUIWRAP'
-#!/bin/bash
-TUI_DIR=/home/admin/qdistro/tui
-export PYTHONPATH="$TUI_DIR${PYTHONPATH:+:$PYTHONPATH}"
-exec python3 "$TUI_DIR/qdistro_admin_tui.py" "$@"
-TUIWRAP
-chmod 0755 /usr/local/bin/qdistro-admin-tui
+# 4. The admin TUI is NOT reinstalled here: fresh-vm-bootstrap.sh ran the
+# image's installer (install-admin-cli-for-vm.sh). Verify it is intact.
+verify_installed_tui
 
-# 5. qterminal.ini geometry pinned to 1200×700 — AGENTS.md  notes
-#    this is required so the TUI's header subtitle and full footer
-#    fit without truncation.
-install -d -o admin -g users -m 0755 /home/admin/.config/qterminal.org
-cat > /home/admin/.config/qterminal.org/qterminal.ini <<'INI'
-[MainWindow]
-size=@Size(1200 700)
-INI
-chown admin:users /home/admin/.config/qterminal.org/qterminal.ini
-
-# DESKTOP WALLPAPER (BOTH profiles): install_test_wallpaper renders the patterned
-# test wallpaper to /home/admin/Pictures/Wallpapers/qdistro-test-pattern.png.
-# The qdwin profile shows it through qdshell (wallpaper directory default); the
-# labwc profile points swaybg at it via scripts/vm/assets/labwc-test-wallpaper.sh
-# (step 8-wp). The body keeps its 4-space indent: make-test-wallpaper.sh and
-# the gate tests extract the generator by that exact line shape.
-TEST_WALLPAPER=/home/admin/Pictures/Wallpapers/qdistro-test-pattern.png
+# DESKTOP WALLPAPER: install_test_wallpaper renders the patterned test
+# wallpaper to /home/admin/Pictures/Wallpapers/qdistro-test-pattern.png, which
+# qdshell shows (wallpaper directory default). The body keeps its 4-space
+# indent: make-test-wallpaper.sh and the gate tests extract the generator by
+# that exact line shape.
 install_test_wallpaper() {
     # DESKTOP WALLPAPER: make the ordinary idle desktop visibly non-flat.
     #
@@ -407,124 +261,9 @@ WPEOF
     chown admin:users /home/admin/Pictures/Wallpapers/qdistro-test-pattern.png 2>/dev/null || true
 }
 
-# Steps 6-8 below stand up the labwc+lxqt session and are skipped for the
-# `qdwin` profile (which keeps the qdwin+qdshell session staged by
-# fresh-vm-bootstrap.sh instead — see step 8c). §8b (virtio-gpu DRM) runs for
-# BOTH profiles. The body is intentionally left un-indented to keep the diff
-# reviewable; it is bracketed by this `if`/`fi`.
-if [ "$SESSION" = labwc ]; then
-# 6. Install labwc + lxqt + XWayland + qterminal + xdotool + grim + fonts.
-#    The permissions-gui scenarios assume `labwc + lxqt on tty3 as
-#    user admin, autologged via greetd` (AGENTS.md), not the
-#    qdwin-shell session that install-qdwin-session-for-vm.sh wires
-#    up. We layer labwc on top — the qdwin user units stay enabled
-#    but inactive (they bind wayland-1; labwc binds wayland-0).
-#
-#    Discovered installs (each missing on baseweed-baked, learned
-#    the hard way when labwc errored out):
-#      - labwc, lxqt-session, lxqt-labwc-session (config files)
-#      - xwayland (provides /usr/bin/Xwayland)
-#      - dejavu-fonts noto-sans-fonts (labwc aborts on no fonts)
-zypper -n install labwc lxqt-session lxqt-labwc-session \
-    qterminal xdotool xhost xwayland git swaybg grim \
-    python314-rich python314-textual python314-mistune \
-    dejavu-fonts google-noto-sans-fonts \
-    perl-Net-DBus \
-    >/dev/null 2>&1 || \
-    echo "[gui-spin] WARN: zypper install of GUI stack failed"
-# python3 → 3.14 on unbaked bases (snapshot's python313-base still owns the
-# unversioned symlink; see scripts/install/lib/qdistro-python.sh)
-command -v python3.14 >/dev/null 2>&1 && [ "$(readlink /usr/bin/python3)" != "python3.14" ] \
-    && ln -sf python3.14 /usr/bin/python3 || true
-fc-cache -f >/dev/null 2>&1 || true
-# grim is how vm-gui makes labwc present a fresh frame before each host
-# capture (see labwc_present_frame in scripts/vm/vm-gui); without it every
-# labwc-lane screenshot fails closed, so refuse the golden here instead.
-command -v grim >/dev/null 2>&1 \
-    || { echo "[gui-spin] ERROR: grim is not installed; vm-gui cannot refresh labwc frames"; exit 1; }
-
-# Install the qdistro labwc-startup override + session wrapper.
-install -m 0755 "$SRC/deploy/qdistro-startlxqtwayland.sh" \
-                /usr/local/bin/startlxqtwayland
-install -m 0755 "$SRC/deploy/qdistro-lxqt-session-wrap.sh" \
-                /usr/local/bin/qdistro-lxqt-session-wrap
-
-# 7. Env-setup wrapper. Greetd's initial_session doesn't run a
-#    full PAM stack, so XDG_RUNTIME_DIR is unset; labwc also wants
-#    WLR_RENDERER_ALLOW_SOFTWARE in software-only VMs.
-cat > /usr/local/bin/greetd-labwc-wrap <<'WRAP'
-#!/bin/bash
-export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null
-chmod 0700 "$XDG_RUNTIME_DIR" 2>/dev/null
-export XDG_SESSION_TYPE=wayland
-export WLR_RENDERER_ALLOW_SOFTWARE=1
-export WLR_NO_HARDWARE_CURSORS=1
-exec /usr/local/bin/startlxqtwayland
-WRAP
-chmod +x /usr/local/bin/greetd-labwc-wrap
-
-# 8. Run labwc from admin's lingering user manager. The former tty1 agetty
-#    autologin path exits immediately on current Tumbleweed after login(1), so
-#    getty hits its start limit and no compositor survives a golden reboot.
-#    The user manager is already kept alive by loginctl linger, and admin has
-#    the seat/render/input groups needed by labwc, making it a stable boot-time
-#    owner for the test compositor.
-mkdir -p /home/admin/.config/systemd/user
-cat > /home/admin/.config/systemd/user/qdistro-labwc.service <<'EOF2'
-[Unit]
-Description=qdistro labwc GUI test session
-After=default.target
-
-[Service]
-UnsetEnvironment=WAYLAND_DISPLAY DISPLAY
-Environment=XDG_RUNTIME_DIR=/run/user/1000
-Environment=XDG_SESSION_TYPE=wayland
-Environment=WLR_RENDERER_ALLOW_SOFTWARE=1
-Environment=WLR_NO_HARDWARE_CURSORS=1
-ExecStart=/usr/local/bin/startlxqtwayland
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-EOF2
-chown -R admin:users /home/admin/.config/systemd/user
-
-# 8-wp. Desktop wallpaper for the labwc lane. Without it the desktop outside
-#       app windows is solid black: labwc's autostart (seeded from
-#       lxqt-labwc-session's /usr/share/lxqt/wayland/labwc by startlxqtwayland)
-#       runs `swaybg -i /usr/share/wallpapers/openSUSEdefault/...`, an image
-#       this image never installs, so swaybg shows nothing. An empty desktop
-#       then reads as a dead display and vm-gui refuses it as near-black.
-#       This must run BEFORE qdistro-labwc.service first starts (step below):
-#       the helper seeds ~/.config/lxqt/labwc itself, so startlxqtwayland's
-#       first-run copy is skipped and cannot overwrite the edit. The helper
-#       fails closed if swaybg is missing, replaces any other swaybg line,
-#       and drops the distro swayidle `wlopm --off` idle-blanking line.
-#       Test image only; the product's labwc defaults are untouched.
-install_test_wallpaper
-# Runs as root ($SRC is root's 0700 home), then hands the tree to admin.
-install -d -m 0755 -o admin -g users /home/admin/.config/lxqt
-sh "$SRC/scripts/vm/assets/labwc-test-wallpaper.sh" \
-    /home/admin/.config/lxqt/labwc "$TEST_WALLPAPER" \
-    || { echo "[gui-spin] ERROR: could not point labwc's swaybg at the test wallpaper"; exit 1; }
-chown -R admin:users /home/admin/.config/lxqt
-
-# 8a. spice-vdagent must be absent: fresh-vm-bootstrap.sh §0c removes and
-#     locks it (it rides in on xwayland's supplements). Under labwc,
-#     lxqt-session autostarts it and it loops on the missing Mutter API
-#     (~500k journal lines / 3 min), so fail closed if the lock was bypassed.
-if rpm -q spice-vdagent >/dev/null 2>&1; then
-    echo "[gui-spin] ERROR: spice-vdagent is installed despite the zypper lock (fresh-vm-bootstrap.sh §0c)" >&2
-    exit 1
-fi
-fi  # end labwc-only steps 6-8
-
 # 8b. Display-resolution fix — make virtio_gpu the DRM driver instead
 #     of the generic vesa/simple framebuffer.
-#     Generic — runs for BOTH the labwc and qdwin profiles (qdwin's weston
-#     drm-backend also wants virtio_gpu to win over simpledrm).
+#     qdwin's weston drm-backend wants virtio_gpu to win over simpledrm.
 #
 #     The template (create-template-domain.sh, default path) now
 #     exposes a bare virtio-gpu-pci device (no VGA-compat shim), so
@@ -599,193 +338,149 @@ elif command -v update-bootloader >/dev/null 2>&1; then
         || echo "[gui-spin] WARN: update-bootloader failed"
 fi
 
-# greetd stays masked in BOTH profiles (it would grab the DRM seat and block
-# admin's lingering user manager — see fresh-vm-bootstrap.sh). The two profiles
-# differ only in which session admin's user manager runs.
+# greetd stays masked (it would grab the DRM seat and block admin's lingering
+# user manager — see fresh-vm-bootstrap.sh).
 systemctl mask greetd.service 2>/dev/null || true
 
-if [ "$SESSION" = labwc ]; then
-    # labwc: admin's lingering user manager starts labwc on wayland-0; the
-    # qdwin session units would race it for the DRM seat, so disable them.
-    # qdlocker.service too: it binds qdwin_locker_v1 on wayland-1 and cannot
-    # run under labwc. Older qdlocker units were WantedBy=default.target, so a
-    # base built with one carries a default.target.wants link that started the
-    # locker here and crash-looped it every 2s for the life of the VM (qci
-    # 2026-09-23: 92 restarts/3 min, coredump spam, journald suppressing the
-    # admin session's messages). `disable` removes every enablement link.
-    systemctl set-default multi-user.target >/dev/null
-    systemctl daemon-reload
-    systemctl disable --now getty@tty1.service >/dev/null 2>&1 || true
-    runuser -l admin -c 'systemctl --user disable --now qdwin-session.target qdwin-compositor.service qdshell.service qdlocker.service 2>/dev/null' || true
-    runuser -l admin -c 'systemctl --user daemon-reload'
-    runuser -l admin -c 'systemctl --user enable --now qdistro-labwc.service'
-
-    # Wait up to 30s for admin's wayland-0 socket to appear (labwc up).
-    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-        if [ -e /run/user/1000/wayland-0 ]; then
-            echo "[gui-spin] wayland-0 socket up after ${i}s"
-            break
-        fi
-        sleep 2
-    done
+# 8c. Keep the qdwin compositor + qdshell session that fresh-vm-bootstrap.sh
+#     staged and started under admin's lingering user manager (deploy-named
+#     units qdwin-compositor.service / qdshell.service, pulled in by
+#     qdwin-session.target — see install-qdwin-session-for-vm.sh). Ensure the
+#     target is enabled + (re)started (idempotent — bootstrap normally already
+#     has wayland-1 up) and wait for the wayland-1 socket.
+# GUI CI has no host-side SPICE/RDP viewer, so it does not need the GL-only
+# virtio cursor-plane path used by an interactive desktop. Pin Pixman in
+# disposable qdwin workers: virtio-gpu's GL/KMS path can begin rejecting
+# every atomic commit when a full-output LOCK-layer surface appears, leaving
+# screenshots black even though the locker and input protocol are healthy.
+# Pixman renders the same guest UI deterministically and keeps every GUI
+# pixel inside the VM. Pin the output to the VM helper's 1280x800 QMP
+# coordinate space too: if Weston switches from the firmware 1280x800 mode
+# to production's 1920x1080 after a test samples the framebuffer, absolute
+# tablet input is rescaled between observation and injection. Fixed mode +
+# renderer are test-profile policy only; production's installer continues
+# to default to renderer=gl and its normal 1920x1080 output.
+if grep -q '^renderer=' /home/admin/weston.ini; then
+    sed -i 's/^renderer=.*/renderer=pixman/' /home/admin/weston.ini
 else
-    # 8c. qdwin profile: keep the qdwin compositor + qdshell session that
-    #     fresh-vm-bootstrap.sh staged and started under admin's lingering user
-    #     manager (deploy-named units qdwin-compositor.service / qdshell.service,
-    #     pulled in by qdwin-session.target — see install-qdwin-session-for-vm.sh).
-    #     Ensure the target is enabled + (re)started (idempotent — bootstrap
-    #     normally already has wayland-1 up) and wait for the wayland-1 socket.
-    # GUI CI has no host-side SPICE/RDP viewer, so it does not need the GL-only
-    # virtio cursor-plane path used by an interactive desktop. Pin Pixman in
-    # disposable qdwin workers: virtio-gpu's GL/KMS path can begin rejecting
-    # every atomic commit when a full-output LOCK-layer surface appears, leaving
-    # screenshots black even though the locker and input protocol are healthy.
-    # Pixman renders the same guest UI deterministically and keeps every GUI
-    # pixel inside the VM. Pin the output to the VM helper's 1280x800 QMP
-    # coordinate space too: if Weston switches from the firmware 1280x800 mode
-    # to production's 1920x1080 after a test samples the framebuffer, absolute
-    # tablet input is rescaled between observation and injection. Fixed mode +
-    # renderer are test-profile policy only; production's installer continues
-    # to default to renderer=gl and its normal 1920x1080 output.
-    if grep -q '^renderer=' /home/admin/weston.ini; then
-        sed -i 's/^renderer=.*/renderer=pixman/' /home/admin/weston.ini
-    else
-        sed -i '/^\[core\]$/a renderer=pixman' /home/admin/weston.ini
-    fi
-    if grep -q '^mode=' /home/admin/weston.ini; then
-        sed -i 's/^mode=.*/mode=1280x800@60/' /home/admin/weston.ini
-    else
-        sed -i '/^\[output\]$/a mode=1280x800@60' /home/admin/weston.ini
-    fi
-    grep -qx 'renderer=pixman' /home/admin/weston.ini \
-        || { echo "[gui-spin] ERROR: failed to pin qdwin GUI renderer to pixman"; exit 1; }
-    grep -qx 'mode=1280x800@60' /home/admin/weston.ini \
-        || { echo "[gui-spin] ERROR: failed to pin qdwin GUI output to 1280x800"; exit 1; }
+    sed -i '/^\[core\]$/a renderer=pixman' /home/admin/weston.ini
+fi
+if grep -q '^mode=' /home/admin/weston.ini; then
+    sed -i 's/^mode=.*/mode=1280x800@60/' /home/admin/weston.ini
+else
+    sed -i '/^\[output\]$/a mode=1280x800@60' /home/admin/weston.ini
+fi
+grep -qx 'renderer=pixman' /home/admin/weston.ini \
+    || { echo "[gui-spin] ERROR: failed to pin qdwin GUI renderer to pixman"; exit 1; }
+grep -qx 'mode=1280x800@60' /home/admin/weston.ini \
+    || { echo "[gui-spin] ERROR: failed to pin qdwin GUI output to 1280x800"; exit 1; }
 
-    # Make the compositor's VT unstealable by an injected chord.
-    #
-    # A GUI scenario that sends Super+Left (qdwin/tests/gui/19-wm-policy.md
-    # drives tile-left with it) was switching the VT away from the compositor,
-    # which kills the seat: seatd revokes the evdev fds, weston drops DRM
-    # master, and since capture is only serviced during a repaint EVERY later
-    # screenshot in the scenario fails. Two independent causes, both fixed here
-    # because either alone is sufficient and neither needs a golden rebake:
-    #
-    #  1. The chord reaches the KERNEL console, not just weston. weston shares
-    #     tty1 with a stock getty@tty1 (the autologin drop-in above is
-    #     labwc-only), and getty's start-time TTY reset reverts the K_OFF that
-    #     seatd installed — journals show injected keystrokes landing in
-    #     login(1) as `FAILED LOGIN 1 FROM tty1`. With the console keyboard
-    #     live, the openSUSE xkb-converted keymap makes Super+Left a console
-    #     switch outright: `keycode 125 = Alt` and `alt keycode 105 =
-    #     Decr_Console` (/usr/share/kbd/keymaps/xkb/us.map.gz:92,106).
-    #     Nothing in the qdwin profile uses tty1 — CI drives the VM over
-    #     qemu-guest-agent and serial-getty@ttyS0 — so disable it. That also
-    #     stops test keystrokes leaking into a login prompt.
-    #
-    #  2. Decr_Console had somewhere to land only because logind reserves a VT.
-    #     `ReserveVT` defaults to 6 and marks tty6 busy unconditionally, so the
-    #     kernel's downward scan (which wraps from 62) stopped at tty6 —
-    #     deterministically, which is why every occurrence names tty6.
-    #     ReserveVT=0 + NAutoVTs=0 leave tty2-6 unallocated, so the switch
-    #     becomes a no-op even if a console keyboard is somehow live.
-    #
-    # NB: this is NOT what weston.ini's vt-switching=false covers. That closes
-    # weston's own Ctrl+Alt+F1..F8 bindings, a separate path this chord never
-    # touches. Keep both.
-    systemctl disable --now getty@tty1.service >/dev/null 2>&1 || true
-    mkdir -p /etc/systemd/logind.conf.d
-    cat > /etc/systemd/logind.conf.d/99-qdwin-no-spare-vts.conf <<'EOF2'
+# Make the compositor's VT unstealable by an injected chord.
+#
+# A GUI scenario that sends Super+Left (qdwin/tests/gui/19-wm-policy.md
+# drives tile-left with it) was switching the VT away from the compositor,
+# which kills the seat: seatd revokes the evdev fds, weston drops DRM
+# master, and since capture is only serviced during a repaint EVERY later
+# screenshot in the scenario fails. Two independent causes, both fixed here
+# because either alone is sufficient and neither needs a golden rebake:
+#
+#  1. The chord reaches the KERNEL console, not just weston. weston shares
+#     tty1 with a stock getty@tty1, and getty's start-time TTY reset reverts the K_OFF that
+#     seatd installed — journals show injected keystrokes landing in
+#     login(1) as `FAILED LOGIN 1 FROM tty1`. With the console keyboard
+#     live, the openSUSE xkb-converted keymap makes Super+Left a console
+#     switch outright: `keycode 125 = Alt` and `alt keycode 105 =
+#     Decr_Console` (/usr/share/kbd/keymaps/xkb/us.map.gz:92,106).
+#     Nothing in the qdwin profile uses tty1 — CI drives the VM over
+#     qemu-guest-agent and serial-getty@ttyS0 — so disable it. That also
+#     stops test keystrokes leaking into a login prompt.
+#
+#  2. Decr_Console had somewhere to land only because logind reserves a VT.
+#     `ReserveVT` defaults to 6 and marks tty6 busy unconditionally, so the
+#     kernel's downward scan (which wraps from 62) stopped at tty6 —
+#     deterministically, which is why every occurrence names tty6.
+#     ReserveVT=0 + NAutoVTs=0 leave tty2-6 unallocated, so the switch
+#     becomes a no-op even if a console keyboard is somehow live.
+#
+# NB: this is NOT what weston.ini's vt-switching=false covers. That closes
+# weston's own Ctrl+Alt+F1..F8 bindings, a separate path this chord never
+# touches. Keep both.
+systemctl disable --now getty@tty1.service >/dev/null 2>&1 || true
+mkdir -p /etc/systemd/logind.conf.d
+cat > /etc/systemd/logind.conf.d/99-qdwin-no-spare-vts.conf <<'EOF2'
 # qdwin GUI test profile: no reserved/auto VT for an injected console chord to
 # switch to. See spin-test-vm-gui.sh for the full rationale.
 [Login]
 ReserveVT=0
 NAutoVTs=0
 EOF2
-    systemctl restart systemd-logind >/dev/null 2>&1 || true
+systemctl restart systemd-logind >/dev/null 2>&1 || true
 
-    # DESKTOP WALLPAPER: see install_test_wallpaper above (qdshell reads
-    # ~/Pictures/Wallpapers, where it installs the pattern).
-    install_test_wallpaper
+# DESKTOP WALLPAPER: see install_test_wallpaper above (qdshell reads
+# ~/Pictures/Wallpapers, where it installs the pattern).
+install_test_wallpaper
 
-    systemctl daemon-reload
-    runuser -l admin -c 'systemctl --user enable qdwin-session.target 2>/dev/null' || true
-    runuser -l admin -c 'systemctl --user start qdwin-session.target' || true
-    # Bootstrap normally started the session before this test-profile layer was
-    # applied. Restart the compositor so the new renderer is active in the
-    # golden, then reconnect its shell and optional standalone locker peers.
-    runuser -l admin -c 'systemctl --user restart qdwin-compositor.service'
-    for _i in $(seq 1 30); do
-        [ -S /run/user/1000/wayland-1 ] && break
-        sleep 0.5
-    done
-    [ -S /run/user/1000/wayland-1 ] \
-        || { echo "[gui-spin] ERROR: qdwin compositor restart did not recreate wayland-1"; exit 1; }
-    runuser -l admin -c 'systemctl --user restart qdshell.service'
-    runuser -l admin -c 'systemctl --user try-restart qdlocker.service 2>/dev/null' || true
+systemctl daemon-reload
+runuser -l admin -c 'systemctl --user enable qdwin-session.target 2>/dev/null' || true
+runuser -l admin -c 'systemctl --user start qdwin-session.target' || true
+# Bootstrap normally started the session before this test-profile layer was
+# applied. Restart the compositor so the new renderer is active in the
+# golden, then reconnect its shell and optional standalone locker peers.
+runuser -l admin -c 'systemctl --user restart qdwin-compositor.service'
+for _i in $(seq 1 30); do
+    [ -S /run/user/1000/wayland-1 ] && break
+    sleep 0.5
+done
+[ -S /run/user/1000/wayland-1 ] \
+    || { echo "[gui-spin] ERROR: qdwin compositor restart did not recreate wayland-1"; exit 1; }
+runuser -l admin -c 'systemctl --user restart qdshell.service'
+runuser -l admin -c 'systemctl --user try-restart qdlocker.service 2>/dev/null' || true
 
-    # Wait up to 60s for admin's wayland-1 socket (qdwin compositor up). The
-    # compositor restarts on-failure, so give it longer than the labwc path.
-    for i in $(seq 1 30); do
-        if [ -S /run/user/1000/wayland-1 ]; then
-            echo "[gui-spin] wayland-1 socket up after $((i*2))s (qdwin compositor)"
-            break
-        fi
-        sleep 2
-    done
-    if [ ! -S /run/user/1000/wayland-1 ]; then
-        # Fail CLOSED: the whole point of this profile is to hand back a VM
-        # running qdwin+qdshell. If the compositor never came up, returning a
-        # VM name would let downstream qdwin/qdshell lanes run against a VM that
-        # does not satisfy the requested profile. Dump diagnostics, then abort
-        # (this exit propagates through vm-exec to the host spinner's set -e).
-        echo "[gui-spin] ERROR: wayland-1 socket did not appear within 60s — qdwin compositor failed to start"
-        runuser -l admin -c 'systemctl --user --no-pager status qdwin-session.target qdwin-compositor.service qdshell.service 2>&1 | head -40' || true
-        runuser -l admin -c 'journalctl --user -u qdwin-compositor.service -u qdshell.service --no-pager -n 40 2>&1' || true
-        exit 1
+# Wait up to 60s for admin's wayland-1 socket (qdwin compositor up). The
+# compositor restarts on-failure, so give it time.
+for i in $(seq 1 30); do
+    if [ -S /run/user/1000/wayland-1 ]; then
+        echo "[gui-spin] wayland-1 socket up after $((i*2))s (qdwin compositor)"
+        break
     fi
+    sleep 2
+done
+if [ ! -S /run/user/1000/wayland-1 ]; then
+    # Fail CLOSED: the whole point of this profile is to hand back a VM
+    # running qdwin+qdshell. If the compositor never came up, returning a
+    # VM name would let downstream qdwin/qdshell lanes run against a VM that
+    # does not satisfy the requested profile. Dump diagnostics, then abort
+    # (this exit propagates through vm-exec to the host spinner's set -e).
+    echo "[gui-spin] ERROR: wayland-1 socket did not appear within 60s — qdwin compositor failed to start"
+    runuser -l admin -c 'systemctl --user --no-pager status qdwin-session.target qdwin-compositor.service qdshell.service 2>&1 | head -40' || true
+    runuser -l admin -c 'journalctl --user -u qdwin-compositor.service -u qdshell.service --no-pager -n 40 2>&1' || true
+    exit 1
 fi
 
 # Confirm the surface the scenarios need:
-echo "--- post-install state ($SESSION) ---"
-# labwc-only: the work/work2 fixtures are provisioned on that profile alone
-# (see the fixture block above). Under `set -e` an unguarded `id work` here
-# aborts the whole qdwin bake, because on qdwin those accounts correctly do
-# not exist.
-if [ "$SESSION" = labwc ]; then
-    id work
-    id work2
-fi
-ls -l /usr/local/bin/qdistro-{test-permission,start-admin-app,start-admin-tui}
-ls -l /usr/local/bin/qdistro-admin-tui
-ls -l /home/admin/qdistro/admin_app/qdistro_admin_app.py
-ls -l /home/admin/qdistro/tui/qdistro_admin_tui.py
+echo "--- post-install state (qdwin) ---"
+ls -l /usr/local/bin/qdistro-test-permission /usr/local/bin/qdistro-start-admin-app \
+      /usr/local/bin/qdistro-admin-approval-app
+ls -l /usr/local/bin/qdistro-admin-tui /usr/local/lib/qdistro/admin-tui/qdistro_admin_tui.py
 ls -l /etc/dracut.conf.d/90-qdistro-virtio-gpu.conf 2>&1 \
     || echo "WARN: virtio-gpu dracut conf not installed"
 grep -H "simpledrm_platform_driver_init" /etc/default/grub 2>&1 \
     || echo "WARN: simpledrm blacklist not in GRUB cmdline"
-if [ "$SESSION" = labwc ]; then
-    ls -l /usr/local/bin/startlxqtwayland /usr/local/bin/qdistro-lxqt-session-wrap
-    ls -l /home/admin/.config/qterminal.org/qterminal.ini
-    ls -l /run/user/1000/wayland-0 2>&1 || echo "WARN: wayland-0 not up"
-    ps -ef | grep -E "labwc|lxqt|Xwayland" | grep -v grep | head -5
-else
-    # qdwin profile: the compositor socket, the vendored libweston the clamp/
-    # popup-grab paths need, and the live qs (qdshell) + weston processes.
-    ls -l /run/user/1000/wayland-1 2>&1 || echo "WARN: wayland-1 not up"
-    ls -ld /usr/libexec/qdistro/qdwin-libweston/lib64 2>&1 \
-        || echo "WARN: vendored libweston not installed (popup clamp/grab will be absent)"
-    runuser -l admin -c 'systemctl --user is-active qdwin-compositor.service qdshell.service' 2>&1 || true
-    grep -qx 'renderer=pixman' /home/admin/weston.ini \
-        || { echo "ERROR: qdwin GUI test profile is not using pixman"; exit 1; }
-    grep -qx 'mode=1280x800@60' /home/admin/weston.ini \
-        || { echo "ERROR: qdwin GUI test profile is not using its fixed 1280x800 mode"; exit 1; }
-    ps -ef | grep -E "[w]eston|[q]s -p|quickshell" | head -5 || true
-fi
+# The compositor socket, the vendored libweston the clamp/popup-grab paths
+# need, and the live qs (qdshell) + weston processes.
+ls -l /run/user/1000/wayland-1 2>&1 || echo "WARN: wayland-1 not up"
+ls -ld /usr/libexec/qdistro/qdwin-libweston/lib64 2>&1 \
+    || echo "WARN: vendored libweston not installed (popup clamp/grab will be absent)"
+runuser -l admin -c 'systemctl --user is-active qdwin-compositor.service qdshell.service' 2>&1 || true
+grep -qx 'renderer=pixman' /home/admin/weston.ini \
+    || { echo "ERROR: qdwin GUI test profile is not using pixman"; exit 1; }
+grep -qx 'mode=1280x800@60' /home/admin/weston.ini \
+    || { echo "ERROR: qdwin GUI test profile is not using its fixed 1280x800 mode"; exit 1; }
+ps -ef | grep -E "[w]eston|[q]s -p|quickshell" | head -5 || true
 echo "--- done ---"
 POSTBOOT
 )
-$VMEXEC "$VM" "echo $B64 | base64 -d | VM_PASSWORD='$VM_PASSWORD' QDISTRO_VM_GUI_SESSION='$GUI_SESSION' GOLDEN_CLONE='$GOLDEN_CLONE' bash" >&2
+$VMEXEC "$VM" "echo $B64 | base64 -d | VM_PASSWORD='$VM_PASSWORD' GOLDEN_CLONE='$GOLDEN_CLONE' bash" >&2
 
 # Note on display resolution (FIXED — verify on a live boot):
 #   Earlier templates used QXL / virtio-vga (VGA-compat shim), which
@@ -813,8 +508,8 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | VM_PASSWORD='$VM_PASSWORD' QDISTRO_VM_GUI
 #   here; a live boot must confirm the >640×480 mode. The §8b changes
 #   take effect on the NEXT boot — the just-bootstrapped VM is still on
 #   its original initramfs, so reboot it (`virsh reboot $VM`) before
-#   running geometry-sensitive scenarios (e.g. 35).
+#   running geometry-sensitive scenarios.
 
-echo "[gui-spin] step 3/3: ready ($GUI_SESSION session). Scenarios can target VMNAME=$VM" >&2
+echo "[gui-spin] step 3/3: ready (qdwin session). Scenarios can target VMNAME=$VM" >&2
 # Final stdout line: the VM name, matching spin-test-vm.sh's contract.
 echo "$VM"

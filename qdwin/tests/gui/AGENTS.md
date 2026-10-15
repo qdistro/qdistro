@@ -1,9 +1,9 @@
 # qdwin GUI test runner — for graphic-aware subagents
 
-This is the qdwin-on-tty3 sibling of `phase1/gui-tests/AGENTS.md`. The
-older guide assumes labwc + XWayland (Phase 1-5 demo); qdwin runs on
-bare DRM via libweston with no XWayland in this profile, so the input
-and observation primitives are different.
+This is the qdwin-on-tty3 sibling of
+`tests/integration/permissions-gui/AGENTS.md`. (The older labwc + XWayland
+harness of the Phase 1-5 demo is retired.) qdwin runs on bare DRM via
+libweston, so the input and observation primitives are the ones below.
 
 ## Roles
 

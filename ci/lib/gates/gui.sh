@@ -72,20 +72,6 @@ run_qdwin_executable_gui_smokes() {
         _record_headless_smoke_skips "golden lacks QDWIN_ENABLE_SHELL_CAPTURE=1 (qdwin_screenshot needs the shell-capture path); rebake the golden with fresh-vm-bootstrap"
         return 0
     fi
-    if [ "${QCI_GUI_SKIP_QDWIN:-0}" = 1 ]; then
-        for scenario in \
-            agent-mvp-session-smoke.sh \
-            agent-protocol-audit.sh \
-            agent-cursor-clickthrough-smoke.sh \
-            agent-click-smoke.sh
-        do
-            record_result gui "qdwin-$scenario" skip 0 pass gui "" "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent smoke skipped"
-        done
-        record_result gui "qdwin-agent-vendored-libweston-verify.sh" skip 0 pass gui "" "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent smoke skipped"
-        record_result gui "qdwin-agent-shell-capture-smoke.sh" skip 0 pass gui "" "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent smoke skipped"
-        _record_headless_smoke_skips "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent smoke skipped"
-        return 0
-    fi
     if ! "$VM_TOOLS/vm-exec" "$vm" "test -S /run/user/1000/wayland-1 && ! pgrep -x labwc >/dev/null && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdwin-compositor.service qdshell.service qdistro-cursor-sprites.service >/dev/null" >/dev/null 2>&1; then
         for scenario in \
             agent-mvp-session-smoke.sh \
@@ -177,7 +163,9 @@ run_qdwin_executable_gui_smokes() {
 # symlink (for example /home/me/ws/qdwin/... while WORKSPACE/qdwin is a
 # symlink), and qdistro itself may be running from a git worktree outside the
 # normal WORKSPACE/qdistro path.  Raw prefix stripping misclassified those
-# paths as gui-admin, so qdwin/qdlocker scenarios booted the wrong VM profile.
+# paths (when there were two GUI VM profiles, qdwin/qdlocker scenarios booted
+# the wrong one), and the logical ids are what results.tsv and the A/B
+# manifest key on.
 # Canonicalize both sides and map known project roots back to project/path.
 gui_scenario_rel() {
     local scenario=$1 canonical root project repo_var repo
@@ -185,8 +173,8 @@ gui_scenario_rel() {
 
     # Components FIRST, qdistro (the repo root) LAST: in the monorepo every
     # component root lies INSIDE $QDISTRO_REPO, so testing qdistro first would
-    # label qdwin/tests/gui/x.md as "qdistro/qdwin/tests/gui/x.md" and route it
-    # to the admin lane. Most-specific root wins; the logical ids stay
+    # label qdwin/tests/gui/x.md as "qdistro/qdwin/tests/gui/x.md". Most-specific
+    # root wins; the logical ids stay
     # "qdwin/..." and "qdistro/tests/..." exactly as before the migration, so
     # results.tsv subjects and ci/integrity/ab-manifest.tsv are unchanged.
     for project in qdwin qdshell qdlocker qdistro; do
@@ -212,64 +200,6 @@ gui_scenario_rel() {
     esac
 }
 
-gui_scenario_requires_qdwin() {
-    local rel=$1
-    # The admin-app scenarios ported off the labwc/XWayland lane: they run the
-    # SHIPPED native-Wayland admin app on the product session
-    # (permissions-gui/AGENTS.md, "qdwin lane"). Matched with or without the
-    # leading `qdistro/` that gui_scenario_rel may print.
-    case "${rel#qdistro/}" in
-        tests/integration/permissions-gui/03-qt-admin-app-visual.md|\
-        tests/integration/permissions-gui/04-qt-admin-app-approve.md|\
-        tests/integration/permissions-gui/06-qt-admin-app-mouse.md|\
-        tests/integration/permissions-gui/08-admin-app-survives-broker-restart.md|\
-        tests/integration/permissions-gui/10-qt-cache-revoke.md|\
-        tests/integration/permissions-gui/12-cross-user-sendto-visual.md|\
-        tests/integration/permissions-gui/13-cross-user-sendto-deny.md|\
-        tests/integration/permissions-gui/14-cross-user-sendto-forbidden-scope.md|\
-        tests/integration/permissions-gui/34-admin-app-multi-pending-nav.md|\
-        tests/integration/permissions-gui/43-qsu-admin-app-argv-prompt.md|\
-        tests/integration/permissions-gui/47-qsu-delegated-guard-forever-exe-rejected.md|\
-        tests/integration/permissions-gui/62-admin-approval-password-prompt.md|\
-        tests/integration/workflow-gui/04-admin-workflowstab-list-run-view.md)
-            return 0 ;;
-    esac
-    case "$rel" in
-        qdwin/tests/gui/[0-9][0-9]-*.md|\
-        qdwin/tests/apps/[0-9][0-9]-*.md|\
-        qdistro/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md|\
-        tests/integration/qdwin-noctalia/[0-9][0-9]-*.md|\
-        qdistro/tests/integration/presentation-gui/[0-9][0-9]-*.md|\
-        tests/integration/presentation-gui/[0-9][0-9]-*.md|\
-        qdlocker/tests/gui/[0-9][0-9]-*.md|\
-        qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md|\
-        tests/integration/permissions-gui/18-podapps-launcher-badge.md|\
-        qdistro/tests/integration/permissions-gui/19-tier5-loopback-visible.md|\
-        tests/integration/permissions-gui/19-tier5-loopback-visible.md|\
-        qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md|\
-        tests/integration/permissions-gui/20-tier5-vm-cold-start.md|\
-        qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md|\
-        tests/integration/permissions-gui/21-tier5-close-cleanup.md|\
-        qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md|\
-        tests/integration/permissions-gui/56-tier4-rdp-window-visible.md|\
-        qdistro/tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md|\
-        tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md|\
-        qdistro/tests/integration/permissions-gui/58-tier3s-window-visible.md|\
-        tests/integration/permissions-gui/58-tier3s-window-visible.md|\
-        qdistro/tests/integration/permissions-gui/59-tier3s-close-cleanup.md|\
-        tests/integration/permissions-gui/59-tier3s-close-cleanup.md|\
-        qdistro/tests/integration/permissions-gui/60-vmapps-manifest-catalogue.md|\
-        tests/integration/permissions-gui/60-vmapps-manifest-catalogue.md|\
-        qdistro/tests/integration/permissions-gui/61-window-chrome-context-menu.md|\
-        tests/integration/permissions-gui/61-window-chrome-context-menu.md|\
-        qdistro/tests/integration/permissions-gui/63-tier5-launch-password-prompt.md|\
-        tests/integration/permissions-gui/63-tier5-launch-password-prompt.md)
-            return 0 ;;
-        *)
-            return 1 ;;
-    esac
-}
-
 # True (0) when a qdwin GUI scenario drives the REMOVED legacy qdshell.py
 # ctrl-socket — detected by CONTENT: the `qdwin_ctrl` shell helper or a raw
 # `socat … /run/user/1000/qdshell.sock` call. The shipping session is Quickshell,
@@ -281,9 +211,9 @@ gui_scenario_requires_qdwin() {
 # deterministically by content (so MODERN qs-ipc scenarios — e.g. gui/17,18 — and
 # app-launch tests still run), unless the explicit legacy lane is requested with
 # QCI_GUI_RUN_LEGACY_QDWIN_MD=1. Detection is content-based rather than the old
-# runtime `legacy_ctrl` probe, which was unsound (it ran on the gui-admin VM while
-# the scenarios run on gui-qdwin, and the modern qs server owns the same socket
-# path, so the probe false-positived across profiles and flipped a green run red).
+# runtime `legacy_ctrl` probe, which was unsound (the modern qs server owns the
+# same socket path, so the probe false-positived and flipped a green run red;
+# it is gone).
 # Arg: absolute or workspace-relative scenario path.
 gui_scenario_uses_legacy_ctrl() {
     local file=$1
@@ -817,7 +747,7 @@ Rules:
   vm-exec/vm-gui helpers and virsh. qci deliberately makes the host desktop
   sockets unavailable to this agent process.
 - For every model-targeted mouse click, use the two-phase command-line workflow;
-  never call raw \`vm-gui click X Y\` or \`xdotool click\` directly:
+  never call raw \`vm-gui click X Y\` directly:
   1. Activate the target window and run
      \`$QDISTRO_REPO/scripts/vm/vm-gui "\$VMNAME" click-preview X Y "visible target label"\`.
      This moves the real VM pointer to (X,Y) without pressing a button, waits,
@@ -1013,8 +943,10 @@ Rules:
   material. Three consequences, and they are the whole contract:
     1. CAPTURE THROUGH THE TOOL. A frame counts only when it came from
        \`$QDISTRO_REPO/scripts/vm/vm-gui "\$VMNAME" screenshot ...\`,
-       \`... screenshot-fresh ...\`, or a click-preview/click-confirm. A PNG you
-       produced any other way is not evidence and cannot make a verdict green.
+       \`... screenshot-fresh ...\`, a click-preview/click-confirm, or the
+       \`qdwin_screenshot\` / \`qdwin_apps_screenshot\` helper the scenario
+       names. A PNG you produced any other way is not evidence and cannot make a
+       verdict green.
     2. CAPTURE INTO THE ARTIFACT DIRECTORY, e.g.
        \`$QDISTRO_REPO/scripts/vm/vm-gui "\$VMNAME" screenshot $artifact_dir/s1.png\`
        (click-preview captures already land there). A capture written elsewhere
@@ -1080,8 +1012,8 @@ Rules:
   exactly as written, between the input and the capture. Do not add waits or
   re-captures the scenario does not authorize, and never past a deadline it
   states: a frame taken at a scenario's deadline stands. Where a scenario
-  authorizes a late re-capture (permissions-gui/05 does), take it once, to a
-  NEW name, and judge from it.
+  authorizes a late re-capture, take it once, to a NEW name, and judge from
+  it.
 - NEVER kill a running \`vm-exec\` and re-issue the same driver. Its periodic
   \`[vm-exec] Waiting... (polls=Ns elapsed=Ns)\` lines mean the TRANSPORT IS
   HEALTHY and your guest command is still running; they are progress, not a
@@ -1195,10 +1127,10 @@ Rules:
   \`Permission denied\` and produces a black screenshot that looks like a product
   failure (permissions-gui/50, full-20260914T194046Z-13620). Redirect YOUR OWN
   logs to \`/tmp/qci/$slug/<name>.log\`. Do NOT invent a shipped log path to
-  clear: the admin launchers write under
-  \`\${XDG_STATE_HOME:-/home/admin/.local/state}/qdistro/\` (admin-app.log,
-  qterminal-tui.log), which is per-user and not a shared /tmp path — read it for
-  diagnostics, never delete it as root.
+  clear: the shipped admin-app launcher logs to a fresh private
+  \`/run/user/1000/qdistro-admin-app.*.log\` (it prints the path), and the
+  admin TUI helper logs to \`/run/qci-admin-tui/foot.log\` -- read them for
+  diagnostics, never delete them as root.
 - Diagnose your OWN tooling before blaming the product:
   - First confirm your setup/driver commands actually executed. A shell
     parser/usage error from one of your own commands (e.g. \`option requires an
@@ -1542,7 +1474,7 @@ gui_visual_frames() {
 #
 # Written by every harness CAPTURE TOOL -- one row per frame it captures -- via
 # the shared scripts/vm/lib/capture-attest.sh:
-#     qdistro/scripts/vm/vm-gui            (virsh; labwc/admin lane)
+#     qdistro/scripts/vm/vm-gui            (virsh; click preview/confirm)
 #     qdwin/tests/gui/qdwin-helpers.sh     (in-guest qdshell capture; qdwin lane)
 #     qdwin/tests/apps/qdwin-apps-helpers.sh (virsh; qdwin apps lane)
 # and read by the gate. It lives in the RUN TREE, never in the artifact directory: the
@@ -3631,18 +3563,14 @@ gui_job_count() {
 gui_run_scenario() {
     local scenario=$1 provided=${2:-} rel vm prompt log_path status agent_rc frc=0 own=0 vm_live=1 t0 t1 t2 ta0 ta1 gate_name lane adir
     rel=$(gui_scenario_rel "$scenario")
-    # Scheduling lane for the attempt ledger + correlated-burst detector: a qdwin
-    # scenario runs on the heavier gui-qdwin profile, everything else on gui-admin.
-    if gui_scenario_requires_qdwin "$rel"; then lane=qdwin; else lane=admin; fi
+    # Scheduling lane for the attempt ledger + correlated-burst detector. Every
+    # GUI scenario runs on the one GUI profile, the product qdwin session.
+    lane=qdwin
     t0=$(date +%s)
     if [ -n "$provided" ]; then
         vm=$provided
     else
-        if gui_scenario_requires_qdwin "$rel"; then
-            gate_name="gui-qdwin-$(safe_name "$rel")"
-        else
-            gate_name="gui-admin-$(safe_name "$rel")"
-        fi
+        gate_name="gui-qdwin-$(safe_name "$rel")"
         vm=$(acquire_vm "$gate_name" "") || {
             record_result gui "$rel" fail "$EXIT_VM_PROVISION" vm_provision vm "" "GUI VM creation failed"
             record_timing gui "$rel" "$(( $(date +%s) - t0 ))" 0 "$(( $(date +%s) - t0 ))" provfail ""
@@ -3696,12 +3624,6 @@ gui_run_scenario() {
     # set it from the prompt (or a racy `virsh list | head` fallback).
     # QCI_GUI_ARTIFACT_DIR is the SHORT alias (preferred for agents); harvest
     # still grades the canonical adir after recovery.
-    # The admin lane IS labwc: vm-gui then requires labwc's frame refresh
-    # instead of trusting the guest's own "no labwc" (scripts/vm/vm-gui). An
-    # explicit value in the gate's own environment (the operator's, or a
-    # fake-VM test declaring `none`) wins; the scenario driver cannot set it.
-    local vm_gui_session=${QCI_VM_GUI_SESSION:-auto}
-    [ "$lane" = admin ] && vm_gui_session=${QCI_VM_GUI_SESSION:-labwc}
     # QCI_GUI_SCENARIO_AGENT marks the agent process tree: dispatch.sh refuses
     # a nested `qci full|bats|gui|...` from inside it (apps/13 ERROR,
     # full-20261001T124446Z: luna ran `qci gui` on its own VM, hit the run
@@ -3710,7 +3632,7 @@ gui_run_scenario() {
         QCI_SCENARIO_FILE="$scenario" \
         QCI_GUI_SCENARIO_AGENT="$slug" \
         QCI_GUI_ARTIFACT_DIR="$art_alias" QCI_GUI_CAPTURE_LOG="$caplog" \
-        QCI_GUI_VIEW_STATE="$viewstate" QCI_VM_GUI_SESSION="$vm_gui_session" \
+        QCI_GUI_VIEW_STATE="$viewstate" \
         run_agent_command "$prompt" "$log_path" "$obs"
     agent_rc=$?
     ta1=$(date +%s)
@@ -4018,9 +3940,9 @@ gui_run_scenario() {
 # noise. So: present-stack-but-absent-image is a clean SKIP *unless the run opted
 # in*, in which case an absent/broken bake runs and the agent reports ERROR (the
 # build was requested). This is decided HERE, separately from
-# gui_scenario_skip_reason, because it must run BEFORE the qdwin-routing bypass
-# in the dispatch loop (tier-4/5 scenarios are qdwin-required, so the bypass
-# would otherwise skip the stack-presence function entirely). Pure function:
+# gui_scenario_skip_reason, because it must run for disposable runs too, which
+# never consult the stack-presence function (their workers have the outer
+# stack by construction). Pure function:
 # host-testable. Echoes the skip reason, or nothing when the scenario should run.
 #
 # Args: rel tier5_base_present tier4_base_present tier5_optin tier4_optin
@@ -4062,8 +3984,7 @@ gui_scenario_is_gui_apps_lane() {
 # carries the app set (QDWIN_APP_DEPS=1 bake; the gate sets that for the
 # gui-qdwin golden when QCI_GUI_APPS=1). Dispatching them to an agent on a lean
 # golden is what produced a fail-closed UNKNOWN when its SKIP verdict was not
-# captured. Like the tier-base gate, this must run BEFORE the qdwin-routing
-# bypass in the dispatch loop (app scenarios are qdwin-required). Pure (reads
+# captured. Like the tier-base gate, this runs for disposable runs too. Pure (reads
 # only its args) => host-testable. Echoes the skip reason, or nothing when the
 # scenario should run.
 #
@@ -4079,72 +4000,19 @@ gui_scenario_app_deps_skip_reason() {
     return 0
 }
 
-# qterminal/Textual scenarios traverse the legacy XWayland presentation and
-# focus path. They are useful periodic desktop-integration coverage, but are
-# not part of the supported blocking GUI surface: virsh framebuffer captures
-# and X11 focus are independently flaky on the labwc template. Keep the
-# scenarios available in an explicit opt-in lane rather than deleting them.
-#
-# Args: rel xwayland_optin
-# The labwc/XWayland ADMIN lane is opt-in. It drives the admin approvals app
-# (and the other permissions-gui/workflow-gui scenarios that are not routed to
-# the qdwin lane) through labwc + LXQt + XWayland + xdotool with the test-only
-# xcb launcher -- none of which the image ships (image/config.sh) -- and it is
-# the source of the chronic stale/half-drawn frame flakes (XWayland commit vs
-# labwc screencopy). The admin-app scenarios that test shipped behaviour now
-# run on the qdwin lane with the shipped native-Wayland launcher
-# (gui_scenario_requires_qdwin). The lane is kept, not deleted: set
-# QCI_LABWC_ADMIN_LANE=1 (or run `qci gui-admin`) to run it. The qterminal/TUI
-# scenarios behind QCI_XWAYLAND_E2E=1 live on this lane by nature, so that
-# opt-in also admits them. Prints a skip reason, or nothing when the scenario
-# runs. Args: rel labwc_optin xwayland_optin.
-gui_scenario_labwc_lane_skip_reason() {
-    local rel=$1 labwc_optin=${2:-0} xwayland_optin=${3:-0}
-    gui_scenario_requires_qdwin "$rel" && return 0
-    [ "$labwc_optin" = 1 ] && return 0
-    if [ "$xwayland_optin" = 1 ] && \
-            [ -n "$(gui_scenario_xwayland_skip_reason "$rel" 0)" ]; then
-        return 0
-    fi
-    printf '%s\n' "labwc/XWayland admin lane is opt-in (none of labwc, LXQt, XWayland or the xcb launcher ships); set QCI_LABWC_ADMIN_LANE=1 or run \`qci gui-admin\`"
-    return 0
-}
-
-gui_scenario_xwayland_skip_reason() {
-    local rel=$1 xwayland_optin=${2:-0}
-    [ "$xwayland_optin" = 1 ] && return 0
-    case "$rel" in
-        qdistro/tests/integration/permissions-gui/01-tui-approver-visual.md|\
-        qdistro/tests/integration/permissions-gui/02-tui-scope-picker.md|\
-        qdistro/tests/integration/permissions-gui/05-tui-help-overlay.md|\
-        qdistro/tests/integration/permissions-gui/09-tui-broker-offline.md|\
-        qdistro/tests/integration/permissions-gui/35-tui-and-qt-concurrent.md|\
-        qdistro/tests/integration/permissions-gui/40-tui-survives-broker-restart.md)
-            printf '%s\n' "XWayland/qterminal E2E is opt-in (set QCI_XWAYLAND_E2E=1 for the dedicated desktop-integration lane)" ;;
-        qdistro/tests/integration/permissions-gui/16-realapp-sendto-visual.md)
-            # Shows work/work2 qnotebook windows on admin's display through the
-            # xhost SI shared-XWayland expedient, which the product does not have.
-            printf '%s\n' "shared-XWayland real-app send-to is opt-in (set QCI_XWAYLAND_E2E=1 for the dedicated desktop-integration lane)" ;;
-    esac
-    return 0
-}
-
 # Tier-4/5 base-image opt-in skip is handled SEPARATELY by
-# gui_scenario_tier_base_skip_reason (above) so it can run BEFORE the
-# qdwin-routing bypass in the dispatch loop; this function stays purely about
-# OUTER-stack presence.
+# gui_scenario_tier_base_skip_reason (above), which also applies to disposable
+# runs; this function stays purely about OUTER-stack presence.
 #
-# Args: rel legacy_ctrl nested_kvm qdshell_active vm_ssh_port skip_qdwin
+# Consulted only for an explicit --vm (`qci gui --vm`, `qci replay`): disposable
+# runs dispatch every scenario to a fresh worker of the qdwin profile, which
+# has the outer stack by construction.
+#
+# Args: rel nested_kvm qdshell_active
 gui_scenario_skip_reason() {
-    local rel=$1 legacy_ctrl=$2 nested_kvm=$3 qdshell_active=$4 vm_ssh_port=$5 skip_qdwin=${6:-0}
-    if [ "$skip_qdwin" = 1 ] && gui_scenario_requires_qdwin "$rel"; then
-        printf '%s\n' "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent scenario skipped"
-        return 0
-    fi
+    local rel=$1 nested_kvm=$2 qdshell_active=$3
     case "$rel" in
         qdwin/tests/gui/[0-9][0-9]-*.md)
-            # Reached only with an explicit --vm (`qci gui --vm`, `qci replay`):
-            # the default lane routes these to qdwin workers before this point.
             # Legacy ctrl-socket scenarios were already skipped by content
             # (gui_scenario_uses_legacy_ctrl); the runtime legacy_ctrl probe
             # never answers on the Quickshell session, so gating on it skipped
@@ -4194,9 +4062,6 @@ gui_scenario_skip_reason() {
         qdlocker/tests/gui/[0-9][0-9]-*.md)
             [ "$qdshell_active" != 1 ] && \
                 printf '%s\n' "qdshell session not active in this VM profile" ;;
-        qdistro/tests/integration/permissions-gui/55-qsu-selinux-enforcing.md)
-            [ -z "$vm_ssh_port" ] && \
-                printf '%s\n' "VM_SSH_PORT not set for SSH-only SELinux scenario" ;;
     esac
     # Always succeed: a no-skip outcome (empty stdout) must not look like a
     # failure to callers. Without this the trailing `[ ] && printf` short-circuit
@@ -4215,21 +4080,14 @@ gui_scenario_skip_reason() {
 # reporting only — it changes no dispatch decision and fails nothing. Echoes one
 # observation per line, empty when the profile is fully capable. Pure (reads only
 # its args) => host-testable (tests/integration/qci/gui-preflight.bats).
-# Args: skip_qdwin qdshell_active nested_kvm legacy_ctrl vm_ssh_port \
-#       tier5_base tier4_base tier5_optin tier4_optin
+# Args: qdshell_active nested_kvm tier5_base tier4_base tier5_optin tier4_optin
 gui_preflight_capabilities() {
-    local skip_qdwin=$1 qdshell_active=$2 nested_kvm=$3 legacy_ctrl=$4 vm_ssh_port=$5
-    local tier5_base=${6:-0} tier4_base=${7:-0} tier5_optin=${8:-0} tier4_optin=${9:-0}
-    if [ "$skip_qdwin" = 1 ]; then
-        printf '%s\n' "qdwin lane DISABLED (QCI_GUI_SKIP_QDWIN=1): qdwin/qdshell/noctalia/qdlocker/tier scenarios skip"
-    else
-        [ "$qdshell_active" != 1 ] && \
-            printf '%s\n' "qdshell session ABSENT on wayland-1: qdshell/noctalia/qdlocker/podapps scenarios will skip (profile gap, not per-scenario failures)"
-        [ "$nested_kvm" != 1 ] && \
-            printf '%s\n' "nested KVM (/dev/kvm) ABSENT: tier-4/5 cold-start/cleanup scenarios will skip"
-    fi
-    [ -z "$vm_ssh_port" ] && \
-        printf '%s\n' "VM_SSH_PORT unset: the SSH-only SELinux-enforcing scenario (55) will skip"
+    local qdshell_active=$1 nested_kvm=$2
+    local tier5_base=${3:-0} tier4_base=${4:-0} tier5_optin=${5:-0} tier4_optin=${6:-0}
+    [ "$qdshell_active" != 1 ] && \
+        printf '%s\n' "qdshell session ABSENT on wayland-1: qdshell/noctalia/qdlocker/podapps scenarios will skip (profile gap, not per-scenario failures)"
+    [ "$nested_kvm" != 1 ] && \
+        printf '%s\n' "nested KVM (/dev/kvm) ABSENT: tier-4/5 cold-start/cleanup scenarios will skip"
     # Tier base images are only noteworthy when the run OPTED IN but the bake is
     # absent: a REQUESTED-but-missing environment runs and the agent reports
     # ERROR (a broken requested bake is a real failure, never a silent skip).
@@ -4237,8 +4095,6 @@ gui_preflight_capabilities() {
         printf '%s\n' "tier-5 base image REQUESTED (QDISTRO_BUILD_TIER5_BASE=1) but ABSENT: scenarios 20/21 will run and ERROR on the broken bake"
     [ "$tier4_optin" = 1 ] && [ "$tier4_base" != 1 ] && \
         printf '%s\n' "tier-4 base image REQUESTED (QDISTRO_BUILD_TIER4_BASE=1) but ABSENT: scenarios 56/57 will run and ERROR on the broken bake"
-    [ "$legacy_ctrl" != 1 ] && \
-        printf '%s\n' "legacy qdshell ctrl-socket absent (expected on the shipping Quickshell session): legacy qdwin/*.md scenarios skip by content"
     return 0
 }
 
@@ -4324,31 +4180,24 @@ gate_gui() {
     kv gui_host_agent_sandbox bubblewrap
     qci_assert_vm_tools gui || return $?
     record_agent_identity
-    local explicit=${1:-} svm qdwin_svm="" rc=$EXIT_OK scenario rel require step_rc legacy_ctrl=0 nested_kvm=0 qdshell_active=0
+    local explicit=${1:-} svm rc=$EXIT_OK scenario rel require step_rc nested_kvm=0 qdshell_active=0
     require=${QCI_REQUIRE_AGENT_GUI:-1}
-    # Build per-run GUI goldens once per profile. The admin profile keeps the
-    # compositor-independent approval/broker scenarios available; the qdwin
-    # profile runs qdwin/qdshell/qdshell-vision rows instead of pre-skipping them
-    # just because the admin probe VM is not a qdwin session.
+    # Build the per-run GUI golden once. There is one GUI profile: the product
+    # qdwin compositor + qdshell session (spin-test-vm-gui.sh).
     if [ -z "$explicit" ] && [ "${QCI_NO_GOLDEN:-0}" != 1 ]; then
-        ensure_run_golden gui-admin || return "$EXIT_VM_PROVISION"
-        if [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ]; then
-            # The opt-in gui-apps lane needs the third-party app set baked into
-            # the qdwin golden; the admin golden never does.
-            if [ "${QCI_GUI_APPS:-0}" = 1 ]; then
-                QDWIN_APP_DEPS=1 ensure_run_golden gui-qdwin || return "$EXIT_VM_PROVISION"
-            else
-                ensure_run_golden gui-qdwin || return "$EXIT_VM_PROVISION"
-            fi
+        # The opt-in gui-apps lane needs the third-party app set baked in.
+        if [ "${QCI_GUI_APPS:-0}" = 1 ]; then
+            QDWIN_APP_DEPS=1 ensure_run_golden gui-qdwin || return "$EXIT_VM_PROVISION"
+        else
+            ensure_run_golden gui-qdwin || return "$EXIT_VM_PROVISION"
         fi
     fi
-    # A single admin session VM is used for compositor-independent capability
-    # probes. qdwin-specific sub-gates get a qdwin-profile session VM below.
-    svm=$(acquire_vm gui-admin "$explicit") || return "$EXIT_VM_PROVISION"
+    # ONE session VM of the same profile as the scenario workers (or the
+    # explicit --vm): the capability probes below, the executable smokes and
+    # the qdshell-ui vision harness all run on it, so a probe describes exactly
+    # what the cloned workers will have.
+    svm=$(acquire_vm gui-qdwin "$explicit") || return "$EXIT_VM_PROVISION"
     kv vm "$svm"
-    if "$VM_TOOLS/vm-exec" "$svm" "runuser -u admin -- sh -c 'echo list | socat -t 2 - UNIX-CONNECT:/run/user/1000/qdshell.sock 2>/dev/null | head -1 | grep -qx \"ok list\"'" >/dev/null 2>&1; then
-        legacy_ctrl=1
-    fi
     if "$VM_TOOLS/vm-exec" "$svm" "test -e /dev/kvm" >/dev/null 2>&1; then
         nested_kvm=1
     fi
@@ -4369,8 +4218,7 @@ gate_gui() {
     # leaving the reader to infer a whole-lane-down profile gap from N skip rows.
     # Reuses the same capability flags; does not change any dispatch decision.
     local preflight_log="$RDIR/gui/preflight.txt" preflight_obs
-    preflight_obs=$(gui_preflight_capabilities "${QCI_GUI_SKIP_QDWIN:-0}" \
-        "$qdshell_active" "$nested_kvm" "$legacy_ctrl" "${VM_SSH_PORT:-}" \
+    preflight_obs=$(gui_preflight_capabilities "$qdshell_active" "$nested_kvm" \
         "$tier5_base" "$tier4_base" "$tier5_optin" "$tier4_optin")
     # Text-corroboration probe for the visual-evidence contract. Unlike the
     # flags above this is a HOST capability (the gate OCRs the attested frames
@@ -4392,7 +4240,7 @@ gate_gui() {
         echo "# GUI preflight capability summary"
         echo "session VM: $svm"
         echo "visual-evidence backend: ${ocr_backend:-NONE}"
-        echo "flags: skip_qdwin=${QCI_GUI_SKIP_QDWIN:-0} qdshell_active=$qdshell_active nested_kvm=$nested_kvm legacy_ctrl=$legacy_ctrl vm_ssh_port=${VM_SSH_PORT:-} tier5_base=$tier5_base tier4_base=$tier4_base tier5_optin=$tier5_optin tier4_optin=$tier4_optin"
+        echo "flags: qdshell_active=$qdshell_active nested_kvm=$nested_kvm tier5_base=$tier5_base tier4_base=$tier4_base tier5_optin=$tier5_optin tier4_optin=$tier4_optin"
         echo
         if [ -n "$preflight_obs" ]; then
             echo "Observations (lanes that will skip / run-and-error this run):"
@@ -4412,26 +4260,15 @@ gate_gui() {
             "fully capable GUI profile; no shared precondition absent"
     fi
 
-    if [ "${QCI_GUI_SKIP_QDWIN:-0}" = 1 ] || [ -n "$explicit" ]; then
-        qdwin_svm=$svm
-    else
-        qdwin_svm=$(acquire_vm gui-qdwin "") || {
-            collect_vm_artifacts "$svm" gui
-            release_vm "$svm" "$EXIT_VM_PROVISION"
-            return "$EXIT_VM_PROVISION"
-        }
-        kv vm_qdwin "$qdwin_svm"
-    fi
-
     # App-deps capability: the gui-apps lane scenarios need real desktop apps
     # that only exist when the golden was built with QDWIN_APP_DEPS=1. Probe the
-    # qdwin session VM for the bake marker fresh-vm-bootstrap.sh writes with that
+    # session VM for the bake marker fresh-vm-bootstrap.sh writes with that
     # set — authoritative for what the cloned qdwin workers will have. (foot no
     # longer tells: it is a core test client in every golden.) When absent, the
     # gui-apps scenarios SKIP deterministically before the agent starts (see
     # gui_scenario_app_deps_skip_reason).
     local app_deps=0
-    if "$VM_TOOLS/vm-exec" "$qdwin_svm" "test -f /var/lib/qdistro-ci/qdwin-app-deps" >/dev/null 2>&1; then
+    if "$VM_TOOLS/vm-exec" "$svm" "test -f /var/lib/qdistro-ci/qdwin-app-deps" >/dev/null 2>&1; then
         app_deps=1
     fi
     kv gui_app_deps "$app_deps"
@@ -4445,8 +4282,8 @@ gate_gui() {
     # qdshell-ui vision, qdwin markdown scenarios) skip CONSISTENTLY with the
     # same rebake hint instead of hard-failing one by one.
     local qdwin_capture=1 capture_env
-    if [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && [ -n "$qdwin_svm" ]; then
-        capture_env=$("$VM_TOOLS/vm-exec" "$qdwin_svm" "pid=\$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show qdwin-compositor.service -p MainPID --value); tr '\0' '\n' </proc/\$pid/environ 2>/dev/null | grep -c '^QDWIN_ENABLE_SHELL_CAPTURE=1\$'" 2>/dev/null | grep -v '^\[vm-exec\]' | tr -d '\r')
+    if [ -n "$svm" ]; then
+        capture_env=$("$VM_TOOLS/vm-exec" "$svm" "pid=\$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show qdwin-compositor.service -p MainPID --value); tr '\0' '\n' </proc/\$pid/environ 2>/dev/null | grep -c '^QDWIN_ENABLE_SHELL_CAPTURE=1\$'" 2>/dev/null | grep -v '^\[vm-exec\]' | tr -d '\r')
         [ "${capture_env:-0}" = "1" ] || qdwin_capture=0
     fi
     kv gui_qdwin_capture "$qdwin_capture"
@@ -4457,7 +4294,7 @@ gate_gui() {
     local session_subgates=1
     [ "${QCI_GUI_REPLAY_ONLY:-0}" = 1 ] && session_subgates=0
     if [ "$session_subgates" = 1 ]; then
-        run_qdwin_executable_gui_smokes "$qdwin_svm" "$qdwin_capture"; step_rc=$?
+        run_qdwin_executable_gui_smokes "$svm" "$qdwin_capture"; step_rc=$?
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     fi
     # The vision harness needs a LIVE qdshell quickshell session on wayland-1.
@@ -4465,19 +4302,16 @@ gate_gui() {
     # wayland-1 socket rather than relying solely on the earlier
     # qdshell_active flag, which matches the broader scenario gating.
     local qdshell_session=0
-    if [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && { [ "$qdshell_active" = 1 ] || "$VM_TOOLS/vm-exec" "$qdwin_svm" "test -S /run/user/1000/wayland-1 && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdshell.service 2>/dev/null | grep -qx active" >/dev/null 2>&1; }; then
+    if [ "$qdshell_active" = 1 ] || "$VM_TOOLS/vm-exec" "$svm" "test -S /run/user/1000/wayland-1 && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdshell.service 2>/dev/null | grep -qx active" >/dev/null 2>&1; then
         qdshell_session=1
     fi
     if [ "$session_subgates" = 0 ]; then
         log "gui: qci replay: session sub-gates (smokes, qdshell-ui) not run"
-    elif [ "${QCI_GUI_SKIP_QDWIN:-0}" = 1 ]; then
-        record_result gui qdshell-ui skip 0 pass vision "" \
-            "QCI_GUI_SKIP_QDWIN=1: qdwin/qdshell vision harness skipped"
     elif [ "$qdwin_capture" = 0 ]; then
         record_result gui qdshell-ui skip 0 pass vision "" \
             "golden lacks QDWIN_ENABLE_SHELL_CAPTURE=1 (vision harness needs the shell-capture path; rebake with fresh-vm-bootstrap)"
     elif [ "$qdshell_session" = 1 ]; then
-        gate_qdshell_ui_agent "$qdwin_svm"; step_rc=$?
+        gate_qdshell_ui_agent "$svm"; step_rc=$?
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     else
         record_result gui qdshell-ui skip 0 pass vision "" \
@@ -4492,15 +4326,10 @@ gate_gui() {
     if [ -z "$explicit" ]; then
         collect_vm_artifacts "$svm" gui
         release_vm "$svm" "$rc"
-        if [ -n "$qdwin_svm" ] && [ "$qdwin_svm" != "$svm" ]; then
-            collect_vm_artifacts "$qdwin_svm" gui-qdwin
-            release_vm "$qdwin_svm" "$rc"
-        fi
     fi
 
-    # Partition scenarios: admin-profile scenarios are gated by the admin probe
-    # VM, while qdwin-dependent scenarios are routed to qdwin-profile workers
-    # unless qdwin was explicitly disabled for an admin-only run.
+    # Decide each scenario: run it on its own fresh qdwin-profile worker (or
+    # serially on the explicit --vm), or SKIP it up front for a named reason.
     local to_run=() log_path
     while IFS= read -r scenario; do
         rel=$(gui_scenario_rel "$scenario")
@@ -4512,9 +4341,9 @@ gate_gui() {
             record_result gui "$rel" skip 0 pass agent "" "QCI_OFFLINE=1: registry network=external; skipped"
             continue
         fi
-        # Stack-absent SKIP gate (see gui_scenario_skip_reason). When the VM
-        # profile lacks the OUTER stack a scenario needs (legacy ctrl-socket,
-        # qdshell/wayland-1 session, nested KVM, SSH transport), short-circuit to
+        # Stack-absent SKIP gate (see gui_scenario_skip_reason). When an
+        # explicit VM lacks the OUTER stack a scenario needs (qdshell/wayland-1
+        # session, nested KVM), short-circuit to
         # SKIP up front — no VM spent, no agent dispatched. For tier-4/5: an
         # absent OPT-IN base image is SKIPped here when the run did not opt in
         # (gui_scenario_tier_base_skip_reason); but if the run DID opt in
@@ -4524,44 +4353,34 @@ gate_gui() {
         local skip_reason
         # Legacy ctrl-socket scenarios (removed qdshell.py API) can never pass
         # against the shipping Quickshell session — skip them deterministically by
-        # content, in EVERY path (this runs before the qdwin-routing bypass below
-        # so routing qdwin scenarios to the qdwin profile doesn't unleash them as
-        # agent ERRORs). Opt into a legacy lane with QCI_GUI_RUN_LEGACY_QDWIN_MD=1.
-        local tier_base_skip app_deps_skip xwayland_skip labwc_skip
+        # content, in EVERY path (this runs first, so dispatching them to qdwin
+        # workers doesn't unleash them as agent ERRORs). Opt into a legacy lane
+        # with QCI_GUI_RUN_LEGACY_QDWIN_MD=1.
+        local tier_base_skip app_deps_skip
         tier_base_skip=$(gui_scenario_tier_base_skip_reason "$rel" \
             "$tier5_base" "$tier4_base" "$tier5_optin" "$tier4_optin")
         app_deps_skip=$(gui_scenario_app_deps_skip_reason "$rel" "$app_deps" "${QCI_GUI_APPS:-0}")
-        xwayland_skip=$(gui_scenario_xwayland_skip_reason "$rel" "${QCI_XWAYLAND_E2E:-0}")
-        labwc_skip=$(gui_scenario_labwc_lane_skip_reason "$rel" \
-            "${QCI_LABWC_ADMIN_LANE:-0}" "${QCI_XWAYLAND_E2E:-0}")
         if [ "${QCI_GUI_RUN_LEGACY_QDWIN_MD:-0}" != 1 ] && gui_scenario_uses_legacy_ctrl "$scenario"; then
             skip_reason="legacy qdshell.py ctrl-socket scenario not supported by the Quickshell qdshell session"
-        elif [ -n "$xwayland_skip" ]; then
-            skip_reason="$xwayland_skip"
-        elif [ -n "$labwc_skip" ]; then
-            skip_reason="$labwc_skip"
         elif [ -n "$tier_base_skip" ]; then
             # Opt-in tier-4/5 base image absent (and not opted in): clean SKIP.
-            # Runs BEFORE the qdwin-routing bypass below so it actually fires for
-            # these qdwin-required scenarios in the default lane.
             skip_reason="$tier_base_skip"
         elif [ -n "$app_deps_skip" ]; then
             # gui-apps lane scenario not opted in, or a golden with no app
-            # deps: deterministic SKIP naming why, before the agent starts. Runs BEFORE the qdwin-routing bypass (app scenarios are
-            # qdwin-required) so it actually fires in the default lean lane.
+            # deps: deterministic SKIP naming why, before the agent starts.
             skip_reason="$app_deps_skip"
-        elif [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && [ "$qdwin_capture" = 0 ] && \
-                gui_scenario_requires_qdwin "$rel"; then
+        elif [ "$qdwin_capture" = 0 ]; then
             # Golden predates the in-compositor shell-capture path: every
-            # visual assertion in a qdwin scenario would fail at the first
-            # qdwin_screenshot. Same capability skip as the smoke/vision
-            # lanes — one consistent rebake signal, not N confusing failures.
+            # visual assertion would fail at the first qdwin_screenshot. Same
+            # capability skip as the smoke/vision lanes — one consistent
+            # rebake signal, not N confusing failures.
             skip_reason="golden lacks QDWIN_ENABLE_SHELL_CAPTURE=1 (qdwin_screenshot needs the shell-capture path); rebake the golden with fresh-vm-bootstrap"
-        elif [ -z "$explicit" ] && [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && gui_scenario_requires_qdwin "$rel"; then
+        elif [ -z "$explicit" ]; then
+            # Disposable: a fresh worker of the qdwin profile has the outer
+            # stack by construction.
             skip_reason=""
         else
-            skip_reason=$(gui_scenario_skip_reason "$rel" "$legacy_ctrl" "$nested_kvm" \
-                "$qdshell_active" "${VM_SSH_PORT:-}" "${QCI_GUI_SKIP_QDWIN:-0}")
+            skip_reason=$(gui_scenario_skip_reason "$rel" "$nested_kvm" "$qdshell_active")
         fi
         if [ -n "$skip_reason" ]; then
             {

@@ -1206,28 +1206,6 @@ setup() {
     assert_output_contains "PASS: 0 new denials — qdistro_broker.te 0.3.0 covers the enforcing workload"
 }
 
-@test "phase7-qsu-enforcing: qsu end to end under Enforcing — zero qdistro-domain AVCs" {
-    # Headless port of permissions-gui/55 (+ its host runner run-55): real
-    # `qsu /usr/bin/id` as the non-admin user, root approve over D-Bus, the
-    # command must run and no new qdistro_root_exec_t / qsu_child_t /
-    # qdistro_broker_t / qdistro_tier1_t / qdistro_pwd_t AVC may appear.
-    # qga cannot setenforce, so this needs the SSH transport
-    # (run-bats-enforcing.sh exports VM_SSH_PORT); on the default bake the
-    # driver also SKIPs because /etc/selinux/config pins permissive.
-    [ -n "${VM_SSH_PORT:-}" ] \
-        || skip "qsu enforcing needs the SSH transport (VM_SSH_PORT unset; qga cannot setenforce)"
-    stage_vm_driver "s54-qsu-enforcing.sh"
-    vm_run "curl -fsS -o /tmp/s54.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s54-qsu-enforcing.sh && chmod +x /tmp/s54.sh && bash /tmp/s54.sh 2>/dev/null"
-    if [[ "$output" == *"SKIP:"* ]]; then
-        skip "qsu enforcing not enabled in this bake (config-pinned permissive; opt-in QDISTRO_BUILD_TIER1=1)"
-    fi
-    assert_success
-    assert_output_contains "PASS: SELinux mode now Enforcing"
-    assert_output_contains "PASS: qsu request found by admin and approved by root over D-Bus under Enforcing"
-    assert_output_contains "PASS: qsu /usr/bin/id ran under Enforcing (uid=0(root))"
-    assert_output_contains "PASS: 0 new denials — qsu policy covers the enforcing qsu flow"
-}
-
 @test "phase7-session-manager-enforcing: S6 — qdistro_sessmgr_t lifecycle AVC budget" {
     # S6 VM half: flip SELinux to enforcing, restart the session manager
     # under qdistro_sessmgr_t, run the representative s101 lifecycle

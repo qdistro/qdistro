@@ -1,9 +1,14 @@
 # Workflow GUI test runner — for graphic-aware subagents
 
-These scenarios validate the **workflow orchestration engine** end-to-end
-on a live VM: triggers firing real runs, the secret-delivery lifecycle
-(channel exists during the run, scrubbed after), failure→scrub→failed-run,
-and the admin app's read-only **Workflows** tab.
+These scenarios validate what the admin sees of the **workflow
+orchestration engine** on a live VM: the admin app's **Workflows** tab
+rendering definitions and completed / running / failed runs (04), and the
+approval queue that gates a non-`auto_run` workflow (05). The engine itself
+— triggers firing runs, the secret-delivery lifecycle (channel exists during
+the run, scrubbed after), failure → scrub → failed run — is tested headless
+in `tests/integration/vm/workflow-headless.bats` (`s130-workflow-headless.sh`,
+wf01/02/03/05); the former GUI scenarios 01–03 were merged into 04 on
+2026-10-14, keeping their rendered-row assertions.
 
 ## Shared harness — read this first
 
@@ -20,7 +25,8 @@ This file only documents what is *different* for workflow scenarios.
 ## Provisioning
 
 Use `scripts/vm/spin-test-vm-gui.sh` (same as permissions-gui): it brings
-up the broker, admin-app launchers, and an admin compositor session. The workflow
+up the broker, the shipped admin app and its launcher, and the qdwin session
+(both scenarios run on the qdwin lane). The workflow
 engine loads inside the broker automatically (`_setup_workflow_engine`),
 so no extra service is needed — but it only picks up workflows present at
 broker start or on a reload.
@@ -68,14 +74,21 @@ broker start or on a reload.
    audit DB. Query it via the base64-SQL pattern from the shared AGENTS.md.
    The secret VALUE must never appear there — several scenarios assert this.
 
-5. **Admin app → Workflows tab.** The Qt admin app
-   (`/usr/local/bin/qdistro-start-admin-app`) has a `Workflows` tab
-   (5th tab, after Pending/Cache/Rules/History). Its top table columns are
+5. **Admin app → Workflows tab.** The Qt admin app (started with
+   `qdwin_start_admin_app`) has a `Workflows` tab (5th tab, after
+   Pending/Cache/Rules/History). Its top table columns are
    `name | trigger | steps | needs | description`; the bottom "Recent runs"
-   table is `run_id | workflow | state | started | finished | error`. A
-   `Refresh` button re-queries `ListWorkflows`/`ListWorkflowRuns`. Activate
-   the tab by locating the `Workflows` label, previewing the marked target, and
-   confirming that click per the shared permissions-gui contract; then screenshot.
+   table is `run_id | workflow | state | started | finished | error |
+   cleanup | cleanup pending | cleanup error`. A `Refresh` button re-queries
+   `ListWorkflows`/`ListWorkflowRuns`; `Approve selected run` opens the
+   "Review workflow plan" dialog for a pending run. Activate the tab by
+   locating the `Workflows` label, previewing the marked target, and
+   confirming that click per the shared permissions-gui contract; then
+   `qdwin_screenshot`.
+
+6. **Scope run waits to this scenario.** Runs from earlier invocations stay
+   in `workflow_runs`; record a start time in Setup and wait for rows with
+   `started_at >=` it, never by workflow name alone.
 
 ## Teardown hard rule
 

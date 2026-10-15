@@ -111,7 +111,6 @@ CREATED_VMS=()
 # disk is a stable read-only backing). Tracked separately from CREATED_VMS so
 # release_vm/worker cleanup never touches them.
 RUN_GOLDEN_BATS=""
-RUN_GOLDEN_GUI_ADMIN=""
 RUN_GOLDEN_GUI_QDWIN=""
 RUN_GOLDEN_DISKS=()
 GOLDEN_INFLIGHT_VMS=()   # golden VMs mid-build (for interrupt cleanup)

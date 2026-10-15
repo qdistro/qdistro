@@ -13,7 +13,7 @@
 # Every subcommand main() dispatches, one entry per case arm.
 SUBCOMMANDS=(preflight lint selftest image registry-check release-manifest
     bootstrap-release-profile affected edit-guard replay host feedback vm-smoke bats
-    gui gui-admin full snapshot-daily mmnet cleanup report triage list-runs)
+    gui full snapshot-daily mmnet cleanup report triage list-runs)
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
@@ -194,7 +194,7 @@ stub_main() {
     echo "$output"
     [[ "$output" == *"GATE gate_gui"* ]]
     [[ "$output" != *"Usage:"* ]]
-    run stub_main "$work" gui-admin --vm --help
+    run stub_main "$work" gui --vm --help
     [[ "$output" == *"GATE gate_gui --help"* ]]
     run stub_main "$work" vm-smoke --vm -h
     [[ "$output" == *"GATE gate_vm_smoke -h"* ]]
@@ -321,7 +321,7 @@ parsed_value_opts() {
     [[ "$parsed" == *"cleanup --age-hours"* ]]
     # Boolean options must NOT be reported as value options.
     [[ "$parsed" != *"affected --run"* ]]
-    [[ "$parsed" != *"gui --skip-qdwin"* ]]
+    [[ "$parsed" != *"gui --no-require-agent"* ]]
     [[ "$parsed" != *"image --no-boot"* ]]
     [[ "$parsed" != *UNSUPPORTED* ]]
     table=$(bash -c '. "$1"; for c in $QCI_COMMANDS; do for o in $(qci_value_opts "$c"); do echo "$c $o"; done; done' _ "$REPO_ROOT/ci/lib/dispatch.sh" | sort -u)

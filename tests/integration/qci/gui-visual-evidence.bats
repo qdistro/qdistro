@@ -32,7 +32,7 @@
 # The producer side is not re-implemented here: attest_row() sources the REAL
 # scripts/vm/lib/capture-attest.sh, so producer and verifier are pinned against
 # each other rather than against a test-local copy. THREE capture tools use that
-# library -- vm-gui (labwc/admin lane), qdwin-helpers.sh (in-guest qdwin lane)
+# library -- vm-gui (virsh), qdwin-helpers.sh (in-guest qdwin capture)
 # and qdwin-apps-helpers.sh (qdwin apps lane); this header said "both" (fable,
 # B round 8). Only the vm-gui lane is exercised here.
 #
@@ -45,9 +45,6 @@
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
-    # A fake virsh has no guest to answer the labwc frame refresh; these
-    # suites test capture attestation (vm-gui-labwc-refresh.bats covers it).
-    export QCI_VM_GUI_SESSION=none
     # shellcheck disable=SC1090
     source "$REPO_ROOT/ci/lib/gates/gui.sh"
     EXIT_USAGE=2
@@ -975,7 +972,7 @@ EOF
 }
 
 @test "capture tools: every lane's capture tool sources the shared attestation library" {
-    # vm-gui (virsh, labwc/admin lane): the library TAKES the screenshot.
+    # vm-gui (virsh): the library TAKES the screenshot.
     grep -q 'lib/capture-attest.sh' "$REPO_ROOT/scripts/vm/vm-gui"
     # The plain screenshot lane reaches the library through the usable-frame
     # gate (round 9), which rejects black/flat/undecodable captures before the
@@ -985,15 +982,13 @@ EOF
     # it PUBLISHES the padded frame (view-geometry.sh): the retry lanes'
     # candidates and, since the padding work, click-preview raw and
     # click-confirm post too.
-    # (Every host frame goes through capture_presented_shot, which first makes
-    # labwc present a fresh frame and then calls capture_virsh_shot.)
-    grep -q 'capture_presented_shot "\$VM" "\$candidate"' "$REPO_ROOT/scripts/vm/vm-gui"
-    grep -q '^capture_presented_shot() {' "$REPO_ROOT/scripts/vm/vm-gui"
-    grep -q 'capture_virsh_shot "\$@"' "$REPO_ROOT/scripts/vm/vm-gui"
+    # (Every host frame goes through capture_virsh_shot; vm-gui-capture-path.bats
+    # pins that there is no other capture site.)
+    grep -q 'capture_virsh_shot "\$VM" "\$candidate"' "$REPO_ROOT/scripts/vm/vm-gui"
     grep -q 'capture_publish_frame "\$src" "\$dst"' "$REPO_ROOT/scripts/vm/vm-gui"
-    grep -q 'capture_presented_shot "\$VM" "\$scratch/raw.png"' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'capture_virsh_shot "\$VM" "\$scratch/raw.png"' "$REPO_ROOT/scripts/vm/vm-gui"
     grep -q 'qci_view_publish "\$scratch/raw.png" "\$raw" click-raw "virsh:\$VM" deliver_attested_frame' "$REPO_ROOT/scripts/vm/vm-gui"
-    grep -q 'capture_presented_shot "\$VM" "\$scratch/post.png"' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'capture_virsh_shot "\$VM" "\$scratch/post.png"' "$REPO_ROOT/scripts/vm/vm-gui"
     grep -q 'qci_view_publish "\$scratch/post.png" "\$post" click-post "virsh:\$VM" deliver_attested_frame' "$REPO_ROOT/scripts/vm/vm-gui"
     # qdwin_screenshot (in-guest qdshell capture, qdwin/qdlocker lane). Without
     # this, every qci:visual=required scenario in those repos would be ERROR.
@@ -2628,7 +2623,7 @@ printf '\211PNG\r\n\032\n\0\0\0\rIHDR\0\0\0\1\0\0\0\1\10\6\0\0\0\37\25\304\211\0
 printf '\n%s\n' "$(date +%s%N)" >> "$out"
 EOF
     chmod +x "$farm/virsh"
-    run env -i PATH="$farm" HOME="$TDIR" QCI_VM_GUI_SESSION=none \
+    run env -i PATH="$farm" HOME="$TDIR" \
         QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" \
         LIBVIRT_DEFAULT_URI=qemu:///session \
         "$REPO_ROOT/scripts/vm/vm-gui" "$CAPVM" screenshot-fresh "$ADIR/unchecked.png"

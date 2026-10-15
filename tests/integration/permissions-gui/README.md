@@ -5,16 +5,16 @@ User-authored GUI acceptance scenarios for qdistro . Each
 prose. A graphic-aware subagent executes them against a running VM
 following the instructions in `AGENTS.md`.
 
-## Lanes
+## Lane
 
-Two GUI lanes run these scenarios (see `AGENTS.md`, "qdwin lane"):
-
-- **qdwin lane** — the product session (qdwin + qdshell) with the admin
-  app started through the shipped native-Wayland launcher: 03, 04, 06,
-  08, 10, 12, 13, 14, 34, 43, 47 (and 18–21, 56, 57).
-- **labwc admin lane** — labwc + LXQt + XWayland with the test-only xcb
-  launcher: every other scenario here. None of that stack ships, so the
-  lane is opt-in (`QCI_LABWC_ADMIN_LANE=1`, or `qci gui-admin`).
+Every scenario runs on the product session (qdwin compositor + qdshell on
+`wayland-1`; see `AGENTS.md`, "qdwin lane"): the admin app started through
+the shipped native-Wayland launcher, the admin TUI as installed, hosted in
+`foot` (a test client of every GUI golden; the image ships qterminator).
+The labwc/LXQt/XWayland admin lane was retired on 2026-10-14; its scenarios
+were migrated or merged (01 absorbed 02 and 05, 40 absorbed 09, 12 absorbed
+16, workflow-gui/04 absorbed workflow-gui 01–03) and 55 became the headless
+`tests/integration/vm/qsu-enforcing.bats`.
 
 ## Scenario index by area
 
@@ -26,22 +26,21 @@ screenshots) in the bats gate — 07, 11, 15, 17, 23–33, 36–39,
 (one `pgNN-*` @test each), and the qsu ones 44–46, 49–54 in
 `tests/integration/vm/s58-qsu-real-flow.sh` (run by `tiered-isolation.bats`).
 
-- **01–10** — admin app + TUI smoke (visual / scope picker / approve /
-  deny / mouse / restart-resilience / cache revoke and its
-  `ApprovalRevoked` signal, formerly 22).
+- **01–10** — admin app + TUI smoke (01: TUI render, help overlay, scope
+  picker and deny in foot; Qt visual / approve / mouse / restart-resilience
+  / cache revoke and its `ApprovalRevoked` signal, formerly 22).
 - **12–14** — cross-user `RelayMessage` flow, visual approve / deny /
-  forbidden scope.
-- **16** — realapp send-to, visual (shared-XWayland expedient).
+  forbidden scope; 12 also delivers to two real qnotebook receivers.
 - **18** — pod-apps launcher badge.
 - **19–21** — tier-5 loopback / cold-start / close-cleanup.
 - **34** — admin-app navigation across multiple pending requests.
 - **35** — TUI + Qt admin app concurrent subscribers stay in sync.
-- **40-tui** — TUI survives a broker restart.
-- **43, 47, 55** — `qsu` admin UX: 43 (prompt + scope radios
-  rendered), 47 (delegated `forever_exe` rejected with a
-  `ScopeNotPermitted` modal), 55 (qsu end-to-end
-  under SELinux Enforcing; its headless twin `phase7-qsu-enforcing` in
-  `tiered-isolation.bats` needs an SSH-transport enforcing VM).
+- **40-tui** — TUI survives a broker restart, shows the broker offline,
+  recovers.
+- **43, 47** — `qsu` admin UX: 43 (prompt + scope radios rendered), 47
+  (delegated `forever_exe` rejected with a `ScopeNotPermitted` modal). qsu
+  end-to-end under SELinux Enforcing (formerly 55) is
+  `tests/integration/vm/qsu-enforcing.bats` (`# qci:enforcing`).
 - **56–57** — tier-4 RDP transport visual acceptance: single guest
   window visible over FreeRDP/vsock and close-cleanup of the RDP path.
 
@@ -53,12 +52,13 @@ Dispatch a subagent (Explore or general-purpose) and point it at
 ```
 Read tests/integration/permissions-gui/AGENTS.md, then run
 tests/integration/permissions-gui/01-tui-approver-visual.md against VM
-qdistro-dev-260421-0052. Return the report in the required format.
+<vm>. Return the report in the required format.
 ```
 
-The subagent drives the VM via `scripts/vm/vm-exec` and
-`vm-gui`, takes screenshots with `virsh screenshot`, reads them as
-images, and returns PASS/FAIL per assertion.
+The subagent drives the VM via `scripts/vm/vm-exec`, the qdwin helpers and
+`vm-gui` click preview/confirm, takes screenshots with `qdwin_screenshot`,
+reads them as images, and returns PASS/FAIL per assertion. Under qci,
+`ci/bin/qci gui --scenario <abs path>` does all of this.
 
 ## Why scenarios live here, not in `tests/`
 

@@ -6,17 +6,17 @@
 # Usage (inside the VM):
 #   bash /root/qdistro-src/scripts/vm/lib/gui-silo-fixtures.sh [--prove-restart]
 #
-# Two callers:
-#   - spin-test-vm-gui.sh bakes them into the labwc (gui-admin) golden, with
-#     --prove-restart: the reconcile that used to purge the grants runs at
-#     daemon start, so the bake restarts the session manager once and
-#     re-verifies (cheap there, expensive when discovered per scenario).
-#   - qdwin-lane permissions-gui scenarios run it at Setup on their own
-#     disposable clone of the gui-qdwin golden (see
-#     tests/integration/permissions-gui/AGENTS.md, "qdwin lane"). The qdwin
-#     golden deliberately has no silos: Active silos add a network-egress
-#     indicator to the qdwin lock screen, which every qdlocker GUI scenario
-#     on that golden would then show.
+# Caller: the permissions-gui scenarios that need work/work2 run it at Setup
+# (qdwin_admin_lane_setup --silos in ci/lib/guest/gui-waiters.sh) on their own
+# disposable clone of the gui-qdwin golden. The golden deliberately has no
+# silos: Active silos add a network-egress indicator to the qdwin lock screen,
+# which every qdlocker GUI scenario on that golden would then show.
+#
+# --prove-restart additionally restarts the session manager once and
+# re-verifies, reproducing the daemon-start reconcile that used to purge the
+# grants on a clone's first boot. It mattered when the retired labwc golden
+# BAKED these fixtures; a scenario that provisions them on its running VM
+# never crosses that boot, so it is kept for hand-provisioned VMs only.
 #
 # Idempotent: an existing work/work2 that the session manager confirms is the
 # right silo is kept; anything else is a hard failure (see below).

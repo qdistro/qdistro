@@ -17,11 +17,11 @@
 #     resolves to SKIP (cheap + honest). When the run DID opt in but the bake is
 #     still missing/broken, the scenario RUNS and the agent reports ERROR/INFRA
 #     per the scenarios' own "do not silently skip a requested bake" contract.
-#     This gate runs BEFORE the qdwin-routing bypass so it fires for these
-#     qdwin-required scenarios in the default lane.
+#     This gate applies to disposable runs too (they never consult the
+#     stack-presence function: their workers have the outer stack).
 #
 # Helper signatures:
-#   gui_scenario_skip_reason           rel legacy nested qdshell ssh skip_qdwin
+#   gui_scenario_skip_reason           rel nested qdshell   (explicit --vm only)
 #   gui_scenario_tier_base_skip_reason rel tier5_base tier4_base tier5_optin tier4_optin
 
 setup() {
@@ -32,73 +32,10 @@ setup() {
     source "$REPO_ROOT/ci/lib/gates/gui.sh"
 }
 
-@test "gui XWayland lane: qterminal TUI scenarios skip unless explicitly opted in" {
-    run gui_scenario_xwayland_skip_reason \
-        "qdistro/tests/integration/permissions-gui/05-tui-help-overlay.md" 0
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"QCI_XWAYLAND_E2E=1"* ]]
-
-    run gui_scenario_xwayland_skip_reason \
-        "qdistro/tests/integration/permissions-gui/05-tui-help-overlay.md" 1
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-}
-
-@test "gui XWayland lane: native GUI scenarios remain enabled" {
-    run gui_scenario_xwayland_skip_reason \
-        "qdistro/tests/integration/permissions-gui/04-qt-admin-app-approve.md" 0
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-}
-
-@test "gui labwc admin lane: opt-in; the ported admin-app scenarios run on qdwin" {
-    local rel
-    # Ported off the labwc lane: routed to qdwin and never labwc-skipped, with
-    # or without the leading qdistro/ that gui_scenario_rel may print.
-    for rel in \
-        qdistro/tests/integration/permissions-gui/03-qt-admin-app-visual.md \
-        tests/integration/permissions-gui/04-qt-admin-app-approve.md \
-        qdistro/tests/integration/permissions-gui/06-qt-admin-app-mouse.md \
-        qdistro/tests/integration/permissions-gui/08-admin-app-survives-broker-restart.md \
-        qdistro/tests/integration/permissions-gui/10-qt-cache-revoke.md \
-        qdistro/tests/integration/permissions-gui/12-cross-user-sendto-visual.md \
-        qdistro/tests/integration/permissions-gui/13-cross-user-sendto-deny.md \
-        qdistro/tests/integration/permissions-gui/14-cross-user-sendto-forbidden-scope.md \
-        qdistro/tests/integration/permissions-gui/34-admin-app-multi-pending-nav.md \
-        qdistro/tests/integration/permissions-gui/43-qsu-admin-app-argv-prompt.md \
-        qdistro/tests/integration/permissions-gui/47-qsu-delegated-guard-forever-exe-rejected.md \
-        qdistro/tests/integration/permissions-gui/62-admin-approval-password-prompt.md \
-        qdistro/tests/integration/workflow-gui/04-admin-workflowstab-list-run-view.md; do
-        gui_scenario_requires_qdwin "$rel" || { echo "not qdwin-routed: $rel"; return 1; }
-        run gui_scenario_labwc_lane_skip_reason "$rel" 0 0
-        [ "$status" -eq 0 ]
-        [ -z "$output" ]
-    done
-    # Still on the labwc lane: skipped by default, run when opted in.
-    rel=qdistro/tests/integration/permissions-gui/07-cli-roundtrip.md
-    run gui_scenario_requires_qdwin "$rel"
-    [ "$status" -ne 0 ]
-    run gui_scenario_labwc_lane_skip_reason "$rel" 0 0
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"QCI_LABWC_ADMIN_LANE=1"* ]]
-    run gui_scenario_labwc_lane_skip_reason "$rel" 1 0
-    [ -z "$output" ]
-    # QCI_XWAYLAND_E2E=1 admits the qterminal/TUI scenarios (labwc-only by
-    # nature), not the rest of the lane.
-    run gui_scenario_labwc_lane_skip_reason \
-        qdistro/tests/integration/permissions-gui/05-tui-help-overlay.md 0 1
-    [ -z "$output" ]
-    run gui_scenario_labwc_lane_skip_reason "$rel" 0 1
-    [[ "$output" == *"QCI_LABWC_ADMIN_LANE=1"* ]]
-    # Lanes that were always qdwin are untouched.
-    run gui_scenario_labwc_lane_skip_reason qdwin/tests/gui/12-bar-no-overdraw.md 0 0
-    [ -z "$output" ]
-}
-
 # All outer-stack capabilities present (a fully provisioned tier-4/5 GUI VM).
 reason_full_stack() {
     local rel=$1
-    gui_scenario_skip_reason "$rel" 1 1 1 "2222"
+    gui_scenario_skip_reason "$rel" 1 1
 }
 
 # ---------------------------------------------------------------------------
@@ -106,10 +43,10 @@ reason_full_stack() {
 # ---------------------------------------------------------------------------
 
 @test "gui skip: tier-5 cold-start (20) SKIPs when wayland-1/qdshell absent" {
-    # rel legacy nested qdshell ssh
+    # rel nested qdshell
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md" \
-        0 1 0 ""
+        1 0
     [ "$status" -eq 0 ]
     [ -n "$output" ]
     [[ "$output" == *"tier-5 outer stack not provisioned"* ]]
@@ -119,7 +56,7 @@ reason_full_stack() {
 @test "gui skip: tier-5 cold-start (20) SKIPs when nested KVM absent" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md" \
-        0 0 1 ""
+        0 1
     [ "$status" -eq 0 ]
     [[ "$output" == *"nested KVM"* ]]
 }
@@ -129,13 +66,13 @@ reason_full_stack() {
     # (Base-image opt-in is a separate gate, gui_scenario_tier_base_skip_reason.)
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md" \
-        0 1 1 ""
+        1 1
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
 
-# gui_scenario_tier_base_skip_reason: opt-in base-image gate (runs before the
-# qdwin-routing bypass in the dispatch loop).
+# gui_scenario_tier_base_skip_reason: opt-in base-image gate (applies to
+# disposable runs too).
 # args: rel tier5_base tier4_base tier5_optin tier4_optin
 @test "gui tier-base skip: tier-5 (20) SKIPs when base image absent and NOT opted-in" {
     run gui_scenario_tier_base_skip_reason \
@@ -187,7 +124,7 @@ reason_full_stack() {
 @test "gui skip: tier-5 close-cleanup (21) SKIPs when outer stack absent" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md" \
-        0 0 0 ""
+        0 0
     [ "$status" -eq 0 ]
     [ -n "$output" ]
     [[ "$output" == *"tier-5 outer stack not provisioned"* ]]
@@ -196,20 +133,16 @@ reason_full_stack() {
 @test "gui run: tier-5 close-cleanup (21) RUNS when outer stack present" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md" \
-        0 1 1 ""
+        1 1
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
 
-@test "gui tier-5 launch password prompt (63): qdwin-routed, tier-5 stack and base gates apply" {
+@test "gui tier-5 launch password prompt (63): tier-5 stack and base gates apply" {
     local rel=qdistro/tests/integration/permissions-gui/63-tier5-launch-password-prompt.md
-    run gui_scenario_requires_qdwin "$rel"
-    [ "$status" -eq 0 ]
-    run gui_scenario_requires_qdwin "tests/integration/permissions-gui/63-tier5-launch-password-prompt.md"
-    [ "$status" -eq 0 ]
-    run gui_scenario_skip_reason "$rel" 0 0 1 ""
+    run gui_scenario_skip_reason "$rel" 0 1
     [[ "$output" == *"tier-5 outer stack not provisioned"* ]]
-    run gui_scenario_skip_reason "$rel" 0 1 1 ""
+    run gui_scenario_skip_reason "$rel" 1 1
     [ -z "$output" ]
     run gui_scenario_tier_base_skip_reason "$rel" 0 0 0 0
     [[ "$output" == *"tier-5 base image not built"* ]]
@@ -287,35 +220,22 @@ reason_full_stack() {
     [ -z "$output" ]
 }
 
-@test "opt-in lane: permissions-gui/16 skips unless QCI_XWAYLAND_E2E=1" {
-    local rel
-    for rel in qdistro/tests/integration/permissions-gui/16-realapp-sendto-visual.md; do
-        run gui_scenario_xwayland_skip_reason "$rel" 0
-        [ "$status" -eq 0 ]
-        [[ "$output" == *"QCI_XWAYLAND_E2E=1"* ]] || { echo "$rel: $output"; return 1; }
-        run gui_scenario_xwayland_skip_reason "$rel" 1
-        [ -z "$output" ]
-    done
-}
-
-
-@test "ported multi-pending navigation runs on qdwin without XWayland opt-in" {
-    local rel=qdistro/tests/integration/permissions-gui/34-admin-app-multi-pending-nav.md
-    run gui_scenario_xwayland_skip_reason "$rel" 0
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-    run gui_scenario_labwc_lane_skip_reason "$rel" 0 0
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-    run gui_scenario_requires_qdwin "$rel"
-    [ "$status" -eq 0 ]
-}
-
 @test "agent_scenarios: workflow-gui is enumerated, deleted scenarios are not" {
     WORKSPACE=$REPO_ROOT QDISTRO_REPO=$REPO_ROOT run agent_scenarios
     [ "$status" -eq 0 ]
-    [[ "$output" == *"/tests/integration/workflow-gui/01-one-trigger-one-run-audit-row.md"* ]]
-    [[ "$output" == *"/tests/integration/workflow-gui/03-failure-mid-step-scrub-failed-run.md"* ]]
+    [[ "$output" == *"/tests/integration/workflow-gui/04-admin-workflowstab-list-run-view.md"* ]]
+    [[ "$output" == *"/tests/integration/workflow-gui/05-approval-queue-gated-run.md"* ]]
+    [[ "$output" == *"/tests/integration/permissions-gui/01-tui-approver-visual.md"* ]]
+    [[ "$output" == *"/tests/integration/permissions-gui/35-tui-and-qt-concurrent.md"* ]]
+    [[ "$output" == *"/tests/integration/permissions-gui/40-tui-survives-broker-restart.md"* ]]
+    # Merged into 01/40/12/workflow-gui-04, or replaced by qsu-enforcing.bats
+    # (2026-10-14, labwc lane retired).
+    local gone
+    for gone in permissions-gui/02-tui-scope-picker permissions-gui/05-tui-help-overlay \
+        permissions-gui/09-tui-broker-offline permissions-gui/16-realapp-sendto-visual \
+        permissions-gui/55-qsu-selinux-enforcing workflow-gui/01- workflow-gui/02- workflow-gui/03-; do
+        [[ "$output" != *"/tests/integration/$gone"* ]] || { echo "still enumerated: $gone"; return 1; }
+    done
     [[ "$output" != *"/qdwin/tests/gui/01-"* ]]
     [[ "$output" != *"06-taskbar-isolation-menu"* ]]
     [[ "$output" != *"48-qsu-tui-argv-rendering"* ]]
@@ -328,7 +248,7 @@ reason_full_stack() {
 @test "gui skip: tier-4 rdp-window (56) SKIPs when wayland-1/qdshell absent" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md" \
-        0 1 0 ""
+        1 0
     [ "$status" -eq 0 ]
     [[ "$output" == *"tier-4 outer stack not provisioned"* ]]
     [[ "$output" == *"wayland-1"* ]]
@@ -337,7 +257,7 @@ reason_full_stack() {
 @test "gui skip: tier-4 rdp-window (56) SKIPs when nested KVM absent" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md" \
-        0 0 1 ""
+        0 1
     [ "$status" -eq 0 ]
     [[ "$output" == *"nested KVM"* ]]
 }
@@ -345,7 +265,7 @@ reason_full_stack() {
 @test "gui run: tier-4 rdp-window (56) RUNS when outer stack present (image gap is agent INFRA, not skip)" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md" \
-        0 1 1 ""
+        1 1
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
@@ -360,7 +280,7 @@ reason_full_stack() {
 @test "gui skip: tier-4 close-cleanup (57) SKIPs when outer stack absent" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md" \
-        0 0 0 ""
+        0 0
     [ "$status" -eq 0 ]
     [ -n "$output" ]
     [[ "$output" == *"tier-4 outer stack not provisioned"* ]]
@@ -369,7 +289,7 @@ reason_full_stack() {
 @test "gui run: tier-4 close-cleanup (57) RUNS when outer stack present" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md" \
-        0 1 1 ""
+        1 1
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
@@ -381,7 +301,7 @@ reason_full_stack() {
 @test "gui skip: podapps-launcher-badge (18) SKIPs when qdshell inactive" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md" \
-        0 1 0 ""
+        1 0
     [ "$status" -eq 0 ]
     [[ "$output" == *"qdshell session not active"* ]]
 }
@@ -389,7 +309,7 @@ reason_full_stack() {
 @test "gui run: podapps-launcher-badge (18) RUNS when qdshell active" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md" \
-        0 1 1 ""
+        1 1
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
@@ -397,7 +317,7 @@ reason_full_stack() {
 @test "gui skip: tier5-loopback-visible (19) SKIPs when qdshell inactive" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/19-tier5-loopback-visible.md" \
-        0 1 0 ""
+        1 0
     [ "$status" -eq 0 ]
     [[ "$output" == *"qdshell session not active"* ]]
 }
@@ -406,7 +326,7 @@ reason_full_stack() {
     # 19 explicitly does NOT need nested KVM; a wayland-1 session is enough.
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/19-tier5-loopback-visible.md" \
-        0 0 1 ""
+        0 1
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
@@ -416,7 +336,7 @@ reason_full_stack() {
 # ---------------------------------------------------------------------------
 
 @test "gui skip: explicit-VM qdwin md SKIPs when the qdshell session is absent" {
-    run gui_scenario_skip_reason "qdwin/tests/gui/01-foo.md" 1 1 0 "2222"
+    run gui_scenario_skip_reason "qdwin/tests/gui/01-foo.md" 1 0
     [ "$status" -eq 0 ]
     [[ "$output" == *"qdshell session not active"* ]]
 }
@@ -425,43 +345,9 @@ reason_full_stack() {
     # tests/apps uses qdwin-bystander + its own FIFO, not the retired qdshell
     # control socket. App dependencies are gated separately.
     run gui_scenario_skip_reason \
-        "qdwin/tests/apps/04-cursor-spam-suppressed.md" 0 1 1 "2222"
+        "qdwin/tests/apps/04-cursor-spam-suppressed.md" 1 1
     [ "$status" -eq 0 ]
     [ -z "$output" ]
-}
-
-@test "gui skip: qdwin md SKIPs when qdwin lane is disabled" {
-    run gui_scenario_skip_reason "qdwin/tests/gui/01-foo.md" 1 1 1 "2222" 1
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"QCI_GUI_SKIP_QDWIN=1"* ]]
-}
-
-@test "gui classify: qdwin rows require the qdwin profile" {
-    run gui_scenario_requires_qdwin "qdwin/tests/gui/01-foo.md"
-    [ "$status" -eq 0 ]
-
-    run gui_scenario_requires_qdwin "qdistro/tests/integration/qdwin-noctalia/01-bar-visible.md"
-    [ "$status" -eq 0 ]
-
-    run gui_scenario_requires_qdwin "tests/integration/qdwin-noctalia/01-bar-visible.md"
-    [ "$status" -eq 0 ]
-
-    run gui_scenario_requires_qdwin "qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md"
-    [ "$status" -eq 0 ]
-
-    run gui_scenario_requires_qdwin "tests/integration/permissions-gui/20-tier5-vm-cold-start.md"
-    [ "$status" -eq 0 ]
-
-    run gui_scenario_requires_qdwin "tests/integration/permissions-gui/60-vmapps-manifest-catalogue.md"
-    [ "$status" -eq 0 ]
-
-    run gui_scenario_requires_qdwin "tests/integration/permissions-gui/61-window-chrome-context-menu.md"
-    [ "$status" -eq 0 ]
-}
-
-@test "gui classify: retained TUI rows do not require the qdwin profile" {
-    run gui_scenario_requires_qdwin "qdistro/tests/integration/permissions-gui/01-tui-approver-visual.md"
-    [ "$status" -ne 0 ]
 }
 
 @test "gui classify: canonical path behind workspace symlink keeps qdwin identity" {
@@ -475,8 +361,6 @@ reason_full_stack() {
     run gui_scenario_rel "$fixture/real-qdwin/tests/apps/01-firefox.md"
     [ "$status" -eq 0 ]
     [ "$output" = "qdwin/tests/apps/01-firefox.md" ]
-    run gui_scenario_requires_qdwin "$output"
-    [ "$status" -eq 0 ]
 }
 
 @test "gui classify: qdistro worktree path keeps qdistro identity" {
@@ -488,14 +372,12 @@ reason_full_stack() {
     run gui_scenario_rel "$fixture/tests/integration/permissions-gui/18-podapps-launcher-badge.md"
     [ "$status" -eq 0 ]
     [ "$output" = "qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md" ]
-    run gui_scenario_requires_qdwin "$output"
-    [ "$status" -eq 0 ]
 }
 
-@test "gui run: explicit-VM qdwin md RUNS on a qdshell session without the legacy ctrl-socket" {
-    # qci replay / qci gui --vm on a qdwin VM: the legacy probe is always 0 on
-    # the Quickshell session and must not skip modern scenarios.
-    run gui_scenario_skip_reason "qdwin/tests/gui/17-foo.md" 0 1 1 "2222"
+@test "gui run: explicit-VM qdwin md RUNS on a qdshell session" {
+    # qci replay / qci gui --vm on a qdwin VM: the retired legacy ctrl-socket
+    # probe never answered on the Quickshell session; modern scenarios run.
+    run gui_scenario_skip_reason "qdwin/tests/gui/17-foo.md" 1 1
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
@@ -541,30 +423,6 @@ reason_full_stack() {
     [ "$status" -ne 0 ]
 }
 
-@test "gui skip: ported admin permissions scenario requires the qdwin lane" {
-    run gui_scenario_skip_reason \
-        "qdistro/tests/integration/permissions-gui/03-qt-admin-app-visual.md" \
-        0 0 0 "" 1
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"qdwin"* ]]
-}
-
-@test "gui skip: SELinux (55) SKIPs when VM_SSH_PORT unset" {
-    run gui_scenario_skip_reason \
-        "qdistro/tests/integration/permissions-gui/55-qsu-selinux-enforcing.md" \
-        1 1 1 ""
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"VM_SSH_PORT not set"* ]]
-}
-
-@test "gui run: SELinux (55) RUNS when VM_SSH_PORT set" {
-    run gui_scenario_skip_reason \
-        "qdistro/tests/integration/permissions-gui/55-qsu-selinux-enforcing.md" \
-        1 1 1 "2222"
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-}
-
 # ---------------------------------------------------------------------------
 # Unknown / ungated scenario always runs
 # ---------------------------------------------------------------------------
@@ -572,7 +430,25 @@ reason_full_stack() {
 @test "gui run: an ungated permissions-gui scenario is never pre-skipped" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/03-qt-admin-app-visual.md" \
-        0 0 0 ""
+        0 0
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+# ---------------------------------------------------------------------------
+# One GUI lane: the labwc/XWayland admin lane and its opt-ins are gone
+# ---------------------------------------------------------------------------
+
+@test "one GUI lane: every scenario worker and the session VM use the qdwin profile" {
+    local gui="$REPO_ROOT/ci/lib/gates/gui.sh" vm="$REPO_ROOT/ci/lib/vm.sh"
+    grep -q 'gate_name="gui-qdwin-$(safe_name "$rel")"' "$gui"
+    grep -q 'svm=$(acquire_vm gui-qdwin "$explicit")' "$gui"
+    grep -q 'ensure_run_golden gui-qdwin' "$gui"
+    run grep -nE 'gui-admin|QCI_GUI_SKIP_QDWIN|QCI_XWAYLAND_E2E|QCI_LABWC_ADMIN_LANE|QCI_VM_GUI_SESSION|gui_scenario_requires_qdwin|labwc_lane|xwayland_skip' \
+        "$gui" "$vm" "$REPO_ROOT/ci/lib/dispatch.sh" "$REPO_ROOT/ci/lib/usage.sh" \
+        "$REPO_ROOT/ci/lib/bootstrap.sh" "$REPO_ROOT/ci/justfile"
+    [ "$status" -ne 0 ] || { echo "lane selection left: $output" >&2; return 1; }
+    # Every GUI gate name maps to the one GUI spinner and golden.
+    grep -q 'gui|gui-\*) spinner=spin-test-vm-gui.sh ;;' "$vm"
+    grep -q 'gui|gui-\*) golden_backing="$RUN_GOLDEN_GUI_QDWIN" ;;' "$vm"
 }

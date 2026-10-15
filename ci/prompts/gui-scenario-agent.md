@@ -17,10 +17,10 @@ Procedure:
 5. Read the scenario's `<!-- qci:visual: required -->` or
    `<!-- qci:visual: none -->` declaration. On `required`, capture a
    screenshot after every GUI action that changes state, THROUGH YOUR
-   LANE'S OWN CAPTURE TOOL, INTO the artifact directory. For the
-   labwc/admin lane that is `vm-gui` (`screenshot`, `screenshot-fresh`,
-   `click-preview`, `click-confirm`); for the qdwin lanes it is the
-   `qdwin_screenshot` / `qdwin_apps_screenshot` helper your `AGENTS.md` names.
+   LANE'S OWN CAPTURE TOOL, INTO the artifact directory: the
+   `qdwin_screenshot` / `qdwin_apps_screenshot` helper your `AGENTS.md` names
+   (and `vm-gui` `click-preview` / `click-confirm`, whose frames are
+   captured the same attested way).
    Only frames the harness's own capture tool took are graded as visual
    evidence; an image produced any other way is not evidence. Never delete or overwrite a capture once it is in the
    artifact directory — including one that shows a failure. Removing it is
@@ -80,8 +80,8 @@ Procedure:
    wait-for-state check the scenario lists, exactly as written, between the
    input and the capture. Do not add waits or re-captures the scenario does not
    authorize, and never past a deadline it states: a frame taken at a
-   scenario's deadline stands. Where a scenario authorizes a late re-capture
-   (permissions-gui/05 does), take it once, to a NEW name, and judge from it.
+   scenario's deadline stands. Where a scenario authorizes a late re-capture,
+   take it once, to a NEW name, and judge from it.
 7. Drive keys and clicks through the harness.
    A hotkey asserted by typing into a focused field is not evidence the
    binding fired. Modifier chords go through `virsh send-key`.
@@ -93,7 +93,7 @@ Procedure:
    is acceptable. If the red ring is misplaced, generate a corrected preview.
    A preview moves but never clicks. Only after visually confirming the marker may you run
    `vm-gui "$VMNAME" click-confirm <preview-manifest>`. Never use raw
-   `vm-gui click X Y` or `xdotool click` for a model-targeted action.
+   `vm-gui click X Y` for a model-targeted action.
    Click preview and click-confirm apply only to mouse clicks.
 8. Save screenshots, OCR/vision notes, command logs, click preview manifests,
    `click-targets/clicks.tsv`, and journal excerpts under
@@ -238,10 +238,10 @@ Procedure:
    ROOT-owned from the golden image; a non-root writer then dies with
    `Permission denied` and produces a black screenshot that looks like a
    product failure. Redirect YOUR OWN logs to `/tmp/qci-<slug>/<name>.log`. Do
-   not invent a shipped log path to clear: the admin launchers write under
-   `${XDG_STATE_HOME:-/home/admin/.local/state}/qdistro/` (admin-app.log,
-   qterminal-tui.log), which is per-user and not a shared /tmp path - read it
-   for diagnostics, never delete it as root.
+   not invent a shipped log path to clear: the shipped admin-app launcher logs
+   to a fresh private `/run/user/1000/qdistro-admin-app.*.log` (it prints the
+   path) and the admin TUI helper to `/run/qci-admin-tui/foot.log` - read them
+   for diagnostics, never delete them as root.
 
 13. Run Setup, Steps, Assertions, and Cleanup serially in the execution
    context that owns the scenario's helpers. Guest-driver scenarios with

@@ -136,7 +136,7 @@ def _vm_session():
     ok, reason = runner.vm_session_healthy(session)
     if not ok:
         # Loud, precise failure — never silently pass on a session that is
-        # not actually qdshell (e.g. a labwc-only VM profile).
+        # not actually qdshell (e.g. a VM without the qdwin session).
         pytest.fail(
             f"QDSHELL_UI_VM={session.vm} but no usable qdshell session: {reason}",
             pytrace=False,

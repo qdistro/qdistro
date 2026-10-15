@@ -327,26 +327,18 @@ case "${QDISTRO_DEPS_OFFLINE:-0}" in 1|true|yes|on) _OFFLINE=1 ;; esac
 
 fi  # end stages 4-5 (skipped in run-golden mode)
 
-# Stage 6: verify the qdwin session came up. SKIPPED when
-# QCI_SPIN_VERIFY_SESSION=none — the gui spinner (spin-test-vm-gui.sh) sets that
-# and does its OWN profile-aware verification in its POSTBOOT. A labwc GUI
-# golden clone boots straight into labwc (wayland-0, no wayland-1), so an
-# unconditional wayland-1 check here would fail every labwc clone before the gui
-# POSTBOOT ever runs. Default (qdwin) preserves the historic check for bats +
-# standalone spin-test-vm.sh.
-if [ "${QCI_SPIN_VERIFY_SESSION:-qdwin}" != none ]; then
+# Stage 6: verify the qdwin session came up. Every profile this spinner
+# serves (bats, the qdwin GUI golden and its clones, standalone use) runs the
+# qdwin compositor + qdshell session on wayland-1.
 # wayland-1 is the core "compositor came up" signal — fatal on miss.
 # qdshell ctrl-socket + qdlocker.sock are warn-only. qdshell may not have
 # bound the ctrl-socket yet at this exact moment. qdlocker.sock is created by
-# a successfully running qdlocker by default (QDLOCKER_CTRL_SOCKET=1); it is
-# expected to be ABSENT on this lxqt/labwc admin-test harness because qdlocker
-# only runs inside the qdwin compositor session — without qdwin's
-# qdwin_locker_v1 global it retry-crashes (by design) before creating its ctrl
-# socket. The /etc/qdistro/locker-ctrl-introspection marker gates only the
-# diagnostic commands (status/unlock-result/prompt-text) on that socket, not
-# the socket itself or the production `lock` command. So distinguish: socket
-# absent + qdlocker not active = expected here; qdlocker active + socket
-# missing = a real ctrl-socket regression.
+# a successfully running qdlocker by default (QDLOCKER_CTRL_SOCKET=1). The
+# /etc/qdistro/locker-ctrl-introspection marker gates only the diagnostic
+# commands (status/unlock-result/prompt-text) on that socket, not the socket
+# itself or the production `lock` command. So distinguish: socket absent +
+# qdlocker not active = not (yet) running; qdlocker active + socket missing =
+# a real ctrl-socket regression.
 # Poll for the compositor socket rather than a single fixed sleep. The
 # guest-agent becoming ready does NOT mean the qdwin compositor session has
 # finished starting — under first-wave concurrency (several clones booting
@@ -396,18 +388,17 @@ if [ "${LOCKER_OK:-no}" = "yes" ]; then
     log "PASS: qdlocker.sock present"
 else
     # Don't flat-normalize the absence: an absent socket is expected only when
-    # qdlocker isn't running (no qdwin session on this harness). If qdlocker is
-    # active but the socket is missing, that's a real ctrl-socket regression.
+    # qdlocker isn't running. If qdlocker is active but the socket is missing,
+    # that's a real ctrl-socket regression.
     # is-active returns nonzero for an inactive/failed unit; neutralize so the
     # substitution doesn't trip set -e/pipefail before we classify the state.
     LOCKER_STATE=$("$SCRIPT_DIR/vm-exec" "$VM" 'runuser -l admin -c "systemctl --user is-active qdlocker.service"' 2>/dev/null | tr -d '\r' | tail -1 || true)
     if [ "${LOCKER_STATE:-}" = "active" ]; then
         log "WARN: qdlocker.sock missing though qdlocker.service is active — possible ctrl-socket regression (QDLOCKER_CTRL_SOCKET leak / bad XDG_RUNTIME_DIR / bind failure)"
     else
-        log "WARN: qdlocker.sock absent (expected on this lxqt harness: qdlocker.service is '${LOCKER_STATE:-unknown}', no qdwin compositor session to bind qdwin_locker_v1; introspection marker gates only status/unlock-result/prompt-text)"
+        log "WARN: qdlocker.sock absent: qdlocker.service is '${LOCKER_STATE:-unknown}' (introspection marker gates only status/unlock-result/prompt-text)"
     fi
 fi
-fi  # end stage 6 (skipped when QCI_SPIN_VERIFY_SESSION=none)
 
 # Success: emit the VM name FIRST, then mark SPUN_OK so the EXIT trap won't tear
 # it down. Ordering matters — qci only trusts a clean (rc=0) exit, so if we are
