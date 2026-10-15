@@ -225,3 +225,16 @@ def test_cleanup_outcome_survives_broker_bridge_into_workflow_table(qapp, tmp_pa
         assert selected["cleanup_pending"] == 2
     finally:
         engine.shutdown(); audit.close()
+
+
+def test_review_dialog_puts_the_definition_digest_on_its_own_line(qapp):
+    # workflow-gui/05 (full-20261015T112127Z-3016413): after its label the
+    # unbreakable 64-hex digest ran past the screen edge and was cut off.
+    from PyQt6.QtWidgets import QLabel
+    tab = WorkflowsTab(_broker())
+    digest = "0123456789abcdef" * 4
+    dialog = tab._preview_dialog({"run_id": "run-1", "definition_digest": digest,
+                                  "definition": {"name": "wf"}})
+    header = next(lbl for lbl in dialog.findChildren(QLabel) if digest in lbl.text())
+    assert header.text().split("\n") == ["Run run-1", "Definition SHA-256:", digest]
+    dialog.close()
