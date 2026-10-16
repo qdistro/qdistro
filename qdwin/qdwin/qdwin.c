@@ -682,8 +682,12 @@ struct qdwin_toplevel {
 	uint32_t border_rgba;
 	int border_rgba_set;
 	/* Restore geometry — captured on entry to maximise, consumed on
-	 * un-maximise. Outer dims (chrome-inclusive). */
+	 * un-maximise. Outer dims (chrome-inclusive), with the frame
+	 * thickness they were saved under: the shell drops the side borders
+	 * while maximised, so restore re-derives outer from the saved inner
+	 * size and the current frame. */
 	int saved_outer_w, saved_outer_h;
+	int saved_insets_h, saved_insets_v;
 	double saved_x, saved_y;
 	/* v25: half-screen tiling (request_tile). `tiled` is a tile_edge
 	 * value (0=none, 1=left, 2=right). The tile_saved_* fields hold the
@@ -693,6 +697,7 @@ struct qdwin_toplevel {
 	 * geometry. */
 	uint32_t tiled;
 	int tile_saved_outer_w, tile_saved_outer_h;
+	int tile_saved_insets_h, tile_saved_insets_v;
 	double tile_saved_x, tile_saved_y;
 	/* Chrome surfaces/views, indexed by qdwin_side. */
 	struct qdwin_chrome chrome[QDWIN_SIDES];
@@ -3260,6 +3265,29 @@ qdwin_chrome_attach_side(struct qdwin_toplevel *tl, int side,
 	return 0;
 }
 
+/* Restore a saved outer rect. Back to floating, the client keeps the inner
+ * size it had when saved: the shell drops the side borders while maximised
+ * and re-attaches them only after the restore, and attach_decoration then
+ * grows the frame around the client — restoring the saved outer as-is under
+ * the maximised frame grew the window by its borders on every
+ * maximise/restore cycle (permissions-gui/61 S5, 908x628 -> 916x632).
+ * A tile keeps its rect; the nested proxy's curtain is its outer rect. */
+static void
+qdwin_toplevel_restore_outer(struct qdwin_toplevel *tl, int saved_w,
+			     int saved_h, int saved_insets_h,
+			     int saved_insets_v, bool floating)
+{
+	if (!floating || tl->is_nested_proxy) {
+		tl->outer_width = saved_w;
+		tl->outer_height = saved_h;
+		return;
+	}
+	tl->outer_width = qdwin_outer_keep_inner(saved_w, saved_insets_h,
+						 tl->inset_w + tl->inset_e);
+	tl->outer_height = qdwin_outer_keep_inner(saved_h, saved_insets_v,
+						  tl->inset_n + tl->inset_s);
+}
+
 static void
 qdwin_toplevel_seed_outer_from_committed(struct qdwin_toplevel *tl)
 {
@@ -3506,6 +3534,21 @@ qdwin_handle_attach_decoration(struct wl_client *client,
 		tl->outer_height = qdwin_outer_keep_inner(
 			tl->outer_height, old_n + old_s, tl->inset_n + tl->inset_s);
 	}
+	/* A maximised or tiled rect stays put and the content moves inside
+	 * it: the content view was placed at rect + the old W/N insets, so
+	 * when the shell drops the side borders on maximise the client would
+	 * otherwise sit inset_w to the right and leave that strip of the
+	 * work area unpainted (permissions-gui/61 S5). */
+	if (inset_changed && !tl->is_nested_proxy &&
+	    !(tl->state & QDWIN_TS_FULLSCREEN) &&
+	    (tl->tiled != 0 || (tl->state & QDWIN_TS_MAXIMIZED)) &&
+	    (tl->inset_w != old_w || tl->inset_n != old_n)) {
+		struct weston_coord_global pos =
+			weston_view_get_pos_offset_global(tl->view);
+		pos.c.x += tl->inset_w - old_w;
+		pos.c.y += tl->inset_n - old_n;
+		weston_view_set_position(tl->view, pos);
+	}
 	if (inset_changed &&
 	    (tl->inset_n || tl->inset_e || tl->inset_s || tl->inset_w))
 		qdwin_toplevel_apply_inset(tl);
@@ -3679,6 +3722,8 @@ qdwin_toplevel_set_fullscreen(struct qdwin *qdwin,
 		qdwin_toplevel_seed_outer_from_committed(tl);
 		tl->saved_outer_w = tl->outer_width;
 		tl->saved_outer_h = tl->outer_height;
+		tl->saved_insets_h = tl->inset_w + tl->inset_e;
+		tl->saved_insets_v = tl->inset_n + tl->inset_s;
 
 		int ox = out->pos.c.x, oy = out->pos.c.y;
 		qdwin_toplevel_apply_fullscreen_geometry(qdwin, tl, out);
@@ -3697,8 +3742,12 @@ qdwin_toplevel_set_fullscreen(struct qdwin *qdwin,
 			weston_desktop_surface_set_fullscreen(tl->desktop_surface,
 							      false);
 		}
-		tl->outer_width  = tl->saved_outer_w;
-		tl->outer_height = tl->saved_outer_h;
+		qdwin_toplevel_restore_outer(tl, tl->saved_outer_w,
+					     tl->saved_outer_h,
+					     tl->saved_insets_h,
+					     tl->saved_insets_v,
+					     tl->tiled == 0 &&
+					     !(tl->state & QDWIN_TS_MAXIMIZED));
 		struct weston_coord_global pos = {
 			.c = weston_coord(tl->saved_x, tl->saved_y),
 		};
@@ -3786,6 +3835,8 @@ qdwin_toplevel_set_maximized(struct qdwin *qdwin,
 		qdwin_toplevel_seed_outer_from_committed(tl);
 		tl->saved_outer_w = tl->outer_width;
 		tl->saved_outer_h = tl->outer_height;
+		tl->saved_insets_h = tl->inset_w + tl->inset_e;
+		tl->saved_insets_v = tl->inset_n + tl->inset_s;
 
 		/* §6.6 S1: maximise fills the work area (output minus panel
 		 * exclusive zones), not the full output. */
@@ -3833,8 +3884,12 @@ qdwin_toplevel_set_maximized(struct qdwin *qdwin,
 			weston_desktop_surface_set_maximized(tl->desktop_surface,
 							    false);
 		}
-		tl->outer_width  = tl->saved_outer_w;
-		tl->outer_height = tl->saved_outer_h;
+		qdwin_toplevel_restore_outer(tl, tl->saved_outer_w,
+					     tl->saved_outer_h,
+					     tl->saved_insets_h,
+					     tl->saved_insets_v,
+					     tl->tiled == 0 &&
+					     !(tl->state & QDWIN_TS_FULLSCREEN));
 		struct weston_coord_global pos = {
 			.c = weston_coord(tl->saved_x, tl->saved_y),
 		};
@@ -10102,8 +10157,12 @@ qdwin_toplevel_set_tiled(struct qdwin *qdwin, struct qdwin_toplevel *tl,
 	if (edge == QDWIN_TILE_NONE) {
 		if (tl->tiled == QDWIN_TILE_NONE)
 			return;  /* not tiled — no-op */
-		tl->outer_width  = tl->tile_saved_outer_w;
-		tl->outer_height = tl->tile_saved_outer_h;
+		qdwin_toplevel_restore_outer(tl, tl->tile_saved_outer_w,
+					     tl->tile_saved_outer_h,
+					     tl->tile_saved_insets_h,
+					     tl->tile_saved_insets_v,
+					     !(tl->state & (QDWIN_TS_MAXIMIZED |
+							    QDWIN_TS_FULLSCREEN)));
 		struct weston_coord_global pos = {
 			.c = weston_coord(tl->tile_saved_x, tl->tile_saved_y),
 		};
@@ -10148,6 +10207,8 @@ qdwin_toplevel_set_tiled(struct qdwin *qdwin, struct qdwin_toplevel *tl,
 		qdwin_toplevel_seed_outer_from_committed(tl);
 		tl->tile_saved_outer_w = tl->outer_width;
 		tl->tile_saved_outer_h = tl->outer_height;
+		tl->tile_saved_insets_h = tl->inset_w + tl->inset_e;
+		tl->tile_saved_insets_v = tl->inset_n + tl->inset_s;
 		tl->tile_saved_x = cur.c.x;
 		tl->tile_saved_y = cur.c.y;
 	}
