@@ -98,6 +98,17 @@ These used to live only in private agent notes; validation relies on them.
   run. An inherited environment value can be stale and silently drive a whole
   run with the wrong model; a debug rerun with a different model is never a
   CI verdict.
+- **The secondary ("advanced") GUI agent is pluggable and opt-in.** Pin it in
+  `QCI_AGENT_ADVANCED_CMD` (same template rules as `QCI_AGENT_CMD`; name its
+  model in the template or `QCI_AGENT_ADVANCED_MODEL`). It drives only the
+  scenarios in `ci/gui-agent-advanced.tsv`, the ones the default driver fails
+  for reasons of its own (each row cites the run). It never changes what a
+  scenario asserts or how it is graded. The manifest records
+  `qci_agent_advanced_*` and every attempt log ends with
+  `qci_agent_profile=… qci_agent_model=…`, so compare a scenario's rows only
+  across runs that used the same profile. Unset, the registry is inert.
+  Adding a row is a CI change that needs review; it is not a way to rescue a
+  real product failure.
 - **Launch long runs under `systemd-run --user --unit=qci-<name>`**, so they
   survive the launching shell, and **never edit a script while a run that
   sources it is going**: bash reads scripts incrementally, and an edit (or a

@@ -3435,8 +3435,58 @@ gui_apply_view_gate() {
         "$status" "$rc"
 }
 
+# --- Secondary ("advanced") GUI agent --------------------------------------
+# Some scenarios are a poor fit for the default driver: it hand-retypes long
+# blocks, re-runs half-executed input, or misattributes frames (Luna 6 in
+# full-20261015T112127Z-3016413: apps/13, permissions-gui/61 and 63,
+# presentation-gui/01). ci/gui-agent-advanced.tsv names those scenarios; the
+# operator pins a more capable agent for them in QCI_AGENT_ADVANCED_CMD (same
+# template rules as QCI_AGENT_CMD, e.g. `{prompt}`), optionally naming its
+# model in QCI_AGENT_ADVANCED_MODEL. The agent is pluggable: the registry only
+# says WHICH scenarios get the advanced profile, never which model it is.
+# It changes who drives a scenario, never what the scenario asserts or how it
+# is graded; every attempt log and the manifest record the profile and model.
+GUI_AGENT_ADVANCED_REGISTRY=${GUI_AGENT_ADVANCED_REGISTRY:-${QCI_DIR:-${QDISTRO_REPO:-.}/ci}/gui-agent-advanced.tsv}
+
+# gui_agent_profile <scenario-path> — `advanced` when a registry row's
+# path_suffix ends the scenario path (at a / boundary) and
+# QCI_AGENT_ADVANCED_CMD is set; `default` otherwise. Pure (reads the
+# registry and the env) => host-testable.
+gui_agent_profile() {
+    local scenario=$1 suffix rest
+    [ -n "${QCI_AGENT_ADVANCED_CMD:-}" ] && [ -f "$GUI_AGENT_ADVANCED_REGISTRY" ] \
+        || { printf 'default'; return 0; }
+    while IFS=$'\t' read -r suffix rest; do
+        case "$suffix" in ''|'#'*) continue ;; esac
+        case "/$scenario" in
+            */"$suffix") printf 'advanced'; return 0 ;;
+        esac
+    done < "$GUI_AGENT_ADVANCED_REGISTRY"
+    printf 'default'
+}
+
+# gui_agent_cmd_for <profile> / gui_agent_model_for <profile>
+gui_agent_cmd_for() {
+    if [ "$1" = advanced ]; then printf '%s' "${QCI_AGENT_ADVANCED_CMD:-}"
+    else printf '%s' "${QCI_AGENT_CMD:-}"; fi
+}
+gui_agent_model_for() {
+    local cmd model
+    cmd=$(gui_agent_cmd_for "$1")
+    model=$(gui_agent_model_from_cmd "$cmd")
+    if [ "$1" = advanced ]; then
+        [ -n "${QCI_AGENT_ADVANCED_MODEL:-}" ] && model=$QCI_AGENT_ADVANCED_MODEL
+    else
+        [ -n "${QCI_AGENT_MODEL:-}" ] && model=$QCI_AGENT_MODEL
+    fi
+    printf '%s' "${model:-unknown}"
+}
+
 run_agent_command() {
-    local prompt=$1 log_path=$2 observe_out=${3:-} cmd=${QCI_AGENT_CMD:-} expanded workdir rc
+    local prompt=$1 log_path=$2 observe_out=${3:-} cmd expanded workdir rc profile
+    # QCI_SCENARIO_FILE is exported for the attempt by the caller.
+    profile=$(gui_agent_profile "${QCI_SCENARIO_FILE:-}")
+    cmd=$(gui_agent_cmd_for "$profile")
     local -a host_sandbox=()
     if [ -z "$cmd" ]; then
         return 127
@@ -3483,8 +3533,11 @@ run_agent_command() {
         fi
     )
     rc=$?
+    printf '\nqci_agent_profile=%s qci_agent_model=%s\n' \
+        "$profile" "$(gui_agent_model_for "$profile")" >> "$log_path"
     # F3: observe BEFORE the cwd goes (relative view_image paths resolve there).
-    [ -z "$observe_out" ] || gui_observe_attempt "$log_path" "$observe_out"
+    # The rollout observer judges observability from THIS attempt's template.
+    [ -z "$observe_out" ] || QCI_AGENT_CMD="$cmd" gui_observe_attempt "$log_path" "$observe_out"
     if [ "$rc" -eq 0 ]; then
         rm -rf -- "$workdir" 2>/dev/null || true
         printf '\nqci_agent_workdir=%s (removed after success)\n' "$workdir" >> "$log_path"
@@ -4166,6 +4219,22 @@ record_agent_identity() {
         ver=$(timeout 10 codex --version 2>/dev/null | head -1) || true
         if [ -n "$ver" ]; then kv qci_agent_version "$ver"; fi
     fi
+    record_advanced_agent_identity
+}
+
+# The secondary agent's identity, beside the default's: the sanitized template,
+# its model and pinned effort, and the scenarios that will get it. Recorded
+# only when QCI_AGENT_ADVANCED_CMD is set; without it the registry is inert.
+record_advanced_agent_identity() {
+    local cmd=${QCI_AGENT_ADVANCED_CMD:-} effort list
+    [ -n "$cmd" ] || return 0
+    kv qci_agent_advanced_cmd "$(printf '%s' "$cmd" | tr '\t\n' '  ')"
+    kv qci_agent_advanced_model "$(gui_agent_model_for advanced)"
+    effort=$(gui_agent_effort_from_cmd "$cmd") || effort=""
+    kv qci_agent_advanced_reasoning_effort "${effort:-unpinned}"
+    list=$(awk -F'\t' '$1 != "" && $1 !~ /^#/ { printf "%s%s", sep, $1; sep = " " }' \
+        "$GUI_AGENT_ADVANCED_REGISTRY" 2>/dev/null) || list=""
+    kv qci_agent_advanced_scenarios "${list:-none}"
 }
 
 gate_gui() {
