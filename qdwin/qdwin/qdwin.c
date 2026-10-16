@@ -3379,6 +3379,7 @@ qdwin_toplevel_apply_inset(struct qdwin_toplevel *tl)
 		   surface ? surface->width : 0, surface ? surface->height : 0,
 		   geometry.width, geometry.height, configure_w, configure_h);
 	if (xwayland) {
+		bool earlier_pending = tl->xwayland_configure_pending;
 		tl->xwayland_target_w = inner_w;
 		tl->xwayland_target_h = inner_h;
 		tl->xwayland_sent_w = configure_w;
@@ -3388,7 +3389,23 @@ qdwin_toplevel_apply_inset(struct qdwin_toplevel *tl)
 		tl->xwayland_before_h = geometry.height > 0
 			? geometry.height : (surface ? surface->height : 0);
 		tl->xwayland_corrections = 0;
-		tl->xwayland_configure_pending = true;
+		/* A target the client already has (a floating window's frame
+		 * attaching keeps its extent) gets no size-changing response, so
+		 * the feedback above would never clear pending: it would mistake
+		 * the next app-driven resize for this answer and undo it. */
+		int actual_w = surface && surface->width > 0
+			? surface->width : geometry.width;
+		int actual_h = surface && surface->height > 0
+			? surface->height : geometry.height;
+		/* An earlier configure still in flight must be superseded and
+		 * its response corrected, so it keeps convergence and the send. */
+		tl->xwayland_configure_pending = earlier_pending ||
+			actual_w != inner_w || actual_h != inner_h;
+		/* Otherwise send nothing: a Chromium/Electron client would add
+		 * its unlearned frame to the "same" size, and with nothing
+		 * pending that growth would go uncorrected. */
+		if (!tl->xwayland_configure_pending)
+			return;
 	}
 	weston_desktop_surface_set_size(tl->desktop_surface,
 					configure_w, configure_h);
@@ -3474,6 +3491,21 @@ qdwin_handle_attach_decoration(struct wl_client *client,
 	 * window would jitter and could settle short of the pointer. */
 	bool inset_changed = tl->inset_n != old_n || tl->inset_e != old_e ||
 			     tl->inset_s != old_s || tl->inset_w != old_w;
+	/* A floating client keeps the size it committed; the frame grows around
+	 * it. outer_* was recorded with the previous (first time: zero) insets,
+	 * so apply_inset would otherwise shrink the client by the new frame:
+	 * the tier-5 polkit prompt went 323x136 -> 315x108 and cut its message
+	 * to "Authentication required to show" (permissions-gui/63), the admin
+	 * app's QMessageBox 500x108 -> 492x80 lost its second line (62).
+	 * Maximized/fullscreen/tiled rects stay as chosen; the nested proxy's
+	 * curtain already is its outer rect. */
+	if (inset_changed && !tl->is_nested_proxy && tl->tiled == 0 &&
+	    !(tl->state & (QDWIN_TS_MAXIMIZED | QDWIN_TS_FULLSCREEN))) {
+		tl->outer_width = qdwin_outer_keep_inner(
+			tl->outer_width, old_w + old_e, tl->inset_w + tl->inset_e);
+		tl->outer_height = qdwin_outer_keep_inner(
+			tl->outer_height, old_n + old_s, tl->inset_n + tl->inset_s);
+	}
 	if (inset_changed &&
 	    (tl->inset_n || tl->inset_e || tl->inset_s || tl->inset_w))
 		qdwin_toplevel_apply_inset(tl);

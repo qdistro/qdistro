@@ -96,6 +96,15 @@ void qdwin_layer_compute_box(uint32_t anchor,
 int32_t qdwin_inset_inner_extent(int32_t outer, int32_t inset_lead,
 				 int32_t inset_trail);
 
+/* Outer extent of a floating toplevel after its frame thickness changes from
+ * old_insets to new_insets (lead + trail), keeping the client's own extent.
+ * The commit path records outer = committed + insets while the chrome is not
+ * attached yet (insets 0), so without this the first attach_decoration shrank
+ * every client by its frame: Qt dialogs obeyed and clipped their text. An
+ * unset outer (<= 0) is returned unchanged for the committed-size seed. */
+int32_t qdwin_outer_keep_inner(int32_t outer, int32_t old_insets,
+			       int32_t new_insets);
+
 /* Convert a desired visible desktop-window extent to the configure extent a
  * client needs. XWayland surfaces may have a larger wl_surface buffer than
  * their desktop geometry because of CSD shadows. Its configure path applies

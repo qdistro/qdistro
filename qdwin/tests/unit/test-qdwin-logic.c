@@ -341,6 +341,30 @@ static void test_client_extent_for_geometry(void)
 	      qdwin_client_extent_for_geometry(1280, 1332, 1280, 64));
 }
 
+static void test_outer_keep_inner(void)
+{
+	/* The tier-5 polkit prompt committed 323x136 before its chrome
+	 * (N24 E4 S4 W4) attached; the frame must grow around it. */
+	CHECK(qdwin_outer_keep_inner(323, 0, 8) == 331,
+	      "first attach keeps the 323 committed width: got %d",
+	      qdwin_outer_keep_inner(323, 0, 8));
+	CHECK(qdwin_outer_keep_inner(136, 0, 28) == 164,
+	      "first attach keeps the 136 committed height: got %d",
+	      qdwin_outer_keep_inner(136, 0, 28));
+	CHECK(qdwin_outer_keep_inner(164, 28, 32) == 168,
+	      "a thicker title bar grows the frame, not shrinks the client: got %d",
+	      qdwin_outer_keep_inner(164, 28, 32));
+	CHECK(qdwin_outer_keep_inner(164, 28, 0) == 136,
+	      "chrome removal returns the client extent: got %d",
+	      qdwin_outer_keep_inner(164, 28, 0));
+	CHECK(qdwin_outer_keep_inner(0, 0, 28) == 0,
+	      "unset outer is left for the committed-size seed: got %d",
+	      qdwin_outer_keep_inner(0, 0, 28));
+	CHECK(qdwin_outer_keep_inner(10, 28, 28) == 29,
+	      "stale outer below the old insets keeps a one-pixel client: got %d",
+	      qdwin_outer_keep_inner(10, 28, 28));
+}
+
 static void test_committed_restore_extent(void)
 {
 	CHECK(qdwin_committed_restore_extent(true, 676, 612) == 676,
@@ -892,6 +916,7 @@ int main(void)
 	test_compute_box();
 	test_fractional_scale();
 	test_inset_inner_extent();
+	test_outer_keep_inner();
 	test_client_extent_for_geometry();
 	test_committed_restore_extent();
 	test_rehome_outer_rect();
