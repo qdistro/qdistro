@@ -365,6 +365,23 @@ static void test_outer_keep_inner(void)
 	      qdwin_outer_keep_inner(10, 28, 28));
 }
 
+static void test_restore_keeps_inner_across_frame_change(void)
+{
+	/* permissions-gui/61 S5: a 900x600 client saved for maximise under
+	 * E4 W4 (outer 908); the shell drops the side borders while
+	 * maximised and re-attaches them after the restore. Restore derives
+	 * outer under the current (borderless) frame, and attach_decoration
+	 * then grows the frame back around the same client. */
+	int restored = qdwin_outer_keep_inner(908, 8, 0);
+	CHECK(restored == 900,
+	      "restore under the maximised frame keeps the 900 client: got %d",
+	      restored);
+	int reattached = qdwin_outer_keep_inner(restored, 0, 8);
+	CHECK(reattached == 908,
+	      "re-attached borders return the saved 908 outer, not 916: got %d",
+	      reattached);
+}
+
 static void test_committed_restore_extent(void)
 {
 	CHECK(qdwin_committed_restore_extent(true, 676, 612) == 676,
@@ -917,6 +934,7 @@ int main(void)
 	test_fractional_scale();
 	test_inset_inner_extent();
 	test_outer_keep_inner();
+	test_restore_keeps_inner_across_frame_change();
 	test_client_extent_for_geometry();
 	test_committed_restore_extent();
 	test_rehome_outer_rect();
