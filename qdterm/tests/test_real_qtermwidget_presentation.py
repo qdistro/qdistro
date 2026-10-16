@@ -202,8 +202,10 @@ def test_real_default_profile_follows_a_published_light_dark_switch(qtbot, tmp_p
     for mode, bright in (("light", True), ("dark", False)):
         s = snap(mode)
         write_snapshot(str(tmp_path), s, require_unwritable_dirs=False)
-        qtbot.waitUntil(lambda: ctrl.state.generation == s.generation, timeout=5000)
         qtbot.waitUntil(
-            lambda: (_background_luma(term.term) > 200) == bright, timeout=5000)
+            lambda s=s: ctrl.state.generation == s.generation, timeout=5000)
+        qtbot.waitUntil(
+            lambda bright=bright: (_background_luma(term.term) > 200) == bright,
+            timeout=5000)
     assert term.term.getShellPID() == pid
     win.close()
