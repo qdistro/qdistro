@@ -3388,7 +3388,16 @@ qdwin_toplevel_apply_inset(struct qdwin_toplevel *tl)
 		tl->xwayland_before_h = geometry.height > 0
 			? geometry.height : (surface ? surface->height : 0);
 		tl->xwayland_corrections = 0;
-		tl->xwayland_configure_pending = true;
+		/* A target the client already has (a floating window's frame
+		 * attaching keeps its extent) gets no size-changing response, so
+		 * the feedback above would never clear pending: it would mistake
+		 * the next app-driven resize for this answer and undo it. */
+		int actual_w = surface && surface->width > 0
+			? surface->width : geometry.width;
+		int actual_h = surface && surface->height > 0
+			? surface->height : geometry.height;
+		tl->xwayland_configure_pending =
+			actual_w != inner_w || actual_h != inner_h;
 	}
 	weston_desktop_surface_set_size(tl->desktop_surface,
 					configure_w, configure_h);
