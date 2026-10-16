@@ -3398,6 +3398,11 @@ qdwin_toplevel_apply_inset(struct qdwin_toplevel *tl)
 			? surface->height : geometry.height;
 		tl->xwayland_configure_pending =
 			actual_w != inner_w || actual_h != inner_h;
+		/* Nor send it: a Chromium/Electron client would add its
+		 * unlearned frame to the "same" size, and with nothing pending
+		 * that growth would go uncorrected. */
+		if (!tl->xwayland_configure_pending)
+			return;
 	}
 	weston_desktop_surface_set_size(tl->desktop_surface,
 					configure_w, configure_h);
