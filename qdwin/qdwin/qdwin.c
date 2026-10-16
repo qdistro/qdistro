@@ -3379,6 +3379,7 @@ qdwin_toplevel_apply_inset(struct qdwin_toplevel *tl)
 		   surface ? surface->width : 0, surface ? surface->height : 0,
 		   geometry.width, geometry.height, configure_w, configure_h);
 	if (xwayland) {
+		bool earlier_pending = tl->xwayland_configure_pending;
 		tl->xwayland_target_w = inner_w;
 		tl->xwayland_target_h = inner_h;
 		tl->xwayland_sent_w = configure_w;
@@ -3396,11 +3397,13 @@ qdwin_toplevel_apply_inset(struct qdwin_toplevel *tl)
 			? surface->width : geometry.width;
 		int actual_h = surface && surface->height > 0
 			? surface->height : geometry.height;
-		tl->xwayland_configure_pending =
+		/* An earlier configure still in flight must be superseded and
+		 * its response corrected, so it keeps convergence and the send. */
+		tl->xwayland_configure_pending = earlier_pending ||
 			actual_w != inner_w || actual_h != inner_h;
-		/* Nor send it: a Chromium/Electron client would add its
-		 * unlearned frame to the "same" size, and with nothing pending
-		 * that growth would go uncorrected. */
+		/* Otherwise send nothing: a Chromium/Electron client would add
+		 * its unlearned frame to the "same" size, and with nothing
+		 * pending that growth would go uncorrected. */
 		if (!tl->xwayland_configure_pending)
 			return;
 	}
