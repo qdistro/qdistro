@@ -179,3 +179,31 @@ def test_real_missing_scheme_keeps_last_valid_scheme(qtbot, monkeypatch, caplog)
     assert term._applied_scheme == LIGHT_SCHEME
     qtbot.waitUntil(lambda: _background_luma(term.term) > 200, timeout=5000)
     win.close()
+
+
+def test_real_default_profile_follows_a_published_light_dark_switch(qtbot, tmp_path, monkeypatch):
+    """presentation-gui/01: the terminal background follows the shell's
+    light/dark mode, delivered as a snapshot, without a respawn."""
+    def snap(mode):
+        return with_generation(replace(example_snapshot(), mode=mode))
+
+    write_snapshot(str(tmp_path), snap("dark"), require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(QApplication.instance(), Config())
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    qtbot.waitExposed(win)
+    term = win._active_terminal
+    qtbot.waitUntil(lambda: _background_luma(term.term) < 60, timeout=5000)
+    qtbot.waitUntil(lambda: int(term.term.getShellPID() or 0) > 0, timeout=5000)
+    pid = term.term.getShellPID()
+    ctrl = current_controller()
+    for mode, bright in (("light", True), ("dark", False)):
+        s = snap(mode)
+        write_snapshot(str(tmp_path), s, require_unwritable_dirs=False)
+        qtbot.waitUntil(lambda: ctrl.state.generation == s.generation, timeout=5000)
+        qtbot.waitUntil(
+            lambda: (_background_luma(term.term) > 200) == bright, timeout=5000)
+    assert term.term.getShellPID() == pid
+    win.close()

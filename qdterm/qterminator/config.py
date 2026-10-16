@@ -23,6 +23,9 @@ DEFAULTS = {
         "theme_mode": "system",  # "dark", "light", or "system" (follows OS)
         "dark_color_scheme": "Linux",
         "light_color_scheme": "BlackOnLightYellow",
+        # Set once stored profiles were moved to theme-following colours
+        # (Config._load); a config written after that keeps what it stores.
+        "color_follow_theme_migrated": True,
         # SECURITY: Saving scrollback may persist secrets (passwords typed
         # in plaintext, API keys, tokens printed in logs). Opt-in only.
         "save_scrollback": False,
@@ -34,7 +37,8 @@ DEFAULTS = {
             "font_ligatures": False,
             "font_source": "desktop",
             "color_scheme": "Linux",
-            "color_source": "profile",
+            # Follow the desktop's light/dark mode (general.*_color_scheme).
+            "color_source": "appearance-mode",
             "cursor_shape": "block",  # block, underline, ibeam
             "cursor_blink": True,
             "scrollback_lines": 5000,
@@ -140,10 +144,14 @@ class Config:
     def _load(self):
         existed = os.path.isfile(CONFIG_FILE)
         raw_profiles = {}
+        migrated = True
         if existed:
             with open(CONFIG_FILE, "rb") as f:
                 user_config = tomllib.load(f)
             raw_profiles = copy.deepcopy(user_config.get("profiles") or {})
+            general = user_config.get("general")
+            migrated = isinstance(general, dict) and bool(
+                general.get("color_follow_theme_migrated"))
             self._merge(self._data, user_config)
         for name, prof in list(self._data.get("profiles", {}).items()):
             if not isinstance(prof, dict) or str(name).startswith("_"):
@@ -153,8 +161,17 @@ class Config:
                 src = {}
             if "font_source" not in src:
                 prof["font_source"] = "local" if existed else "desktop"
-            if "color_source" not in src:
-                prof["color_source"] = "profile"
+            if not migrated and (
+                    src.get("color_source", "profile") == "profile"
+                    and src.get("color_scheme", "Linux") == "Linux"):
+                # Older qterminator saved its defaults (profile + Linux) on
+                # every save, so that pair is not a choice: follow the
+                # desktop's light/dark mode. Any other stored scheme stays.
+                prof["color_source"] = "appearance-mode"
+            elif "color_source" not in src:
+                prof["color_source"] = (
+                    "profile" if "color_scheme" in src else "appearance-mode")
+        self._data["general"]["color_follow_theme_migrated"] = True
 
     def _merge(self, base, override):
         for key, value in override.items():
