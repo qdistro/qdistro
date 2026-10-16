@@ -13,3 +13,4 @@ tests/integration/permissions-gui/61-window-chrome-context-menu.md	default drive
 tests/integration/permissions-gui/63-tier5-launch-password-prompt.md	default driver re-ran a half-executed block; the second Return sent an empty password (full-20261015T112127Z-3016413)
 tests/integration/presentation-gui/01-four-apps-follow-shell.md	default driver batch-opened unlabelled frames and credited QFileMan's frame to qdbrowser (full-20261015T112127Z-3016413)
 tests/integration/permissions-gui/13-cross-user-sendto-deny.md	default driver captured no broker request id (relay.reqid=none) and stalled in admin-app cleanup, recording ERROR; it passed the run before (gui-20261015T203710Z-1210293)
+tests/integration/permissions-gui/62-admin-approval-password-prompt.md	default driver drove S1-S2 so slowly that the requester's bounded D-Bus wait expired (work1-rc=1, NoReply), recording ERROR; same driver ERROR in gui-20261014T204004Z-455830 (gui-20261016T090200Z-3406513)
