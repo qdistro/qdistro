@@ -132,6 +132,20 @@ qdwin_inset_inner_extent(int32_t outer, int32_t inset_lead, int32_t inset_trail)
 }
 
 int32_t
+qdwin_outer_keep_inner(int32_t outer, int32_t old_insets, int32_t new_insets)
+{
+	if (outer <= 0)
+		return outer;
+	int64_t inner = (int64_t)outer - old_insets;
+	if (inner < 1)
+		inner = 1;
+	int64_t kept = inner + new_insets;
+	if (kept > INT32_MAX)
+		return INT32_MAX;
+	return (int32_t)kept;
+}
+
+int32_t
 qdwin_client_extent_for_geometry(int32_t desired_geometry,
 				 int32_t surface_extent,
 				 int32_t geometry_extent,

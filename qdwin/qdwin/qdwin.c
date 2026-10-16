@@ -3474,6 +3474,21 @@ qdwin_handle_attach_decoration(struct wl_client *client,
 	 * window would jitter and could settle short of the pointer. */
 	bool inset_changed = tl->inset_n != old_n || tl->inset_e != old_e ||
 			     tl->inset_s != old_s || tl->inset_w != old_w;
+	/* A floating client keeps the size it committed; the frame grows around
+	 * it. outer_* was recorded with the previous (first time: zero) insets,
+	 * so apply_inset would otherwise shrink the client by the new frame:
+	 * the tier-5 polkit prompt went 323x136 -> 315x108 and cut its message
+	 * to "Authentication required to show" (permissions-gui/63), the admin
+	 * app's QMessageBox 500x108 -> 492x80 lost its second line (62).
+	 * Maximized/fullscreen/tiled rects stay as chosen; the nested proxy's
+	 * curtain already is its outer rect. */
+	if (inset_changed && !tl->is_nested_proxy && tl->tiled == 0 &&
+	    !(tl->state & (QDWIN_TS_MAXIMIZED | QDWIN_TS_FULLSCREEN))) {
+		tl->outer_width = qdwin_outer_keep_inner(
+			tl->outer_width, old_w + old_e, tl->inset_w + tl->inset_e);
+		tl->outer_height = qdwin_outer_keep_inner(
+			tl->outer_height, old_n + old_s, tl->inset_n + tl->inset_s);
+	}
 	if (inset_changed &&
 	    (tl->inset_n || tl->inset_e || tl->inset_s || tl->inset_w))
 		qdwin_toplevel_apply_inset(tl);
