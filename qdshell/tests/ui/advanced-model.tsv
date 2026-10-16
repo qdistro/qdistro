@@ -1,0 +1,24 @@
+# advanced-model.tsv — qdshell-ui tests whose screenshot describe + judge run
+# on the advanced model (runner._codex_model_for_current_test; default
+# gpt-6.1-sol at low effort, QDSHELL_UI_ADVANCED_MODEL / _EFFORT override,
+# QDSHELL_UI_ADVANCED_MODEL= disables). The model changes WHO reads the frame,
+# never the expectation or the verdict rule; stderr records the model used.
+# Columns (TAB-separated): nodeid_suffix<TAB>reason
+#   nodeid_suffix  matched against the END of the pytest node id at a / boundary
+#   reason         the default model's observed failure (run ids)
+# A row belongs here only when the default model misreads a correct frame,
+# never to rescue a real product failure.
+test_panels.py::test_panel[panel_launcher]	describer omitted the launcher icons/footer in every Luna run (full-20261015T112127Z-3016413, full-20261015T180520Z-16970, gui-20261015T203710Z-1210293)
+test_settings_tabs.py::test_settings_tab[settings_advanced]	describer misread the reset-icon colours in every Luna run (full-20261015T112127Z-3016413, full-20261015T180520Z-16970, gui-20261015T203710Z-1210293)
+test_panels.py::test_panel[panel_battery]	failed once under Luna, passed in the next two (full-20261015T112127Z-3016413)
+test_real_input.py::test_launcher_shift_and_backspace	describer added punctuation to the typed text (Gajku.) once (full-20261015T112127Z-3016413)
+test_panels.py::test_panel[panel_bluetooth]	failed once under Luna, passed in the other two (full-20261015T180520Z-16970)
+test_panels.py::test_panel[panel_tray]	failed once under Luna, passed in the other two (full-20261015T180520Z-16970)
+test_settings_details.py::test_desktopicons_sort_options	failed once under Luna, passed in the other two (full-20261015T180520Z-16970)
+test_settings_tabs.py::test_settings_tab[settings_systemmonitor]	failed once under Luna, passed in the other two (full-20261015T180520Z-16970)
+test_interaction.py::test_sequential_panel_opens	failed once under Luna, passed in the other two (gui-20261015T203710Z-1210293)
+test_real_input.py::test_launcher_escape_real_key	failed once under Luna, passed in the other two (gui-20261015T203710Z-1210293)
+test_settings_tabs.py::test_settings_tab[settings_desktopicons]	failed once under Luna, passed in the other two (gui-20261015T203710Z-1210293)
+test_settings_tabs.py::test_settings_tab[settings_osd]	failed once under Luna, passed in the other two (gui-20261015T203710Z-1210293)
+test_settings_tabs.py::test_settings_tab[settings_connections]	describer missed the Bluetooth-off icon once, passed in the other two (gui-20261015T203710Z-1210293)
+test_settings_tabs.py::test_settings_tab[settings_power]	failed once under Luna, passed in the other two (gui-20261015T203710Z-1210293)

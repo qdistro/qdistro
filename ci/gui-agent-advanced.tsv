@@ -12,3 +12,4 @@ qdwin/tests/apps/13-rdp-subscribe-frame.md	default driver hand-retyped the block
 tests/integration/permissions-gui/61-window-chrome-context-menu.md	default driver recorded ERROR after S4 with nothing blocking S5-S9 (full-20261015T112127Z-3016413)
 tests/integration/permissions-gui/63-tier5-launch-password-prompt.md	default driver re-ran a half-executed block; the second Return sent an empty password (full-20261015T112127Z-3016413)
 tests/integration/presentation-gui/01-four-apps-follow-shell.md	default driver batch-opened unlabelled frames and credited QFileMan's frame to qdbrowser (full-20261015T112127Z-3016413)
+tests/integration/permissions-gui/13-cross-user-sendto-deny.md	default driver captured no broker request id (relay.reqid=none) and stalled in admin-app cleanup, recording ERROR; it passed the run before (gui-20261015T203710Z-1210293)

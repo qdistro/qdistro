@@ -2233,8 +2233,43 @@ def describe_view(image_path: Path, prompt: Optional[str] = None) -> str:
     return desc
 
 
+DEFAULT_CODEX_MODEL = "gpt-6-luna"
+ADVANCED_MODEL_REGISTRY = UI_TESTS_ROOT / "advanced-model.tsv"
+
+
+def _advanced_model_rows() -> list[str]:
+    """Node-id suffixes listed in advanced-model.tsv (comments skipped)."""
+    try:
+        lines = ADVANCED_MODEL_REGISTRY.read_text().splitlines()
+    except OSError:
+        return []
+    rows = []
+    for line in lines:
+        if not line.strip() or line.startswith("#"):
+            continue
+        rows.append(line.split("\t", 1)[0].strip())
+    return rows
+
+
+def _codex_model_for_current_test(effort: str) -> tuple[str, str]:
+    """(model, effort) for the running test: the advanced model for a test
+    listed in advanced-model.tsv, else the default model at `effort`."""
+    model = os.environ.get("QDSHELL_UI_ADVANCED_MODEL", "gpt-6.1-sol")
+    nodeid = os.environ.get("PYTEST_CURRENT_TEST", "").rsplit(" (", 1)[0]
+    if model and nodeid and any(
+        nodeid == row or nodeid.endswith("/" + row)
+        for row in _advanced_model_rows()
+    ):
+        return model, os.environ.get("QDSHELL_UI_ADVANCED_EFFORT", "low")
+    return DEFAULT_CODEX_MODEL, effort
+
+
 def _run_codex(prompt: str, image_path: Optional[Path] = None,
                effort: str = "medium") -> str:
+    model, effort = _codex_model_for_current_test(effort)
+    if model != DEFAULT_CODEX_MODEL:
+        print(f"qdshell-ui: advanced model={model} effort={effort}",
+              file=sys.stderr)
     with tempfile.TemporaryDirectory(prefix="qdshell-codex-") as tmp:
         output_path = Path(tmp) / "last-message.txt"
         cmd = [
@@ -2242,7 +2277,7 @@ def _run_codex(prompt: str, image_path: Optional[Path] = None,
             "--dangerously-bypass-approvals-and-sandbox",
             "--sandbox", "danger-full-access",
             "--cd", str(QDSHELL_ROOT),
-            "--model", "gpt-6-luna",
+            "--model", model,
             "-c", f"model_reasoning_effort={effort}",
             "--output-last-message", str(output_path),
         ]

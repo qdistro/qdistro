@@ -530,3 +530,77 @@ def test_tray_golden_matches_the_empty_drawer_auto_close():
                    "no stale or placeholder tray icons",
                    "no other panel/surface", "no crash dialog"):
         assert banned in text
+
+
+def _fake_codex(seen):
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        out = Path(cmd[cmd.index("--output-last-message") + 1])
+        out.write_text("MISSING: none\nEXTRA: none\nVERDICT: PASS\n")
+        return SimpleNamespace(returncode=0, stdout="")
+    return fake_run
+
+
+@pytest.mark.parametrize("judge_call", [False, True])
+def test_ui_listed_test_runs_on_the_advanced_model(monkeypatch, judge_call):
+    seen = []
+    monkeypatch.setattr(runner.subprocess, "run", _fake_codex(seen))
+    monkeypatch.setattr(runner.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.delenv("QDSHELL_UI_NO_CODEX", raising=False)
+    monkeypatch.delenv("QDSHELL_UI_ADVANCED_MODEL", raising=False)
+    monkeypatch.delenv("QDSHELL_UI_ADVANCED_EFFORT", raising=False)
+    monkeypatch.setenv(
+        "PYTEST_CURRENT_TEST",
+        "tests/ui/test_panels.py::test_panel[panel_launcher] (call)")
+    if judge_call:
+        runner.judge("reference", "actual")
+    else:
+        runner._run_codex("describe", Path("/tmp/x.png"))
+    (cmd,) = seen
+    assert cmd[cmd.index("--model") + 1] == "gpt-6.1-sol"
+    assert cmd[cmd.index("-c") + 1] == "model_reasoning_effort=low"
+
+
+def test_ui_unlisted_test_keeps_the_default_model(monkeypatch):
+    seen = []
+    monkeypatch.setattr(runner.subprocess, "run", _fake_codex(seen))
+    monkeypatch.setenv(
+        "PYTEST_CURRENT_TEST",
+        "tests/ui/test_panels.py::test_panel[panel_network] (call)")
+    runner._run_codex("describe", Path("/tmp/x.png"))
+    # a suffix must match at a path boundary, not inside a longer name
+    monkeypatch.setenv(
+        "PYTEST_CURRENT_TEST",
+        "tests/ui/xtest_panels.py::test_panel[panel_launcher] (call)")
+    runner._run_codex("describe", Path("/tmp/x.png"))
+    for cmd in seen:
+        assert cmd[cmd.index("--model") + 1] == "gpt-6-luna"
+        assert cmd[cmd.index("-c") + 1] == "model_reasoning_effort=medium"
+
+
+def test_ui_advanced_model_can_be_overridden_or_disabled(monkeypatch):
+    seen = []
+    monkeypatch.setattr(runner.subprocess, "run", _fake_codex(seen))
+    monkeypatch.setenv(
+        "PYTEST_CURRENT_TEST",
+        "tests/ui/test_panels.py::test_panel[panel_launcher] (call)")
+    monkeypatch.setenv("QDSHELL_UI_ADVANCED_MODEL", "other-model")
+    monkeypatch.setenv("QDSHELL_UI_ADVANCED_EFFORT", "medium")
+    runner._run_codex("describe", Path("/tmp/x.png"))
+    monkeypatch.setenv("QDSHELL_UI_ADVANCED_MODEL", "")
+    runner._run_codex("describe", Path("/tmp/x.png"))
+    assert seen[0][seen[0].index("--model") + 1] == "other-model"
+    assert seen[0][seen[0].index("-c") + 1] == "model_reasoning_effort=medium"
+    assert seen[1][seen[1].index("--model") + 1] == "gpt-6-luna"
+
+
+def test_ui_advanced_model_rows_name_existing_tests():
+    rows = runner._advanced_model_rows()
+    assert rows
+    for row in rows:
+        path, _, name = row.partition("::")
+        func, _, param = name.partition("[")
+        src = (runner.UI_TESTS_ROOT / path).read_text()
+        assert f"def {func}(" in src, row
+        if param:
+            assert (runner.EXPECTATIONS_DIR / f"{param.rstrip(']')}.md").exists(), row
