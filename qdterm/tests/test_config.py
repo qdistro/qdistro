@@ -55,6 +55,47 @@ def test_existing_profiles_migrate_to_local_font(tmp_path):
     assert c.get("profiles", "default", "color_source") == "appearance-mode"
 
 
+def test_older_saved_defaults_follow_the_theme(tmp_path):
+    # What the previous qterminator wrote on any save: its defaults verbatim.
+    (tmp_path / "config.toml").write_text(
+        '[general]\ntheme_mode = "system"\n'
+        '[profiles.default]\ncolor_scheme = "Linux"\ncolor_source = "profile"\n'
+        'font_source = "desktop"\n',
+        encoding="utf-8",
+    )
+    Config._instance = None
+    c = Config()
+    assert c.get("profiles", "default", "color_source") == "appearance-mode"
+    assert c.get("general", "color_follow_theme_migrated") is True
+
+
+def test_a_profile_scheme_saved_after_migration_is_kept(tmp_path):
+    (tmp_path / "config.toml").write_text(
+        '[general]\ncolor_follow_theme_migrated = true\n'
+        '[profiles.default]\ncolor_scheme = "Linux"\ncolor_source = "profile"\n',
+        encoding="utf-8",
+    )
+    Config._instance = None
+    c = Config()
+    assert c.get("profiles", "default", "color_source") == "profile"
+
+
+def test_migration_survives_a_save_round_trip(tmp_path):
+    (tmp_path / "config.toml").write_text(
+        '[profiles.default]\ncolor_scheme = "Linux"\ncolor_source = "profile"\n',
+        encoding="utf-8",
+    )
+    Config._instance = None
+    Config().save()
+    Config._instance = None
+    c = Config()
+    assert c.get("profiles", "default", "color_source") == "appearance-mode"
+    c.set("profiles", "default", "color_source", "profile")
+    c.save()
+    Config._instance = None
+    assert Config().get("profiles", "default", "color_source") == "profile"
+
+
 def test_existing_profile_with_a_stored_scheme_keeps_it(tmp_path):
     (tmp_path / "config.toml").write_text(
         '[profiles.default]\ncolor_scheme = "WhiteOnBlack"\n',
