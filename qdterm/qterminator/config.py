@@ -34,7 +34,8 @@ DEFAULTS = {
             "font_ligatures": False,
             "font_source": "desktop",
             "color_scheme": "Linux",
-            "color_source": "profile",
+            # Follow the desktop's light/dark mode (general.*_color_scheme).
+            "color_source": "appearance-mode",
             "cursor_shape": "block",  # block, underline, ibeam
             "cursor_blink": True,
             "scrollback_lines": 5000,
@@ -154,7 +155,10 @@ class Config:
             if "font_source" not in src:
                 prof["font_source"] = "local" if existed else "desktop"
             if "color_source" not in src:
-                prof["color_source"] = "profile"
+                # A scheme the user stored explicitly stays theirs; anything
+                # else follows the desktop's light/dark mode.
+                prof["color_source"] = (
+                    "profile" if "color_scheme" in src else "appearance-mode")
 
     def _merge(self, base, override):
         for key, value in override.items():

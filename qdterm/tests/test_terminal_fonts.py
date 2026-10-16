@@ -251,6 +251,9 @@ def test_appearance_mode_follows_theme_only_for_opted_in(qtbot):
             "scrollback_lines": 5000,
         },
     )
+    # The default profile follows the theme out of the box; opt it out so
+    # the active terminal is the profile-scheme control.
+    cfg.set("profiles", "default", "color_source", "profile")
     win = MainWindow()
     qtbot.addWidget(win)
     win._split_horizontal()

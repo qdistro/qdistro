@@ -41,7 +41,7 @@ def test_config_get_profile():
     assert profile["font_family"] == "Monospace"
     assert profile["scrollback_lines"] == 5000
     assert profile["font_source"] == "desktop"
-    assert profile["color_source"] == "profile"
+    assert profile["color_source"] == "appearance-mode"
 
 
 def test_existing_profiles_migrate_to_local_font(tmp_path):
@@ -52,7 +52,18 @@ def test_existing_profiles_migrate_to_local_font(tmp_path):
     Config._instance = None
     c = Config()
     assert c.get("profiles", "default", "font_source") == "local"
+    assert c.get("profiles", "default", "color_source") == "appearance-mode"
+
+
+def test_existing_profile_with_a_stored_scheme_keeps_it(tmp_path):
+    (tmp_path / "config.toml").write_text(
+        '[profiles.default]\ncolor_scheme = "WhiteOnBlack"\n',
+        encoding="utf-8",
+    )
+    Config._instance = None
+    c = Config()
     assert c.get("profiles", "default", "color_source") == "profile"
+    assert c.get("profiles", "default", "color_scheme") == "WhiteOnBlack"
 
 
 def test_config_get_profile_fallback():
