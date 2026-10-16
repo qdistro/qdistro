@@ -22,3 +22,5 @@ test_settings_tabs.py::test_settings_tab[settings_desktopicons]	failed once unde
 test_settings_tabs.py::test_settings_tab[settings_osd]	failed once under Luna, passed in the other two (gui-20261015T203710Z-1210293)
 test_settings_tabs.py::test_settings_tab[settings_connections]	describer missed the Bluetooth-off icon once, passed in the other two (gui-20261015T203710Z-1210293)
 test_settings_tabs.py::test_settings_tab[settings_power]	failed once under Luna, passed in the other two (gui-20261015T203710Z-1210293)
+test_panels.py::test_panel[panel_controlcenter]	judge split on the same frame (idle media card, no player in the VM): one pass PASS, two FAIL under Luna (full-20261016T143843Z-3875382)
+test_settings_tabs.py::test_settings_tab[settings_wallpaper]	judge wanted the closed Fill mode dropdown's options listed; the frame shows the Look tab with Fill mode "Crop (Fill)" under Luna (full-20261016T143843Z-3875382)
