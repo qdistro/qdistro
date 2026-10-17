@@ -132,7 +132,9 @@ SH
         case "$suffix" in ''|'#'*) continue ;; esac
         n=$((n + 1))
         [ -n "$reason" ] || { echo "no reason: $suffix"; false; }
-        [ "$(find "$REPO_ROOT" -path "$REPO_ROOT/.worktrees" -prune -o -path "*/$suffix" -print | wc -l)" -eq 1 ] \
+        # Tracked files only: a staged source copy (image/root/root/
+        # qdistro-src in a checkout that built an image) is not a scenario.
+        [ "$(git -C "$REPO_ROOT" ls-files | grep -cE "(^|/)${suffix//./\\.}\$")" -eq 1 ] \
             || { echo "not exactly one scenario: $suffix"; false; }
     done < "$REPO_ROOT/ci/gui-agent-advanced.tsv"
     [ "$n" -gt 0 ]
