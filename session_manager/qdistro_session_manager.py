@@ -429,10 +429,11 @@ _OFFLOAD_WORKERS = 4
 # many ops are already queued/running is answered SiloBusy on the dispatch
 # thread instead of queueing invisibly behind work it cannot pass.
 _OFFLOAD_QUEUE_MAX = 16
-# Separate admission bound for offloaded reads (ListSilos), which the bus
-# policy admits from any uid: they used to share _OFFLOAD_QUEUE_MAX, so a
-# read burst answered the admin's lifecycle calls SiloBusy (devin 14 F4).
-# Kept below _OFFLOAD_WORKERS so reads can never occupy the whole pool.
+# Reads the bus policy admits from any uid (ListSilos) run on their own
+# queue and worker with this admission bound: they used to share the
+# lifecycle pool and _OFFLOAD_QUEUE_MAX, so a read burst — or reads left
+# queued after their deadline — answered the admin's lifecycle calls
+# SiloBusy (devin 14 F4).
 _OFFLOAD_READ_MAX = 3
 # A queued op that waited this long is answered SiloBusy rather than run:
 # the caller's D-Bus timeout (~25s default) has already fired, so running
@@ -7590,11 +7591,18 @@ if dbus is not None:
             # daemon workers cannot hold interpreter exit the way TPE's
             # non-daemon workers + _python_exit join could.
             self._offload_work_q: queue.Queue = queue.Queue(
-                maxsize=_OFFLOAD_QUEUE_MAX + _OFFLOAD_READ_MAX)
+                maxsize=_OFFLOAD_QUEUE_MAX)
             for _i in range(_OFFLOAD_WORKERS):
                 threading.Thread(target=self._offload_worker_loop,
                                  name=f"sessmgr-op-{_i}",
                                  daemon=True).start()
+            # Reads (read=True) never enter the lifecycle queue or occupy
+            # a lifecycle worker.
+            self._offload_read_q: queue.Queue = queue.Queue(
+                maxsize=_OFFLOAD_READ_MAX)
+            threading.Thread(target=self._offload_worker_loop,
+                             args=(self._offload_read_q,),
+                             name="sessmgr-read", daemon=True).start()
             # Dispatch-thread admission counter for _run_offloaded:
             # admitted ops whose answer is not yet delivered.
             # Incremented before enqueue, decremented by _invoke when
@@ -7755,25 +7763,30 @@ if dbus is not None:
                     # stalling teardown forever.
                     self._refusal_audit_q.task_done()
 
-        def _offload_worker_loop(self) -> None:
-            """Consume work items off the bounded offload queue for the
-            process lifetime (daemon thread). Each item is a
-            ``(guarded, settle)`` pair built by _run_offloaded; the item
-            answers its own request."""
+        def _offload_worker_loop(self, work_q=None) -> None:
+            """Consume work items off the bounded offload queue (or
+            ``work_q``, the read queue) for the process lifetime (daemon
+            thread). Each item is a ``(guarded, settle)`` pair built by
+            _run_offloaded; the item answers its own request."""
+            q = self._offload_work_q if work_q is None else work_q
             while True:
-                guarded, _settle = self._offload_work_q.get()
+                guarded, _settle = q.get()
                 try:
                     guarded()
                 except Exception:  # noqa: BLE001 — keep the worker alive
                     log.exception("offloaded operation raised")
 
-        def _offload_enqueue(self, item) -> None:
+        def _offload_enqueue(self, item, read: bool = False) -> None:
             """Enqueue one ``(guarded, settle)`` work item on the bounded
-            offload queue. queue.Queue.put_nowait is atomic: it enqueues
-            or raises queue.Full — never both — unlike
-            ThreadPoolExecutor.submit(), which can enqueue the callable
-            and only then fail on thread creation."""
-            self._offload_work_q.put_nowait(item)
+            offload queue (the read queue for ``read``).
+            queue.Queue.put_nowait is atomic: it enqueues or raises
+            queue.Full — never both — unlike ThreadPoolExecutor.submit(),
+            which can enqueue the callable and only then fail on thread
+            creation."""
+            if read:
+                self._offload_read_q.put_nowait(item)
+            else:
+                self._offload_work_q.put_nowait(item)
 
         def _run_offloaded(self, op: str, work, reply, error,
                            unexpected_error=None,
@@ -7840,8 +7853,9 @@ if dbus is not None:
             an existing worker may already be running it.
 
             ``read=True`` admits against the separate _OFFLOAD_READ_MAX
-            budget, so reads any uid may issue never take a lifecycle
-            slot."""
+            budget and runs on the read queue/worker, so reads any uid
+            may issue never take a lifecycle slot, queue entry or
+            worker."""
 
             map_unexpected = unexpected_error or _to_dbus_exception
             started = threading.Event()
@@ -8154,7 +8168,10 @@ if dbus is not None:
                 # queue.Full, never both), so a raised Full can never
                 # strand a leaked callable the way ThreadPoolExecutor's
                 # submit-after-enqueue could.
-                self._offload_enqueue((guarded, settle))
+                if read:
+                    self._offload_enqueue((guarded, settle), read=True)
+                else:
+                    self._offload_enqueue((guarded, settle))
             except Exception:  # noqa: BLE001 — queue.Full when the work
                 # queue is saturated; a patched seam may raise anything.
                 # Only claim the refusal when no worker started (a stray
@@ -8768,15 +8785,16 @@ def main():  # pragma: no cover - exercised in the VM
         # asynchronously and cannot hold interpreter exit.
         with mgr._offload_pending_lock:
             mgr._stopping = True
-        while True:
-            try:
-                _guarded, settle = mgr._offload_work_q.get_nowait()
-            except queue.Empty:
-                break
-            try:
-                settle()
-            except Exception:  # noqa: BLE001 — teardown best-effort
-                log.exception("offload settle failed during shutdown")
+        for work_q in (mgr._offload_work_q, mgr._offload_read_q):
+            while True:
+                try:
+                    _guarded, settle = work_q.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    settle()
+                except Exception:  # noqa: BLE001 — teardown best-effort
+                    log.exception("offload settle failed during shutdown")
         # Wait out running work before final cleanup: an op mid-way
         # through a multi-step mutation (e.g. useradd → grant → link →
         # save) must finish — or at least reach its rollback — before the

@@ -147,6 +147,9 @@ def _mgr(store, monkeypatch):
     for _w in range(2):
         threading.Thread(target=mgr._offload_worker_loop,
                          daemon=True).start()
+    mgr._offload_read_q = queue.Queue(maxsize=sm._OFFLOAD_READ_MAX)
+    threading.Thread(target=mgr._offload_worker_loop,
+                     args=(mgr._offload_read_q,), daemon=True).start()
     mgr._offload_pending = 0
     mgr._offload_pending_reads = 0
     mgr._offload_pending_lock = threading.Lock()
@@ -1924,3 +1927,47 @@ def test_list_silos_burst_never_takes_a_lifecycle_slot(
     assert [r["name"] for r in rows] == ["work"]
     assert mgr._offload_pending == sm._OFFLOAD_QUEUE_MAX
     assert mgr._offload_pending_reads == 0
+
+
+@pytest.mark.skipif(sm.dbus is None, reason="dbus-python unavailable")
+def test_expired_reads_never_fill_the_lifecycle_queue(monkeypatch, tmp_path):
+    """ensures: reads that expire while their worker is blocked stay off
+    the lifecycle queue — batch after batch of them cannot make an admin
+    lifecycle call fail to enqueue (Sol review of the read budget)."""
+    store = sm._SiloStore(
+        _FakeOps(), config_path=tmp_path / "silos.yaml")
+    mgr = _mgr(store, monkeypatch)
+    monkeypatch.setattr(sm, "_OFFLOAD_QUEUE_STALE_S", 0.2)
+    release = threading.Event()
+    real_list = store.list_silos
+
+    def blocked_list():
+        assert release.wait(60), "test never released the read worker"
+        return real_list()
+
+    store.list_silos = blocked_list
+    mgr._peer_uid = lambda _s, _c: sm.ADMIN_UID
+    answers: list = []
+    for _batch in range(4):
+        for _i in range(sm._OFFLOAD_READ_MAX):
+            mgr.ListSilos(lambda raw: answers.append("reply"),
+                          lambda exc: answers.append(exc.get_dbus_name()),
+                          sender=":1.9", conn=object())
+        # The first read holds the blocked worker (and its slot); the
+        # rest of each batch expires at the queue deadline.
+        time.sleep(0.4)
+        assert mgr._offload_work_q.qsize() == 0, \
+            "a read entered the lifecycle queue"
+
+    replied = threading.Event()
+    errors: list = []
+    mgr.CreateSilo("work", 2000, replied.set, errors.append,
+                   sender=":1.2", conn=object())
+    assert replied.wait(2), f"lifecycle call refused: {errors}"
+    assert errors == []
+    release.set()
+    deadline = time.monotonic() + 3
+    while "reply" not in answers and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert "reply" in answers, "the blocked read never answered"
+    assert set(answers) <= {"reply", f"{sm.BUS_NAME}.SiloBusy"}, answers
