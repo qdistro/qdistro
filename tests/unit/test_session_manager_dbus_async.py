@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import time
@@ -146,7 +147,11 @@ def _mgr(store, monkeypatch):
     for _w in range(2):
         threading.Thread(target=mgr._offload_worker_loop,
                          daemon=True).start()
+    mgr._offload_read_q = queue.Queue(maxsize=sm._OFFLOAD_READ_MAX)
+    threading.Thread(target=mgr._offload_worker_loop,
+                     args=(mgr._offload_read_q,), daemon=True).start()
     mgr._offload_pending = 0
+    mgr._offload_pending_reads = 0
     mgr._offload_pending_lock = threading.Lock()
     mgr._offload_active = 0
     mgr._offload_delivering = 0
@@ -161,6 +166,7 @@ def _mgr(store, monkeypatch):
     mgr._peer_caller = lambda _sender, _conn: {
         "uid": 1000, "pid": 42, "exe": "/bin/test"}
     mgr._require_admin = lambda _sender, _conn: None
+    mgr._peer_uid = lambda _sender, _conn: sm.ADMIN_UID
     mgr.audit = None
     monkeypatch.setattr(sm.GLib, "idle_add", lambda callback: callback())
     # No GLib main loop runs in tests; dispatch the queue deadline on a
@@ -1837,3 +1843,131 @@ def test_offload_worker_dequeued_after_drain_fence_answers_nothing(
     assert mgr._offload_pending == 0
     assert mgr._offload_delivering == 0
     assert mgr._offload_active == 0
+
+
+def _list_silos(mgr, uid_or_exc):
+    """Call ListSilos as a peer with uid (or whose uid lookup raises);
+    return ("reply", rows) or ("error", dbus error name)."""
+    def peer_uid(_sender, _conn):
+        if isinstance(uid_or_exc, BaseException):
+            raise uid_or_exc
+        return uid_or_exc
+    mgr._peer_uid = peer_uid
+    out: list = []
+    done = threading.Event()
+
+    def on_reply(raw):
+        out.append(("reply", json.loads(raw)))
+        done.set()
+
+    def on_error(exc):
+        out.append(("error", exc.get_dbus_name()))
+        done.set()
+
+    mgr.ListSilos(on_reply, on_error, sender=":1.9", conn=object())
+    assert done.wait(2), "ListSilos never answered"
+    return out[0]
+
+
+@pytest.mark.skipif(sm.dbus is None, reason="dbus-python unavailable")
+def test_list_silos_shows_other_uids_only_their_own_silo(
+        monkeypatch, tmp_path):
+    """ensures: a non-admin uid (which the bus policy lets call ListSilos)
+    cannot read other silos' launch config and egress; admin and root
+    tooling still see every row (devin 14 F4)."""
+    store = sm._SiloStore(
+        _FakeOps(), config_path=tmp_path / "silos.yaml")
+    store.create("work", 2000)
+    store.create("bank", 2001)
+    mgr = _mgr(store, monkeypatch)
+
+    for uid in (sm.ADMIN_UID, 0):
+        kind, rows = _list_silos(mgr, uid)
+        assert kind == "reply"
+        assert sorted(r["name"] for r in rows) == ["bank", "work"], uid
+    kind, rows = _list_silos(mgr, 2000)
+    assert kind == "reply"
+    assert [r["name"] for r in rows] == ["work"]
+    kind, rows = _list_silos(mgr, 4242)
+    assert (kind, rows) == ("reply", [])
+    # An unresolvable caller is refused, not shown everything.
+    kind, name = _list_silos(mgr, sm.NotAuthorized("no uid"))
+    assert (kind, name) == ("error", f"{sm.BUS_NAME}.NotAuthorized")
+    assert mgr._offload_pending_reads == 0
+    assert mgr._offload_pending == 0
+
+
+@pytest.mark.skipif(sm.dbus is None, reason="dbus-python unavailable")
+def test_list_silos_burst_never_takes_a_lifecycle_slot(
+        monkeypatch, tmp_path):
+    """ensures: reads from any uid cannot answer the admin's lifecycle
+    calls SiloBusy — a saturated read budget refuses only the read, and
+    a saturated lifecycle budget does not refuse the read."""
+    store = sm._SiloStore(
+        _FakeOps(), config_path=tmp_path / "silos.yaml")
+    mgr = _mgr(store, monkeypatch)
+
+    mgr._offload_pending_reads = sm._OFFLOAD_READ_MAX
+    kind, name = _list_silos(mgr, sm.ADMIN_UID)
+    assert (kind, name) == ("error", f"{sm.BUS_NAME}.SiloBusy")
+    assert mgr._offload_pending_reads == sm._OFFLOAD_READ_MAX
+
+    replied = threading.Event()
+    errors: list = []
+    mgr.CreateSilo("work", 2000, replied.set, errors.append,
+                   sender=":1.2", conn=object())
+    assert replied.wait(2), f"lifecycle call refused: {errors}"
+    assert errors == []
+    assert store.get("work").uid == 2000
+
+    mgr._offload_pending_reads = 0
+    mgr._offload_pending = sm._OFFLOAD_QUEUE_MAX
+    kind, rows = _list_silos(mgr, sm.ADMIN_UID)
+    assert kind == "reply"
+    assert [r["name"] for r in rows] == ["work"]
+    assert mgr._offload_pending == sm._OFFLOAD_QUEUE_MAX
+    assert mgr._offload_pending_reads == 0
+
+
+@pytest.mark.skipif(sm.dbus is None, reason="dbus-python unavailable")
+def test_expired_reads_never_fill_the_lifecycle_queue(monkeypatch, tmp_path):
+    """ensures: reads that expire while their worker is blocked stay off
+    the lifecycle queue — batch after batch of them cannot make an admin
+    lifecycle call fail to enqueue (Sol review of the read budget)."""
+    store = sm._SiloStore(
+        _FakeOps(), config_path=tmp_path / "silos.yaml")
+    mgr = _mgr(store, monkeypatch)
+    monkeypatch.setattr(sm, "_OFFLOAD_QUEUE_STALE_S", 0.2)
+    release = threading.Event()
+    real_list = store.list_silos
+
+    def blocked_list():
+        assert release.wait(60), "test never released the read worker"
+        return real_list()
+
+    store.list_silos = blocked_list
+    mgr._peer_uid = lambda _s, _c: sm.ADMIN_UID
+    answers: list = []
+    for _batch in range(4):
+        for _i in range(sm._OFFLOAD_READ_MAX):
+            mgr.ListSilos(lambda raw: answers.append("reply"),
+                          lambda exc: answers.append(exc.get_dbus_name()),
+                          sender=":1.9", conn=object())
+        # The first read holds the blocked worker (and its slot); the
+        # rest of each batch expires at the queue deadline.
+        time.sleep(0.4)
+        assert mgr._offload_work_q.qsize() == 0, \
+            "a read entered the lifecycle queue"
+
+    replied = threading.Event()
+    errors: list = []
+    mgr.CreateSilo("work", 2000, replied.set, errors.append,
+                   sender=":1.2", conn=object())
+    assert replied.wait(2), f"lifecycle call refused: {errors}"
+    assert errors == []
+    release.set()
+    deadline = time.monotonic() + 3
+    while "reply" not in answers and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert "reply" in answers, "the blocked read never answered"
+    assert set(answers) <= {"reply", f"{sm.BUS_NAME}.SiloBusy"}, answers
