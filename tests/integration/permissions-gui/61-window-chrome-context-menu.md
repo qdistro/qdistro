@@ -307,13 +307,16 @@ and position, edges back.
 On `s5-restored.png`, take a point on the bottom edge within its last
 ~8 px from the right (`frame_right - 6`, `bottom_edge_top + 2`) —
 the edge is only 4 px tall, so `click-preview` it carefully. Drag it
-~100 px right and ~80 px down.
+~100 px left and ~80 px up — shrinking keeps the pointer on screen (the
+restored terminal's bottom edge sits near y=779 of the 800 px display,
+so a downward drag would leave it and stop the resize at the screen
+edge).
 
 ```bash
 qdwin_screenshot "$ART/s6-before-resize.png"
 # Runner: corner point (RX,RY) from s6-before-resize.png
 $VMGUI "$VM" click-preview RX RY bottom-right-corner
-$VMGUI "$VM" drag RX RY $((RX + 100)) $((RY + 80))
+$VMGUI "$VM" drag RX RY $((RX - 100)) $((RY - 80))
 $VMEXEC "$VM" 'H=$(cat /tmp/61-app.handle)
     bash /tmp/61-driver.sh await_qdwin_line "begin_interactive_resize handle=$H edges=0xa" &&
     bash /tmp/61-driver.sh await_qdwin_line "end_interactive_resize handle=$H \("' \
@@ -323,8 +326,8 @@ qdwin_screenshot "$ART/s6-after-resize.png"
 
 **Assert** (hard): both journal lines exist for this handle
 (`edges=0xa` = bottom|right). **And** (agent-visual)
-`s6-after-resize.png` shows the window roughly 100 px wider and 80 px
-taller than in `s6-before-resize.png`, its top-left corner unmoved, and
+`s6-after-resize.png` shows the window roughly 100 px narrower and 80 px
+shorter than in `s6-before-resize.png`, its top-left corner unmoved, and
 the frame (title bar + edges) hugging the new size. If the journal shows
 `begin_interactive_resize ... ignored` the press missed the edge —
 re-aim once before grading FAIL.
