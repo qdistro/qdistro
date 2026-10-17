@@ -690,6 +690,14 @@ struct qdwin_toplevel {
 	int saved_outer_w, saved_outer_h;
 	int saved_inset_n, saved_inset_e, saved_inset_s, saved_inset_w;
 	double saved_x, saved_y;
+	/* Fullscreen's own restore rect, same convention as saved_* above.
+	 * Only used when fullscreen is left unmaximised: a maximised window
+	 * returns to the work area, recomputed on exit. Sharing saved_* with
+	 * maximise lost the floating rect on maximise -> fullscreen -> exit
+	 * -> unmaximise. */
+	int fs_saved_outer_w, fs_saved_outer_h;
+	int fs_saved_inset_n, fs_saved_inset_e, fs_saved_inset_s, fs_saved_inset_w;
+	double fs_saved_x, fs_saved_y;
 	/* v25: half-screen tiling (request_tile). `tiled` is a tile_edge
 	 * value (0=none, 1=left, 2=right). The tile_saved_* fields hold the
 	 * pre-tile geometry, captured on the first tile and consumed on
@@ -3705,6 +3713,48 @@ qdwin_toplevel_apply_fullscreen_geometry(struct qdwin *qdwin,
 	qdwin_toplevel_position_chrome(tl);
 }
 
+/* §6.6 S1: maximise fills the work area (output minus panel exclusive
+ * zones), not the full output. Returns the content origin; *wx_out/*wy_out
+ * get the work area's top-left. */
+static struct weston_coord_global
+qdwin_toplevel_apply_maximized_geometry(struct qdwin *qdwin,
+					struct qdwin_toplevel *tl,
+					struct weston_output *out,
+					int *wx_out, int *wy_out)
+{
+	int wx, wy, ww, wh;
+	qdwin_output_work_area(qdwin, out, &wx, &wy, &ww, &wh);
+	tl->outer_width  = ww;
+	tl->outer_height = wh;
+	if (tl->is_nested_proxy) {
+		/* Nested-proxy: resize the curtain via set_geometry.
+		 * Inner client gets resized via S3 input flow. */
+		qdwin_nested_proxy_set_geometry(tl, ww, wh);
+	} else {
+		weston_desktop_surface_set_maximized(tl->desktop_surface,
+						    true);
+	}
+	/* Place the CONTENT view inside the work area, leaving room
+	 * for the chrome (N titlebar, side borders). Without this
+	 * offset chrome ends up at negative coords (off-screen) and
+	 * the close/maximize/minimize glyphs paint above the visible
+	 * area, making the maximised window indistinguishable from
+	 * fullscreen. The (wx + inset_w, wy + inset_n) anchor keeps
+	 * the titlebar at (wx, wy) — the top of the work area — so
+	 * the panel stays visible at the bottom and the chrome stays
+	 * visible at the top. */
+	struct weston_coord_global origin = {
+		.c = weston_coord(wx + tl->inset_w,
+				  wy + tl->inset_n),
+	};
+	weston_view_set_position(tl->view, origin);
+	qdwin_toplevel_apply_inset(tl);
+	qdwin_toplevel_position_chrome(tl);
+	*wx_out = wx;
+	*wy_out = wy;
+	return origin;
+}
+
 static void
 qdwin_toplevel_set_fullscreen(struct qdwin *qdwin,
 			      struct qdwin_toplevel *tl,
@@ -3735,49 +3785,61 @@ qdwin_toplevel_set_fullscreen(struct qdwin *qdwin,
 				   tl->handle);
 			return;
 		}
-		struct weston_coord_global pos =
-			weston_view_get_pos_offset_global(tl->view);
-		tl->saved_x = pos.c.x;
-		tl->saved_y = pos.c.y;
-		qdwin_toplevel_seed_outer_from_committed(tl);
-		tl->saved_outer_w = tl->outer_width;
-		tl->saved_outer_h = tl->outer_height;
-		tl->saved_inset_n = tl->inset_n;
-		tl->saved_inset_e = tl->inset_e;
-		tl->saved_inset_s = tl->inset_s;
-		tl->saved_inset_w = tl->inset_w;
+		if (!(tl->state & QDWIN_TS_MAXIMIZED)) {
+			struct weston_coord_global pos =
+				weston_view_get_pos_offset_global(tl->view);
+			tl->fs_saved_x = pos.c.x;
+			tl->fs_saved_y = pos.c.y;
+			qdwin_toplevel_seed_outer_from_committed(tl);
+			tl->fs_saved_outer_w = tl->outer_width;
+			tl->fs_saved_outer_h = tl->outer_height;
+			tl->fs_saved_inset_n = tl->inset_n;
+			tl->fs_saved_inset_e = tl->inset_e;
+			tl->fs_saved_inset_s = tl->inset_s;
+			tl->fs_saved_inset_w = tl->inset_w;
+		}
 
 		int ox = out->pos.c.x, oy = out->pos.c.y;
 		qdwin_toplevel_apply_fullscreen_geometry(qdwin, tl, out);
 
 		tl->state |= QDWIN_TS_FULLSCREEN;
 		weston_log("qdwin: set_fullscreen handle=%u fs=1 outer=%dx%d at (%d,%d) "
-			   "saved=%dx%d@(%.0f,%.0f)\n",
+			   "saved=%dx%d@(%.0f,%.0f)%s\n",
 			   tl->handle, tl->outer_width, tl->outer_height, ox, oy,
-			   tl->saved_outer_w, tl->saved_outer_h,
-			   tl->saved_x, tl->saved_y);
+			   tl->fs_saved_outer_w, tl->fs_saved_outer_h,
+			   tl->fs_saved_x, tl->fs_saved_y,
+			   (tl->state & QDWIN_TS_MAXIMIZED) ? " (maximised)" : "");
 	} else {
-		if (tl->is_nested_proxy) {
-			qdwin_nested_proxy_set_geometry(tl, tl->saved_outer_w,
-							tl->saved_outer_h);
-		} else {
+		if (!tl->is_nested_proxy)
 			weston_desktop_surface_set_fullscreen(tl->desktop_surface,
 							      false);
+		struct weston_output *mout = qdwin_primary_output(qdwin);
+		if ((tl->state & QDWIN_TS_MAXIMIZED) && mout) {
+			int wx, wy;
+			qdwin_toplevel_apply_maximized_geometry(qdwin, tl, mout,
+								&wx, &wy);
+		} else {
+			if (tl->is_nested_proxy)
+				qdwin_nested_proxy_set_geometry(
+					tl, tl->fs_saved_outer_w,
+					tl->fs_saved_outer_h);
+			qdwin_toplevel_restore_rect(tl, tl->fs_saved_outer_w,
+						    tl->fs_saved_outer_h,
+						    tl->fs_saved_x,
+						    tl->fs_saved_y,
+						    tl->fs_saved_inset_n,
+						    tl->fs_saved_inset_e,
+						    tl->fs_saved_inset_s,
+						    tl->fs_saved_inset_w,
+						    tl->tiled == 0);
+			qdwin_toplevel_apply_inset(tl);
+			qdwin_toplevel_position_chrome(tl);
 		}
-		qdwin_toplevel_restore_rect(tl, tl->saved_outer_w,
-					    tl->saved_outer_h,
-					    tl->saved_x, tl->saved_y,
-					    tl->saved_inset_n, tl->saved_inset_e,
-					    tl->saved_inset_s, tl->saved_inset_w,
-					    tl->tiled == 0 &&
-					    !(tl->state & QDWIN_TS_MAXIMIZED));
-		qdwin_toplevel_apply_inset(tl);
-		qdwin_toplevel_position_chrome(tl);
 
 		tl->state &= ~QDWIN_TS_FULLSCREEN;
-		weston_log("qdwin: set_fullscreen handle=%u fs=0 restored=%dx%d@(%.0f,%.0f)\n",
+		weston_log("qdwin: set_fullscreen handle=%u fs=0 restored=%dx%d%s\n",
 			   tl->handle, tl->outer_width, tl->outer_height,
-			   tl->saved_x, tl->saved_y);
+			   (tl->state & QDWIN_TS_MAXIMIZED) ? " (maximised)" : "");
 	}
 	qdwin_send_toplevel_state(qdwin, tl);
 	weston_compositor_schedule_repaint(qdwin->compositor);
@@ -3824,6 +3886,40 @@ qdwin_toplevel_set_maximized(struct qdwin *qdwin,
 		return;
 	}
 
+	/* Fullscreen stays on screen; only the state and which slot holds
+	 * the floating rect change. Leaving fullscreen then returns to the
+	 * work area (maximised) or to fs_saved_* (not). */
+	if (tl->state & QDWIN_TS_FULLSCREEN) {
+		if (want_max) {
+			tl->saved_outer_w = tl->fs_saved_outer_w;
+			tl->saved_outer_h = tl->fs_saved_outer_h;
+			tl->saved_x = tl->fs_saved_x;
+			tl->saved_y = tl->fs_saved_y;
+			tl->saved_inset_n = tl->fs_saved_inset_n;
+			tl->saved_inset_e = tl->fs_saved_inset_e;
+			tl->saved_inset_s = tl->fs_saved_inset_s;
+			tl->saved_inset_w = tl->fs_saved_inset_w;
+			tl->state |= QDWIN_TS_MAXIMIZED;
+		} else {
+			tl->fs_saved_outer_w = tl->saved_outer_w;
+			tl->fs_saved_outer_h = tl->saved_outer_h;
+			tl->fs_saved_x = tl->saved_x;
+			tl->fs_saved_y = tl->saved_y;
+			tl->fs_saved_inset_n = tl->saved_inset_n;
+			tl->fs_saved_inset_e = tl->saved_inset_e;
+			tl->fs_saved_inset_s = tl->saved_inset_s;
+			tl->fs_saved_inset_w = tl->saved_inset_w;
+			tl->state &= ~QDWIN_TS_MAXIMIZED;
+		}
+		if (!tl->is_nested_proxy)
+			weston_desktop_surface_set_maximized(tl->desktop_surface,
+							    want_max);
+		weston_log("qdwin: set_maximized handle=%u max=%d while "
+			   "fullscreen\n", tl->handle, want_max);
+		qdwin_send_toplevel_state(qdwin, tl);
+		return;
+	}
+
 	if (want_max) {
 		struct weston_output *out = qdwin_primary_output(qdwin);
 		if (!out) {
@@ -3859,36 +3955,10 @@ qdwin_toplevel_set_maximized(struct qdwin *qdwin,
 		tl->saved_inset_s = tl->inset_s;
 		tl->saved_inset_w = tl->inset_w;
 
-		/* §6.6 S1: maximise fills the work area (output minus panel
-		 * exclusive zones), not the full output. */
-		int wx, wy, ww, wh;
-		qdwin_output_work_area(qdwin, out, &wx, &wy, &ww, &wh);
-		tl->outer_width  = ww;
-		tl->outer_height = wh;
-		if (tl->is_nested_proxy) {
-			/* Nested-proxy: resize the curtain via set_geometry.
-			 * Inner client gets resized via S3 input flow. */
-			qdwin_nested_proxy_set_geometry(tl, ww, wh);
-		} else {
-			weston_desktop_surface_set_maximized(tl->desktop_surface,
-							    true);
-		}
-		/* Place the CONTENT view inside the work area, leaving room
-		 * for the chrome (N titlebar, side borders). Without this
-		 * offset chrome ends up at negative coords (off-screen) and
-		 * the close/maximize/minimize glyphs paint above the visible
-		 * area, making the maximised window indistinguishable from
-		 * fullscreen. The (wx + inset_w, wy + inset_n) anchor keeps
-		 * the titlebar at (wx, wy) — the top of the work area — so
-		 * the panel stays visible at the bottom and the chrome stays
-		 * visible at the top. */
-		struct weston_coord_global origin = {
-			.c = weston_coord(wx + tl->inset_w,
-					  wy + tl->inset_n),
-		};
-		weston_view_set_position(tl->view, origin);
-		qdwin_toplevel_apply_inset(tl);
-		qdwin_toplevel_position_chrome(tl);
+		int wx, wy;
+		struct weston_coord_global origin =
+			qdwin_toplevel_apply_maximized_geometry(qdwin, tl, out,
+								&wx, &wy);
 
 		tl->state |= QDWIN_TS_MAXIMIZED;
 		weston_log("qdwin: set_maximized handle=%u max=1 outer=%dx%d at (%d,%d) "
@@ -3910,8 +3980,7 @@ qdwin_toplevel_set_maximized(struct qdwin *qdwin,
 					    tl->saved_x, tl->saved_y,
 					    tl->saved_inset_n, tl->saved_inset_e,
 					    tl->saved_inset_s, tl->saved_inset_w,
-					    tl->tiled == 0 &&
-					    !(tl->state & QDWIN_TS_FULLSCREEN));
+					    tl->tiled == 0);
 		qdwin_toplevel_apply_inset(tl);
 		qdwin_toplevel_position_chrome(tl);
 
@@ -21628,6 +21697,10 @@ qdwin_output_boundary_rehome_toplevel(struct qdwin *qdwin,
 		qdwin_output_boundary_rehome_saved(
 			tl, survivor, &tl->tile_saved_x, &tl->tile_saved_y,
 			tl->tile_saved_outer_w, tl->tile_saved_outer_h);
+	if (tl->fs_saved_outer_w > 0 && tl->fs_saved_outer_h > 0)
+		qdwin_output_boundary_rehome_saved(
+			tl, survivor, &tl->fs_saved_x, &tl->fs_saved_y,
+			tl->fs_saved_outer_w, tl->fs_saved_outer_h);
 
 	weston_view_set_output(tl->view, survivor);
 	if (tl->state & QDWIN_TS_FULLSCREEN) {
