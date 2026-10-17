@@ -87,14 +87,52 @@ def compute_stats(notebook, index, top_k: int = 10) -> dict[str, Any]:
 
 # ---- Dialog (lazy-imported from window.py) ----
 
+def build_activity_chart(bars: list, parent=None):
+    """The "Last 30 days" bar chart. Bars take the palette (Highlight fill,
+    WindowText outline) and are recoloured on PaletteChange, so a light/dark
+    switch while the dashboard is open keeps them legible."""
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtGui import QBrush, QPalette, QPen
+    from PyQt6.QtWidgets import QGraphicsScene, QGraphicsView, QVBoxLayout, QWidget
+
+    class _ActivityChart(QWidget):
+        def __init__(self) -> None:
+            super().__init__(parent)
+            cv = QVBoxLayout(self)
+            self.scene = QGraphicsScene(self)
+            self.view = QGraphicsView(self.scene, self)
+            cv.addWidget(self.view)
+            self.bars = []
+            max_n = max((n for _d, n in bars), default=1) or 1
+            bar_w = 18
+            gap = 2
+            h = 180
+            for i, (_d, n) in enumerate(bars):
+                bh = int((n / max_n) * h) if max_n else 0
+                self.bars.append(
+                    self.scene.addRect(i * (bar_w + gap), h - bh, bar_w, bh))
+            self.recolor()
+
+        def recolor(self) -> None:
+            pal = self.palette()
+            pen = QPen(pal.color(QPalette.ColorRole.WindowText))
+            brush = QBrush(pal.color(QPalette.ColorRole.Highlight))
+            for rect in self.bars:
+                rect.setPen(pen)
+                rect.setBrush(brush)
+
+        def changeEvent(self, event) -> None:  # noqa: N802
+            super().changeEvent(event)
+            if event.type() == QEvent.Type.PaletteChange:
+                self.recolor()
+
+    return _ActivityChart()
+
+
 def show_dashboard(parent, notebook, index) -> None:
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtGui import QBrush, QColor, QPen
     from PyQt6.QtWidgets import (
         QDialog,
         QDialogButtonBox,
-        QGraphicsScene,
-        QGraphicsView,
         QLabel,
         QListWidget,
         QTabWidget,
@@ -137,21 +175,7 @@ def show_dashboard(parent, notebook, index) -> None:
     _list_tab("Most tagged", stats["most_tagged"])
 
     # Recent activity bar chart (QGraphicsScene).
-    chart = QWidget()
-    cv = QVBoxLayout(chart)
-    scene = QGraphicsScene(chart)
-    view = QGraphicsView(scene, chart)
-    cv.addWidget(view)
-    bars = stats["recent_days"]
-    max_n = max((n for _d, n in bars), default=1) or 1
-    bar_w = 18
-    gap = 2
-    h = 180
-    pen = QPen(Qt.GlobalColor.black)
-    brush = QBrush(QColor("#4a90d9"))
-    for i, (_d, n) in enumerate(bars):
-        bh = int((n / max_n) * h) if max_n else 0
-        scene.addRect(i * (bar_w + gap), h - bh, bar_w, bh, pen, brush)
+    chart = build_activity_chart(stats["recent_days"])
     tabs.addTab(chart, "Last 30 days")
 
     btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)

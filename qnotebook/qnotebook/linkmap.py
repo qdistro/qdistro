@@ -9,8 +9,8 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 
-from PyQt6.QtCore import QPointF, Qt
-from PyQt6.QtGui import QBrush, QColor, QFont, QPen
+from PyQt6.QtCore import QEvent, QPointF, Qt
+from PyQt6.QtGui import QBrush, QColor, QFont, QPalette, QPen
 from PyQt6.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsLineItem,
@@ -64,16 +64,37 @@ def force_layout(nodes: list[str], edges: list[tuple[str, str]],
 NODE_RADIUS = 24
 
 
+def graph_colors(palette: QPalette) -> dict[str, QColor]:
+    """Node/edge/label colours from the widget palette, so the map follows
+    the desktop's light/dark mode instead of fixed dark-on-light hex values
+    (unreadable labels and edges on a dark palette)."""
+    text = palette.color(QPalette.ColorRole.WindowText)
+    edge = QColor(text)
+    edge.setAlpha(170)
+    return {
+        "center": palette.color(QPalette.ColorRole.Highlight),
+        "peer": palette.color(QPalette.ColorRole.Mid),
+        "outline": text,
+        "edge": edge,
+        "label": text,
+    }
+
+
 class _PageNode(QGraphicsEllipseItem):
-    def __init__(self, page: str, x: float, y: float, is_center: bool, on_click: Callable[[str], None]) -> None:
+    def __init__(self, page: str, x: float, y: float, is_center: bool,
+                 on_click: Callable[[str], None],
+                 colors: dict[str, QColor]) -> None:
         super().__init__(x - NODE_RADIUS, y - NODE_RADIUS, NODE_RADIUS * 2, NODE_RADIUS * 2)
         self.page = page
+        self.is_center = is_center
         self._on_click = on_click
-        color = QColor("#2e86de") if is_center else QColor("#95a5a6")
-        self.setBrush(QBrush(color))
-        self.setPen(QPen(QColor("#2c3e50"), 1))
+        self.apply_colors(colors)
         self.setAcceptHoverEvents(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def apply_colors(self, colors: dict[str, QColor]) -> None:
+        self.setBrush(QBrush(colors["center" if self.is_center else "peer"]))
+        self.setPen(QPen(colors["outline"], 1))
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -104,6 +125,33 @@ class LinkMapDock(QWidget):
         self._on_navigate: Callable[[str], None] = lambda _p: None
         self._on_hops_request: Callable[[int], None] = lambda _h: None
         self._nodes: dict[str, _PageNode] = {}
+        self._edges: list[QGraphicsLineItem] = []
+        self._labels: list[QGraphicsSimpleTextItem] = []
+
+    def _colors(self) -> dict[str, QColor]:
+        return graph_colors(self.palette())
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.PaletteChange:
+            self._recolor()
+
+    def _recolor(self) -> None:
+        colors = self._colors()
+        for node in self._nodes.values():
+            node.apply_colors(colors)
+        for line in self._edges:
+            pen = line.pen()
+            pen.setColor(colors["edge"])
+            line.setPen(pen)
+        for label in self._labels:
+            label.setBrush(QBrush(colors["label"]))
+
+    def _clear(self) -> None:
+        self.scene.clear()
+        self._nodes = {}
+        self._edges = []
+        self._labels = []
 
     def hops(self) -> int:
         return self.hops_spin.value()
@@ -118,8 +166,7 @@ class LinkMapDock(QWidget):
         self._on_navigate = cb
 
     def build(self, current_page: str | None, forward: list[str], backward: list[str]) -> None:
-        self.scene.clear()
-        self._nodes = {}
+        self._clear()
         if current_page is None:
             return
         center = QPointF(0.0, 0.0)
@@ -142,13 +189,14 @@ class LinkMapDock(QWidget):
             x = radius * math.cos(angle)
             y = radius * math.sin(angle)
             self._add_node(page, QPointF(x, y), is_center=False)
-            pen = QPen(QColor("#34495e"), 1.5)
+            pen = QPen(self._colors()["edge"], 1.5)
             if kind == "back":
                 pen.setStyle(Qt.PenStyle.DashLine)
             line = QGraphicsLineItem(center.x(), center.y(), x, y)
             line.setPen(pen)
             line.setZValue(-1)
             self.scene.addItem(line)
+            self._edges.append(line)
         rect = self.scene.itemsBoundingRect().adjusted(-30, -30, 30, 30)
         self.scene.setSceneRect(rect)
         self.view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
@@ -163,8 +211,7 @@ class LinkMapDock(QWidget):
 
         `edges` are (src, dst) pairs. `nodes` defaults to the union of all
         edge endpoints plus current_page."""
-        self.scene.clear()
-        self._nodes = {}
+        self._clear()
         if current_page is None:
             return
         all_nodes: list[str]
@@ -188,21 +235,26 @@ class LinkMapDock(QWidget):
             sx, sy = positions[s]
             dx, dy = positions[d]
             line = QGraphicsLineItem(sx, sy, dx, dy)
-            line.setPen(QPen(QColor("#34495e"), 1.2))
+            line.setPen(QPen(self._colors()["edge"], 1.2))
             line.setZValue(-1)
             self.scene.addItem(line)
+            self._edges.append(line)
         rect = self.scene.itemsBoundingRect().adjusted(-30, -30, 30, 30)
         self.scene.setSceneRect(rect)
         self.view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
 
     def _add_node(self, page: str, pos: QPointF, is_center: bool) -> None:
-        node = _PageNode(page, pos.x(), pos.y(), is_center, self._on_navigate)
+        colors = self._colors()
+        node = _PageNode(page, pos.x(), pos.y(), is_center, self._on_navigate,
+                         colors)
         self.scene.addItem(node)
         self._nodes[page] = node
         label = QGraphicsSimpleTextItem(page.rsplit(":", 1)[-1])
         f = QFont()
         f.setPointSize(9)
         label.setFont(f)
+        label.setBrush(QBrush(colors["label"]))
+        self._labels.append(label)
         br = label.boundingRect()
         label.setPos(pos.x() - br.width() / 2, pos.y() + NODE_RADIUS + 2)
         self.scene.addItem(label)
