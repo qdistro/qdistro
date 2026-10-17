@@ -88,8 +88,7 @@ def compute_stats(notebook, index, top_k: int = 10) -> dict[str, Any]:
 # ---- Dialog (lazy-imported from window.py) ----
 
 def show_dashboard(parent, notebook, index) -> None:
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtGui import QBrush, QColor, QPen
+    from PyQt6.QtGui import QBrush, QPalette, QPen
     from PyQt6.QtWidgets import (
         QDialog,
         QDialogButtonBox,
@@ -147,8 +146,10 @@ def show_dashboard(parent, notebook, index) -> None:
     bar_w = 18
     gap = 2
     h = 180
-    pen = QPen(Qt.GlobalColor.black)
-    brush = QBrush(QColor("#4a90d9"))
+    # Palette colours, so the chart reads on a dark desktop too.
+    pal = dlg.palette()
+    pen = QPen(pal.color(QPalette.ColorRole.WindowText))
+    brush = QBrush(pal.color(QPalette.ColorRole.Highlight))
     for i, (_d, n) in enumerate(bars):
         bh = int((n / max_n) * h) if max_n else 0
         scene.addRect(i * (bar_w + gap), h - bh, bar_w, bh, pen, brush)
