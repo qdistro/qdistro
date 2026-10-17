@@ -429,6 +429,11 @@ _OFFLOAD_WORKERS = 4
 # many ops are already queued/running is answered SiloBusy on the dispatch
 # thread instead of queueing invisibly behind work it cannot pass.
 _OFFLOAD_QUEUE_MAX = 16
+# Separate admission bound for offloaded reads (ListSilos), which the bus
+# policy admits from any uid: they used to share _OFFLOAD_QUEUE_MAX, so a
+# read burst answered the admin's lifecycle calls SiloBusy (devin 14 F4).
+# Kept below _OFFLOAD_WORKERS so reads can never occupy the whole pool.
+_OFFLOAD_READ_MAX = 3
 # A queued op that waited this long is answered SiloBusy rather than run:
 # the caller's D-Bus timeout (~25s default) has already fired, so running
 # the mutation now would take effect after the client gave up — the same
@@ -7585,7 +7590,7 @@ if dbus is not None:
             # daemon workers cannot hold interpreter exit the way TPE's
             # non-daemon workers + _python_exit join could.
             self._offload_work_q: queue.Queue = queue.Queue(
-                maxsize=_OFFLOAD_QUEUE_MAX)
+                maxsize=_OFFLOAD_QUEUE_MAX + _OFFLOAD_READ_MAX)
             for _i in range(_OFFLOAD_WORKERS):
                 threading.Thread(target=self._offload_worker_loop,
                                  name=f"sessmgr-op-{_i}",
@@ -7595,6 +7600,8 @@ if dbus is not None:
             # Incremented before enqueue, decremented by _invoke when
             # the op's one answer actually reaches the caller.
             self._offload_pending = 0
+            # Same, for read ops (read=True) against _OFFLOAD_READ_MAX.
+            self._offload_pending_reads = 0
             self._offload_pending_lock = threading.Lock()
             # Running ops teardown must wait out: incremented inside the
             # same decision_lock section that elects to run work(), so a
@@ -7770,7 +7777,8 @@ if dbus is not None:
 
         def _run_offloaded(self, op: str, work, reply, error,
                            unexpected_error=None,
-                           audit: tuple[str, str] | None = None) -> None:
+                           audit: tuple[str, str] | None = None,
+                           read: bool = False) -> None:
             """Run ``work()`` on the bounded offload pool and deliver the
             method's reply or error via ``GLib.idle_add``, so a slow
             kernel/subprocess/NSS/fsync call inside the store can never
@@ -7829,7 +7837,11 @@ if dbus is not None:
             abnormal-escape ``abandon`` can each be the releaser
             depending on race order — submit() can enqueue the callable
             before raising RuntimeError when thread creation fails, and
-            an existing worker may already be running it."""
+            an existing worker may already be running it.
+
+            ``read=True`` admits against the separate _OFFLOAD_READ_MAX
+            budget, so reads any uid may issue never take a lifecycle
+            slot."""
 
             map_unexpected = unexpected_error or _to_dbus_exception
             started = threading.Event()
@@ -7970,7 +7982,10 @@ if dbus is not None:
                         return
                     released.set()
                 with self._offload_pending_lock:
-                    self._offload_pending -= 1
+                    if read:
+                        self._offload_pending_reads -= 1
+                    else:
+                        self._offload_pending -= 1
 
             def abandon() -> None:
                 # Reclaim only when the worker itself owned the answer
@@ -8102,12 +8117,21 @@ if dbus is not None:
                 if self._stopping:
                     refused = f"{op} refused: session manager is " \
                         "shutting down"
-                elif self._offload_pending >= _OFFLOAD_QUEUE_MAX:
+                elif read and \
+                        self._offload_pending_reads >= _OFFLOAD_READ_MAX:
+                    refused = (f"{op} refused: {_OFFLOAD_READ_MAX} "
+                               f"offloaded reads already outstanding "
+                               f"— retry shortly")
+                elif not read and \
+                        self._offload_pending >= _OFFLOAD_QUEUE_MAX:
                     refused = (f"{op} refused: {_OFFLOAD_QUEUE_MAX} "
                                f"offloaded operations already "
                                f"outstanding — retry shortly")
                 else:
-                    self._offload_pending += 1
+                    if read:
+                        self._offload_pending_reads += 1
+                    else:
+                        self._offload_pending += 1
                     # Registered only for admitted ops: the slot is held
                     # until the answer is delivered (_invoke), so the
                     # drain registry inherits the _OFFLOAD_QUEUE_MAX
@@ -8556,18 +8580,27 @@ if dbus is not None:
                 audit=("dispose-export", token_s))
 
         @dbus.service.method(BUS_NAME, in_signature="", out_signature="s",
-                             async_callbacks=("_reply", "_error"))
-        def ListSilos(self, _reply, _error):
+                             async_callbacks=("_reply", "_error"),
+                             sender_keyword="sender",
+                             connection_keyword="conn")
+        def ListSilos(self, _reply, _error, sender=None, conn=None):
             # Read-only, but still offloaded: the store lock it takes can
             # be held by a worker across save()'s fdatasync, and a parked
             # reader on the dispatch thread stalls every later call.
+            # The bus policy admits any uid, so the read has its own
+            # admission budget and another uid sees only its own silo's
+            # row (devin 14 F4): every row carries launch config and
+            # egress, which only the admin and root tooling (qdshell,
+            # qdlocker, admin app, broker) consume.
 
             def list_on_worker() -> tuple:
-                rows = [s.to_dict() for s in self.store.list_silos()]
+                uid = self._peer_uid(sender, conn)
+                rows = [s.to_dict() for s in self.store.list_silos()
+                        if uid in (0, ADMIN_UID) or int(s.uid) == uid]
                 return (json.dumps(rows),)
 
             self._run_offloaded("list-silos", list_on_worker,
-                                _reply, _error)
+                                _reply, _error, read=True)
 
         @dbus.service.method(BUS_NAME, in_signature="i", out_signature="s",
                              async_callbacks=("_reply", "_error"),
