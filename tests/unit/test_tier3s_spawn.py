@@ -2902,7 +2902,13 @@ def test_gui_launch_refuses_when_registration_keeps_failing(w):
     regs = [l for l in w.dbus_full() if "RegisterLaunch" in l]
     assert len(regs) == 5, regs                     # bounded: exactly five tries
     assert w.first("systemd-run") is None           # refused BEFORE podman run
-    assert w.launch_gone(TOKEN)
+    # Failed once in ~300 runs under load (full-20261015T112127Z-3016413,
+    # stress repro 2026-10-17) with no evidence of why the record stayed;
+    # name what is left and what the spawn and its cleanup said.
+    assert w.launch_gone(TOKEN), (
+        f"launch record left after the refusal: "
+        f"{sorted(str(p) for p in (*w.ctl.rglob('*'), *w.launch_parent.rglob('*')))}\n"
+        f"stderr:\n{r.stderr}\nlast calls:\n" + "\n".join(w.calls()[-30:]))
     # the bridge client+wrapper were started, recorded, then torn down
     assert bridge_call(w)[0] is not None
     left = [p for p in (w.T / "proc").iterdir() if p.name != "self"]
